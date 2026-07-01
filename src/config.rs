@@ -32,8 +32,10 @@ pub struct Config {
 }
 
 /// Skin selection. `name` picks a built-in palette (see
-/// [`crate::theme::BUILTIN_NAMES`]; default `catppuccin-mocha`); `colors`
-/// overrides individual swatches by name with `#rrggbb` hex values.
+/// [`crate::theme::BUILTIN_NAMES`]); leaving it unset auto-detects the
+/// terminal's dark/light mode and picks `catppuccin-mocha`/`catppuccin-latte`
+/// accordingly. `colors` overrides individual swatches by name with
+/// `#rrggbb` hex values.
 ///
 /// ```toml
 /// [skin]

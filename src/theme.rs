@@ -1,8 +1,8 @@
 //! Data-driven palette + semantic styles for the TUI.
 //!
 //! The palette is a 25-swatch [`Palette`] (Catppuccin's slot layout). A named
-//! built-in skin — default `catppuccin-mocha` — is selected in config, with
-//! optional per-swatch hex overrides:
+//! built-in skin is selected in config, with optional per-swatch hex
+//! overrides:
 //!
 //! ```toml
 //! [skin]
@@ -13,6 +13,13 @@
 //! mauve = "#d3869b"
 //! ```
 //!
+//! Leaving out `[skin]`/`name` entirely defaults to an auto-detected
+//! Catppuccin flavor: `catppuccin-latte` on a light terminal background,
+//! `catppuccin-mocha` otherwise. Detection queries the terminal's background
+//! color (OSC 11) and is best-effort — it silently falls back to mocha on
+//! terminals that don't answer the query (e.g. `TERM=dumb`, piped output, an
+//! SSH hop with high latency).
+//!
 //! [`init`] installs the resolved palette once at startup; every color accessor
 //! (`text()`, `peach()`, …) and semantic style (`title()`, `selected_row()`, …)
 //! reads from it. Swatches not yet wired into a view are kept for completeness.
@@ -22,6 +29,7 @@ use std::collections::HashMap;
 use std::sync::OnceLock;
 
 use ratatui::style::{Color, Modifier, Style};
+use terminal_colorsaurus::{QueryOptions, ThemeMode};
 
 /// A full 25-swatch palette. Field names double as the override keys accepted
 /// under `[skin.colors]` in config.
@@ -162,9 +170,16 @@ pub const BUILTIN_NAMES: &[&str] = &[
     "catppuccin-latte",
     "catppuccin-frappe",
     "catppuccin-macchiato",
-    "gruvbox",
+    "gruvbox-dark",
+    "gruvbox-light",
     "nord",
     "dracula",
+    "solarized-dark",
+    "solarized-light",
+    "tokyo-night",
+    "one-dark",
+    "rose-pine",
+    "monokai",
 ];
 
 /// Look up a built-in palette by name (case-insensitive; a few aliases). The
@@ -216,6 +231,48 @@ pub fn builtin(name: &str) -> Option<Palette> {
             "#b8b8b2", "#6272a4", "#565761", "#44475a", "#3a3c4e", "#343746", "#282a36", "#21222c",
             "#191a21",
         ],
+        "gruvbox-light" => [
+            "#ebdbb2", "#d5c4a1", "#b16286", "#b16286", "#cc241d", "#9d0006", "#d65d0e", "#d79921",
+            "#98971a", "#689d6a", "#458588", "#076678", "#458588", "#b16286", "#282828", "#3c3836",
+            "#504945", "#665c54", "#7c6f64", "#928374", "#a89984", "#bdae93", "#fbf1c7", "#ebdbb2",
+            "#d5c4a1",
+        ],
+        "solarized-dark" | "solarized" => [
+            "#d33682", "#d33682", "#d33682", "#6c71c4", "#dc322f", "#dc322f", "#cb4b16", "#b58900",
+            "#859900", "#2aa198", "#2aa198", "#268bd2", "#268bd2", "#6c71c4", "#93a1a1", "#839496",
+            "#657b83", "#586e75", "#586e75", "#586e75", "#073642", "#073642", "#002b36", "#002b36",
+            "#001e26",
+        ],
+        "solarized-light" => [
+            "#d33682", "#d33682", "#d33682", "#6c71c4", "#dc322f", "#dc322f", "#cb4b16", "#b58900",
+            "#859900", "#2aa198", "#2aa198", "#268bd2", "#268bd2", "#6c71c4", "#002b36", "#073642",
+            "#586e75", "#657b83", "#839496", "#93a1a1", "#eee8d5", "#eee8d5", "#fdf6e3", "#eee8d5",
+            "#eee8d5",
+        ],
+        "tokyo-night" | "tokyonight" => [
+            "#f7768e", "#f7768e", "#bb9af7", "#9d7cd8", "#f7768e", "#db4b4b", "#ff9e64", "#e0af68",
+            "#9ece6a", "#73daca", "#7dcfff", "#0db9d7", "#7aa2f7", "#9d7cd8", "#c0caf5", "#a9b1d6",
+            "#545c7e", "#545c7e", "#3b4261", "#3b4261", "#292e42", "#292e42", "#1a1b26", "#16161e",
+            "#13131a",
+        ],
+        "one-dark" | "onedark" => [
+            "#e06c75", "#e06c75", "#c678dd", "#c678dd", "#e06c75", "#be5046", "#d19a66", "#e5c07b",
+            "#98c379", "#56b6c2", "#56b6c2", "#61afef", "#61afef", "#c678dd", "#abb2bf", "#828997",
+            "#5c6370", "#5c6370", "#4b5263", "#4b5263", "#3b4048", "#323842", "#282c34", "#21252b",
+            "#1b1d23",
+        ],
+        "rose-pine" | "rosepine" => [
+            "#ebbcba", "#ebbcba", "#ebbcba", "#c4a7e7", "#eb6f92", "#eb6f92", "#f6c177", "#f6c177",
+            "#31748f", "#31748f", "#9ccfd8", "#9ccfd8", "#9ccfd8", "#c4a7e7", "#e0def4", "#908caa",
+            "#6e6a86", "#6e6a86", "#524f67", "#524f67", "#403d52", "#26233a", "#191724", "#191724",
+            "#14121d",
+        ],
+        "monokai" => [
+            "#f92672", "#f92672", "#f92672", "#ae81ff", "#f92672", "#f92672", "#fd971f", "#e6db74",
+            "#a6e22e", "#66d9ef", "#66d9ef", "#66d9ef", "#66d9ef", "#ae81ff", "#f8f8f2", "#cfcfc2",
+            "#75715e", "#75715e", "#49483e", "#49483e", "#3e3d32", "#3e3d32", "#272822", "#23241f",
+            "#1e1f1c",
+        ],
         _ => return None,
     };
     Some(Palette::from_hexes(&hex))
@@ -225,12 +282,29 @@ fn catppuccin_mocha() -> Palette {
     builtin("catppuccin-mocha").expect("mocha built-in")
 }
 
-/// Resolve the active palette from config: start from the named built-in
-/// (default `catppuccin-mocha`), then apply per-swatch hex overrides. Warns on
-/// an unknown name, unknown swatch key, or malformed hex, and carries on.
+fn catppuccin_latte() -> Palette {
+    builtin("catppuccin-latte").expect("latte built-in")
+}
+
+/// Best-effort dark/light detection via an OSC 11 background-color query.
+/// `None` means the terminal didn't answer (unsupported, `TERM=dumb`, piped
+/// output, or the query timed out) — callers should treat that as "assume
+/// dark" rather than blocking or erroring.
+fn detect_terminal_mode() -> Option<ThemeMode> {
+    terminal_colorsaurus::theme_mode(QueryOptions::default()).ok()
+}
+
+/// Resolve the active palette from config: start from the named built-in, or
+/// — when no name is configured — auto-detect the terminal's dark/light mode
+/// and pick `catppuccin-latte`/`catppuccin-mocha` accordingly. Then apply
+/// per-swatch hex overrides. Warns on an unknown name, unknown swatch key, or
+/// malformed hex, and carries on.
 pub fn resolve_skin(name: Option<&str>, colors: &HashMap<String, String>) -> Palette {
     let mut p = match name {
-        None => catppuccin_mocha(),
+        None => match detect_terminal_mode() {
+            Some(ThemeMode::Light) => catppuccin_latte(),
+            _ => catppuccin_mocha(),
+        },
         Some(n) => match builtin(&n.trim().to_ascii_lowercase()) {
             Some(p) => p,
             None => {
@@ -579,5 +653,12 @@ mod tests {
     fn unknown_skin_falls_back_to_mocha() {
         let p = resolve_skin(Some("no-such-skin"), &HashMap::new());
         assert_eq!(p.base, catppuccin_mocha().base);
+    }
+
+    #[test]
+    fn detect_terminal_mode_is_best_effort() {
+        // No TTY in the test harness, so this should return `None` promptly
+        // rather than panicking or blocking on the query timeout.
+        let _ = detect_terminal_mode();
     }
 }
