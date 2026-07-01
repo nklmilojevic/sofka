@@ -1102,7 +1102,7 @@ fn draw_contexts(frame: &mut Frame, app: &mut App, area: Rect) {
     frame.render_widget(Clear, popup);
     let current = app.cluster.context.clone();
     let items: Vec<ListItem> = app
-        .ctx_list
+        .filtered_contexts()
         .iter()
         .map(|c| {
             let marker = if *c == current { "● " } else { "  " };
@@ -1116,6 +1116,12 @@ fn draw_contexts(frame: &mut Frame, app: &mut App, area: Rect) {
             ))
         })
         .collect();
+    // Show the type-to-filter buffer in the title so it reads like an input.
+    let title = if app.ctx_filter.is_empty() {
+        " Contexts (type to filter · ⏎ switch) ".to_string()
+    } else {
+        format!(" Contexts · /{}_ ", app.ctx_filter)
+    };
     let list = List::new(items)
         .highlight_style(theme::selected_row())
         .highlight_symbol("▌ ")
@@ -1125,7 +1131,7 @@ fn draw_contexts(frame: &mut Frame, app: &mut App, area: Rect) {
                 .borders(Borders::ALL)
                 .border_type(BorderType::Rounded)
                 .border_style(theme::border_focused())
-                .title(Span::styled(" Contexts (⏎ switch) ", theme::title())),
+                .title(Span::styled(title, theme::title())),
         );
     frame.render_stateful_widget(list, popup, &mut app.ctx_state);
 }
