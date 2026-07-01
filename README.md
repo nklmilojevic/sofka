@@ -2,24 +2,24 @@
 
 <img src="docs/sophie.png" alt="Sophie, a Russian Blue, watching the screen with visible suspicion" align="right" width="220">
 
-A Kubernetes TUI, reimagined in Rust — built on [`kube-rs`](https://kube.rs) and
+A Kubernetes TUI, reimagined in Rust - built on [`kube-rs`](https://kube.rs) and
 [`ratatui`](https://ratatui.rs), async-first from the ground up.
 
 ### Why "sofka"
 
-That's Sophie. She sits behind the monitor and watches it — not occasionally,
+That's Sophie. She sits behind the monitor and watches it - not occasionally,
 _constantly_, with the specific narrowed-eye expression of someone who has
 noticed a pod in `CrashLoopBackOff` and is judging you for it. She doesn't
 miss a state change. She doesn't get distracted. She is, functionally, a
 cluster watchman who happens to be a cat.
 
-`sofka` is the Serbian diminutive of Sophia — "wisdom," fittingly, since
+`sofka` is the Serbian diminutive of Sophia - "wisdom," fittingly, since
 watching things closely and knowing when something's wrong is more or less
 the whole job description of both a good cluster TUI and a good cat.
 
 This is a from-scratch reimagining of [k9s](https://github.com/derailed/k9s)
-(originally ~51k lines of Go), not a line-for-line port. It keeps the spirit —
-a fast, keyboard-driven cluster navigator — but rethinks the architecture
+(originally ~51k lines of Go), not a line-for-line port. It keeps the spirit -
+a fast, keyboard-driven cluster navigator - but rethinks the architecture
 around a single generic object pipeline instead of one hand-written renderer
 per resource kind.
 
@@ -28,12 +28,12 @@ per resource kind.
 - **One generic render pipeline, not one file per kind.** k9s ships a
   dedicated Go file (struct + `ColorerFunc`) per resource type it knows about.
   sofka has one `DynamicObject → cells` function with curated columns for the
-  common kinds and a NAME/AGE fallback for everything else — so a CRD nobody's
+  common kinds and a NAME/AGE fallback for everything else - so a CRD nobody's
   written a renderer for still lists, sorts, and filters correctly on day one.
 - **Flux CD is a first-class citizen, not a plugin.** `t` opens a
   Suspend/Resume/Reconcile-now menu for Kustomizations, HelmReleases,
   git/helm/oci repositories, buckets, image automation, and notification
-  alerts/receivers — patching `spec.suspend` and the
+  alerts/receivers - patching `spec.suspend` and the
   `reconcile.fluxcd.io/requestedAt` annotation directly via the k8s API. No
   `flux` binary required, and it composes with bulk multiselect.
 - **Port-forwards run in the background.** Starting one doesn't freeze the
@@ -41,9 +41,9 @@ per resource kind.
   individually while others keep running. They're killed automatically on
   quit rather than left orphaned.
 - **Bulk actions via multiselect.** `space` marks rows for delete, kill, or
-  Flux suspend/resume/reconcile across many resources at once — not
+  Flux suspend/resume/reconcile across many resources at once - not
   one-row-at-a-time.
-- **CRD rows drill into their custom resources**, not their YAML — `enter` on
+- **CRD rows drill into their custom resources**, not their YAML - `enter` on
   a CustomResourceDefinition resolves its served version and lists the actual
   objects.
 - **Skins, not a single fixed palette.** Built-in Catppuccin/Gruvbox/Nord/
@@ -58,7 +58,7 @@ per resource kind.
 
 ## Why it's faster
 
-Not a marketing number — these are specific, checkable design choices:
+Not a marketing number - these are specific, checkable design choices:
 
 - **No GC.** Rust's ownership model means zero garbage-collector pauses.
   Watching thousands of pods/CRs across a large cluster grows the in-memory
@@ -76,7 +76,7 @@ Not a marketing number — these are specific, checkable design choices:
   merge-patches over the existing client), not a `kubectl`/`flux` process
   fork+exec per action.
 - **Generation-tagged streams.** Switching views doesn't wait for an old
-  watcher to tear down — stale messages are dropped by generation tag the
+  watcher to tear down - stale messages are dropped by generation tag the
   instant a newer watch takes over, so navigation never stalls behind a
   slow-to-cancel stream.
 
@@ -98,28 +98,28 @@ Not a marketing number — these are specific, checkable design choices:
 - **Drill-down navigation** with a breadcrumb stack: workload/service →
   pods, node → its pods, pod → containers, namespace → re-scope, CRD → its
   custom resources. `esc` pops back.
-- **Command palette** (`:`) — fuzzy over the full resource catalog _and_
+- **Command palette** (`:`) - fuzzy over the full resource catalog _and_
   built-in commands (`ctx`, `pulse`, `xray`, `diff`, `pf`) together, plus
   fuzzy row **filtering** (`/`) with matched-character highlighting.
 - **Multiselect** (`space`) for bulk delete/kill/suspend/resume/reconcile.
-- **Pulse dashboard** (`:pulse`) — cluster-health tiles, refreshed every 5s.
-- **Xray tree** (`:xray`) — hierarchical view from the current kind down
+- **Pulse dashboard** (`:pulse`) - cluster-health tiles, refreshed every 5s.
+- **Xray tree** (`:xray`) - hierarchical view from the current kind down
   through owner references to pods and containers.
-- **Flux CD controls** (`t`) — suspend/resume/reconcile menu, native k8s API
+- **Flux CD controls** (`t`) - suspend/resume/reconcile menu, native k8s API
   patches.
 - **Background port-forwards** (`f`/`F` to start, `:pf` to manage).
-- **Plugins** — config-defined shell-out commands bound to keys, scoped per
+- **Plugins** - config-defined shell-out commands bound to keys, scoped per
   resource.
-- **Diff** (`:diff`) — unified diff of the live object vs its
+- **Diff** (`:diff`) - unified diff of the live object vs its
   `last-applied-configuration`.
-- **RBAC-aware palette** — hides resource kinds you can't `list`.
+- **RBAC-aware palette** - hides resource kinds you can't `list`.
 - **Namespace switcher** (`n`) and **context switcher** (`:ctx`).
 - **YAML view** (`y`) and **describe** (`d`, via `kubectl`).
-- **Logs** (`l`) — per-container on a pod, aggregated across all matching
+- **Logs** (`l`) - per-container on a pod, aggregated across all matching
   pods on a workload/service. In-logs **search** (`/`) with highlighting;
   `p` for previous-container logs. ANSI color codes from the source app are
   parsed and mapped onto the active skin, not printed as literal escapes.
-- **Skinnable** — built-in Catppuccin/Gruvbox/Nord/Dracula palettes plus
+- **Skinnable** - built-in Catppuccin/Gruvbox/Nord/Dracula palettes plus
   per-swatch overrides in config.
 - **Config file** (TOML): aliases, default namespace/resource, plugins, skin.
 
@@ -138,7 +138,7 @@ or build from source (see [Development](#development)).
 ### macOS: "cannot be opened because the developer cannot be verified"
 
 The release binaries aren't signed/notarized yet, so if you download a
-tarball through a browser and extract it, Gatekeeper will refuse to run it —
+tarball through a browser and extract it, Gatekeeper will refuse to run it -
 this is expected, not a broken build. Clear the quarantine flag once:
 
 ```
@@ -199,7 +199,7 @@ sofka [RESOURCE] [-n NAMESPACE] [-A]
 
 | Key                       | Action                                                                                                  |
 | ------------------------- | ------------------------------------------------------------------------------------------------------- |
-| `:<resource>`             | command palette — fuzzy over kinds and built-in commands                                                |
+| `:<resource>`             | command palette - fuzzy over kinds and built-in commands                                                |
 | `enter`                   | drill down (workload/svc → pods, node → its pods, pod → containers, ns → re-scope, CRD → its resources) |
 | `esc`                     | go back / pop the view stack / clear filter / clear marks                                               |
 | `j`/`k`, `↓`/`↑`, `g`/`G` | navigate                                                                                                |
@@ -218,7 +218,7 @@ sofka [RESOURCE] [-n NAMESPACE] [-A]
 | `a`                       | attach to pod                                                                                           |
 | `i`                       | set container image                                                                                     |
 | `r`                       | rollout restart (workloads) / refresh (elsewhere)                                                       |
-| `f` / `shift-f`           | port-forward (pods/services) — runs in the background                                                   |
+| `f` / `shift-f`           | port-forward (pods/services) - runs in the background                                                   |
 | `t`                       | Flux: suspend/resume/reconcile menu                                                                     |
 | `ctrl-d` / `ctrl-k`       | delete / kill (marked rows, or current)                                                                 |
 | `:q`, `ctrl-c`            | quit                                                                                                    |
@@ -256,7 +256,7 @@ Data flow: `watcher` tasks push generation-tagged `Msg`s over an
 `mpsc::UnboundedSender`; the main `tokio::select!` loop folds them into the
 `Store`, batches any other queued updates before redrawing, and shares that
 same loop with terminal input and a 1s tick (age columns, dead port-forward
-reaping) — so the UI never blocks on the network.
+reaping) - so the UI never blocks on the network.
 
 ## Development
 
@@ -269,4 +269,4 @@ cargo clippy --all-targets   # lints (clean)
 ## License
 
 Dual-licensed under [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE), at
-your option — the Rust ecosystem standard.
+your option - the Rust ecosystem standard.
