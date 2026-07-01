@@ -46,8 +46,10 @@ per resource kind.
 - **CRD rows drill into their custom resources**, not their YAML - `enter` on
   a CustomResourceDefinition resolves its served version and lists the actual
   objects.
-- **Skins, not a single fixed palette.** Built-in Catppuccin/Gruvbox/Nord/
-  Dracula palettes selectable in config, with per-swatch hex overrides. Every
+- **Skins, not a single fixed palette.** Built-in Catppuccin, Gruvbox,
+  Solarized, Nord, Dracula, Tokyo Night, One Dark, Rosé Pine, and Monokai
+  palettes selectable in config, with per-swatch hex overrides. Auto-detects
+  a light or dark terminal background when no skin is configured. Every
   semantic color (row status, severity badges, headers, borders) is derived
   from the active palette, so a skin change is consistent everywhere at once.
 - **A combined row colorer.** Whole-row status tinting like k9s (healthy
@@ -119,8 +121,9 @@ Not a marketing number - these are specific, checkable design choices:
   pods on a workload/service. In-logs **search** (`/`) with highlighting;
   `p` for previous-container logs. ANSI color codes from the source app are
   parsed and mapped onto the active skin, not printed as literal escapes.
-- **Skinnable** - built-in Catppuccin/Gruvbox/Nord/Dracula palettes plus
-  per-swatch overrides in config.
+- **Skinnable** - built-in Catppuccin, Gruvbox, Solarized, Nord, Dracula,
+  Tokyo Night, One Dark, Rosé Pine, and Monokai palettes, auto-detected
+  dark/light default, plus per-swatch overrides in config.
 - **Config file** (TOML): aliases, default namespace/resource, plugins, skin.
 
 ## Installation
@@ -161,8 +164,11 @@ default_resource  = "deployments"
 dep = "deployments"
 
 [skin]
-name = "gruvbox"        # catppuccin-mocha (default), -latte, -frappe,
-                         # -macchiato, gruvbox, nord, dracula
+# name omitted: auto-detects dark/light and picks catppuccin-mocha/-latte.
+# Or pick one explicitly: catppuccin-mocha, -latte, -frappe, -macchiato,
+# gruvbox-dark, gruvbox-light, nord, dracula, solarized-dark, solarized-light,
+# tokyo-night, one-dark, rose-pine, monokai.
+name = "gruvbox-dark"
 
 [skin.colors]            # optional per-swatch overrides
 red = "#fb4934"

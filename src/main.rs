@@ -54,7 +54,9 @@ async fn main() -> Result<()> {
     let cfg = config::Config::load();
 
     // Install the color skin before anything renders. Startup-only: changing
-    // the skin requires a restart.
+    // the skin requires a restart. Must run before ratatui::init() below —
+    // resolve_skin's dark/light auto-detection queries the terminal directly
+    // and expects a plain (non-alternate-screen, non-raw-mode) terminal.
     theme::init(theme::resolve_skin(
         cfg.skin.name.as_deref(),
         &cfg.skin.colors,
