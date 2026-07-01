@@ -1,5 +1,5 @@
 name: Setup Nix
-description: Install Nix with flakes enabled and wire up the sofka Cachix cache
+description: Install Nix with flakes enabled and wire up the nkl-sofka Cachix cache
 
 runs:
   using: composite
@@ -17,6 +17,6 @@ runs:
     - name: Setup Cachix
       uses: cachix/cachix-action@ad2ddac53f961de1989924296a1f236fcfbaa4fc # v15
       with:
-        name: sofka
+        name: nkl-sofka
         authToken: ${{ env.CACHIX_AUTH_TOKEN }}
         skipPush: ${{ env.CACHIX_AUTH_TOKEN == '' }}

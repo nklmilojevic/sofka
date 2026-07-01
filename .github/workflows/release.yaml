@@ -167,7 +167,7 @@ jobs:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
         run: cargo publish
 
-  # Warms the sofka Cachix cache for the tagged rev, so `nix build
+  # Warms the nkl-sofka Cachix cache for the tagged rev, so `nix build
   # github:nklmilojevic/sofka?ref=v${{ inputs.version }}` is instant for
   # anyone (or any flake) consuming this tag afterward.
   nix-cache:
