@@ -6,8 +6,9 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{
     Block, BorderType, Borders, Cell, Clear, Gauge, HighlightSpacing, List, ListItem, ListState,
-    Paragraph, Row, Table, Wrap,
+    Paragraph, Row, Table,
 };
+use unicode_width::UnicodeWidthChar;
 
 use crate::app::{App, Mode, SuggestKind};
 use crate::{columns, theme};
@@ -372,7 +373,8 @@ fn draw_scrollable(
         .iter()
         .map(|l| Line::from(highlight_yaml(l)))
         .collect();
-    let p = Paragraph::new(text).scroll((view.scroll, 0)).block(
+    let scroll = view.scroll.min(u16::MAX as usize) as u16;
+    let p = Paragraph::new(text).scroll((scroll, 0)).block(
         Block::default()
             .borders(Borders::ALL)
             .border_type(BorderType::Rounded)
@@ -383,11 +385,20 @@ fn draw_scrollable(
 }
 
 /// Logs view with optional substring filter + match highlighting.
+///
+/// The layout is computed here, not by ratatui: per-line wrapped heights come
+/// from [`wrapped_height`] and the visible rows are cut by [`wrap_line`] —
+/// the *same* greedy fill — so the scroll math and the pixels can never
+/// disagree (ratatui's `Wrap` word-wraps and counts ANSI escape bytes, which
+/// made the follow anchor drift). Only the viewport slice is styled and
+/// rendered, so a 100k-line paused buffer costs a row-count walk per frame,
+/// not a full restyle; and the display-row offset is a `usize`, immune to the
+/// `u16` ceiling of `Paragraph::scroll`.
 fn draw_logs(frame: &mut Frame, app: &mut App, area: Rect) {
     let filter = app.logs.filter.to_lowercase();
     let active = !filter.is_empty();
     let inner_w = area.width.saturating_sub(2).max(1) as usize;
-    let inner_h = area.height.saturating_sub(2);
+    let inner_h = area.height.saturating_sub(2) as usize;
 
     let shown: Vec<&String> = app
         .logs
@@ -397,37 +408,69 @@ fn draw_logs(frame: &mut Frame, app: &mut App, area: Rect) {
         .filter(|l| !active || l.to_lowercase().contains(&filter))
         .collect();
 
-    // Total rendered rows accounts for wrapping, so follow can anchor the
+    // Exact display height of every shown line, so follow can anchor the
     // newest line to the *bottom* of the viewport (not the top).
-    let rows: usize = if app.logs.wrap {
-        shown
-            .iter()
-            .map(|l| l.chars().count().div_ceil(inner_w).max(1))
-            .sum()
+    let heights: Vec<usize> = if app.logs.wrap {
+        shown.iter().map(|l| wrapped_height(l, inner_w)).collect()
+    } else {
+        Vec::new() // 1 row per line; skip the allocation walk
+    };
+    let total_rows: usize = if app.logs.wrap {
+        heights.iter().sum()
     } else {
         shown.len()
     };
 
     // Record viewport geometry (display rows) so key handlers clamp the scroll
-    // in the same units. Saturate to u16 — ratatui's scroll offset is a u16, so
-    // a huge paused buffer can't wrap the cast into garbage.
-    let rows_u16 = rows.min(u16::MAX as usize) as u16;
-    app.logs.viewport_rows = rows_u16;
+    // in the same units, and the message handler can convert trimmed lines
+    // into rows when shifting a paused anchor.
+    app.logs.viewport_rows = total_rows;
     app.logs.viewport_h = inner_h;
+    app.logs.last_wrap_width = if app.logs.wrap { inner_w } else { 0 };
 
     // Deepest offset pins the last full page to the viewport bottom; that same
     // value is where `follow` anchors, so pausing freezes exactly in place.
-    let max_scroll = rows_u16.saturating_sub(inner_h);
+    let max_scroll = total_rows.saturating_sub(inner_h);
     let scroll = if app.logs.follow {
         max_scroll
     } else {
         app.logs.view.scroll.min(max_scroll)
     };
+    // While following, remember the bottom-anchored position so that turning
+    // autoscroll off freezes exactly here instead of jumping to a stale offset.
+    if app.logs.follow {
+        app.logs.view.scroll = scroll;
+    }
 
-    let lines: Vec<Line> = shown
-        .iter()
-        .map(|l| render_log_line(l, &app.logs.filter))
-        .collect();
+    // Style + wrap only the lines that intersect [scroll, scroll + inner_h).
+    let mut rows: Vec<Line> = Vec::with_capacity(inner_h);
+    let mut row = 0usize; // display row where the current line starts
+    for (i, l) in shown.iter().enumerate() {
+        let h = if app.logs.wrap { heights[i] } else { 1 };
+        if row + h <= scroll {
+            row += h;
+            continue;
+        }
+        if row >= scroll + inner_h {
+            break;
+        }
+        let line = render_log_line(l, &app.logs.filter);
+        if app.logs.wrap {
+            for (j, sub) in wrap_line(line, inner_w).into_iter().enumerate() {
+                let r = row + j;
+                if r < scroll {
+                    continue;
+                }
+                if r >= scroll + inner_h {
+                    break;
+                }
+                rows.push(sub);
+            }
+        } else {
+            rows.push(line);
+        }
+        row += h;
+    }
 
     let flags = format!(
         "{}{}{}",
@@ -453,22 +496,84 @@ fn draw_logs(frame: &mut Frame, app: &mut App, area: Rect) {
         format!(" {}{} ", app.logs.view.title, flags)
     };
 
-    let mut p = Paragraph::new(lines).scroll((scroll, 0)).block(
+    // The rows are already the exact viewport slice — no Paragraph scroll or
+    // wrap, so ratatui can't re-lay-out (and disagree with) the math above.
+    let p = Paragraph::new(rows).block(
         Block::default()
             .borders(Borders::ALL)
             .border_type(BorderType::Rounded)
             .border_style(Style::default().fg(theme::green()))
             .title(Span::styled(title, theme::title())),
     );
-    if app.logs.wrap {
-        p = p.wrap(Wrap { trim: false });
-    }
-    // While following, remember the bottom-anchored position so that turning
-    // autoscroll off freezes exactly here instead of jumping to a stale offset.
-    if app.logs.follow {
-        app.logs.view.scroll = scroll;
-    }
     frame.render_widget(p, area);
+}
+
+/// Display rows `raw` occupies when char-wrapped to `width` columns: ANSI
+/// escapes are zero-width (they're stripped at render time) and East-Asian
+/// wide glyphs take two columns. Must stay the exact greedy fill
+/// [`wrap_line`] performs — the scroll math depends on them agreeing.
+pub(crate) fn wrapped_height(raw: &str, width: usize) -> usize {
+    let width = width.max(1);
+    // Fast path: plain ASCII with no escapes wraps at exactly `width` chars.
+    if raw.is_ascii() && !raw.as_bytes().contains(&0x1b) {
+        return raw.len().div_ceil(width).max(1);
+    }
+    let mut rows = 1usize;
+    let mut col = 0usize;
+    let mut chars = raw.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\x1b' {
+            // Mirror ansi_runs: swallow a whole CSI sequence, or a lone ESC.
+            if chars.peek() == Some(&'[') {
+                chars.next();
+                for pc in chars.by_ref() {
+                    if !(pc.is_ascii_digit() || pc == ';') {
+                        break;
+                    }
+                }
+            }
+            continue;
+        }
+        let w = UnicodeWidthChar::width(c).unwrap_or(0);
+        if col + w > width && col > 0 {
+            rows += 1;
+            col = 0;
+        }
+        col += w;
+    }
+    rows
+}
+
+/// Greedily split a styled line into rows of at most `width` display columns,
+/// breaking spans mid-way as needed. A wide glyph that doesn't fit in the
+/// remaining columns moves whole to the next row. Counterpart of
+/// [`wrapped_height`] — keep the fill rules identical.
+fn wrap_line(line: Line<'static>, width: usize) -> Vec<Line<'static>> {
+    let width = width.max(1);
+    let mut out: Vec<Line> = Vec::new();
+    let mut cur: Vec<Span> = Vec::new();
+    let mut col = 0usize;
+    for span in line.spans {
+        let style = span.style;
+        let mut buf = String::new();
+        for c in span.content.chars() {
+            let w = UnicodeWidthChar::width(c).unwrap_or(0);
+            if col + w > width && col > 0 {
+                if !buf.is_empty() {
+                    cur.push(Span::styled(std::mem::take(&mut buf), style));
+                }
+                out.push(Line::from(std::mem::take(&mut cur)));
+                col = 0;
+            }
+            buf.push(c);
+            col += w;
+        }
+        if !buf.is_empty() {
+            cur.push(Span::styled(buf, style));
+        }
+    }
+    out.push(Line::from(cur)); // final row; an empty line still takes one row
+    out
 }
 
 /// Render a log line: an optional `[source]` prefix (pod/container/component)
@@ -901,7 +1006,8 @@ fn draw_diff(frame: &mut Frame, view: &crate::app::Scrollable, area: Rect) {
             Line::from(Span::styled(l.clone(), Style::default().fg(color)))
         })
         .collect();
-    let p = Paragraph::new(lines).scroll((view.scroll, 0)).block(
+    let scroll = view.scroll.min(u16::MAX as usize) as u16;
+    let p = Paragraph::new(lines).scroll((scroll, 0)).block(
         Block::default()
             .borders(Borders::ALL)
             .border_type(BorderType::Rounded)
@@ -1647,6 +1753,49 @@ fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The scroll math (`wrapped_height`) and the renderer (`wrap_line`) must
+    /// produce the same row count for any input, or follow/clamping drifts.
+    #[test]
+    fn wrapped_height_matches_wrap_line() {
+        let cases = [
+            "",
+            "short",
+            "exactly-ten",
+            "a much longer plain ascii log line that wraps a few times over",
+            // ANSI escapes are zero-width.
+            "\x1b[33mwarn\x1b[0m something colorful happened in the reconcile loop",
+            // Wide CJK glyphs take two columns and never straddle a break.
+            "日本語のログ行 with mixed ascii ワイド文字",
+            // Combining mark (zero width) + multi-byte.
+            "cafe\u{301} naïve élan über — dash",
+            // Lone ESC and non-SGR CSI are swallowed.
+            "\x1bodd \x1b[2Kcleared line",
+        ];
+        for w in [1usize, 3, 10, 37, 120] {
+            for raw in cases {
+                let rendered = render_log_line(raw, "");
+                let rows = wrap_line(rendered, w).len();
+                assert_eq!(
+                    wrapped_height(raw, w),
+                    rows,
+                    "height/split disagree for {raw:?} at width {w}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn wrapped_height_counts_columns_not_bytes() {
+        assert_eq!(wrapped_height("", 10), 1); // empty line still takes a row
+        assert_eq!(wrapped_height("aaaaaaaaaa", 10), 1); // exact fit
+        assert_eq!(wrapped_height("aaaaaaaaaab", 10), 2);
+        // 5 wide chars = 10 columns → one row at width 10, not "5 chars fit".
+        assert_eq!(wrapped_height("五五五五五", 10), 1);
+        assert_eq!(wrapped_height("五五五五五五", 10), 2);
+        // ANSI escapes don't consume columns.
+        assert_eq!(wrapped_height("\x1b[31maaaaaaaaaa\x1b[0m", 10), 1);
+    }
 
     #[test]
     fn log_levels_colorize() {

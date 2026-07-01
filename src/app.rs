@@ -163,7 +163,10 @@ enum PromptKind {
 pub struct Scrollable {
     pub title: String,
     pub lines: Vec<String>,
-    pub scroll: u16,
+    /// Scroll offset in display rows. `usize` on purpose: a paused log buffer
+    /// (100k lines, wrapped) far exceeds `u16`; views that hand this to a
+    /// ratatui `Paragraph` clamp at the edge instead.
+    pub scroll: usize,
 }
 
 /// One command-palette suggestion — either a built-in command (`:ctx`, `:pulse`)
@@ -235,8 +238,8 @@ impl Scrollable {
         }
     }
     pub fn scroll_by(&mut self, delta: i32) {
-        let max = self.lines.len() as i32;
-        self.scroll = (self.scroll as i32 + delta).clamp(0, max.max(1) - 1) as u16;
+        let max = self.lines.len().saturating_sub(1) as i64;
+        self.scroll = (self.scroll as i64 + delta as i64).clamp(0, max) as usize;
     }
 }
 
@@ -253,8 +256,12 @@ pub struct LogsView {
     /// from the last draw. Recorded so key handlers clamp the scroll in the
     /// same *display-row* units the renderer uses — otherwise a wrapped buffer
     /// (rows ≫ lines) makes a pause-then-scroll jump to a stale offset.
-    pub viewport_rows: u16,
-    pub viewport_h: u16,
+    pub viewport_rows: usize,
+    pub viewport_h: usize,
+    /// Wrap width used at the last draw (0 = wrap off). Lets the message
+    /// handler convert trimmed *lines* into the display *rows* they occupied
+    /// when shifting a paused scroll anchor.
+    pub last_wrap_width: usize,
     /// What is being streamed, so it can be re-streamed (e.g. toggling
     /// timestamps) without re-deriving the source.
     source: Option<LogSource>,
@@ -271,6 +278,7 @@ impl Default for LogsView {
             stopped: false,
             viewport_rows: 0,
             viewport_h: 0,
+            last_wrap_width: 0,
             source: None,
         }
     }
@@ -780,13 +788,23 @@ impl App {
                 };
                 let overflow = self.logs.view.lines.len().saturating_sub(cap);
                 if overflow > 0 {
-                    self.logs.view.lines.drain(0..overflow);
-                    // If we did trim while paused, shift the anchored scroll with
-                    // the dropped lines so the view stays put.
+                    // If we trim while paused, shift the anchored scroll by the
+                    // display rows the dropped lines occupied on screen —
+                    // filtered lines take none, wrapped lines take several —
+                    // so the frozen view stays put.
                     if !self.logs.follow {
-                        self.logs.view.scroll =
-                            self.logs.view.scroll.saturating_sub(overflow as u16);
+                        let filter = self.logs.filter.to_lowercase();
+                        let rows: usize = self.logs.view.lines[..overflow]
+                            .iter()
+                            .filter(|l| filter.is_empty() || l.to_lowercase().contains(&filter))
+                            .map(|l| match self.logs.last_wrap_width {
+                                0 => 1,
+                                w => crate::ui::wrapped_height(l, w),
+                            })
+                            .sum();
+                        self.logs.view.scroll = self.logs.view.scroll.saturating_sub(rows);
                     }
+                    self.logs.view.lines.drain(0..overflow);
                 }
             }
             Msg::Metrics { generation, data } if generation == self.generation => {
@@ -2718,7 +2736,7 @@ impl App {
             KeyCode::PageUp => target.scroll_by(-20),
             KeyCode::Char('g') | KeyCode::Home => target.scroll = 0,
             KeyCode::Char('G') | KeyCode::End => {
-                target.scroll = target.lines.len().saturating_sub(1) as u16
+                target.scroll = target.lines.len().saturating_sub(1)
             }
             _ => {}
         }
@@ -3111,7 +3129,9 @@ impl App {
         let tx = self.tx.clone();
         let genr = self.generation;
         let flag = self.gen_flag.clone();
-        let ns = self.namespace.clone();
+        // Cluster-health snapshot: always spans every namespace, regardless
+        // of whatever namespace filter was active in the table view.
+        let ns = String::new();
 
         let handle = tokio::spawn(async move {
             loop {
@@ -4564,6 +4584,36 @@ mod tests {
         app.handle_key(press(KeyCode::Char('s'))).unwrap(); // follow on
         assert!(app.logs.follow);
         assert_eq!(app.logs.view.lines.len(), MAX_LOG_LINES);
+    }
+
+    #[tokio::test]
+    async fn paused_trim_shifts_scroll_in_display_rows() {
+        let (mut app, _rx) = test_app();
+        app.logs.follow = false;
+        app.logs.last_wrap_width = 10; // as if the last draw wrapped at 10 cols
+        app.logs.view.scroll = 500;
+        let lg = app.log_gen;
+        // The first line is the one trimmed later: 25 chars → 3 rows at width 10.
+        app.handle_msg(Msg::LogLine {
+            generation: lg,
+            line: "a".repeat(25),
+        });
+        for i in 1..MAX_LOG_LINES_PAUSED {
+            app.handle_msg(Msg::LogLine {
+                generation: lg,
+                line: format!("l{i}"),
+            });
+        }
+        assert_eq!(app.logs.view.lines.len(), MAX_LOG_LINES_PAUSED);
+        assert_eq!(app.logs.view.scroll, 500); // nothing trimmed yet
+        // One more line overflows the paused cap: the wrapped first line drains
+        // and the frozen anchor shifts by its 3 display rows, not by 1 line.
+        app.handle_msg(Msg::LogLine {
+            generation: lg,
+            line: "x".into(),
+        });
+        assert_eq!(app.logs.view.lines.len(), MAX_LOG_LINES_PAUSED);
+        assert_eq!(app.logs.view.scroll, 497);
     }
 
     #[tokio::test]
