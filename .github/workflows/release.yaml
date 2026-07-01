@@ -45,10 +45,24 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add Cargo.toml Cargo.lock
-          git commit -m "chore(release): v$VERSION"
-          git tag "v$VERSION"
-          git push origin HEAD:main
-          git push origin "v$VERSION"
+
+          # Cargo.toml may already be at the requested version (e.g. the
+          # very first release) — that's not an error, just nothing to bump.
+          if git diff --cached --quiet; then
+            echo "Cargo.toml is already at v$VERSION — nothing to bump."
+          else
+            git commit -m "chore(release): v$VERSION"
+            git push origin HEAD:main
+          fi
+
+          # Re-running after a later job failed shouldn't choke on a tag
+          # that's already there from the earlier attempt.
+          if git ls-remote --exit-code --tags origin "refs/tags/v$VERSION" > /dev/null; then
+            echo "Tag v$VERSION already exists on origin — reusing it."
+          else
+            git tag "v$VERSION"
+            git push origin "v$VERSION"
+          fi
 
   # Cross-platform release binaries, one native build per target — every
   # target below is the runner's own host, so no cross-compilation toolchain
