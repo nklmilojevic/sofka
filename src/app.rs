@@ -364,6 +364,8 @@ pub struct App {
 
     pub ctx_list: Vec<String>,
     pub ctx_state: ListState,
+    /// Type-to-filter buffer for the context switcher.
+    pub ctx_filter: String,
     /// User aliases from config, re-applied when switching context.
     pub user_aliases: HashMap<String, String>,
     /// User-defined shell-out plugins.
@@ -456,6 +458,7 @@ impl App {
             ns_filter: String::new(),
             ctx_list: Vec::new(),
             ctx_state: ListState::default(),
+            ctx_filter: String::new(),
             user_aliases: HashMap::new(),
             plugins: Vec::new(),
             rbac_allowed: None,
@@ -2979,23 +2982,61 @@ impl App {
         let cur = self.cluster.context.clone();
         let idx = list.iter().position(|c| *c == cur).unwrap_or(0);
         self.ctx_list = list;
+        self.ctx_filter.clear();
         self.ctx_state.select(Some(idx));
         self.mode = Mode::Contexts;
     }
 
+    /// Contexts for the switcher, fuzzy-matched against the type-to-filter
+    /// buffer (see `filtered_namespaces` for the same pattern).
+    pub fn filtered_contexts(&self) -> Vec<String> {
+        if self.ctx_filter.is_empty() {
+            return self.ctx_list.clone();
+        }
+        let mut scored: Vec<(i64, &String)> = self
+            .ctx_list
+            .iter()
+            .filter_map(|c| {
+                self.matcher
+                    .fuzzy_match(c, &self.ctx_filter)
+                    .map(|s| (s, c))
+            })
+            .collect();
+        scored.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(b.1)));
+        scored.into_iter().map(|(_, c)| c.clone()).collect()
+    }
+
     fn key_contexts(&mut self, key: KeyEvent) {
-        let len = self.ctx_list.len();
+        let len = self.filtered_contexts().len();
         match key.code {
-            KeyCode::Esc | KeyCode::Char('q') => self.mode = Mode::Table,
-            KeyCode::Char('j') | KeyCode::Down => list_step(&mut self.ctx_state, len, true),
-            KeyCode::Char('k') | KeyCode::Up => list_step(&mut self.ctx_state, len, false),
+            KeyCode::Esc => {
+                // First esc clears the filter, second closes the switcher.
+                if self.ctx_filter.is_empty() {
+                    self.mode = Mode::Table;
+                } else {
+                    self.ctx_filter.clear();
+                    self.ctx_state.select(Some(0));
+                }
+            }
+            KeyCode::Down => list_step(&mut self.ctx_state, len, true),
+            KeyCode::Up => list_step(&mut self.ctx_state, len, false),
             KeyCode::Enter => {
-                self.mode = Mode::Table;
-                if let Some(i) = self.ctx_state.selected()
-                    && let Some(name) = self.ctx_list.get(i).cloned()
+                if let Some(name) = self
+                    .ctx_state
+                    .selected()
+                    .and_then(|i| self.filtered_contexts().get(i).cloned())
                 {
+                    self.mode = Mode::Table;
                     self.switch_context(name);
                 }
+            }
+            KeyCode::Backspace => {
+                self.ctx_filter.pop();
+                self.ctx_state.select(Some(0));
+            }
+            KeyCode::Char(c) => {
+                self.ctx_filter.push(c);
+                self.ctx_state.select(Some(0));
             }
             _ => {}
         }
