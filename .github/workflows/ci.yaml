@@ -45,7 +45,7 @@ jobs:
             system: aarch64-linux
           - os: macos-latest
             system: aarch64-darwin
-          - os: macos-13
+          - os: macos-15-intel
             system: x86_64-darwin
     runs-on: ${{ matrix.os }}
     env:
