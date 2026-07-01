@@ -1,0 +1,296 @@
+//! sofka — a Kubernetes TUI, reimagined in Rust.
+//!
+//! A from-scratch reimagining of k9s built on kube-rs + ratatui, async-first.
+
+mod app;
+mod columns;
+mod config;
+mod k8s;
+mod store;
+mod theme;
+mod ui;
+
+use std::time::Duration;
+
+use anyhow::Result;
+use clap::Parser;
+use crossterm::event::{Event, KeyEventKind};
+use futures_util::StreamExt;
+use tokio::sync::mpsc;
+
+use crate::app::App;
+use crate::k8s::Cluster;
+
+/// sofka: navigate, observe, and inspect your Kubernetes clusters.
+#[derive(Parser, Debug)]
+#[command(name = "sofka", version, about)]
+struct Args {
+    /// Resource to open on launch (alias/plural/kind), e.g. pods, svc, dp.
+    /// Defaults to config `default_resource`, then "pods".
+    resource: Option<String>,
+
+    /// Namespace to start in.
+    #[arg(short, long)]
+    namespace: Option<String>,
+
+    /// Start across all namespaces.
+    #[arg(short = 'A', long)]
+    all_namespaces: bool,
+
+    /// Connect, run discovery, print a summary, and exit (no TUI). Useful for
+    /// verifying cluster connectivity in CI or a headless shell.
+    #[arg(long)]
+    check: bool,
+
+    /// Render a single frame of the resource view to stdout and exit (no TTY
+    /// needed). Lets you eyeball the UI headlessly.
+    #[arg(long)]
+    snapshot: bool,
+}
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    let args = Args::parse();
+    let cfg = config::Config::load();
+
+    // Install the color skin before anything renders. Startup-only: changing
+    // the skin requires a restart.
+    theme::init(theme::resolve_skin(
+        cfg.skin.name.as_deref(),
+        &cfg.skin.colors,
+    ));
+
+    // Connect before taking over the terminal so errors are readable.
+    eprintln!("Connecting to cluster…");
+    let mut cluster = match Cluster::connect().await {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("\x1b[31merror:\x1b[0m {e:#}");
+            std::process::exit(1);
+        }
+    };
+    cluster.add_aliases(&cfg.aliases);
+
+    if args.check {
+        println!("✓ connected");
+        println!("  context:    {}", cluster.context);
+        println!("  cluster:    {}", cluster.cluster_url);
+        println!("  namespace:  {}", cluster.default_namespace);
+        println!(
+            "  kinds:      {} resource types discovered",
+            cluster.catalog.len()
+        );
+        for alias in ["pods", "po", "dp", "svc", "no", "ns", "cm"] {
+            match cluster.resolve(alias) {
+                Some(k) => println!(
+                    "  resolve {alias:<5} → {} (namespaced={})",
+                    k.title(),
+                    k.namespaced
+                ),
+                None => println!("  resolve {alias:<5} → <unresolved>"),
+            }
+        }
+        match cluster.namespaces().await {
+            Ok(ns) => println!("  namespaces: {}", ns.len()),
+            Err(e) => println!("  namespaces: error: {e}"),
+        }
+        return Ok(());
+    }
+
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let mut app = App::new(cluster, tx);
+    app.user_aliases = cfg.aliases.clone();
+    app.plugins = cfg.plugins.clone();
+    if args.all_namespaces {
+        app.namespace = String::new();
+    } else if let Some(ns) = args.namespace {
+        app.namespace = ns;
+    } else if let Some(ns) = cfg.default_namespace.clone() {
+        app.namespace = ns;
+    }
+    let resource = args
+        .resource
+        .or(cfg.default_resource)
+        .unwrap_or_else(|| "pods".into());
+    app.switch_kind(&resource);
+
+    if args.snapshot {
+        return snapshot(&mut app, &mut rx).await;
+    }
+
+    let mut terminal = ratatui::init();
+    let result = run(&mut terminal, &mut app, &mut rx).await;
+    ratatui::restore();
+    result
+}
+
+/// Populate the store from the watch for a short window, then render one frame
+/// to an in-memory backend and print it. Headless UI smoke test.
+async fn snapshot(app: &mut App, rx: &mut mpsc::UnboundedReceiver<store::Msg>) -> Result<()> {
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    match std::env::var("PUP_DEMO").as_deref() {
+        Ok("pulse") => app.open_pulse(),
+        Ok("xray") => app.open_xray(),
+        _ => {}
+    }
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+    while tokio::time::Instant::now() < deadline {
+        match tokio::time::timeout(Duration::from_millis(250), rx.recv()).await {
+            Ok(Some(msg)) => app.handle_msg(msg),
+            Ok(None) => break,
+            Err(_) => {} // keep polling until the deadline (let metrics arrive)
+        }
+    }
+
+    // Optional overlay demo for headless visual verification of popups.
+    match std::env::var("PUP_DEMO").as_deref() {
+        Ok("prompt") => {
+            app.prompt_label = "Scale sherlock to replicas (current 1):".into();
+            app.prompt_input = "3".into();
+            app.mode = app::Mode::Prompt;
+        }
+        Ok("ns") => {
+            app.ns_list = vec![
+                "<all>".into(),
+                "default".into(),
+                "kube-system".into(),
+                "sherlock".into(),
+            ];
+            app.ns_state.select(Some(0));
+            app.mode = app::Mode::Namespaces;
+        }
+        Ok("logs") => {
+            app.logs.view.title = "sherlock — logs".into();
+            app.logs.view.lines = (1..=40)
+                .map(|i| {
+                    format!(
+                        "2026-06-15T12:0{}:00Z [info] request {i} handled in {}ms",
+                        i % 6,
+                        i * 3
+                    )
+                })
+                .collect();
+            app.logs.follow = true;
+            app.mode = app::Mode::Logs;
+        }
+        Ok("diff") => {
+            // Try a real diff; fall back to synthetic content to show the view.
+            app.table_state.select(Some(0));
+            app.open_diff();
+            if app.mode != app::Mode::Diff {
+                app.detail = app::Scrollable {
+                    title: "web — diff (last-applied → live)".into(),
+                    lines: vec![
+                        " spec:".into(),
+                        "   replicas: 3".into(),
+                        "-  image: web:v1.2.0".into(),
+                        "+  image: web:v1.3.0".into(),
+                        "   ports:".into(),
+                        "-  - containerPort: 8080".into(),
+                        "+  - containerPort: 9090".into(),
+                    ],
+                    scroll: 0,
+                };
+                app.mode = app::Mode::Diff;
+            }
+        }
+        Ok("palette") => {
+            app.command = "de".into();
+            app.cmd_suggestions = [
+                "deployments",
+                "daemonsets",
+                "endpoints",
+                "endpointslices",
+                "events",
+            ]
+            .into_iter()
+            .map(|s| app::Suggestion {
+                label: s.into(),
+                kind: app::SuggestKind::Resource,
+            })
+            .collect();
+            app.cmd_sel = 0;
+            app.mode = app::Mode::Command;
+        }
+        Ok("image") => {
+            app.container_list = vec!["app".into(), "istio-proxy".into()];
+            app.image_values = vec![
+                "registry.litehub.io/sherlock:v2.4.1".into(),
+                "docker.io/istio/proxyv2:1.22.0".into(),
+            ];
+            app.container_state.select(Some(0));
+            app.mode = app::Mode::SetImage;
+        }
+        _ => {}
+    }
+
+    let mut terminal = Terminal::new(TestBackend::new(120, 32))?;
+    terminal.draw(|f| ui::draw(f, app))?;
+    let buffer = terminal.backend().buffer().clone();
+    for y in 0..buffer.area.height {
+        let mut line = String::new();
+        for x in 0..buffer.area.width {
+            line.push_str(buffer[(x, y)].symbol());
+        }
+        println!("{}", line.trim_end());
+    }
+    Ok(())
+}
+
+/// Leave the alt-screen/raw-mode TUI, run an interactive command with inherited
+/// stdio (kubectl exec/edit/port-forward), then restore the TUI.
+fn suspend_and_run(terminal: &mut ratatui::DefaultTerminal, argv: &[String]) {
+    if argv.is_empty() {
+        return;
+    }
+    ratatui::restore();
+    let _ = std::process::Command::new(&argv[0])
+        .args(&argv[1..])
+        .status();
+    *terminal = ratatui::init();
+    let _ = terminal.clear();
+}
+
+async fn run(
+    terminal: &mut ratatui::DefaultTerminal,
+    app: &mut App,
+    rx: &mut mpsc::UnboundedReceiver<store::Msg>,
+) -> Result<()> {
+    let mut reader = crossterm::event::EventStream::new();
+    let mut tick = tokio::time::interval(Duration::from_secs(1));
+
+    loop {
+        terminal.draw(|f| ui::draw(f, app))?;
+        if app.should_quit {
+            return Ok(());
+        }
+
+        tokio::select! {
+            maybe_event = reader.next() => {
+                match maybe_event {
+                    Some(Ok(Event::Key(key))) if key.kind == KeyEventKind::Press => {
+                        app.handle_key(key)?;
+                        if let Some(app::Suspend::Shell(argv)) = app.pending.take() {
+                            suspend_and_run(terminal, &argv);
+                            app.flash = format!("ran: {}", argv.join(" "));
+                            app.flash_err = false;
+                        }
+                    }
+                    Some(Err(_)) | None => return Ok(()),
+                    _ => {}
+                }
+            }
+            Some(msg) = rx.recv() => {
+                app.handle_msg(msg);
+                // Batch any other queued updates before the next redraw.
+                while let Ok(m) = rx.try_recv() {
+                    app.handle_msg(m);
+                }
+            }
+            _ = tick.tick() => app.reap_port_forwards(), // age columns + drop dead forwards
+        }
+    }
+}

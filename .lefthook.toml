@@ -1,0 +1,42 @@
+[pre-commit]
+parallel = true
+skip = ["merge", "rebase"]
+
+# format-rust/clippy/test all invoke `cargo` against the same `target/`
+# directory — running them concurrently races on cargo's build lock and
+# produces spurious compile failures. Serialize just these three via
+# priority (lower runs first); everything else stays parallel.
+[pre-commit.commands.format-rust]
+glob = ["*.rs"]
+run = "cargo fmt --all"
+stage_fixed = true
+priority = 1
+
+[pre-commit.commands.clippy]
+glob = ["*.rs"]
+run = "cargo clippy --all-targets -- -D warnings"
+priority = 2
+
+[pre-commit.commands.test]
+glob = ["*.rs"]
+run = "cargo test --quiet"
+priority = 3
+
+[pre-commit.commands.format-nix]
+glob = ["*.nix"]
+run = "nixpkgs-fmt {staged_files}"
+stage_fixed = true
+
+[pre-commit.commands.format-markdown]
+glob = ["*.md", "*.markdown", "*.mdx"]
+run = "oxfmt {staged_files}"
+stage_fixed = true
+
+[pre-commit.commands.format-yaml]
+glob = ["*.yaml", "*.yml"]
+run = "oxfmt {staged_files}"
+stage_fixed = true
+
+[pre-commit.commands.zizmor]
+glob = [".github/workflows/*.yaml", ".github/actions/**/action.yaml"]
+run = "zizmor --offline --min-confidence medium --min-severity low {staged_files}"

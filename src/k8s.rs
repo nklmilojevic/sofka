@@ -1,0 +1,400 @@
+//! Kubernetes connectivity: client bootstrap, resource discovery, alias
+//! resolution, and async watch streams that feed the in-memory store.
+
+use std::collections::HashMap;
+
+use anyhow::{Context, Result};
+use futures_util::StreamExt;
+use kube::api::{Api, ListParams};
+use kube::config::{KubeConfigOptions, Kubeconfig};
+use kube::core::DynamicObject;
+use kube::discovery::{ApiResource, Discovery, Scope};
+use kube::runtime::watcher;
+use kube::{Client, Config};
+use tokio::sync::mpsc::UnboundedSender;
+use tokio::task::JoinHandle;
+
+use crate::store::{Msg, row_key};
+
+/// A resolvable Kubernetes resource type.
+#[derive(Clone)]
+pub struct Kind {
+    pub ar: ApiResource,
+    pub namespaced: bool,
+}
+
+impl Kind {
+    pub fn title(&self) -> String {
+        if self.ar.group.is_empty() {
+            self.ar.plural.clone()
+        } else {
+            format!("{}.{}", self.ar.plural, self.ar.group)
+        }
+    }
+}
+
+/// Connection + discovery context for a cluster.
+pub struct Cluster {
+    pub client: Client,
+    pub context: String,
+    pub cluster_url: String,
+    pub default_namespace: String,
+    /// Context name to pass to `kubectl` shell-outs (`--context`). `None` when
+    /// we connected without a named kubeconfig context (e.g. in-cluster), in
+    /// which case kubectl falls back to its own default.
+    cli_context: Option<String>,
+    /// lookup key (alias/plural/kind, lowercased) -> Kind
+    registry: HashMap<String, Kind>,
+    /// stable, de-duplicated list of plural names for completion
+    pub catalog: Vec<String>,
+}
+
+impl Cluster {
+    pub async fn connect() -> Result<Self> {
+        let config = Config::infer()
+            .await
+            .context("loading kubeconfig (is KUBECONFIG / ~/.kube/config present?)")?;
+        // The real kubeconfig current-context (if any) is what kubectl uses by
+        // default; pass it explicitly so shell-outs can't drift from us.
+        let cli_context = current_context_name();
+        let context = cli_context.clone().unwrap_or_else(|| "default".into());
+        Self::from_config(config, context, cli_context).await
+    }
+
+    /// Connect using a specific kubeconfig context (for the `:ctx` switcher).
+    pub async fn connect_context(name: &str) -> Result<Self> {
+        let kubeconfig = Kubeconfig::read().context("reading kubeconfig")?;
+        let opts = KubeConfigOptions {
+            context: Some(name.to_string()),
+            cluster: None,
+            user: None,
+        };
+        let config = Config::from_custom_kubeconfig(kubeconfig, &opts)
+            .await
+            .with_context(|| format!("building config for context '{name}'"))?;
+        Self::from_config(config, name.to_string(), Some(name.to_string())).await
+    }
+
+    async fn from_config(
+        config: Config,
+        context: String,
+        cli_context: Option<String>,
+    ) -> Result<Self> {
+        let cluster_url = config.cluster_url.to_string();
+        let default_namespace = config.default_namespace.clone();
+        let client = Client::try_from(config).context("building kube client")?;
+
+        let mut cluster = Self {
+            client,
+            context,
+            cluster_url,
+            default_namespace,
+            cli_context,
+            registry: HashMap::new(),
+            catalog: Vec::new(),
+        };
+        cluster.discover().await?;
+        Ok(cluster)
+    }
+
+    /// Context name to pass to `kubectl` (`--context`), when known. Keeps
+    /// shell-outs (edit/describe/exec/attach/port-forward) on the same cluster
+    /// sofka is connected to, even after an in-app `:ctx` switch.
+    pub fn kubectl_context(&self) -> Option<&str> {
+        self.cli_context.as_deref()
+    }
+
+    /// All context names from the kubeconfig.
+    pub fn list_contexts() -> Vec<String> {
+        Kubeconfig::read()
+            .map(|k| k.contexts.into_iter().map(|c| c.name).collect())
+            .unwrap_or_default()
+    }
+
+    /// Merge user-defined aliases (alias -> canonical) into the registry.
+    pub fn add_aliases(&mut self, aliases: &HashMap<String, String>) {
+        for (alias, target) in aliases {
+            if let Some(k) = self.registry.get(&target.to_lowercase()).cloned() {
+                self.registry.insert(alias.to_lowercase(), k);
+            }
+        }
+    }
+
+    /// Walk the discovery API and index every recommended resource by its
+    /// plural and kind. Built-in aliases are layered on top.
+    async fn discover(&mut self) -> Result<()> {
+        let discovery = Discovery::new(self.client.clone())
+            .run()
+            .await
+            .context("running API discovery")?;
+
+        // Collect everything first, then insert bare keys in priority order so
+        // that e.g. core `pods` wins over `pods.metrics.k8s.io`.
+        let mut entries: Vec<(Kind, String, String)> = Vec::new(); // (kind, plural, kind_lc)
+        let mut catalog = Vec::new();
+        for group in discovery.groups() {
+            for (ar, caps) in group.recommended_resources() {
+                let namespaced = matches!(caps.scope, Scope::Namespaced);
+                let kind = Kind {
+                    ar: ar.clone(),
+                    namespaced,
+                };
+                let plural = ar.plural.to_lowercase();
+                let kind_lc = ar.kind.to_lowercase();
+                catalog.push(plural.clone());
+                // Group-qualified keys are unambiguous; insert directly.
+                if !ar.group.is_empty() {
+                    self.registry
+                        .insert(format!("{}.{}", plural, ar.group), kind.clone());
+                }
+                entries.push((kind, plural, kind_lc));
+            }
+        }
+        // Lowest priority first; later inserts overwrite, so the highest
+        // priority group ends up owning each bare plural/kind key.
+        entries.sort_by_key(|(k, _, _)| group_priority(&k.ar.group));
+        for (kind, plural, kind_lc) in entries {
+            self.registry.insert(plural, kind.clone());
+            self.registry.insert(kind_lc, kind);
+        }
+        catalog.sort();
+        catalog.dedup();
+        self.catalog = catalog;
+
+        // Built-in short aliases (k9s-style), resolved against the registry.
+        for (alias, target) in ALIASES {
+            if let Some(k) = self.registry.get(*target).cloned() {
+                self.registry.entry((*alias).to_string()).or_insert(k);
+            }
+        }
+        Ok(())
+    }
+
+    pub fn resolve(&self, input: &str) -> Option<Kind> {
+        let key = input.trim().trim_start_matches(':').to_lowercase();
+        self.registry.get(&key).cloned()
+    }
+
+    /// Spawn a watch task for `kind` in `namespace` ("" = all namespaces),
+    /// optionally scoped by a label and/or field selector (used for drill-down,
+    /// e.g. deployment -> its pods, or node -> pods on that node).
+    /// Messages are tagged with `gen` so the UI can drop stale streams.
+    pub fn spawn_watch(
+        &self,
+        kind: &Kind,
+        namespace: &str,
+        labels: Option<String>,
+        fields: Option<String>,
+        generation: u64,
+        tx: UnboundedSender<Msg>,
+    ) -> JoinHandle<()> {
+        let client = self.client.clone();
+        let ar = kind.ar.clone();
+        let namespaced = kind.namespaced;
+        let ns = namespace.to_string();
+
+        tokio::spawn(async move {
+            let api: Api<DynamicObject> = if namespaced && !ns.is_empty() {
+                Api::namespaced_with(client, &ns, &ar)
+            } else {
+                Api::all_with(client, &ar)
+            };
+
+            let mut cfg = watcher::Config::default().any_semantic();
+            if let Some(l) = labels {
+                cfg = cfg.labels(&l);
+            }
+            if let Some(f) = fields {
+                cfg = cfg.fields(&f);
+            }
+            let mut stream = watcher(api, cfg).boxed();
+            let _ = tx.send(Msg::Reset { generation });
+
+            while let Some(event) = stream.next().await {
+                let msg = match event {
+                    Ok(watcher::Event::Apply(obj)) | Ok(watcher::Event::InitApply(obj)) => {
+                        Msg::Applied {
+                            generation,
+                            key: row_key(&obj),
+                            obj: Box::new(obj),
+                        }
+                    }
+                    Ok(watcher::Event::Delete(obj)) => Msg::Deleted {
+                        generation,
+                        key: row_key(&obj),
+                    },
+                    Ok(watcher::Event::Init) => Msg::Reset { generation },
+                    Ok(watcher::Event::InitDone) => Msg::Synced { generation },
+                    Err(e) => Msg::Error {
+                        generation,
+                        error: e.to_string(),
+                    },
+                };
+                if tx.send(msg).is_err() {
+                    break; // UI gone
+                }
+            }
+        })
+    }
+
+    /// List namespaces for the namespace switcher.
+    pub async fn namespaces(&self) -> Result<Vec<String>> {
+        if let Some(kind) = self.resolve("namespaces") {
+            let api: Api<DynamicObject> = Api::all_with(self.client.clone(), &kind.ar);
+            let list = api.list(&ListParams::default()).await?;
+            let mut names: Vec<String> = list
+                .items
+                .into_iter()
+                .filter_map(|o| o.metadata.name)
+                .collect();
+            names.sort();
+            Ok(names)
+        } else {
+            Ok(vec![])
+        }
+    }
+}
+
+/// Higher wins when two API groups expose the same bare plural/kind (e.g.
+/// core `pods` should beat `pods.metrics.k8s.io`).
+fn group_priority(group: &str) -> u8 {
+    match group {
+        "" => 100, // core/v1
+        "apps" => 90,
+        "batch" => 85,
+        "networking.k8s.io" => 80,
+        "rbac.authorization.k8s.io" | "storage.k8s.io" | "policy" => 75,
+        "metrics.k8s.io" => 0, // virtual metrics API — never shadow real kinds
+        _ => 50,
+    }
+}
+
+fn current_context_name() -> Option<String> {
+    // Config::infer() doesn't surface the context name, so read it directly.
+    let kubeconfig = kube::config::Kubeconfig::read().ok()?;
+    kubeconfig.current_context
+}
+
+/// Built-in short aliases -> canonical plural. Mirrors common k9s/kubectl ones.
+pub const ALIASES: &[(&str, &str)] = &[
+    ("po", "pods"),
+    ("pod", "pods"),
+    ("dp", "deployments"),
+    ("deploy", "deployments"),
+    ("svc", "services"),
+    ("ns", "namespaces"),
+    ("no", "nodes"),
+    ("node", "nodes"),
+    ("cm", "configmaps"),
+    ("sec", "secrets"),
+    ("secret", "secrets"),
+    ("sts", "statefulsets"),
+    ("ds", "daemonsets"),
+    ("rs", "replicasets"),
+    ("rc", "replicationcontrollers"),
+    ("ing", "ingresses"),
+    ("pv", "persistentvolumes"),
+    ("pvc", "persistentvolumeclaims"),
+    ("sa", "serviceaccounts"),
+    ("jo", "jobs"),
+    ("cj", "cronjobs"),
+    ("ep", "endpoints"),
+    ("ev", "events"),
+    ("hpa", "horizontalpodautoscalers"),
+    ("pc", "priorityclasses"),
+    ("crd", "customresourcedefinitions"),
+    ("cr", "clusterroles"),
+    ("crb", "clusterrolebindings"),
+    ("ro", "roles"),
+    ("rb", "rolebindings"),
+    ("np", "networkpolicies"),
+    ("pdb", "poddisruptionbudgets"),
+    ("sc", "storageclasses"),
+    // Flux CD — the CRDs' own `shortNames`.
+    ("ks", "kustomizations"),
+    ("hr", "helmreleases"),
+];
+
+#[cfg(test)]
+impl Cluster {
+    /// A connectionless cluster for unit tests: the client points at a dummy
+    /// URL (no I/O happens until a request is actually made) and the registry
+    /// is a small hand-built set of common kinds.
+    pub(crate) fn fake() -> Self {
+        let config = Config::new("https://127.0.0.1:6443".parse().unwrap());
+        let client = Client::try_from(config).expect("build test client");
+        let mk = |group: &str, kind: &str, plural: &str, namespaced: bool| Kind {
+            ar: ApiResource {
+                group: group.to_string(),
+                version: "v1".to_string(),
+                api_version: if group.is_empty() {
+                    "v1".to_string()
+                } else {
+                    format!("{group}/v1")
+                },
+                kind: kind.to_string(),
+                plural: plural.to_string(),
+            },
+            namespaced,
+        };
+        let mut registry = HashMap::new();
+        registry.insert("pods".to_string(), mk("", "Pod", "pods", true));
+        registry.insert(
+            "deployments".to_string(),
+            mk("apps", "Deployment", "deployments", true),
+        );
+        registry.insert("services".to_string(), mk("", "Service", "services", true));
+        registry.insert("nodes".to_string(), mk("", "Node", "nodes", false));
+        registry.insert(
+            "namespaces".to_string(),
+            mk("", "Namespace", "namespaces", false),
+        );
+        registry.insert(
+            "kustomizations".to_string(),
+            mk(
+                "kustomize.toolkit.fluxcd.io",
+                "Kustomization",
+                "kustomizations",
+                true,
+            ),
+        );
+        Self {
+            client,
+            context: "test".into(),
+            cluster_url: "https://127.0.0.1:6443".into(),
+            default_namespace: "default".into(),
+            cli_context: Some("test".into()),
+            registry,
+            catalog: vec![
+                "deployments".to_string(),
+                "kustomizations".to_string(),
+                "namespaces".to_string(),
+                "nodes".to_string(),
+                "pods".to_string(),
+                "services".to_string(),
+            ],
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn core_group_outranks_metrics() {
+        // The fix for `pods` resolving to pods.metrics.k8s.io.
+        assert!(group_priority("") > group_priority("metrics.k8s.io"));
+        assert!(group_priority("apps") > group_priority("metrics.k8s.io"));
+        assert!(group_priority("") > group_priority("apps"));
+    }
+
+    #[test]
+    fn aliases_point_at_plurals() {
+        // Every alias target should be non-empty and distinct from its short form.
+        for (alias, target) in ALIASES {
+            assert!(!target.is_empty());
+            assert_ne!(alias, target);
+        }
+    }
+}

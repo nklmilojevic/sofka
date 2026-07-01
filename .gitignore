@@ -1,0 +1,30 @@
+# Rust build artifacts
+/target
+
+# Nix build output symlinks
+/result
+/result-*
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+.Spotlight-V100
+.Trashes
+
+# Editors
+.vscode/
+.idea/
+.zed/
+*.swp
+*.swo
+*~
+
+# Nix / direnv
+.direnv/
+.envrc
+
+# Local env / secrets
+.env
+.env.local

@@ -1,0 +1,1834 @@
+//! All ratatui rendering.
+
+use ratatui::Frame;
+use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
+use ratatui::style::{Color, Modifier, Style};
+use ratatui::text::{Line, Span};
+use ratatui::widgets::{
+    Block, BorderType, Borders, Cell, Clear, Gauge, HighlightSpacing, List, ListItem, ListState,
+    Paragraph, Row, Table, Wrap,
+};
+
+use crate::app::{App, Mode, SuggestKind};
+use crate::{columns, theme};
+
+const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+pub fn draw(frame: &mut Frame, app: &mut App) {
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(7), // header
+            Constraint::Min(3),    // body
+            Constraint::Length(1), // prompt
+            Constraint::Length(1), // status
+        ])
+        .split(frame.area());
+
+    draw_header(frame, app, chunks[0]);
+
+    match app.mode {
+        Mode::Detail => draw_scrollable(frame, &app.detail, chunks[1], theme::sky()),
+        Mode::Diff => draw_diff(frame, &app.detail, chunks[1]),
+        Mode::Logs | Mode::LogFilter => draw_logs(frame, app, chunks[1]),
+        Mode::Help => draw_help(frame, chunks[1]),
+        Mode::Pulse => draw_pulse(frame, app, chunks[1]),
+        Mode::Xray => draw_xray(frame, app, chunks[1]),
+        Mode::PortForwards => draw_port_forwards(frame, app, chunks[1]),
+        _ => draw_table(frame, app, chunks[1]),
+    }
+
+    match app.mode {
+        Mode::Namespaces => draw_namespaces(frame, app, chunks[1]),
+        Mode::Contexts => draw_contexts(frame, app, chunks[1]),
+        Mode::Containers => draw_containers(frame, app, chunks[1]),
+        Mode::SetImage => draw_set_image(frame, app, chunks[1]),
+        Mode::Confirm => draw_confirm(frame, app, chunks[1]),
+        Mode::Prompt => draw_prompt_popup(frame, app, chunks[1]),
+        Mode::Command => draw_palette(frame, app, chunks[1]),
+        Mode::FluxMenu => draw_flux_menu(frame, app, chunks[1]),
+        _ => {}
+    }
+
+    draw_prompt(frame, app, chunks[2]);
+    draw_status(frame, app, chunks[3]);
+}
+
+fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
+    let cols = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Min(30), Constraint::Length(26)])
+        .split(area);
+
+    let ns = if app.all_namespaces() {
+        "<all>".to_string()
+    } else {
+        app.namespace.clone()
+    };
+    let mut kind = app
+        .kind
+        .as_ref()
+        .map(|k| k.title())
+        .unwrap_or_else(|| "—".into());
+    if let Some(scope) = &app.scope_label {
+        kind = format!("{kind}  ‹ {scope}");
+    }
+
+    let field = |label: &str, val: String, color| {
+        Line::from(vec![
+            Span::styled(format!("{label:<12}"), theme::dim()),
+            Span::styled(val, Style::default().fg(color)),
+        ])
+    };
+
+    let info = vec![
+        field("Context:", app.cluster.context.clone(), theme::mauve()),
+        field(
+            "Cluster:",
+            app.cluster.cluster_url.clone(),
+            theme::sapphire(),
+        ),
+        field("Namespace:", ns, theme::green()),
+        field("Resource:", kind, theme::peach()),
+        field("Count:", app.store.len().to_string(), theme::text()),
+    ];
+    frame.render_widget(
+        Paragraph::new(info).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .border_style(theme::border())
+                .title(Span::styled(" sofka ", theme::title())),
+        ),
+        cols[0],
+    );
+
+    // Sophie the Russian Blue: tall pointed ears, a narrow watchful stare
+    // (not round cutesy eyes), cool grey-blue coat. Lines are equal width so
+    // the right-aligned block stays coherent.
+    let logo = vec![
+        Line::from(Span::styled(
+            "  /\\        /\\ ",
+            Style::default().fg(theme::overlay1()),
+        )),
+        Line::from(Span::styled(
+            " /  \\______/  \\",
+            Style::default().fg(theme::overlay1()),
+        )),
+        Line::from(Span::styled(
+            "( -        -  )",
+            Style::default().fg(theme::green()),
+        )),
+        Line::from(Span::styled(
+            " \\     ᴥ      /",
+            Style::default().fg(theme::maroon()),
+        )),
+        Line::from(Span::styled(
+            "  \\    \\__/   /",
+            Style::default().fg(theme::overlay1()),
+        )),
+        Line::from(Span::styled(
+            "   '--------'  ",
+            Style::default().fg(theme::overlay1()),
+        )),
+        Line::from(Span::styled(format!("   sofka v{VERSION}"), theme::dim())),
+    ];
+    frame.render_widget(Paragraph::new(logo).alignment(Alignment::Right), cols[1]);
+}
+
+fn draw_table(frame: &mut Frame, app: &mut App, area: Rect) {
+    let show_ns = app.show_namespace_column();
+    let metrics_cols = app.metrics_columns();
+    let headers: Vec<&str> = app.display_headers();
+    let pods_view = app.kind_plural == "pods";
+    let sort_col = app.sort_column;
+    let sort_arrow = if app.sort_desc { " ↓" } else { " ↑" };
+
+    let header_row = Row::new(
+        headers
+            .iter()
+            .enumerate()
+            .map(|(i, h)| {
+                // Active sort column gets a direction arrow in the sorter color
+                // (sky, bold), matching k9s; the label inherits the header color.
+                if Some(i) == sort_col {
+                    Cell::from(Line::from(vec![
+                        Span::raw(h.to_string()),
+                        Span::styled(
+                            sort_arrow,
+                            Style::default()
+                                .fg(theme::sorter())
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                    ]))
+                } else {
+                    Cell::from(h.to_string())
+                }
+            })
+            .collect::<Vec<_>>(),
+    )
+    .style(theme::header_row());
+
+    // Column indices (fixed for the whole table) for the columns that get
+    // their own visibility treatment below, computed once rather than
+    // string-compared per cell.
+    let name_col = if show_ns { 1 } else { 0 };
+    let age_idx = headers.iter().position(|h| *h == "AGE");
+    let restarts_idx = headers.iter().position(|h| *h == "RESTARTS");
+    let cpu_idx = headers.iter().position(|h| *h == "CPU");
+    let mem_idx = headers.iter().position(|h| *h == "MEM");
+
+    let rows: Vec<Row> = app
+        .rows()
+        .iter()
+        .map(|obj| {
+            let marked_row =
+                !app.marked.is_empty() && app.marked.contains(&crate::store::row_key(obj));
+            let (mut cells, status_idx) = columns::cells(obj, &app.kind_plural);
+            let mut style_idx = status_idx;
+            if show_ns {
+                cells.insert(0, obj.metadata.namespace.clone().unwrap_or_default());
+                style_idx = status_idx.map(|i| i + 1);
+            }
+            let mut metrics_raw = None;
+            if metrics_cols {
+                let name = obj.metadata.name.clone().unwrap_or_default();
+                let key = if pods_view {
+                    format!(
+                        "{}/{}",
+                        obj.metadata.namespace.as_deref().unwrap_or(""),
+                        name
+                    )
+                } else {
+                    name
+                };
+                let (cpu, mem) = app.metrics.get(&key).copied().unwrap_or((0, 0));
+                metrics_raw = Some((cpu, mem));
+                cells.push(columns::fmt_cpu(cpu));
+                cells.push(columns::fmt_mem(mem));
+            }
+            // Combined colorer: the whole row takes a k9s-style status tint
+            // (errors red, pending peach, completed/terminating dimmed, healthy
+            // blue), but a handful of columns keep their own visibility
+            // treatment on top: STATUS gets a semantic badge, RESTARTS/CPU/MEM
+            // flag outliers, AGE is dimmed (rarely the interesting signal),
+            // and NAME highlights the active fuzzy filter's matched chars.
+            let status_val = style_idx
+                .and_then(|i| cells.get(i))
+                .map(String::as_str)
+                .unwrap_or("");
+            let row_color = theme::row_color(status_val);
+            let render_cells: Vec<Cell> = cells
+                .into_iter()
+                .enumerate()
+                .map(|(i, c)| {
+                    if marked_row {
+                        // Marked rows override everything so a bulk selection
+                        // stands out.
+                        Cell::from(c).style(
+                            Style::default()
+                                .fg(theme::mark())
+                                .add_modifier(Modifier::BOLD),
+                        )
+                    } else if Some(i) == style_idx {
+                        let sc = theme::status_color(&c);
+                        Cell::from(c).style(Style::default().fg(sc))
+                    } else if i == name_col {
+                        render_name_cell(app, &c, row_color)
+                    } else if Some(i) == age_idx {
+                        Cell::from(c).style(theme::dim())
+                    } else if Some(i) == restarts_idx {
+                        let n: i64 = c.trim().parse().unwrap_or(0);
+                        let color = theme::restarts_severity(n).unwrap_or(row_color);
+                        Cell::from(c).style(Style::default().fg(color))
+                    } else if Some(i) == cpu_idx {
+                        let color = metrics_raw
+                            .and_then(|(cpu, _)| theme::cpu_severity(cpu))
+                            .unwrap_or(row_color);
+                        Cell::from(c).style(Style::default().fg(color))
+                    } else if Some(i) == mem_idx {
+                        let color = metrics_raw
+                            .and_then(|(_, mem)| theme::mem_severity(mem))
+                            .unwrap_or(row_color);
+                        Cell::from(c).style(Style::default().fg(color))
+                    } else {
+                        Cell::from(c).style(Style::default().fg(row_color))
+                    }
+                })
+                .collect();
+            Row::new(render_cells)
+        })
+        .collect();
+
+    let widths: Vec<Constraint> = headers
+        .iter()
+        .map(|h| match *h {
+            // NAME is the column you actually read — give it most of the
+            // remaining space so long pod/deployment names don't truncate
+            // while NODE (a full GKE node name) crowds it out.
+            "NAME" => Constraint::Fill(6),
+            "NAMESPACE" => Constraint::Fill(2),
+            "NODE" | "CLAIM" | "VOLUME" | "HOSTS" => Constraint::Fill(1),
+            "AGE" => Constraint::Length(7),
+            "CPU" | "MEM" => Constraint::Length(8),
+            // Wide enough for the long pod reasons (ContainerCreating,
+            // CrashLoopBackOff, ImagePullBackOff…) so status is never clipped.
+            "STATUS" => Constraint::Length(19),
+            "READY" | "RESTARTS" => Constraint::Length(10),
+            // CRD view: group domains run long (e.g.
+            // "kustomize.toolkit.fluxcd.io"), so give GROUP/KIND/VERSIONS a
+            // fixed floor wide enough that real-world values don't clip —
+            // Fill(1) alongside NAME's Fill(6) would crush them.
+            "GROUP" => Constraint::Length(30),
+            "KIND" => Constraint::Length(20),
+            "VERSIONS" => Constraint::Length(20),
+            "SCOPE" => Constraint::Length(12),
+            _ => Constraint::Fill(1),
+        })
+        .collect();
+
+    let count = app.rows().len();
+    let kind_label = app
+        .kind
+        .as_ref()
+        .map(|k| k.ar.plural.clone())
+        .unwrap_or_else(|| "resources".into());
+    // k9s title: resource name (teal, bold) then a yellow [count].
+    let mut title = vec![
+        Span::styled(format!(" {kind_label} "), theme::title()),
+        Span::styled(format!("[{count}]"), Style::default().fg(theme::counter())),
+    ];
+    if !app.marked.is_empty() {
+        title.push(Span::styled(
+            format!(" ✓{}", app.marked.len()),
+            Style::default().fg(theme::mark()),
+        ));
+    }
+    title.push(Span::raw(" "));
+
+    let table = Table::new(rows, widths)
+        .header(header_row)
+        .row_highlight_style(theme::selected_row())
+        .highlight_symbol("▌ ")
+        // Always reserve the highlight-symbol column so rows never shift right
+        // when a selection appears.
+        .highlight_spacing(HighlightSpacing::Always)
+        // A little breathing room between columns (default is a single space,
+        // easy to lose track of where one column ends and the next starts).
+        .column_spacing(2)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .border_style(theme::border_focused())
+                .title(Line::from(title)),
+        );
+
+    frame.render_stateful_widget(table, area, &mut app.table_state);
+}
+
+/// Render the NAME cell, highlighting characters that matched the active
+/// fuzzy row filter (bold yellow) so a scan across many filtered results is
+/// faster — every visible row already matched, this just shows *where*.
+/// Falls back to a flat `base`-colored cell when there's no active filter.
+fn render_name_cell(app: &App, name: &str, base: Color) -> Cell<'static> {
+    let Some(matched) = app.filter_match_indices(name).filter(|idx| !idx.is_empty()) else {
+        return Cell::from(name.to_string()).style(Style::default().fg(base));
+    };
+    let matched: std::collections::HashSet<usize> = matched.into_iter().collect();
+    let plain = Style::default().fg(base);
+    let hl = Style::default()
+        .fg(theme::yellow())
+        .add_modifier(Modifier::BOLD);
+
+    let mut spans = Vec::new();
+    let mut run = String::new();
+    let mut run_matched = false;
+    for (i, ch) in name.chars().enumerate() {
+        let is_match = matched.contains(&i);
+        if !run.is_empty() && is_match != run_matched {
+            spans.push(Span::styled(
+                std::mem::take(&mut run),
+                if run_matched { hl } else { plain },
+            ));
+        }
+        run_matched = is_match;
+        run.push(ch);
+    }
+    if !run.is_empty() {
+        spans.push(Span::styled(run, if run_matched { hl } else { plain }));
+    }
+    Cell::from(Line::from(spans))
+}
+
+fn draw_scrollable(
+    frame: &mut Frame,
+    view: &crate::app::Scrollable,
+    area: Rect,
+    accent: ratatui::style::Color,
+) {
+    let text: Vec<Line> = view
+        .lines
+        .iter()
+        .map(|l| Line::from(highlight_yaml(l)))
+        .collect();
+    let p = Paragraph::new(text).scroll((view.scroll, 0)).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
+            .border_style(Style::default().fg(accent))
+            .title(Span::styled(format!(" {} ", view.title), theme::title())),
+    );
+    frame.render_widget(p, area);
+}
+
+/// Logs view with optional substring filter + match highlighting.
+fn draw_logs(frame: &mut Frame, app: &mut App, area: Rect) {
+    let filter = app.logs.filter.to_lowercase();
+    let active = !filter.is_empty();
+    let inner_w = area.width.saturating_sub(2).max(1) as usize;
+    let inner_h = area.height.saturating_sub(2);
+
+    let shown: Vec<&String> = app
+        .logs
+        .view
+        .lines
+        .iter()
+        .filter(|l| !active || l.to_lowercase().contains(&filter))
+        .collect();
+
+    // Total rendered rows accounts for wrapping, so follow can anchor the
+    // newest line to the *bottom* of the viewport (not the top).
+    let rows: usize = if app.logs.wrap {
+        shown
+            .iter()
+            .map(|l| l.chars().count().div_ceil(inner_w).max(1))
+            .sum()
+    } else {
+        shown.len()
+    };
+
+    // Record viewport geometry (display rows) so key handlers clamp the scroll
+    // in the same units. Saturate to u16 — ratatui's scroll offset is a u16, so
+    // a huge paused buffer can't wrap the cast into garbage.
+    let rows_u16 = rows.min(u16::MAX as usize) as u16;
+    app.logs.viewport_rows = rows_u16;
+    app.logs.viewport_h = inner_h;
+
+    // Deepest offset pins the last full page to the viewport bottom; that same
+    // value is where `follow` anchors, so pausing freezes exactly in place.
+    let max_scroll = rows_u16.saturating_sub(inner_h);
+    let scroll = if app.logs.follow {
+        max_scroll
+    } else {
+        app.logs.view.scroll.min(max_scroll)
+    };
+
+    let lines: Vec<Line> = shown
+        .iter()
+        .map(|l| render_log_line(l, &app.logs.filter))
+        .collect();
+
+    let flags = format!(
+        "{}{}{}",
+        if app.logs.stopped {
+            " ⏹stopped"
+        } else if app.logs.follow {
+            " ▶follow"
+        } else {
+            " ⏸paused"
+        },
+        if app.logs.wrap { " wrap" } else { "" },
+        if app.logs.timestamps { " ts" } else { "" },
+    );
+    let title = if active {
+        format!(
+            " {} · /{} [{}]{} ",
+            app.logs.view.title,
+            app.logs.filter,
+            shown.len(),
+            flags
+        )
+    } else {
+        format!(" {}{} ", app.logs.view.title, flags)
+    };
+
+    let mut p = Paragraph::new(lines).scroll((scroll, 0)).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
+            .border_style(Style::default().fg(theme::green()))
+            .title(Span::styled(title, theme::title())),
+    );
+    if app.logs.wrap {
+        p = p.wrap(Wrap { trim: false });
+    }
+    // While following, remember the bottom-anchored position so that turning
+    // autoscroll off freezes exactly here instead of jumping to a stale offset.
+    if app.logs.follow {
+        app.logs.view.scroll = scroll;
+    }
+    frame.render_widget(p, area);
+}
+
+/// Render a log line: an optional `[source]` prefix (pod/container/component)
+/// in its own stable color, an optional leading RFC3339 timestamp dimmed (k9s
+/// style), then the message body in its severity color with search matches
+/// highlighted on top.
+fn render_log_line(line: &str, needle: &str) -> Line<'static> {
+    // Severity is detected on the ANSI-stripped text so a color-wrapped level
+    // token (e.g. "\x1b[33mwarn\x1b[0m") is still recognized.
+    let base = if line.as_bytes().contains(&0x1b) {
+        log_level_color(&strip_ansi(line))
+    } else {
+        log_level_color(line)
+    };
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    let mut rest = line;
+
+    // 1. Source prefix in its per-source color (bold).
+    if let Some((end, color)) = source_prefix(rest) {
+        let (prefix, r) = rest.split_at(end);
+        spans.push(Span::styled(
+            prefix.to_string(),
+            Style::default().fg(color).add_modifier(Modifier::BOLD),
+        ));
+        rest = r;
+    }
+
+    // 2. Leading timestamp (from `--timestamps`) dimmed, like k9s.
+    if let Some(len) = leading_timestamp(rest) {
+        let (ts, r) = rest.split_at(len);
+        spans.push(Span::styled(ts.to_string(), theme::dim()));
+        rest = r;
+    }
+
+    // 3. Message body: honor embedded ANSI colors (from the source app),
+    //    falling back to the severity color, with search matches on top.
+    spans.extend(render_body(rest, needle, base));
+    Line::from(spans)
+}
+
+/// Length of a leading RFC3339 timestamp (`2026-06-30T12:52:20.876Z`,
+/// `…+02:00`) **only** when it's terminated by whitespace or end-of-line — so a
+/// timestamp glued to the message (`…216Zinfo`) is left alone. Hand-rolled to
+/// avoid pulling in a regex dependency.
+fn leading_timestamp(s: &str) -> Option<usize> {
+    let b = s.as_bytes();
+    let digit = |i: usize| b.get(i).is_some_and(u8::is_ascii_digit);
+    let at = |i: usize, c: u8| b.get(i) == Some(&c);
+    // YYYY-MM-DD(T| )HH:MM:SS
+    let shape = digit(0)
+        && digit(1)
+        && digit(2)
+        && digit(3)
+        && at(4, b'-')
+        && digit(5)
+        && digit(6)
+        && at(7, b'-')
+        && digit(8)
+        && digit(9)
+        && (at(10, b'T') || at(10, b' '))
+        && digit(11)
+        && digit(12)
+        && at(13, b':')
+        && digit(14)
+        && digit(15)
+        && at(16, b':')
+        && digit(17)
+        && digit(18);
+    if !shape {
+        return None;
+    }
+    let mut i = 19;
+    if at(i, b'.') {
+        i += 1;
+        while digit(i) {
+            i += 1;
+        }
+    }
+    if at(i, b'Z') || at(i, b'z') {
+        i += 1;
+    } else if (at(i, b'+') || at(i, b'-'))
+        && digit(i + 1)
+        && digit(i + 2)
+        && at(i + 3, b':')
+        && digit(i + 4)
+        && digit(i + 5)
+    {
+        i += 6;
+    }
+    // Require a whitespace/EOL boundary so glued "…Zinfo" isn't treated as a ts.
+    match b.get(i) {
+        None => Some(i),
+        Some(&c) if c == b' ' || c == b'\t' => Some(i),
+        _ => None,
+    }
+}
+
+/// Detect a leading `[label]` source prefix; returns its byte length (including
+/// a trailing space, if any) and a stable color for that label.
+fn source_prefix(line: &str) -> Option<(usize, Color)> {
+    let rest = line.strip_prefix('[')?;
+    let close = rest.find(']')?;
+    let label = &rest[..close];
+    if label.is_empty() {
+        return None;
+    }
+    // `[` + label + `]` = close + 2 bytes; consume a following space too.
+    let mut end = close + 2;
+    if line[end..].starts_with(' ') {
+        end += 1;
+    }
+    Some((end, source_color(label)))
+}
+
+/// Stable color for a source label (FNV-1a hash into a palette). Excludes the
+/// severity colors (red/peach) and the search-highlight yellow so a prefix is
+/// never mistaken for a level.
+fn source_color(label: &str) -> Color {
+    let palette: [Color; 10] = [
+        theme::mauve(),
+        theme::blue(),
+        theme::green(),
+        theme::teal(),
+        theme::pink(),
+        theme::sapphire(),
+        theme::lavender(),
+        theme::flamingo(),
+        theme::sky(),
+        theme::rosewater(),
+    ];
+    let mut h: u32 = 0x811c_9dc5;
+    for b in label.bytes() {
+        h = (h ^ b as u32).wrapping_mul(0x0100_0193);
+    }
+    palette[(h as usize) % palette.len()]
+}
+
+/// Render a log-line body: split it into runs by any embedded ANSI SGR codes
+/// (escape bytes stripped), style each run by its ANSI color — or `base` when
+/// it carries none — and overlay search-match highlights.
+fn render_body(body: &str, needle: &str, base: Color) -> Vec<Span<'static>> {
+    let mut spans = Vec::new();
+    for run in ansi_runs(body) {
+        let mut style = Style::default().fg(run.color.unwrap_or(base));
+        if run.bold {
+            style = style.add_modifier(Modifier::BOLD);
+        }
+        push_highlighted(&mut spans, &run.text, needle, style);
+    }
+    spans
+}
+
+/// Append `text` to `spans` styled with `base`, highlighting case-insensitive
+/// occurrences of `needle` on top.
+fn push_highlighted(spans: &mut Vec<Span<'static>>, text: &str, needle: &str, base: Style) {
+    if needle.is_empty() {
+        if !text.is_empty() {
+            spans.push(Span::styled(text.to_string(), base));
+        }
+        return;
+    }
+    // Lowercasing is not always length-preserving (e.g. Turkish İ, German ß),
+    // so match on the same string we slice to keep byte offsets valid and avoid
+    // panicking on a non-char-boundary index for multi-byte log lines.
+    let hay = text.to_lowercase();
+    let pat = needle.to_lowercase();
+    if text.len() != hay.len() {
+        // Offsets from `hay` wouldn't be valid in `text`; skip highlighting
+        // rather than risk slicing mid-character.
+        spans.push(Span::styled(text.to_string(), base));
+        return;
+    }
+    let hl = Style::default()
+        .bg(theme::yellow())
+        .fg(theme::crust())
+        .add_modifier(Modifier::BOLD);
+    let mut idx = 0;
+    while let Some(pos) = hay[idx..].find(&pat) {
+        let start = idx + pos;
+        let end = start + pat.len();
+        if start > idx {
+            spans.push(Span::styled(text[idx..start].to_string(), base));
+        }
+        spans.push(Span::styled(text[start..end].to_string(), hl));
+        idx = end;
+    }
+    if idx < text.len() {
+        spans.push(Span::styled(text[idx..].to_string(), base));
+    }
+}
+
+/// A run of text sharing one style, extracted from an ANSI-coded string.
+struct AnsiRun {
+    text: String,
+    color: Option<Color>,
+    bold: bool,
+}
+
+/// Concatenated visible text of `s` with all ANSI escapes removed.
+fn strip_ansi(s: &str) -> String {
+    ansi_runs(s).into_iter().map(|r| r.text).collect()
+}
+
+/// Split a string into styled runs by parsing ANSI SGR (`\x1b[…m`) sequences,
+/// dropping the escape bytes. Non-SGR CSI sequences (cursor moves, etc.) are
+/// swallowed too. Standard 8/16 foreground colors map onto the active skin so
+/// embedded colors stay theme-consistent; 256-color (`38;5;n`) and truecolor
+/// (`38;2;r;g;b`) pass through verbatim. A string with no escapes yields a
+/// single run.
+fn ansi_runs(s: &str) -> Vec<AnsiRun> {
+    let mut runs = Vec::new();
+    let mut cur = String::new();
+    let mut color: Option<Color> = None;
+    let mut bold = false;
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\x1b' && chars.peek() == Some(&'[') {
+            chars.next(); // consume '['
+            let mut params = String::new();
+            let mut final_byte = None;
+            for pc in chars.by_ref() {
+                if pc.is_ascii_digit() || pc == ';' {
+                    params.push(pc);
+                } else {
+                    final_byte = Some(pc);
+                    break;
+                }
+            }
+            if final_byte == Some('m') {
+                if !cur.is_empty() {
+                    runs.push(AnsiRun {
+                        text: std::mem::take(&mut cur),
+                        color,
+                        bold,
+                    });
+                }
+                apply_sgr(&params, &mut color, &mut bold);
+            }
+            continue; // non-'m' CSI (or a truncated one) is dropped
+        }
+        if c == '\x1b' {
+            continue; // lone / non-CSI escape — drop the ESC byte
+        }
+        cur.push(c);
+    }
+    if !cur.is_empty() || runs.is_empty() {
+        runs.push(AnsiRun {
+            text: cur,
+            color,
+            bold,
+        });
+    }
+    runs
+}
+
+/// Apply one SGR parameter list (the digits/semicolons between `\x1b[` and `m`)
+/// to the running foreground color and bold flag.
+fn apply_sgr(params: &str, color: &mut Option<Color>, bold: &mut bool) {
+    if params.is_empty() {
+        *color = None; // bare `\x1b[m` == reset
+        *bold = false;
+        return;
+    }
+    let mut it = params.split(';');
+    while let Some(tok) = it.next() {
+        match tok {
+            "" | "0" => {
+                *color = None;
+                *bold = false;
+            }
+            "1" => *bold = true,
+            "22" => *bold = false,
+            "39" => *color = None,
+            "38" => match it.next() {
+                Some("5") => {
+                    if let Some(n) = it.next().and_then(|v| v.parse::<u8>().ok()) {
+                        *color = Some(Color::Indexed(n));
+                    }
+                }
+                Some("2") => {
+                    let r = it.next().and_then(|v| v.parse::<u8>().ok());
+                    let g = it.next().and_then(|v| v.parse::<u8>().ok());
+                    let b = it.next().and_then(|v| v.parse::<u8>().ok());
+                    if let (Some(r), Some(g), Some(b)) = (r, g, b) {
+                        *color = Some(Color::Rgb(r, g, b));
+                    }
+                }
+                _ => {}
+            },
+            other => {
+                if let Some(c) = other.parse::<u8>().ok().and_then(ansi_16_color) {
+                    *color = Some(c);
+                }
+                // background (40-49, 100-107) and other attrs are ignored
+            }
+        }
+    }
+}
+
+/// Map a standard 8/16-color SGR foreground code onto the active skin, so
+/// embedded ANSI colors read consistently with the chosen theme.
+fn ansi_16_color(code: u8) -> Option<Color> {
+    Some(match code {
+        30 => theme::overlay0(),
+        31 => theme::red(),
+        32 => theme::green(),
+        33 => theme::yellow(),
+        34 => theme::blue(),
+        35 => theme::mauve(),
+        36 => theme::teal(),
+        37 => theme::subtext1(),
+        90 => theme::overlay1(),
+        91 => theme::maroon(),
+        92 => theme::green(),
+        93 => theme::peach(),
+        94 => theme::sapphire(),
+        95 => theme::pink(),
+        96 => theme::sky(),
+        97 => theme::text(),
+        _ => return None,
+    })
+}
+
+/// Guess a log line's severity color across common formats: structured JSON
+/// (`"level":"warn"`), space/tab-delimited (` warn `), glued-after-timestamp
+/// (`…Zwarn`), `level=error`, and the klog prefix (`E0627 …`). Errors red,
+/// warnings peach, debug/trace dimmed; info and anything unrecognized stay in
+/// the default text color so they read calmly and real problems pop.
+fn log_level_color(line: &str) -> Color {
+    let l = line.to_ascii_lowercase();
+    // Structured logs: read the level field directly (authoritative — a later
+    // "…error…" in the message can't override it).
+    if let Some(level) = json_field(&l, "level").or_else(|| json_field(&l, "severity")) {
+        return level_color(level);
+    }
+    // klog prefixes (`E0627 …`) put the level at the very start.
+    if klog_level(&l, 'e') || klog_level(&l, 'f') {
+        return theme::red();
+    }
+    if klog_level(&l, 'w') {
+        return theme::peach();
+    }
+    // Otherwise the leftmost level marker wins, since the level precedes the
+    // message — so a later "…the last error:" can't override a `warn` level.
+    let first = |needles: &[&str]| needles.iter().filter_map(|n| l.find(n)).min();
+    let candidates = [
+        (
+            first(&[
+                " error",
+                "\terror",
+                "zerror",
+                "level=error",
+                " fatal",
+                "zfatal",
+                " panic",
+            ]),
+            theme::red(),
+        ),
+        (
+            first(&[" warn", "\twarn", "zwarn", "level=warn"]),
+            theme::peach(),
+        ),
+        (
+            first(&[
+                " debug",
+                "\tdebug",
+                "zdebug",
+                " trace",
+                "ztrace",
+                "level=debug",
+            ]),
+            theme::overlay1(),
+        ),
+    ];
+    candidates
+        .into_iter()
+        .filter_map(|(pos, color)| pos.map(|p| (p, color)))
+        .min_by_key(|(p, _)| *p)
+        .map(|(_, color)| color)
+        .unwrap_or(theme::text())
+}
+
+/// Color for a parsed level token (already lowercased).
+fn level_color(level: &str) -> Color {
+    if level.starts_with("err")
+        || level.starts_with("fatal")
+        || level.starts_with("crit")
+        || level.starts_with("panic")
+    {
+        theme::red()
+    } else if level.starts_with("warn") {
+        theme::peach()
+    } else if level.starts_with("debug") || level.starts_with("trace") {
+        theme::overlay1()
+    } else {
+        theme::text() // info, notice, unknown — keep readable
+    }
+}
+
+/// Read a JSON string field's value, e.g. `json_field(r#"…"level":"warn"…"#,
+/// "level") == Some("warn")`. Tolerant of whitespace around the colon. Input is
+/// expected already lowercased.
+fn json_field<'a>(l: &'a str, key: &str) -> Option<&'a str> {
+    let pat = format!("\"{key}\"");
+    let i = l.find(&pat)?;
+    let rest = l[i + pat.len()..].trim_start();
+    let rest = rest.strip_prefix(':')?.trim_start();
+    let rest = rest.strip_prefix('"')?;
+    let end = rest.find('"')?;
+    Some(&rest[..end])
+}
+
+/// True if `l` starts with a klog level marker, e.g. `e0627 …` (lowercased).
+fn klog_level(l: &str, level: char) -> bool {
+    let mut it = l.chars();
+    it.next() == Some(level) && it.next().is_some_and(|c| c.is_ascii_digit())
+}
+
+/// Unified-diff view with +/- line coloring.
+fn draw_diff(frame: &mut Frame, view: &crate::app::Scrollable, area: Rect) {
+    let lines: Vec<Line> = view
+        .lines
+        .iter()
+        .map(|l| {
+            let color = match l.chars().next() {
+                Some('+') => theme::green(),
+                Some('-') => theme::red(),
+                _ => theme::overlay1(),
+            };
+            Line::from(Span::styled(l.clone(), Style::default().fg(color)))
+        })
+        .collect();
+    let p = Paragraph::new(lines).scroll((view.scroll, 0)).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
+            .border_style(Style::default().fg(theme::peach()))
+            .title(Span::styled(format!(" {} ", view.title), theme::title())),
+    );
+    frame.render_widget(p, area);
+}
+
+/// YAML / `kubectl describe` colorization: comments dimmed, section headers in
+/// mauve, keys in sky, and values tinted by kind (numbers, booleans, statuses).
+fn highlight_yaml(line: &str) -> Vec<Span<'static>> {
+    let trimmed = line.trim_start();
+
+    // Comments.
+    if trimmed.starts_with('#') {
+        return vec![Span::styled(line.to_string(), theme::dim())];
+    }
+
+    // `key: value` — color the key, keep alignment, tint the value.
+    if let Some(idx) = line.find(": ") {
+        let (key, rest) = line.split_at(idx);
+        if is_keyish(key) {
+            let after = &rest[2..]; // value text after the first ": "
+            let ws = after.len() - after.trim_start().len();
+            let value = &after[ws..];
+            let mut spans = vec![
+                Span::styled(key.to_string(), Style::default().fg(theme::sky())),
+                Span::styled(": ".to_string(), theme::dim()),
+            ];
+            if ws > 0 {
+                spans.push(Span::raw(after[..ws].to_string())); // alignment padding
+            }
+            if !value.is_empty() {
+                spans.push(Span::styled(value.to_string(), value_style(value)));
+            }
+            return spans;
+        }
+    }
+
+    // Section header, e.g. `Containers:` / `Events:` (a bare key + colon).
+    if let Some(head) = trimmed.strip_suffix(':')
+        && is_keyish(head)
+    {
+        return vec![Span::styled(
+            line.to_string(),
+            Style::default()
+                .fg(theme::mauve())
+                .add_modifier(Modifier::BOLD),
+        )];
+    }
+
+    vec![Span::styled(
+        line.to_string(),
+        Style::default().fg(theme::text()),
+    )]
+}
+
+/// A bare identifier (allowing spaces, as in `Start Time`) — used to tell a
+/// real key/header from arbitrary text or URLs.
+fn is_keyish(s: &str) -> bool {
+    let t = s.trim();
+    !t.is_empty()
+        && t.chars()
+            .all(|c| c.is_alphanumeric() || matches!(c, '_' | '-' | ' '))
+}
+
+/// Tint a value: numbers peach, booleans/null mauve, status words by their
+/// status color, everything else default text.
+fn value_style(value: &str) -> Style {
+    let t = value.trim_end();
+    if matches!(
+        t,
+        "true" | "false" | "null" | "<none>" | "<unset>" | "<unknown>"
+    ) {
+        return Style::default().fg(theme::mauve());
+    }
+    if t.parse::<f64>().is_ok() {
+        return Style::default().fg(theme::peach());
+    }
+    let sc = theme::status_color(t);
+    if sc != theme::text() {
+        return Style::default().fg(sc);
+    }
+    Style::default().fg(theme::text())
+}
+
+fn draw_help(frame: &mut Frame, area: Rect) {
+    let bind = |k: &str, d: &str| {
+        Line::from(vec![
+            Span::styled(format!("  {k:<14}"), Style::default().fg(theme::yellow())),
+            Span::styled(d.to_string(), theme::dim()),
+        ])
+    };
+    let lines = vec![
+        Line::from(Span::styled("  Navigation", theme::title())),
+        bind(
+            ":<resource>",
+            "command palette — fuzzy over kinds + commands (tab/↑↓)",
+        ),
+        bind(":ctx · :pulse", "switch context · cluster-health dashboard"),
+        bind(
+            ":xray · :diff",
+            "hierarchical tree · live-vs-last-applied diff",
+        ),
+        bind(":pf", "view/stop background port-forwards"),
+        bind(
+            "enter",
+            "drill down (deploy→pods, pod→containers, ns→re-scope)",
+        ),
+        bind("shift-j", "jump to owner (controller)"),
+        bind("o", "show node hosting the pod"),
+        bind("esc", "go back / pop view / clear filter"),
+        bind("j/k g/G", "move · top/bottom"),
+        bind("S · I", "sort by column (cycle) · invert direction"),
+        bind("/", "fuzzy filter"),
+        bind("n · 0-9", "namespace switcher · 0 = all namespaces"),
+        bind("ctrl-r", "refresh watch"),
+        Line::from(""),
+        Line::from(Span::styled("  Inspect", theme::title())),
+        bind("y · d", "view YAML · describe (kubectl)"),
+        bind("l · p", "logs (workload = all pods) · previous logs"),
+        bind("c", "copy resource name to clipboard"),
+        Line::from(""),
+        Line::from(Span::styled("  Act", theme::title())),
+        bind("e", "edit in $EDITOR (kubectl edit)"),
+        bind("s", "shell into pod / scale workload"),
+        bind("a", "attach to pod"),
+        bind("i", "set container image"),
+        bind("r", "rollout restart (deploy/sts/ds)"),
+        bind(
+            "f / shift-f",
+            "port-forward (pod/svc) — runs in the background",
+        ),
+        bind(
+            "t",
+            "flux: suspend/resume/reconcile menu (ks/hr/repos/buckets…)",
+        ),
+        bind("space", "mark/unmark row for bulk actions (esc clears)"),
+        bind("ctrl-d · ctrl-k", "delete · kill (marked rows, or current)"),
+        Line::from(""),
+        Line::from(Span::styled("  Logs view", theme::title())),
+        bind("/ · s · w · t", "search · autoscroll · wrap · timestamps"),
+        bind("x · c · ctrl-s", "stop/resume · copy · save to file"),
+        Line::from(""),
+        bind(":q / ctrl-c", "quit"),
+        bind("?", "toggle help"),
+    ];
+    frame.render_widget(
+        Paragraph::new(lines).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .border_style(theme::border_focused())
+                .title(Span::styled(" Help ", theme::title())),
+        ),
+        area,
+    );
+}
+
+fn draw_namespaces(frame: &mut Frame, app: &mut App, area: Rect) {
+    let popup = centered_rect(40, 60, area);
+    frame.render_widget(Clear, popup);
+    let names = app.filtered_namespaces();
+    let items: Vec<ListItem> = names
+        .iter()
+        .map(|n| {
+            let color = if n == "<all>" {
+                theme::teal()
+            } else {
+                theme::text()
+            };
+            ListItem::new(Span::styled(n.clone(), Style::default().fg(color)))
+        })
+        .collect();
+    // Show the type-to-filter buffer in the title so it reads like an input.
+    let title = if app.ns_filter.is_empty() {
+        " Namespaces (type to filter · ⏎ switch) ".to_string()
+    } else {
+        format!(" Namespaces · /{}_ ", app.ns_filter)
+    };
+    let list = List::new(items)
+        .highlight_style(theme::selected_row())
+        .highlight_symbol("▌ ")
+        .highlight_spacing(HighlightSpacing::Always)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .border_style(theme::border_focused())
+                .title(Span::styled(title, theme::title())),
+        );
+    frame.render_stateful_widget(list, popup, &mut app.ns_state);
+}
+
+fn draw_contexts(frame: &mut Frame, app: &mut App, area: Rect) {
+    let popup = centered_rect(50, 60, area);
+    frame.render_widget(Clear, popup);
+    let current = app.cluster.context.clone();
+    let items: Vec<ListItem> = app
+        .ctx_list
+        .iter()
+        .map(|c| {
+            let marker = if *c == current { "● " } else { "  " };
+            ListItem::new(Span::styled(
+                format!("{marker}{c}"),
+                Style::default().fg(if *c == current {
+                    theme::green()
+                } else {
+                    theme::text()
+                }),
+            ))
+        })
+        .collect();
+    let list = List::new(items)
+        .highlight_style(theme::selected_row())
+        .highlight_symbol("▌ ")
+        .highlight_spacing(HighlightSpacing::Always)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .border_style(theme::border_focused())
+                .title(Span::styled(" Contexts (⏎ switch) ", theme::title())),
+        );
+    frame.render_stateful_widget(list, popup, &mut app.ctx_state);
+}
+
+/// Flux suspend/resume action menu (`t`). Deliberately a menu rather than a
+/// single-key toggle, so acting on a live resource always takes an explicit,
+/// visible choice.
+fn draw_flux_menu(frame: &mut Frame, app: &mut App, area: Rect) {
+    let popup = centered_rect(36, 24, area);
+    frame.render_widget(Clear, popup);
+    let count = app.marked.len().max(1);
+    let target = if count == 1 {
+        "current selection".to_string()
+    } else {
+        format!("{count} marked {}", app.kind_plural)
+    };
+    let items: Vec<ListItem> = crate::app::FLUX_MENU_ITEMS
+        .iter()
+        .map(|label| {
+            let color = match *label {
+                "Suspend" => theme::peach(),
+                "Resume" => theme::green(),
+                _ => theme::overlay1(),
+            };
+            ListItem::new(Span::styled(*label, Style::default().fg(color)))
+        })
+        .collect();
+    let list = List::new(items)
+        .highlight_style(theme::selected_row())
+        .highlight_symbol("▌ ")
+        .highlight_spacing(HighlightSpacing::Always)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .border_style(theme::border_focused())
+                .title(Span::styled(format!(" Flux: {target} "), theme::title())),
+        );
+    frame.render_stateful_widget(list, popup, &mut app.flux_menu_state);
+}
+
+/// Background port-forwards (`:pf`). A full-width view, not a popup — closing
+/// it (`esc`) does not stop the forwards; only `x`/`s` on a row does.
+fn draw_port_forwards(frame: &mut Frame, app: &mut App, area: Rect) {
+    let items: Vec<ListItem> = app
+        .port_forwards
+        .iter()
+        .map(|pf| {
+            ListItem::new(Line::from(vec![
+                Span::styled("● ", Style::default().fg(theme::green())),
+                Span::styled(pf.label(), Style::default().fg(theme::text())),
+            ]))
+        })
+        .collect();
+    let title = format!(
+        " Port-forwards [{}]  (x/s stop · esc close — others keep running) ",
+        app.port_forwards.len()
+    );
+    let list = List::new(items)
+        .highlight_style(theme::selected_row())
+        .highlight_symbol("▌ ")
+        .highlight_spacing(HighlightSpacing::Always)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .border_style(theme::border_focused())
+                .title(Span::styled(title, theme::title())),
+        );
+    frame.render_stateful_widget(list, area, &mut app.pf_state);
+}
+
+fn draw_containers(frame: &mut Frame, app: &mut App, area: Rect) {
+    let popup = centered_rect(50, 60, area);
+    frame.render_widget(Clear, popup);
+    let items: Vec<ListItem> = app
+        .container_list
+        .iter()
+        .map(|c| ListItem::new(Span::styled(c.clone(), Style::default().fg(theme::text()))))
+        .collect();
+    let list = List::new(items)
+        .highlight_style(theme::selected_row())
+        .highlight_symbol("▌ ")
+        .highlight_spacing(HighlightSpacing::Always)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .border_style(theme::border_focused())
+                .title(Span::styled(
+                    " Containers (⏎ logs · p previous) ",
+                    theme::title(),
+                )),
+        );
+    frame.render_stateful_widget(list, popup, &mut app.container_state);
+}
+
+fn draw_prompt_popup(frame: &mut Frame, app: &App, area: Rect) {
+    let popup = centered_rect(60, 34, area);
+    frame.render_widget(Clear, popup);
+    let lines = vec![
+        Line::from(""),
+        Line::from(Span::styled(
+            format!("  {}", app.prompt_label),
+            Style::default().fg(theme::text()),
+        )),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("  ▸ ", Style::default().fg(theme::peach())),
+            Span::styled(app.prompt_input.clone(), Style::default().fg(theme::text())),
+            Span::styled("█", Style::default().fg(theme::peach())),
+        ]),
+        Line::from(""),
+        Line::from(Span::styled("  enter: apply    esc: cancel", theme::dim())),
+    ];
+    frame.render_widget(
+        Paragraph::new(lines).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .border_style(Style::default().fg(theme::peach()))
+                .title(Span::styled(" Input ", Style::default().fg(theme::peach()))),
+        ),
+        popup,
+    );
+}
+
+fn draw_set_image(frame: &mut Frame, app: &mut App, area: Rect) {
+    let popup = centered_rect(70, 60, area);
+    frame.render_widget(Clear, popup);
+    let items: Vec<ListItem> = app
+        .container_list
+        .iter()
+        .enumerate()
+        .map(|(i, c)| {
+            let img = app.image_values.get(i).map(String::as_str).unwrap_or("");
+            ListItem::new(Line::from(vec![
+                Span::styled(format!("{c}  "), Style::default().fg(theme::text())),
+                Span::styled("→ ", theme::dim()),
+                Span::styled(img.to_string(), Style::default().fg(theme::peach())),
+            ]))
+        })
+        .collect();
+    let list = List::new(items)
+        .highlight_style(theme::selected_row())
+        .highlight_symbol("▌ ")
+        .highlight_spacing(HighlightSpacing::Always)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .border_style(theme::border_focused())
+                .title(Span::styled(
+                    " Set Image (⏎ to edit container) ",
+                    theme::title(),
+                )),
+        );
+    frame.render_stateful_widget(list, popup, &mut app.container_state);
+}
+
+fn draw_confirm(frame: &mut Frame, app: &App, area: Rect) {
+    let popup = centered_rect(50, 20, area);
+    frame.render_widget(Clear, popup);
+    let lines = vec![
+        Line::from(""),
+        Line::from(Span::styled(
+            format!("  {}", app.confirm_label),
+            Style::default().fg(theme::text()),
+        )),
+        Line::from(""),
+        Line::from(Span::styled(
+            "  [y] confirm    [n] cancel",
+            Style::default().fg(theme::yellow()),
+        )),
+    ];
+    frame.render_widget(
+        Paragraph::new(lines).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .border_style(Style::default().fg(theme::red()))
+                .title(Span::styled(" Confirm ", Style::default().fg(theme::red()))),
+        ),
+        popup,
+    );
+}
+
+/// Command-palette suggestion list, anchored bottom-left over the table.
+fn draw_palette(frame: &mut Frame, app: &mut App, area: Rect) {
+    if app.cmd_suggestions.is_empty() {
+        return;
+    }
+    let shown = app.cmd_suggestions.len().min(12) as u16;
+    let h = shown + 2;
+    let w = area.width.saturating_sub(4).min(46);
+    let rect = Rect {
+        x: area.x + 1,
+        y: area.y + area.height.saturating_sub(h + 1),
+        width: w,
+        height: h,
+    };
+    frame.render_widget(Clear, rect);
+    let items: Vec<ListItem> = app
+        .cmd_suggestions
+        .iter()
+        .map(|s| match s.kind {
+            // Commands stand out (peach `:name` + a tag) so they read as actions
+            // rather than resource kinds.
+            SuggestKind::Command => ListItem::new(Line::from(vec![
+                Span::styled(format!(":{}", s.label), Style::default().fg(theme::peach())),
+                Span::styled("  cmd", theme::dim()),
+            ])),
+            SuggestKind::Resource => ListItem::new(Span::styled(
+                s.label.clone(),
+                Style::default().fg(theme::text()),
+            )),
+        })
+        .collect();
+    let mut state = ListState::default();
+    state.select(Some(app.cmd_sel));
+    let list = List::new(items)
+        .highlight_style(theme::selected_row())
+        .highlight_symbol("▌ ")
+        .highlight_spacing(HighlightSpacing::Always)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .border_style(theme::border_focused())
+                .title(Span::styled(
+                    " commands & resources (tab/↑↓ · ⏎) ",
+                    theme::title(),
+                )),
+        );
+    frame.render_stateful_widget(list, rect, &mut state);
+}
+
+/// Xray hierarchical tree (owner → children → containers).
+fn draw_xray(frame: &mut Frame, app: &mut App, area: Rect) {
+    let glyph = |kind: &str| match kind {
+        "deployment" => ("◈", theme::blue()),
+        "replicaset" => ("◇", theme::sapphire()),
+        "statefulset" => ("◈", theme::mauve()),
+        "daemonset" => ("◈", theme::pink()),
+        "pod" => ("●", theme::green()),
+        "container" => ("▪", theme::teal()),
+        _ => ("◆", theme::peach()),
+    };
+    let items: Vec<ListItem> = app
+        .xray_items
+        .iter()
+        .map(|it| {
+            let (g, color) = glyph(&it.kind);
+            let indent = "  ".repeat(it.depth);
+            let label = it.container.clone().unwrap_or_else(|| it.name.clone());
+            let mut spans = vec![
+                Span::raw(indent),
+                Span::styled(format!("{g} "), Style::default().fg(color)),
+                Span::styled(label, Style::default().fg(theme::text())),
+            ];
+            if !it.status.is_empty() {
+                let sc = theme::status_color(&it.status);
+                spans.push(Span::styled(
+                    format!("  {}", it.status),
+                    Style::default().fg(sc),
+                ));
+            }
+            ListItem::new(Line::from(spans))
+        })
+        .collect();
+    let title = format!(
+        " Xray [{}]  (⏎ logs · r refresh · esc back) ",
+        app.xray_items.len()
+    );
+    let list = List::new(items)
+        .highlight_style(theme::selected_row())
+        .highlight_symbol("▌ ")
+        .highlight_spacing(HighlightSpacing::Always)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .border_style(theme::border_focused())
+                .title(Span::styled(title, theme::title())),
+        );
+    frame.render_stateful_widget(list, area, &mut app.xray_state);
+}
+
+/// Pulse dashboard: cluster-health tiles.
+fn draw_pulse(frame: &mut Frame, app: &App, area: Rect) {
+    let p = &app.pulse;
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .split(area);
+    let cols = |r: Rect| {
+        Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([
+                Constraint::Percentage(34),
+                Constraint::Percentage(33),
+                Constraint::Percentage(33),
+            ])
+            .split(r)
+    };
+    let top = cols(rows[0]);
+    let bot = cols(rows[1]);
+
+    gauge_tile(frame, top[0], "Nodes Ready", p.nodes_ready, p.nodes_total);
+    pods_tile(frame, top[1], p);
+    gauge_tile(
+        frame,
+        top[2],
+        "Deployments",
+        p.deploys_ready,
+        p.deploys_total,
+    );
+    gauge_tile(frame, bot[0], "StatefulSets", p.sts_ready, p.sts_total);
+    gauge_tile(frame, bot[1], "DaemonSets", p.ds_ready, p.ds_total);
+    counts_tile(frame, bot[2], p);
+}
+
+fn gauge_tile(frame: &mut Frame, area: Rect, label: &str, ready: usize, total: usize) {
+    let ratio = if total == 0 {
+        1.0
+    } else {
+        ready as f64 / total as f64
+    };
+    let color = if total == 0 {
+        theme::overlay1()
+    } else if ready == total {
+        theme::green()
+    } else if ratio >= 0.5 {
+        theme::yellow()
+    } else {
+        theme::red()
+    };
+    let g = Gauge::default()
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .border_style(theme::border())
+                .title(Span::styled(format!(" {label} "), theme::title())),
+        )
+        .gauge_style(Style::default().fg(color).bg(theme::surface0()))
+        .ratio(ratio.clamp(0.0, 1.0))
+        .label(format!("{ready}/{total}"));
+    frame.render_widget(g, area);
+}
+
+fn pods_tile(frame: &mut Frame, area: Rect, p: &crate::store::Pulse) {
+    let row = |label: &str, n: usize, color| {
+        Line::from(vec![
+            Span::styled(format!("  {label:<11}"), Style::default().fg(color)),
+            Span::styled(n.to_string(), Style::default().fg(theme::text())),
+        ])
+    };
+    let lines = vec![
+        row("Running", p.pods_running, theme::green()),
+        row("Pending", p.pods_pending, theme::yellow()),
+        row("Failed", p.pods_failed, theme::red()),
+        row("Succeeded", p.pods_succeeded, theme::blue()),
+        row("Total", p.pods_total, theme::subtext0()),
+    ];
+    frame.render_widget(
+        Paragraph::new(lines).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .border_style(theme::border())
+                .title(Span::styled(" Pods ", theme::title())),
+        ),
+        area,
+    );
+}
+
+fn counts_tile(frame: &mut Frame, area: Rect, p: &crate::store::Pulse) {
+    let lines = vec![
+        Line::from(vec![
+            Span::styled("  PVCs Bound  ", Style::default().fg(theme::teal())),
+            Span::styled(
+                format!("{}/{}", p.pvc_bound, p.pvc_total),
+                Style::default().fg(theme::text()),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("  Jobs        ", Style::default().fg(theme::mauve())),
+            Span::styled(p.jobs_total.to_string(), Style::default().fg(theme::text())),
+        ]),
+    ];
+    frame.render_widget(
+        Paragraph::new(lines).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .border_style(theme::border())
+                .title(Span::styled(" Storage / Batch ", theme::title())),
+        ),
+        area,
+    );
+}
+
+fn draw_prompt(frame: &mut Frame, app: &App, area: Rect) {
+    let line = match app.mode {
+        Mode::Command => Line::from(vec![
+            Span::styled(
+                ":",
+                Style::default()
+                    .fg(theme::mauve())
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(app.command.clone(), Style::default().fg(theme::text())),
+            Span::styled("█", Style::default().fg(theme::mauve())),
+        ]),
+        Mode::Filter => Line::from(vec![
+            Span::styled(
+                "/",
+                Style::default()
+                    .fg(theme::teal())
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(app.filter.clone(), Style::default().fg(theme::text())),
+            Span::styled("█", Style::default().fg(theme::teal())),
+        ]),
+        Mode::LogFilter => Line::from(vec![
+            Span::styled(
+                "log search /",
+                Style::default()
+                    .fg(theme::teal())
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(app.logs.filter.clone(), Style::default().fg(theme::text())),
+            Span::styled("█", Style::default().fg(theme::teal())),
+        ]),
+        Mode::Confirm => Line::from(Span::styled(
+            "  y/enter: confirm   n/esc: cancel",
+            Style::default().fg(theme::yellow()),
+        )),
+        Mode::Logs => {
+            let hint = "  /search  s:autoscroll  w:wrap  t:timestamps  x:stop/resume  c:copy  ^s:save  esc:back";
+            Line::from(Span::styled(hint, theme::dim()))
+        }
+        Mode::FluxMenu => Line::from(Span::styled(
+            "  j/k: move   enter: confirm   esc: cancel",
+            theme::dim(),
+        )),
+        Mode::PortForwards => Line::from(Span::styled(
+            "  j/k: move   x/s: stop   esc: close (others keep running)",
+            theme::dim(),
+        )),
+        _ => {
+            let hint = "  :resource  /filter  S:sort I:invert  ⏎drill  y:yaml d:describe l:logs e:edit s:shell/scale i:image r:restart f:fwd ^d:del  ?:help";
+            Line::from(Span::styled(hint, theme::dim()))
+        }
+    };
+    frame.render_widget(Paragraph::new(line), area);
+}
+
+fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
+    let style = if app.flash_err {
+        Style::default().fg(theme::red())
+    } else {
+        Style::default().fg(theme::subtext0())
+    };
+    let synced = if app.store.synced {
+        "● live"
+    } else {
+        "○ syncing"
+    };
+    let cols = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Min(10), Constraint::Length(12)])
+        .split(area);
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(format!(" {}", app.flash), style))),
+        cols[0],
+    );
+    let sync_color = if app.store.synced {
+        theme::green()
+    } else {
+        theme::yellow()
+    };
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            synced,
+            Style::default().fg(sync_color),
+        )))
+        .alignment(Alignment::Right),
+        cols[1],
+    );
+}
+
+fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
+    let vertical = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Percentage((100 - percent_y) / 2),
+            Constraint::Percentage(percent_y),
+            Constraint::Percentage((100 - percent_y) / 2),
+        ])
+        .split(r);
+    Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Percentage((100 - percent_x) / 2),
+            Constraint::Percentage(percent_x),
+            Constraint::Percentage((100 - percent_x) / 2),
+        ])
+        .split(vertical[1])[1]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn log_levels_colorize() {
+        // Space-delimited level, with "error" later in the message: warn wins.
+        assert_eq!(
+            log_level_color("pod vmagent 2026-06-30T12:00:26.985Z warn lib: the last error: x"),
+            theme::peach()
+        );
+        // Glued-after-timestamp info (config-reloader style) stays default.
+        assert_eq!(
+            log_level_color("[config-reloader] 2026-06-27T04:56:24.216Zinfo k8s_watch.go:153 x"),
+            theme::text()
+        );
+        // Tab-delimited info.
+        assert_eq!(
+            log_level_color("ts 2026\tinfo\tVictoriaMetrics added targets"),
+            theme::text()
+        );
+        // Plain error level.
+        assert_eq!(
+            log_level_color("2026-06-30T12 error connection refused"),
+            theme::red()
+        );
+        // klog prefix.
+        assert_eq!(
+            log_level_color("E0627 12:00:00.000 controller failed"),
+            theme::red()
+        );
+        assert_eq!(
+            log_level_color("W0627 12:00:00.000 retrying"),
+            theme::peach()
+        );
+        // logfmt level=debug.
+        assert_eq!(
+            log_level_color("msg=hi level=debug caller=x"),
+            theme::overlay1()
+        );
+    }
+
+    #[test]
+    fn json_log_levels_colorize() {
+        let line = |lvl: &str, msg: &str| {
+            format!(
+                "[main] {{\"timestamp\":\"2026-06-30T12:52:20.876Z\",\"level\":\"{lvl}\",\"message\":\"{msg}\",\"service\":\"screenshoter\"}}"
+            )
+        };
+        assert_eq!(
+            log_level_color(&line("DEBUG", "request_started")),
+            theme::overlay1()
+        );
+        assert_eq!(
+            log_level_color(&line("INFO", "request_completed")),
+            theme::text()
+        );
+        assert_eq!(
+            log_level_color(&line("WARN", "unauthorized_request")),
+            theme::peach()
+        );
+        assert_eq!(log_level_color(&line("ERROR", "boom")), theme::red());
+        // JSON level is authoritative: "error" in the message can't override WARN.
+        assert_eq!(
+            log_level_color(&line("WARN", "the last error occurred")),
+            theme::peach()
+        );
+        // Whitespace after the colon is tolerated.
+        assert_eq!(log_level_color(r#"{"level": "warning"}"#), theme::peach());
+        // Non-structured rod lines have no level → default color.
+        assert_eq!(log_level_color("[rod] Killed PID: 25258"), theme::text());
+    }
+
+    #[test]
+    fn source_prefix_detection() {
+        // "[rod] " is 6 bytes including the trailing space.
+        assert_eq!(source_prefix("[rod] Close ws://x").map(|(e, _)| e), Some(6));
+        assert_eq!(
+            source_prefix("[main] {\"level\":\"info\"}").map(|(e, _)| e),
+            Some(7)
+        );
+        // No trailing space still detected.
+        assert_eq!(source_prefix("[x]done").map(|(e, _)| e), Some(3));
+        assert_eq!(source_prefix("no prefix here"), None);
+        assert_eq!(source_prefix("[]empty"), None);
+    }
+
+    #[test]
+    fn source_color_is_stable_and_distinct() {
+        // Same label → same color across calls.
+        assert_eq!(source_color("rod"), source_color("rod"));
+        // Reserved severity/highlight colors are never used for a source.
+        for label in ["rod", "main", "istio-proxy", "app", "vmagent"] {
+            let c = source_color(label);
+            assert_ne!(c, theme::red());
+            assert_ne!(c, theme::peach());
+            assert_ne!(c, theme::yellow());
+        }
+        // The two prefixes in the screenshot land on different colors.
+        assert_ne!(source_color("rod"), source_color("main"));
+    }
+
+    #[test]
+    fn render_colors_prefix_then_body() {
+        let line = render_log_line("[rod] Killed PID: 25258", "");
+        // First span is the colored source prefix, kept verbatim.
+        assert_eq!(line.spans[0].content, "[rod] ");
+        assert_eq!(line.spans[0].style.fg, Some(source_color("rod")));
+    }
+
+    #[test]
+    fn leading_timestamp_detection() {
+        // Space-terminated RFC3339 → dimmed.
+        assert_eq!(
+            leading_timestamp("2026-06-30T12:52:20.876Z hello"),
+            Some(24)
+        );
+        assert_eq!(leading_timestamp("2026-06-30T12:52:20Z msg"), Some(20));
+        assert_eq!(
+            leading_timestamp("2026-06-30T12:52:20.5+02:00 msg"),
+            Some(27)
+        );
+        // Glued to the message (config-reloader style) → NOT a timestamp.
+        assert_eq!(
+            leading_timestamp("2026-06-27T04:56:24.216Zinfo k8s_watch"),
+            None
+        );
+        // Not a timestamp at all.
+        assert_eq!(leading_timestamp("Close ws://127.0.0.1"), None);
+    }
+
+    #[test]
+    fn strips_and_interprets_ansi() {
+        // Caddy-style line: level token wrapped in an SGR color, escapes must
+        // not survive into the rendered text.
+        let raw = "2026/07/01 08:43:13 \x1b[34mINFO\x1b[0m WAF started";
+        let line = render_log_line(raw, "");
+        let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(text, "2026/07/01 08:43:13 INFO WAF started");
+        assert!(!text.contains('\x1b') && !text.contains("[34m"));
+        // The "INFO" run picked up the ANSI blue → theme blue.
+        let info = line.spans.iter().find(|s| s.content == "INFO").unwrap();
+        assert_eq!(info.style.fg, Some(theme::blue()));
+    }
+
+    #[test]
+    fn ansi_runs_plain_string_is_single_run() {
+        let runs = ansi_runs("plain text");
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].text, "plain text");
+        assert_eq!(runs[0].color, None);
+    }
+
+    #[test]
+    fn ansi_truecolor_passes_through() {
+        let runs = ansi_runs("\x1b[38;2;10;20;30mX\x1b[0m");
+        assert_eq!(runs[0].text, "X");
+        assert_eq!(runs[0].color, Some(Color::Rgb(10, 20, 30)));
+        assert_eq!(strip_ansi("\x1b[1;31mE\x1b[0mrror"), "Error");
+    }
+
+    #[test]
+    fn render_dims_leading_timestamp() {
+        let line = render_log_line("2026-06-30T12:52:20.876Z request done", "");
+        assert_eq!(line.spans[0].content, "2026-06-30T12:52:20.876Z");
+        assert_eq!(line.spans[0].style.fg, theme::dim().fg);
+    }
+
+    #[test]
+    fn value_styling() {
+        assert_eq!(value_style("3").fg, Some(theme::peach()));
+        assert_eq!(value_style("true").fg, Some(theme::mauve()));
+        assert_eq!(value_style("<none>").fg, Some(theme::mauve()));
+        assert_eq!(value_style("Running").fg, Some(theme::green()));
+        assert_eq!(value_style("nginx:1.25").fg, Some(theme::text()));
+    }
+
+    #[test]
+    fn yaml_highlighting() {
+        // Comment dimmed.
+        assert_eq!(highlight_yaml("  # note")[0].style.fg, theme::dim().fg);
+        // Section header in mauve.
+        assert_eq!(
+            highlight_yaml("Containers:")[0].style.fg,
+            Some(theme::mauve())
+        );
+        // key: value — key in sky, value tinted by status.
+        let spans = highlight_yaml("Status:    Running");
+        assert_eq!(spans[0].content, "Status");
+        assert_eq!(spans[0].style.fg, Some(theme::sky()));
+        assert_eq!(spans.last().unwrap().content, "Running");
+        assert_eq!(spans.last().unwrap().style.fg, Some(theme::green()));
+    }
+}

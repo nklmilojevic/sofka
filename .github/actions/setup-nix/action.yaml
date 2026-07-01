@@ -1,0 +1,22 @@
+name: Setup Nix
+description: Install Nix with flakes enabled and wire up the sofka Cachix cache
+
+runs:
+  using: composite
+  steps:
+    - name: Install Nix
+      uses: cachix/install-nix-action@8aa03977d8d733052d78f4e008a241fd1dbf36b3 # v31
+      with:
+        nix_path: nixpkgs=channel:nixos-unstable
+        extra_nix_config: |
+          experimental-features = nix-command flakes
+          access-tokens = github.com=${{ github.token }}
+      env:
+        NIX_FIRST_BUILD_UID: 400
+
+    - name: Setup Cachix
+      uses: cachix/cachix-action@ad2ddac53f961de1989924296a1f236fcfbaa4fc # v15
+      with:
+        name: sofka
+        authToken: ${{ env.CACHIX_AUTH_TOKEN }}
+        skipPush: ${{ env.CACHIX_AUTH_TOKEN == '' }}

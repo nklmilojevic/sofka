@@ -1,0 +1,150 @@
+//! In-memory store of the currently-watched resource set.
+
+use std::collections::HashMap;
+
+use kube::core::DynamicObject;
+
+/// Messages flowing from watch tasks to the UI loop. Tagged with a
+/// `generation` so messages from a superseded watch can be discarded.
+pub enum Msg {
+    Reset {
+        generation: u64,
+    },
+    Applied {
+        generation: u64,
+        key: String,
+        obj: Box<DynamicObject>,
+    },
+    Deleted {
+        generation: u64,
+        key: String,
+    },
+    Synced {
+        generation: u64,
+    },
+    LogLine {
+        generation: u64,
+        line: String,
+    },
+    /// Point-in-time usage snapshot from the metrics API, keyed by "ns/name"
+    /// (pods) or "name" (nodes) -> (cpu millicores, memory bytes).
+    Metrics {
+        generation: u64,
+        data: HashMap<String, (i64, i64)>,
+    },
+    PulseData {
+        generation: u64,
+        data: Pulse,
+    },
+    XrayData {
+        generation: u64,
+        items: Vec<XrayItem>,
+    },
+    /// Result of an off-thread `kubectl describe` (or its YAML fallback).
+    Detail {
+        generation: u64,
+        title: String,
+        lines: Vec<String>,
+        /// Set when describe failed and we fell back to YAML.
+        warn: Option<String>,
+    },
+    /// Namespace list for the switcher, fetched off-thread.
+    Namespaces {
+        list: Vec<String>,
+    },
+    /// Result of an off-thread context switch (rebuilds client + discovery).
+    ContextSwitched {
+        name: String,
+        result: Result<Box<crate::k8s::Cluster>, String>,
+    },
+    /// Resource plurals the user may `list`, computed for namespace `ns`
+    /// (empty = cluster default). Dropped if the active namespace has since
+    /// changed. "*" = all.
+    Rbac {
+        ns: String,
+        allowed: std::collections::HashSet<String>,
+    },
+    Error {
+        generation: u64,
+        error: String,
+    },
+}
+
+/// Cluster-health snapshot for the pulse dashboard.
+#[derive(Clone, Default)]
+pub struct Pulse {
+    pub nodes_ready: usize,
+    pub nodes_total: usize,
+    pub pods_running: usize,
+    pub pods_pending: usize,
+    pub pods_failed: usize,
+    pub pods_succeeded: usize,
+    pub pods_total: usize,
+    pub deploys_ready: usize,
+    pub deploys_total: usize,
+    pub sts_ready: usize,
+    pub sts_total: usize,
+    pub ds_ready: usize,
+    pub ds_total: usize,
+    pub jobs_total: usize,
+    pub pvc_bound: usize,
+    pub pvc_total: usize,
+}
+
+/// A flattened node in the xray tree (owner → children → containers).
+#[derive(Clone)]
+pub struct XrayItem {
+    pub depth: usize,
+    pub kind: String,
+    pub name: String,
+    pub ns: String,
+    pub status: String,
+    /// Set when this row is a container leaf (its pod is `name`).
+    pub container: Option<String>,
+}
+
+/// Stable identity for a resource row.
+pub fn row_key(obj: &DynamicObject) -> String {
+    match (&obj.metadata.namespace, &obj.metadata.name) {
+        (Some(ns), Some(name)) => format!("{ns}/{name}"),
+        (None, Some(name)) => name.clone(),
+        _ => obj
+            .metadata
+            .uid
+            .clone()
+            .unwrap_or_else(|| "<unknown>".into()),
+    }
+}
+
+#[derive(Default)]
+pub struct Store {
+    items: HashMap<String, DynamicObject>,
+    pub synced: bool,
+}
+
+impl Store {
+    pub fn clear(&mut self) {
+        self.items.clear();
+        self.synced = false;
+    }
+
+    pub fn apply(&mut self, key: String, obj: DynamicObject) {
+        self.items.insert(key, obj);
+    }
+
+    pub fn remove(&mut self, key: &str) {
+        self.items.remove(key);
+    }
+
+    pub fn len(&self) -> usize {
+        self.items.len()
+    }
+
+    pub fn get(&self, key: &str) -> Option<&DynamicObject> {
+        self.items.get(key)
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = (&String, &DynamicObject)> {
+        self.items.iter()
+    }
+}
