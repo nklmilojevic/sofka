@@ -378,6 +378,15 @@ impl Cluster {
                 true,
             ),
         );
+        registry.insert(
+            "externalsecrets".to_string(),
+            mk(
+                "external-secrets.io",
+                "ExternalSecret",
+                "externalsecrets",
+                true,
+            ),
+        );
         Self {
             client,
             context: "test".into(),

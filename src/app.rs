@@ -62,6 +62,12 @@ const FLUX_SUSPENDABLE_KINDS: &[&str] = &[
 /// `flux reconcile` CLI uses, shared by every controller in the toolkit.
 pub const FLUX_MENU_ITEMS: &[&str] = &["Suspend", "Resume", "Reconcile now", "Cancel"];
 
+/// External Secrets Operator kinds that honour the `force-sync` annotation to
+/// trigger an immediate secret refresh. Both are namespaced; the cluster-scoped
+/// `ClusterExternalSecret` is deliberately left out so the namespaced patch
+/// path stays correct.
+const EXTERNAL_SECRET_KINDS: &[&str] = &["externalsecrets", "pushsecrets"];
+
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum Mode {
     Table,
@@ -2369,6 +2375,56 @@ impl App {
         });
     }
 
+    /// Force an immediate External Secrets Operator refresh on the marked rows
+    /// (or the current selection), matching the k9s external-secrets plugin.
+    fn request_refresh_es(&mut self) {
+        if !EXTERNAL_SECRET_KINDS.contains(&self.kind_plural.as_str()) {
+            self.flash_warn(
+                "refresh only applies to external secrets (externalsecrets, pushsecrets)",
+            );
+            return;
+        }
+        let targets = self.action_targets();
+        if targets.is_empty() {
+            return;
+        }
+        self.do_refresh_es(targets);
+    }
+
+    /// Stamp the `force-sync` annotation ESO watches to reconcile a secret out
+    /// of band — the same annotation the k9s plugin overwrites. The value only
+    /// has to change to trigger a sync; a unix timestamp mirrors k9s' `date +%s`.
+    fn do_refresh_es(&mut self, targets: Vec<(String, String)>) {
+        let Some(kind) = self.kind.clone() else {
+            return;
+        };
+        let client = self.cluster.client.clone();
+        let tx = self.tx.clone();
+        let genr = self.generation;
+        let now = k8s_openapi::jiff::Timestamp::now().as_second().to_string();
+        self.flash = if targets.len() == 1 {
+            format!("refreshing {}…", targets[0].0)
+        } else {
+            format!("refreshing {} {}…", targets.len(), self.kind_plural)
+        };
+        self.flash_err = false;
+        self.marked.clear();
+        tokio::spawn(async move {
+            let patch = Patch::Merge(json!({
+                "metadata": { "annotations": { "force-sync": now } }
+            }));
+            for (name, ns) in targets {
+                let api: Api<DynamicObject> = Api::namespaced_with(client.clone(), &ns, &kind.ar);
+                if let Err(e) = api.patch(&name, &PatchParams::default(), &patch).await {
+                    let _ = tx.send(Msg::Error {
+                        generation: genr,
+                        error: format!("refresh {name} failed: {e}"),
+                    });
+                }
+            }
+        });
+    }
+
     fn flash_warn(&mut self, msg: &str) {
         self.flash = msg.to_string();
         self.flash_err = true;
@@ -2508,13 +2564,16 @@ impl App {
                 self.table_state.select(Some(0));
                 self.start_watch();
             }
-            // k9s: `r` = rollout restart on workloads, else refresh.
+            // k9s: `r` = rollout restart on workloads, force-sync on external
+            // secrets, else refresh the watch.
             KeyCode::Char('r') => {
                 if matches!(
                     self.kind_plural.as_str(),
                     "deployments" | "statefulsets" | "daemonsets"
                 ) {
                     self.request_restart();
+                } else if EXTERNAL_SECRET_KINDS.contains(&self.kind_plural.as_str()) {
+                    self.request_refresh_es();
                 } else {
                     self.start_watch();
                 }
@@ -4319,6 +4378,33 @@ mod tests {
         app.handle_key(press(KeyCode::Enter)).unwrap();
         assert_eq!(app.mode, Mode::Table);
         assert!(app.flash.contains("reconciling infra"), "{}", app.flash);
+    }
+
+    #[tokio::test]
+    async fn r_force_syncs_external_secrets() {
+        let (mut app, _rx) = test_app();
+        app.switch_kind("externalsecrets");
+        apply(
+            &mut app,
+            json!({
+                "apiVersion": "external-secrets.io/v1", "kind": "ExternalSecret",
+                "metadata": {"name": "creds", "namespace": "default"}
+            }),
+        );
+        app.table_state.select(Some(0));
+        app.handle_key(press(KeyCode::Char('r'))).unwrap();
+        assert_eq!(app.mode, Mode::Table);
+        assert!(app.flash.contains("refreshing creds"), "{}", app.flash);
+        assert!(!app.flash_err);
+    }
+
+    #[tokio::test]
+    async fn refresh_es_rejects_non_es_kinds() {
+        let (mut app, _rx) = test_app();
+        app.switch_kind("pods");
+        app.request_refresh_es();
+        assert!(app.flash_err);
+        assert!(app.flash.contains("external secrets"), "{}", app.flash);
     }
 
     #[tokio::test]
