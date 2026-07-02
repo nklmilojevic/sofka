@@ -1165,7 +1165,10 @@ fn draw_help(frame: &mut Frame, area: Rect) {
         bind("s", "shell into pod / scale workload"),
         bind("a", "attach to pod"),
         bind("i", "set container image"),
-        bind("r", "rollout restart (deploy/sts/ds)"),
+        bind(
+            "r",
+            "rollout restart (deploy/sts/ds) · force-sync (external secrets)",
+        ),
         bind(
             "f / shift-f",
             "port-forward (pod/svc) — runs in the background",
