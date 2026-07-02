@@ -29,6 +29,9 @@ pub fn headers(plural: &str) -> Vec<&'static str> {
         "ingresses" => vec!["NAME", "CLASS", "HOSTS", "AGE"],
         "endpoints" => vec!["NAME", "ENDPOINTS", "AGE"],
         "customresourcedefinitions" => vec!["NAME", "GROUP", "KIND", "VERSIONS", "SCOPE", "AGE"],
+        "kustomizations" | "helmreleases" => {
+            vec!["NAME", "READY", "MESSAGE", "REVISION", "SUSPENDED", "AGE"]
+        }
         _ => vec!["NAME", "AGE"],
     }
 }
@@ -150,6 +153,12 @@ pub fn cells(obj: &DynamicObject, plural: &str) -> (Vec<String>, Option<usize>) 
             let scope = sget(d, &["spec", "scope"]).unwrap_or_default();
             (vec![name, group, ckind, versions, scope, age], None)
         }
+        "kustomizations" | "helmreleases" => {
+            let (ready, msg) = ready_condition(d);
+            let revision = flux_revision(d);
+            let suspended = bget(d, &["spec", "suspend"]).to_string();
+            (vec![name, ready, msg, revision, suspended, age], Some(1))
+        }
         _ => (vec![name, age], None),
     }
 }
@@ -172,6 +181,46 @@ fn crd_versions(d: &Value) -> String {
     } else {
         names.join(",")
     }
+}
+
+/// (status, message) of the `Ready` condition, the health summary Flux (and
+/// most condition-based CRDs) maintain. Missing condition reads as Unknown —
+/// e.g. a Kustomization the controller hasn't reconciled yet.
+fn ready_condition(d: &Value) -> (String, String) {
+    d.pointer("/status/conditions")
+        .and_then(Value::as_array)
+        .and_then(|conds| {
+            conds
+                .iter()
+                .find(|c| c.get("type").and_then(Value::as_str) == Some("Ready"))
+        })
+        .map(|c| {
+            (
+                c.get("status")
+                    .and_then(Value::as_str)
+                    .unwrap_or("Unknown")
+                    .to_string(),
+                c.get("message")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string(),
+            )
+        })
+        .unwrap_or_else(|| ("Unknown".into(), String::new()))
+}
+
+/// Last applied revision of a Flux object: Kustomizations (and HelmRelease
+/// v2beta*) expose `lastAppliedRevision`; HelmRelease v2 GA moved it into
+/// `history`, with `lastAttemptedRevision` as the pre-first-success fallback.
+fn flux_revision(d: &Value) -> String {
+    sget(d, &["status", "lastAppliedRevision"])
+        .or_else(|| {
+            d.pointer("/status/history/0/chartVersion")
+                .and_then(Value::as_str)
+                .map(String::from)
+        })
+        .or_else(|| sget(d, &["status", "lastAttemptedRevision"]))
+        .unwrap_or_default()
 }
 
 fn sget(v: &Value, path: &[&str]) -> Option<String> {
@@ -590,6 +639,67 @@ mod tests {
         assert_eq!(cells[2], "Widget");
         assert_eq!(cells[3], "v1beta1,v1");
         assert_eq!(cells[4], "Namespaced");
+    }
+
+    #[test]
+    fn kustomization_cells_show_ready_condition_and_revision() {
+        let ks = obj(json!({
+            "apiVersion": "kustomize.toolkit.fluxcd.io/v1",
+            "kind": "Kustomization",
+            "metadata": {"name": "apps", "namespace": "flux-system"},
+            "spec": {"suspend": false},
+            "status": {
+                "lastAppliedRevision": "main@sha1:abc123",
+                "conditions": [
+                    {"type": "Reconciling", "status": "False"},
+                    {"type": "Ready", "status": "True",
+                     "message": "Applied revision: main@sha1:abc123"}
+                ]
+            }
+        }));
+        let (cells, status_idx) = cells(&ks, "kustomizations");
+        assert_eq!(cells[0], "apps");
+        assert_eq!(cells[1], "True");
+        assert_eq!(cells[2], "Applied revision: main@sha1:abc123");
+        assert_eq!(cells[3], "main@sha1:abc123");
+        assert_eq!(cells[4], "false");
+        assert_eq!(status_idx, Some(1));
+    }
+
+    #[test]
+    fn helmrelease_cells_fall_back_to_history_revision() {
+        let hr = obj(json!({
+            "apiVersion": "helm.toolkit.fluxcd.io/v2",
+            "kind": "HelmRelease",
+            "metadata": {"name": "podinfo", "namespace": "default"},
+            "spec": {"suspend": true},
+            "status": {
+                "history": [{"chartVersion": "6.5.4"}],
+                "conditions": [
+                    {"type": "Ready", "status": "False",
+                     "message": "install retries exhausted"}
+                ]
+            }
+        }));
+        let (cells, status_idx) = cells(&hr, "helmreleases");
+        assert_eq!(cells[1], "False");
+        assert_eq!(cells[2], "install retries exhausted");
+        assert_eq!(cells[3], "6.5.4");
+        assert_eq!(cells[4], "true");
+        assert_eq!(status_idx, Some(1));
+    }
+
+    #[test]
+    fn flux_object_without_status_reads_unknown() {
+        let ks = obj(json!({
+            "apiVersion": "kustomize.toolkit.fluxcd.io/v1",
+            "kind": "Kustomization",
+            "metadata": {"name": "new"}
+        }));
+        let (cells, _) = cells(&ks, "kustomizations");
+        assert_eq!(cells[1], "Unknown");
+        assert_eq!(cells[2], "");
+        assert_eq!(cells[3], "");
     }
 
     #[test]

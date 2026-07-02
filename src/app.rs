@@ -2671,10 +2671,21 @@ impl App {
             }
         }
 
+        // An exact alias/kind/plural hit (e.g. `hr` → helmreleases) outranks
+        // every fuzzy match, so a shorthand lands on its target instead of an
+        // alphabetically-earlier lookalike (hr → horizontalpodautoscalers).
+        let alias_target = if q.is_empty() {
+            None
+        } else {
+            self.cluster.resolve(q).map(|k| k.ar.plural.to_lowercase())
+        };
+
         // Resource catalog (RBAC-filtered).
         for c in self.cluster.catalog.iter().filter(|c| self.rbac_visible(c)) {
             let score = if q.is_empty() {
                 Some(0)
+            } else if alias_target.as_deref() == Some(c.as_str()) {
+                Some(i64::MAX)
             } else {
                 self.matcher.fuzzy_match(c, q)
             };
@@ -3795,6 +3806,23 @@ mod tests {
             key: row_key(&o),
             obj: Box::new(o),
         });
+    }
+
+    #[tokio::test]
+    async fn exact_alias_outranks_fuzzy_suggestions() {
+        let (mut app, _rx) = test_app();
+        // `hr` fuzzy-matches horizontalpodautoscalers too; the alias target
+        // must still be the first suggestion.
+        app.command = "hr".into();
+        app.update_suggestions();
+        let first = app.cmd_suggestions.first().expect("has suggestions");
+        assert_eq!(first.label, "helmreleases");
+        assert!(first.kind == SuggestKind::Resource);
+
+        // A full plural typed exactly stays on top as well.
+        app.command = "pods".into();
+        app.update_suggestions();
+        assert_eq!(app.cmd_suggestions[0].label, "pods");
     }
 
     #[test]

@@ -358,6 +358,26 @@ impl Cluster {
                 true,
             ),
         );
+        // An alias/plural pair that collide on fuzzy matching (`hr` is a
+        // subsequence of horizontalpodautoscalers), for suggestion-priority
+        // tests.
+        let hr = mk(
+            "helm.toolkit.fluxcd.io",
+            "HelmRelease",
+            "helmreleases",
+            true,
+        );
+        registry.insert("helmreleases".to_string(), hr.clone());
+        registry.insert("hr".to_string(), hr);
+        registry.insert(
+            "horizontalpodautoscalers".to_string(),
+            mk(
+                "autoscaling",
+                "HorizontalPodAutoscaler",
+                "horizontalpodautoscalers",
+                true,
+            ),
+        );
         Self {
             client,
             context: "test".into(),
@@ -367,6 +387,8 @@ impl Cluster {
             registry,
             catalog: vec![
                 "deployments".to_string(),
+                "helmreleases".to_string(),
+                "horizontalpodautoscalers".to_string(),
                 "kustomizations".to_string(),
                 "namespaces".to_string(),
                 "nodes".to_string(),
