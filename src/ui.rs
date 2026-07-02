@@ -175,6 +175,7 @@ fn draw_table(frame: &mut Frame, app: &mut App, area: Rect) {
     // string-compared per cell.
     let name_col = if show_ns { 1 } else { 0 };
     let age_idx = headers.iter().position(|h| *h == "AGE");
+    let ready_idx = headers.iter().position(|h| *h == "READY");
     let restarts_idx = headers.iter().position(|h| *h == "RESTARTS");
     let cpu_idx = headers.iter().position(|h| *h == "CPU");
     let mem_idx = headers.iter().position(|h| *h == "MEM");
@@ -218,7 +219,20 @@ fn draw_table(frame: &mut Frame, app: &mut App, area: Rect) {
                 .and_then(|i| cells.get(i))
                 .map(String::as_str)
                 .unwrap_or("");
-            let row_color = theme::row_color(status_val);
+            // A pod is phase=Running the moment its sandbox starts, long before
+            // every container passes its readiness probe — until READY is n/n,
+            // paint it as transitional, not healthy.
+            let running_not_ready = status_val == "Running"
+                && ready_idx
+                    .and_then(|i| cells.get(i))
+                    .is_some_and(|r| !all_ready(r));
+            let status_key = if running_not_ready {
+                "PodInitializing"
+            } else {
+                status_val
+            };
+            let row_color = theme::row_color(status_key);
+            let status_badge = theme::status_color(status_key);
             let render_cells: Vec<Cell> = cells
                 .into_iter()
                 .enumerate()
@@ -232,8 +246,7 @@ fn draw_table(frame: &mut Frame, app: &mut App, area: Rect) {
                                 .add_modifier(Modifier::BOLD),
                         )
                     } else if Some(i) == style_idx {
-                        let sc = theme::status_color(&c);
-                        Cell::from(c).style(Style::default().fg(sc))
+                        Cell::from(c).style(Style::default().fg(status_badge))
                     } else if i == name_col {
                         render_name_cell(app, &c, row_color)
                     } else if Some(i) == age_idx {
@@ -284,6 +297,11 @@ fn draw_table(frame: &mut Frame, app: &mut App, area: Rect) {
             "KIND" => Constraint::Length(20),
             "VERSIONS" => Constraint::Length(20),
             "SCOPE" => Constraint::Length(12),
+            // Flux views: the Ready condition message and git/chart revision
+            // are the columns you read — split the leftover space with NAME.
+            "MESSAGE" => Constraint::Fill(4),
+            "REVISION" => Constraint::Fill(2),
+            "SUSPENDED" => Constraint::Length(9),
             _ => Constraint::Fill(1),
         })
         .collect();
@@ -326,6 +344,16 @@ fn draw_table(frame: &mut Frame, app: &mut App, area: Rect) {
         );
 
     frame.render_stateful_widget(table, area, &mut app.table_state);
+}
+
+/// `true` when a `n/m` READY cell has every container ready. Cells that
+/// aren't in that shape (statuses without a ready fraction) count as ready so
+/// they never trigger the not-ready tint.
+fn all_ready(ready: &str) -> bool {
+    match ready.split_once('/') {
+        Some((r, t)) => r == t,
+        None => true,
+    }
 }
 
 /// Render the NAME cell, highlighting characters that matched the active
@@ -1753,6 +1781,16 @@ fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn all_ready_requires_full_fraction() {
+        assert!(all_ready("2/2"));
+        assert!(all_ready("0/0"));
+        assert!(!all_ready("1/2"));
+        assert!(!all_ready("0/1"));
+        // Non-fraction cells (other kinds' status columns) never trigger it.
+        assert!(all_ready("Ready"));
+    }
 
     /// The scroll math (`wrapped_height`) and the renderer (`wrap_line`) must
     /// produce the same row count for any input, or follow/clamping drifts.
