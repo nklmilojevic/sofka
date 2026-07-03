@@ -249,6 +249,7 @@ fn suspend_and_run(terminal: &mut ratatui::DefaultTerminal, argv: &[String]) {
         return;
     }
     ratatui::restore();
+    let _ = crossterm::execute!(std::io::stdout(), crossterm::cursor::Show);
     let _ = std::process::Command::new(&argv[0])
         .args(&argv[1..])
         .status();
