@@ -56,10 +56,12 @@ pub enum Msg {
     },
     /// Namespace list for the switcher, fetched off-thread.
     Namespaces {
+        generation: u64,
         list: Vec<String>,
     },
     /// Result of an off-thread context switch (rebuilds client + discovery).
     ContextSwitched {
+        generation: u64,
         name: String,
         result: Result<Box<crate::k8s::Cluster>, String>,
     },
@@ -67,6 +69,7 @@ pub enum Msg {
     /// (empty = cluster default). Dropped if the active namespace has since
     /// changed. "*" = all.
     Rbac {
+        generation: u64,
         ns: String,
         allowed: std::collections::HashSet<String>,
     },

@@ -648,6 +648,7 @@ impl App {
         };
         let client = self.cluster.client.clone();
         let tx = self.tx.clone();
+        let genr = self.generation;
         // Namespace this review is computed for (echoed back so a stale result
         // from a previous namespace/context is dropped). SelfSubjectRulesReview
         // needs a concrete namespace, so "" falls back to "default".
@@ -697,6 +698,7 @@ impl App {
             }
             let _ = tx
                 .send(Msg::Rbac {
+                    generation: genr,
                     ns: current_ns,
                     allowed,
                 })
@@ -812,7 +814,11 @@ impl App {
             Msg::PulseData { generation, data } if generation == self.generation => {
                 self.pulse = data;
             }
-            Msg::Rbac { ns, allowed } if ns == self.namespace => {
+            Msg::Rbac {
+                generation,
+                ns,
+                allowed,
+            } if generation == self.generation && ns == self.namespace => {
                 self.rbac_allowed = Some(allowed);
             }
             Msg::XrayData { generation, items } if generation == self.generation => {
@@ -849,14 +855,18 @@ impl App {
                     .scroll
                     .min(self.detail.lines.len().saturating_sub(1));
             }
-            Msg::Namespaces { list } => {
+            Msg::Namespaces { generation, list } if generation == self.generation => {
                 // Keep the picker open and preserve the selection if possible.
                 let keep = self.ns_state.selected().unwrap_or(0);
                 self.ns_list = list;
                 self.ns_state
                     .select(Some(keep.min(self.ns_list.len().saturating_sub(1))));
             }
-            Msg::ContextSwitched { name, result } => match result {
+            Msg::ContextSwitched {
+                generation,
+                name,
+                result,
+            } if generation == self.generation => match result {
                 Ok(cluster) => self.apply_context_switch(name, cluster),
                 Err(e) => self.flash_warn(&format!("context switch failed: {e}")),
             },
@@ -3085,6 +3095,7 @@ impl App {
         let client = self.cluster.client.clone();
         let kind = self.cluster.resolve("namespaces").map(|k| k.ar);
         let tx = self.tx.clone();
+        let genr = self.generation;
         tokio::spawn(async move {
             let Some(ar) = kind else { return };
             let api: Api<DynamicObject> = Api::all_with(client, &ar);
@@ -3096,7 +3107,12 @@ impl App {
                     .collect();
                 names.sort();
                 names.insert(0, "<all>".into());
-                let _ = tx.send(Msg::Namespaces { list: names }).await;
+                let _ = tx
+                    .send(Msg::Namespaces {
+                        generation: genr,
+                        list: names,
+                    })
+                    .await;
             }
         });
     }
@@ -3279,12 +3295,19 @@ impl App {
         self.store.clear();
         self.invalidate_rows();
         let tx = self.tx.clone();
+        let genr = self.generation;
         tokio::spawn(async move {
             let result = Cluster::connect_context(&name)
                 .await
                 .map(Box::new)
                 .map_err(|e| e.to_string());
-            let _ = tx.send(Msg::ContextSwitched { name, result }).await;
+            let _ = tx
+                .send(Msg::ContextSwitched {
+                    generation: genr,
+                    name,
+                    result,
+                })
+                .await;
         });
     }
 
@@ -5141,6 +5164,7 @@ mod tests {
         let mut other = HashSet::new();
         other.insert("secrets".to_string());
         app.handle_msg(Msg::Rbac {
+            generation: app.generation,
             ns: "kube-system".into(),
             allowed: other,
         });
@@ -5149,12 +5173,51 @@ mod tests {
         let mut here = HashSet::new();
         here.insert("pods".to_string());
         app.handle_msg(Msg::Rbac {
+            generation: app.generation,
             ns: "default".into(),
             allowed: here,
         });
         assert!(app.rbac_allowed.is_some());
         assert!(app.rbac_visible("pods"));
         assert!(!app.rbac_visible("secrets"));
+    }
+
+    #[tokio::test]
+    async fn stale_async_picker_results_are_dropped() {
+        let (mut app, _rx) = test_app();
+        let stale = app.generation;
+        app.bump_generation();
+
+        app.ns_list = vec!["<all>".into()];
+        app.handle_msg(Msg::Namespaces {
+            generation: stale,
+            list: vec!["<all>".into(), "stale".into()],
+        });
+        assert_eq!(app.ns_list, vec!["<all>".to_string()]);
+
+        let flash = app.flash.clone();
+        app.handle_msg(Msg::ContextSwitched {
+            generation: stale,
+            name: "old-context".into(),
+            result: Err("old failure".into()),
+        });
+        assert_eq!(app.flash, flash);
+    }
+
+    #[tokio::test]
+    async fn rbac_for_old_generation_is_dropped() {
+        let (mut app, _rx) = test_app();
+        let stale = app.generation;
+        app.bump_generation();
+
+        let mut allowed = HashSet::new();
+        allowed.insert("secrets".to_string());
+        app.handle_msg(Msg::Rbac {
+            generation: stale,
+            ns: "default".into(),
+            allowed,
+        });
+        assert!(app.rbac_allowed.is_none());
     }
 
     #[test]
