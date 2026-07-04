@@ -713,4 +713,44 @@ mod tests {
         assert_eq!(cells.len(), 2);
         assert_eq!(idx, None);
     }
+
+    #[test]
+    fn curated_headers_and_cells_stay_aligned() {
+        let o = obj(json!({
+            "apiVersion": "v1",
+            "kind": "Object",
+            "metadata": {"name": "sample"}
+        }));
+        let kinds = [
+            "pods",
+            "deployments",
+            "replicasets",
+            "statefulsets",
+            "daemonsets",
+            "services",
+            "nodes",
+            "namespaces",
+            "configmaps",
+            "secrets",
+            "jobs",
+            "cronjobs",
+            "persistentvolumeclaims",
+            "persistentvolumes",
+            "ingresses",
+            "endpoints",
+            "customresourcedefinitions",
+            "kustomizations",
+            "helmreleases",
+            "widgets",
+        ];
+
+        for kind in kinds {
+            let headers = headers(kind);
+            let (cells, status_idx) = cells(&o, kind);
+            assert_eq!(headers.len(), cells.len(), "{kind} column count");
+            if let Some(idx) = status_idx {
+                assert!(idx < cells.len(), "{kind} status index");
+            }
+        }
+    }
 }
