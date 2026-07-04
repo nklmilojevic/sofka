@@ -180,9 +180,33 @@ fn draw_table(frame: &mut Frame, app: &mut App, area: Rect) {
     let cpu_idx = headers.iter().position(|h| *h == "CPU");
     let mem_idx = headers.iter().position(|h| *h == "MEM");
 
+    let count = app.rows().len();
+    let visible_rows = area.height.saturating_sub(3).max(1) as usize;
+    if count == 0 {
+        *app.table_state.offset_mut() = 0;
+    } else {
+        if app.table_state.selected().is_some_and(|i| i >= count) {
+            app.table_state.select(Some(count - 1));
+        }
+        let selected = app.table_state.selected();
+        let mut offset = app.table_state.offset().min(count.saturating_sub(1));
+        if let Some(sel) = selected {
+            if sel < offset {
+                offset = sel;
+            } else if sel >= offset + visible_rows {
+                offset = sel + 1 - visible_rows;
+            }
+        }
+        *app.table_state.offset_mut() = offset;
+    }
+    let offset = app.table_state.offset();
+    let selected = app.table_state.selected();
+
     let rows: Vec<Row> = app
         .rows()
         .iter()
+        .skip(offset)
+        .take(visible_rows)
         .map(|obj| {
             let marked_row =
                 !app.marked.is_empty() && app.marked.contains(&crate::store::row_key(obj));
@@ -306,7 +330,6 @@ fn draw_table(frame: &mut Frame, app: &mut App, area: Rect) {
         })
         .collect();
 
-    let count = app.rows().len();
     let kind_label = app
         .kind
         .as_ref()
@@ -325,6 +348,13 @@ fn draw_table(frame: &mut Frame, app: &mut App, area: Rect) {
     }
     title.push(Span::raw(" "));
 
+    let mut render_state = ratatui::widgets::TableState::default();
+    let render_selected = if count > 0 {
+        selected.map(|i| i.saturating_sub(offset))
+    } else {
+        None
+    };
+    render_state.select(render_selected);
     let table = Table::new(rows, widths)
         .header(header_row)
         .row_highlight_style(theme::selected_row())
@@ -343,7 +373,7 @@ fn draw_table(frame: &mut Frame, app: &mut App, area: Rect) {
                 .title(Line::from(title)),
         );
 
-    frame.render_stateful_widget(table, area, &mut app.table_state);
+    frame.render_stateful_widget(table, area, &mut render_state);
 }
 
 /// `true` when a `n/m` READY cell has every container ready. Cells that
