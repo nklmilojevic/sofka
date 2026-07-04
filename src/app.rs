@@ -1988,16 +1988,7 @@ impl App {
 
     /// Copy the (filtered) log buffer to the clipboard (k9s `c` in logs).
     fn copy_logs(&mut self) {
-        let f = self.logs.filter.to_lowercase();
-        let text = self
-            .logs
-            .view
-            .lines
-            .iter()
-            .filter(|l| f.is_empty() || l.to_lowercase().contains(&f))
-            .cloned()
-            .collect::<Vec<_>>()
-            .join("\n");
+        let text = self.filtered_log_text();
         if text.is_empty() {
             self.flash_warn("no log lines to copy");
             return;
@@ -2011,9 +2002,13 @@ impl App {
         }
     }
 
-    /// Save the log buffer to a temp file (k9s Ctrl-S).
+    /// Save the filtered log buffer to a temp file (k9s Ctrl-S).
     fn save_logs(&mut self) {
-        let text = self.logs.view.lines.join("\n");
+        let text = self.filtered_log_text();
+        if text.is_empty() {
+            self.flash_warn("no log lines to save");
+            return;
+        }
         let ts = k8s_openapi::jiff::Timestamp::now().as_second();
         let safe: String = self
             .logs
@@ -2030,6 +2025,18 @@ impl App {
             }
             Err(e) => self.flash_warn(&format!("save failed: {e}")),
         }
+    }
+
+    fn filtered_log_text(&self) -> String {
+        let f = self.logs.filter.to_lowercase();
+        self.logs
+            .view
+            .lines
+            .iter()
+            .filter(|l| f.is_empty() || l.to_lowercase().contains(&f))
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 
     /// Copy the selected resource's name to the system clipboard (k9s `c`).
@@ -4932,6 +4939,29 @@ mod tests {
         assert_eq!(
             app.logs.view.lines.last().unwrap(),
             &format!("line {}", MAX_LOG_LINES + 49)
+        );
+    }
+
+    #[tokio::test]
+    async fn filtered_log_text_respects_active_filter() {
+        let (mut app, _rx) = test_app();
+        app.handle_msg(Msg::LogLines {
+            generation: app.log_gen,
+            lines: vec![
+                "api request started".into(),
+                "worker finished".into(),
+                "api request finished".into(),
+            ],
+        });
+
+        assert_eq!(
+            app.filtered_log_text(),
+            "api request started\nworker finished\napi request finished"
+        );
+        app.logs.filter = "api".into();
+        assert_eq!(
+            app.filtered_log_text(),
+            "api request started\napi request finished"
         );
     }
 
