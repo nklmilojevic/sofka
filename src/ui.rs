@@ -431,9 +431,7 @@ fn draw_scrollable(
     let (start, end) = visible_line_window(view.lines.len(), view.scroll, inner_h);
     let text: Vec<Line> = view
         .lines
-        .get(start..end)
-        .unwrap_or_default()
-        .iter()
+        .range(start..end)
         .map(|l| Line::from(highlight_yaml(l)))
         .collect();
     let p = Paragraph::new(text).block(
@@ -1060,9 +1058,7 @@ fn draw_diff(frame: &mut Frame, view: &crate::app::Scrollable, area: Rect) {
     let (start, end) = visible_line_window(view.lines.len(), view.scroll, inner_h);
     let lines: Vec<Line> = view
         .lines
-        .get(start..end)
-        .unwrap_or_default()
-        .iter()
+        .range(start..end)
         .map(|l| {
             let color = match l.chars().next() {
                 Some('+') => theme::green(),

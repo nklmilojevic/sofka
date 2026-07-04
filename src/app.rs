@@ -5,7 +5,7 @@
 //! re-scope the previous view), and `esc` pops back.
 
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
@@ -177,7 +177,7 @@ enum PromptKind {
 
 pub struct Scrollable {
     pub title: String,
-    pub lines: Vec<String>,
+    pub lines: VecDeque<String>,
     /// Scroll offset in display rows. `usize` on purpose: a paused log buffer
     /// (100k lines, wrapped) far exceeds `u16`; views that hand this to a
     /// ratatui `Paragraph` clamp at the edge instead.
@@ -253,7 +253,7 @@ impl Scrollable {
     fn empty() -> Self {
         Self {
             title: String::new(),
-            lines: Vec::new(),
+            lines: VecDeque::new(),
             scroll: 0,
         }
     }
@@ -835,7 +835,7 @@ impl App {
             } if generation == self.generation => {
                 self.detail = Scrollable {
                     title,
-                    lines,
+                    lines: lines.into(),
                     scroll: 0,
                 };
                 self.mode = Mode::Detail;
@@ -849,7 +849,7 @@ impl App {
                 lines,
             } if generation == self.event_gen => {
                 self.detail.title = title;
-                self.detail.lines = lines;
+                self.detail.lines = lines.into();
                 self.detail.scroll = self
                     .detail
                     .scroll
@@ -938,8 +938,12 @@ impl App {
         // wrapped lines take several — so the frozen view stays put.
         if !self.logs.follow {
             let filter = self.logs.filter.to_lowercase();
-            let rows: usize = self.logs.view.lines[..overflow]
+            let rows: usize = self
+                .logs
+                .view
+                .lines
                 .iter()
+                .take(overflow)
                 .filter(|l| filter.is_empty() || l.to_lowercase().contains(&filter))
                 .map(|l| match self.logs.last_wrap_width {
                     0 => 1,
@@ -1418,7 +1422,7 @@ impl App {
         let title = obj.metadata.name.clone().unwrap_or_else(|| "object".into());
         self.detail = Scrollable {
             title: format!("{title} — YAML"),
-            lines: self.object_yaml(obj),
+            lines: self.object_yaml(obj).into(),
             scroll: 0,
         };
         self.mode = Mode::Detail;
@@ -1555,7 +1559,7 @@ impl App {
         }
         self.detail = Scrollable {
             title: format!("{name} — diff (last-applied → live)"),
-            lines,
+            lines: lines.into(),
             scroll: 0,
         };
         self.mode = Mode::Diff;
@@ -1601,7 +1605,7 @@ impl App {
         let genr = self.event_gen;
         self.detail = Scrollable {
             title: title.clone(),
-            lines: vec!["loading events…".into()],
+            lines: vec!["loading events…".into()].into(),
             scroll: 0,
         };
         self.flash = format!("events: {name}");
@@ -1728,7 +1732,7 @@ impl App {
         // the selection is preserved. Log streams have their own lifecycle.
         self.logs.view = Scrollable {
             title,
-            lines: Vec::new(),
+            lines: VecDeque::new(),
             scroll: 0,
         };
         self.logs.follow = true;
@@ -4423,7 +4427,7 @@ mod tests {
     fn scrollable_scroll_clamps() {
         let mut s = Scrollable {
             title: String::new(),
-            lines: vec!["a".into(), "b".into(), "c".into()],
+            lines: vec!["a".into(), "b".into(), "c".into()].into(),
             scroll: 0,
         };
         s.scroll_by(100);
@@ -5111,7 +5115,7 @@ mod tests {
             lines: vec!["2026/07/01 09:21:14.062\tINFO\tProvisioning WAF\r".into()],
         });
         assert_eq!(
-            app.logs.view.lines.last().unwrap(),
+            app.logs.view.lines.back().unwrap(),
             "2026/07/01 09:21:14.062 INFO Provisioning WAF"
         );
     }
@@ -5128,7 +5132,7 @@ mod tests {
         assert_eq!(app.logs.view.lines.len(), MAX_LOG_LINES);
         // Oldest lines dropped; newest retained.
         assert_eq!(
-            app.logs.view.lines.last().unwrap(),
+            app.logs.view.lines.back().unwrap(),
             &format!("line {}", MAX_LOG_LINES + 49)
         );
     }

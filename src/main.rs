@@ -195,7 +195,8 @@ async fn snapshot(app: &mut App, rx: &mut mpsc::Receiver<store::Msg>) -> Result<
                         "   ports:".into(),
                         "-  - containerPort: 8080".into(),
                         "+  - containerPort: 9090".into(),
-                    ],
+                    ]
+                    .into(),
                     scroll: 0,
                 };
                 app.mode = app::Mode::Diff;
