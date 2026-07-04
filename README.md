@@ -219,6 +219,7 @@ sofka [RESOURCE] [-n NAMESPACE] [-A]
 | `o`                       | show the node hosting the selected pod                                                                  |
 | `ctrl-r`                  | refresh the watch                                                                                       |
 | `y` / `d` / `E`           | view YAML / describe (`kubectl`) / live events                                                          |
+| `:skin`                   | switch the color skin live (`:skin gruvbox-dark` applies directly)                                      |
 | `l` / `p`                 | logs (workload = all matching pods) / previous-container logs                                           |
 | `c`                       | copy resource name to clipboard                                                                         |
 | `e`                       | edit in `$EDITOR` (`kubectl edit`)                                                                      |

@@ -70,6 +70,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         Mode::Prompt => draw_prompt_popup(frame, app, chunks[1]),
         Mode::Command => draw_palette(frame, app, chunks[1]),
         Mode::FluxMenu => draw_flux_menu(frame, app, chunks[1]),
+        Mode::Skins => draw_skins(frame, app, chunks[1]),
         _ => {}
     }
 
@@ -1223,6 +1224,7 @@ fn draw_help(frame: &mut Frame, area: Rect) {
         ),
         bind(":events · E", "events for the selected object"),
         bind(":pf", "view/stop background port-forwards"),
+        bind(":skin", "switch color skin live"),
         bind(
             "enter",
             "drill down (deploy→pods, pod→containers, ns→re-scope)",
@@ -1424,6 +1426,36 @@ fn draw_port_forwards(frame: &mut Frame, app: &mut App, area: Rect) {
                 .title(Span::styled(title, theme::title())),
         );
     frame.render_stateful_widget(list, area, &mut app.pf_state);
+}
+
+fn draw_skins(frame: &mut Frame, app: &mut App, area: Rect) {
+    let popup = centered_rect(42, 58, area);
+    frame.render_widget(Clear, popup);
+    let items: Vec<ListItem> = app
+        .skin_list
+        .iter()
+        .map(|name| {
+            ListItem::new(Span::styled(
+                name.clone(),
+                Style::default().fg(theme::text()),
+            ))
+        })
+        .collect();
+    let list = List::new(items)
+        .highlight_style(theme::selected_row())
+        .highlight_symbol("▌ ")
+        .highlight_spacing(HighlightSpacing::Always)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .border_style(theme::border_focused())
+                .title(Span::styled(
+                    " Skins (enter apply · esc close) ",
+                    theme::title(),
+                )),
+        );
+    frame.render_stateful_widget(list, popup, &mut app.skin_state);
 }
 
 fn draw_containers(frame: &mut Frame, app: &mut App, area: Rect) {

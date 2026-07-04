@@ -26,7 +26,7 @@
 #![allow(dead_code)]
 
 use std::collections::HashMap;
-use std::sync::OnceLock;
+use std::sync::{OnceLock, RwLock};
 
 use ratatui::style::{Color, Modifier, Style};
 use terminal_colorsaurus::{QueryOptions, ThemeMode};
@@ -344,16 +344,30 @@ fn parse_hex(s: &str) -> Option<Color> {
 // Active palette + accessors
 // ---------------------------------------------------------------------------
 
-static ACTIVE: OnceLock<Palette> = OnceLock::new();
+static ACTIVE: OnceLock<RwLock<Palette>> = OnceLock::new();
 
-/// Install the active palette. Call once at startup, before rendering; later
-/// calls are ignored. If never called, accessors fall back to Catppuccin Mocha.
+/// Install the active palette. If called after startup, replaces the active
+/// palette so `:skin` can update colors without restarting the TUI.
 pub fn init(p: Palette) {
-    let _ = ACTIVE.set(p);
+    if ACTIVE.set(RwLock::new(p)).is_err() {
+        set(p);
+    }
 }
 
-fn palette() -> &'static Palette {
-    ACTIVE.get_or_init(catppuccin_mocha)
+pub fn set(p: Palette) {
+    let lock = ACTIVE.get_or_init(|| RwLock::new(catppuccin_mocha()));
+    match lock.write() {
+        Ok(mut active) => *active = p,
+        Err(poisoned) => *poisoned.into_inner() = p,
+    }
+}
+
+fn palette() -> Palette {
+    let lock = ACTIVE.get_or_init(|| RwLock::new(catppuccin_mocha()));
+    match lock.read() {
+        Ok(active) => *active,
+        Err(poisoned) => *poisoned.into_inner(),
+    }
 }
 
 pub fn rosewater() -> Color {

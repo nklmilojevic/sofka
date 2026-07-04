@@ -97,6 +97,7 @@ pub enum Mode {
     Events,
     FluxMenu,
     PortForwards,
+    Skins,
 }
 
 /// A request for the run loop to suspend the TUI and run an interactive
@@ -218,6 +219,7 @@ enum PaletteAction {
     Diff,
     Events,
     PortForwards,
+    Skin,
 }
 
 const PALETTE_COMMANDS: &[PaletteCommand] = &[
@@ -244,6 +246,10 @@ const PALETTE_COMMANDS: &[PaletteCommand] = &[
     PaletteCommand {
         action: PaletteAction::PortForwards,
         names: &["pf", "portforwards", "forwards"],
+    },
+    PaletteCommand {
+        action: PaletteAction::Skin,
+        names: &["skin", "skins"],
     },
     PaletteCommand {
         action: PaletteAction::Quit,
@@ -437,6 +443,11 @@ pub struct App {
     pub port_forwards: Vec<PortForward>,
     pub pf_state: ListState,
 
+    pub skin_list: Vec<String>,
+    pub skin_state: ListState,
+    /// Per-swatch color overrides from config, re-applied when switching skins.
+    pub skin_colors: HashMap<String, String>,
+
     /// Current images aligned with `container_list`, for the Set-Image picker.
     pub image_values: Vec<String>,
     /// (namespace, name, plural) of the object being re-imaged.
@@ -522,6 +533,12 @@ impl App {
             flux_menu_state: ListState::default(),
             port_forwards: Vec::new(),
             pf_state: ListState::default(),
+            skin_list: crate::theme::BUILTIN_NAMES
+                .iter()
+                .map(|name| (*name).to_string())
+                .collect(),
+            skin_state: ListState::default(),
+            skin_colors: HashMap::new(),
             image_values: Vec::new(),
             image_target: None,
             metrics: HashMap::new(),
@@ -2681,6 +2698,51 @@ impl App {
         }
     }
 
+    fn open_skins(&mut self) {
+        self.skin_state.select(if self.skin_list.is_empty() {
+            None
+        } else {
+            Some(0)
+        });
+        self.mode = Mode::Skins;
+    }
+
+    fn key_skins(&mut self, key: KeyEvent) {
+        let len = self.skin_list.len();
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('q') => self.mode = Mode::Table,
+            KeyCode::Char('j') | KeyCode::Down => list_step(&mut self.skin_state, len, true),
+            KeyCode::Char('k') | KeyCode::Up => list_step(&mut self.skin_state, len, false),
+            KeyCode::Enter => {
+                if let Some(name) = self
+                    .skin_state
+                    .selected()
+                    .and_then(|i| self.skin_list.get(i).cloned())
+                {
+                    self.apply_skin(&name);
+                }
+                self.mode = Mode::Table;
+            }
+            _ => {}
+        }
+    }
+
+    fn apply_skin(&mut self, name: &str) {
+        let name = name.trim();
+        if name.is_empty() {
+            self.open_skins();
+            return;
+        }
+        if crate::theme::builtin(&name.to_ascii_lowercase()).is_none() {
+            self.flash_warn(&format!("unknown skin: {name}"));
+            return;
+        }
+        let palette = crate::theme::resolve_skin(Some(name), &self.skin_colors);
+        crate::theme::set(palette);
+        self.flash = format!("skin: {name}");
+        self.flash_err = false;
+    }
+
     /// Stop (kill) the selected forward. Others keep running.
     fn stop_selected_port_forward(&mut self) {
         let Some(i) = self.pf_state.selected() else {
@@ -2952,6 +3014,7 @@ impl App {
             Mode::Xray => self.key_xray(key),
             Mode::FluxMenu => self.key_flux_menu(key),
             Mode::PortForwards => self.key_port_forwards(key),
+            Mode::Skins => self.key_skins(key),
         }
         Ok(())
     }
@@ -3145,6 +3208,7 @@ impl App {
             PaletteAction::Diff => self.open_diff(),
             PaletteAction::Events => self.open_events(),
             PaletteAction::PortForwards => self.open_port_forwards(),
+            PaletteAction::Skin => self.open_skins(),
         }
     }
 
@@ -3154,6 +3218,18 @@ impl App {
         let cmd = cmd.trim();
         if cmd.is_empty() {
             return false;
+        }
+        let mut parts = cmd.split_whitespace();
+        if let Some(first) = parts.next()
+            && first.eq_ignore_ascii_case("skin")
+        {
+            let rest = parts.collect::<Vec<_>>().join(" ");
+            if rest.is_empty() {
+                self.open_skins();
+            } else {
+                self.apply_skin(&rest);
+            }
+            return true;
         }
         let action = PALETTE_COMMANDS
             .iter()
@@ -4937,6 +5013,23 @@ mod tests {
         assert!(app.run_palette_command("contexts")); // alias resolves
         assert!(!app.run_palette_command("pods")); // resource kind, not a command
         assert!(!app.run_palette_command("")); // empty is never a command
+    }
+
+    #[tokio::test]
+    async fn skin_palette_command_opens_picker() {
+        let (mut app, _rx) = test_app();
+        assert!(app.run_palette_command("skin"));
+        assert_eq!(app.mode, Mode::Skins);
+        assert_eq!(
+            app.skin_list.first().map(String::as_str),
+            Some("catppuccin-mocha")
+        );
+
+        app.mode = Mode::Table;
+        assert!(app.run_palette_command("skin no-such-skin"));
+        assert_eq!(app.mode, Mode::Table);
+        assert!(app.flash_err);
+        assert!(app.flash.contains("unknown skin"), "{}", app.flash);
     }
 
     #[tokio::test]

@@ -55,10 +55,9 @@ async fn main() -> Result<()> {
     let args = Args::parse();
     let cfg = config::Config::load();
 
-    // Install the color skin before anything renders. Startup-only: changing
-    // the skin requires a restart. Must run before ratatui::init() below —
-    // resolve_skin's dark/light auto-detection queries the terminal directly
-    // and expects a plain (non-alternate-screen, non-raw-mode) terminal.
+    // Install the initial color skin before anything renders. Auto-detecting
+    // dark/light mode queries the terminal directly, so it belongs before
+    // ratatui switches to the alternate screen.
     theme::init(theme::resolve_skin(
         cfg.skin.name.as_deref(),
         &cfg.skin.colors,
@@ -105,6 +104,7 @@ async fn main() -> Result<()> {
     let mut app = App::new(cluster, tx);
     app.user_aliases = cfg.aliases.clone();
     app.plugins = cfg.plugins.clone();
+    app.skin_colors = cfg.skin.colors.clone();
     if args.all_namespaces {
         app.namespace = String::new();
     } else if let Some(ns) = args.namespace {
