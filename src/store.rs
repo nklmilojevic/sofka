@@ -59,6 +59,13 @@ pub enum Msg {
         generation: u64,
         result: Result<std::path::PathBuf, String>,
     },
+    /// Result of an off-thread clipboard copy.
+    ClipboardCopied {
+        generation: u64,
+        copied: bool,
+        success: String,
+        failure: String,
+    },
     /// Namespace list for the switcher, fetched off-thread.
     Namespaces {
         generation: u64,

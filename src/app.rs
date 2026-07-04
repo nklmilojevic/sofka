@@ -862,6 +862,19 @@ impl App {
                 }
                 Err(e) => self.flash_warn(&format!("save failed: {e}")),
             },
+            Msg::ClipboardCopied {
+                generation,
+                copied,
+                success,
+                failure,
+            } if generation == self.generation => {
+                if copied {
+                    self.flash = success;
+                    self.flash_err = false;
+                } else {
+                    self.flash_warn(&failure);
+                }
+            }
             Msg::Namespaces { generation, list } if generation == self.generation => {
                 // Keep the picker open and preserve the selection if possible.
                 let keep = self.ns_state.selected().unwrap_or(0);
@@ -2012,12 +2025,11 @@ impl App {
             return;
         }
         let n = text.lines().count();
-        if copy_to_clipboard(&text) {
-            self.flash = format!("copied {n} log lines");
-            self.flash_err = false;
-        } else {
-            self.flash_warn("no clipboard tool found (pbcopy/xclip/wl-copy)");
-        }
+        self.copy_to_clipboard_async(
+            text,
+            format!("copied {n} log lines"),
+            "no clipboard target found (pbcopy/xclip/wl-copy/OSC 52)",
+        );
     }
 
     /// Save the filtered log buffer to a temp file (k9s Ctrl-S).
@@ -2068,12 +2080,30 @@ impl App {
     fn copy_name(&mut self) {
         let Some(obj) = self.selected() else { return };
         let name = obj.metadata.name.clone().unwrap_or_default();
-        if copy_to_clipboard(&name) {
-            self.flash = format!("copied: {name}");
-            self.flash_err = false;
-        } else {
-            self.flash_warn("no clipboard tool found (pbcopy/xclip/wl-copy)");
-        }
+        self.copy_to_clipboard_async(
+            name.clone(),
+            format!("copied: {name}"),
+            "no clipboard target found (pbcopy/xclip/wl-copy/OSC 52)",
+        );
+    }
+
+    fn copy_to_clipboard_async(&self, text: String, success: String, failure: &str) {
+        let tx = self.tx.clone();
+        let genr = self.generation;
+        let failure = failure.to_string();
+        tokio::spawn(async move {
+            let copied = tokio::task::spawn_blocking(move || copy_to_clipboard(&text))
+                .await
+                .unwrap_or(false);
+            let _ = tx
+                .send(Msg::ClipboardCopied {
+                    generation: genr,
+                    copied,
+                    success,
+                    failure,
+                })
+                .await;
+        });
     }
 
     /// Previous-container logs for the selected pod (k9s `p` on a pod row).
@@ -3838,7 +3868,8 @@ fn list_step(state: &mut ListState, len: usize, down: bool) {
     state.select(Some(next));
 }
 
-/// Copy text to the system clipboard via the first available OS tool.
+/// Copy text to the system clipboard via the first available OS tool, falling
+/// back to OSC 52 for remote terminals where local clipboard tools are absent.
 fn copy_to_clipboard(text: &str) -> bool {
     use std::io::Write;
     use std::process::{Command, Stdio};
@@ -3870,7 +3901,32 @@ fn copy_to_clipboard(text: &str) -> bool {
             return true;
         }
     }
-    false
+    copy_to_clipboard_osc52(text)
+}
+
+fn copy_to_clipboard_osc52(text: &str) -> bool {
+    use std::fs::OpenOptions;
+    use std::io::{Write, stdout};
+
+    let sequence = osc52_sequence(text);
+    if let Ok(mut tty) = OpenOptions::new().write(true).open("/dev/tty") {
+        return tty
+            .write_all(sequence.as_bytes())
+            .and_then(|_| tty.flush())
+            .is_ok();
+    }
+
+    let mut out = stdout();
+    out.write_all(sequence.as_bytes())
+        .and_then(|_| out.flush())
+        .is_ok()
+}
+
+fn osc52_sequence(text: &str) -> String {
+    use base64::Engine;
+
+    let encoded = base64::engine::general_purpose::STANDARD.encode(text.as_bytes());
+    format!("\x1b]52;c;{encoded}\x07")
 }
 
 async fn forward_log_stream(
@@ -5012,6 +5068,35 @@ mod tests {
         });
         assert!(app.flash.contains("sofka-test.log"));
         assert!(!app.flash_err);
+    }
+
+    #[tokio::test]
+    async fn stale_clipboard_result_is_dropped() {
+        let (mut app, _rx) = test_app();
+        let stale = app.generation;
+        app.bump_generation();
+
+        app.handle_msg(Msg::ClipboardCopied {
+            generation: stale,
+            copied: false,
+            success: "copied stale".into(),
+            failure: "stale failed".into(),
+        });
+        assert!(!app.flash.contains("stale failed"));
+
+        app.handle_msg(Msg::ClipboardCopied {
+            generation: app.generation,
+            copied: true,
+            success: "copied current".into(),
+            failure: "current failed".into(),
+        });
+        assert_eq!(app.flash, "copied current");
+        assert!(!app.flash_err);
+    }
+
+    #[test]
+    fn osc52_sequence_base64_encodes_clipboard_text() {
+        assert_eq!(osc52_sequence("sofka"), "\x1b]52;c;c29ma2E=\x07");
     }
 
     #[tokio::test]

@@ -2400,6 +2400,7 @@ name = "sofka"
 version = "0.1.4"
 dependencies = [
  "anyhow",
+ "base64",
  "clap",
  "crossterm",
  "futures-util",
