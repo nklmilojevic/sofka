@@ -31,133 +31,81 @@ use std::sync::{OnceLock, RwLock};
 use ratatui::style::{Color, Modifier, Style};
 use terminal_colorsaurus::{QueryOptions, ThemeMode};
 
-/// A full 25-swatch palette. Field names double as the override keys accepted
-/// under `[skin.colors]` in config.
-#[derive(Debug, Clone, Copy)]
-pub struct Palette {
-    pub rosewater: Color,
-    pub flamingo: Color,
-    pub pink: Color,
-    pub mauve: Color,
-    pub red: Color,
-    pub maroon: Color,
-    pub peach: Color,
-    pub yellow: Color,
-    pub green: Color,
-    pub teal: Color,
-    pub sky: Color,
-    pub sapphire: Color,
-    pub blue: Color,
-    pub lavender: Color,
-    pub text: Color,
-    pub subtext1: Color,
-    pub subtext0: Color,
-    pub overlay1: Color,
-    pub overlay0: Color,
-    pub surface2: Color,
-    pub surface1: Color,
-    pub surface0: Color,
-    pub base: Color,
-    pub mantle: Color,
-    pub crust: Color,
+macro_rules! palette_swatches {
+    ($($idx:expr => $field:ident),+ $(,)?) => {
+        /// A full 25-swatch palette. Field names double as the override keys
+        /// accepted under `[skin.colors]` in config.
+        #[derive(Debug, Clone, Copy)]
+        pub struct Palette {
+            $(pub $field: Color,)+
+        }
+
+        /// Swatch names in the order the built-in tables list their hex values.
+        const FIELDS: &[&str] = &[$(stringify!($field),)+];
+
+        impl Palette {
+            /// Build a palette from 25 hex strings in [`FIELDS`] order. Panics
+            /// on a malformed value — only ever called with the hardcoded
+            /// built-in tables, so a bad hex here is a programmer error, not
+            /// user input.
+            fn from_hexes(h: &[&str]) -> Palette {
+                assert_eq!(
+                    h.len(),
+                    FIELDS.len(),
+                    "built-in palette has {} colors but {} swatches are defined",
+                    h.len(),
+                    FIELDS.len()
+                );
+                let c = |i: usize| {
+                    parse_hex(h[i]).unwrap_or_else(|| panic!("bad built-in hex {}", h[i]))
+                };
+                Palette {
+                    $($field: c($idx),)+
+                }
+            }
+
+            /// Override one swatch by name. Returns `false` for an unknown key.
+            fn set(&mut self, key: &str, color: Color) -> bool {
+                match key {
+                    $(stringify!($field) => self.$field = color,)+
+                    _ => return false,
+                }
+                true
+            }
+        }
+
+        $(pub fn $field() -> Color {
+            palette().$field
+        })+
+    };
 }
 
-/// Swatch names in the order the built-in tables list their hex values.
-const FIELDS: [&str; 25] = [
-    "rosewater",
-    "flamingo",
-    "pink",
-    "mauve",
-    "red",
-    "maroon",
-    "peach",
-    "yellow",
-    "green",
-    "teal",
-    "sky",
-    "sapphire",
-    "blue",
-    "lavender",
-    "text",
-    "subtext1",
-    "subtext0",
-    "overlay1",
-    "overlay0",
-    "surface2",
-    "surface1",
-    "surface0",
-    "base",
-    "mantle",
-    "crust",
-];
-
-impl Palette {
-    /// Build a palette from 25 hex strings in [`FIELDS`] order. Panics on a
-    /// malformed value — only ever called with the hardcoded built-in tables,
-    /// so a bad hex here is a programmer error, not user input.
-    fn from_hexes(h: &[&str; 25]) -> Palette {
-        let c = |i: usize| parse_hex(h[i]).unwrap_or_else(|| panic!("bad built-in hex {}", h[i]));
-        Palette {
-            rosewater: c(0),
-            flamingo: c(1),
-            pink: c(2),
-            mauve: c(3),
-            red: c(4),
-            maroon: c(5),
-            peach: c(6),
-            yellow: c(7),
-            green: c(8),
-            teal: c(9),
-            sky: c(10),
-            sapphire: c(11),
-            blue: c(12),
-            lavender: c(13),
-            text: c(14),
-            subtext1: c(15),
-            subtext0: c(16),
-            overlay1: c(17),
-            overlay0: c(18),
-            surface2: c(19),
-            surface1: c(20),
-            surface0: c(21),
-            base: c(22),
-            mantle: c(23),
-            crust: c(24),
-        }
-    }
-
-    /// Override one swatch by name. Returns `false` for an unknown key.
-    fn set(&mut self, key: &str, color: Color) -> bool {
-        match key {
-            "rosewater" => self.rosewater = color,
-            "flamingo" => self.flamingo = color,
-            "pink" => self.pink = color,
-            "mauve" => self.mauve = color,
-            "red" => self.red = color,
-            "maroon" => self.maroon = color,
-            "peach" => self.peach = color,
-            "yellow" => self.yellow = color,
-            "green" => self.green = color,
-            "teal" => self.teal = color,
-            "sky" => self.sky = color,
-            "sapphire" => self.sapphire = color,
-            "blue" => self.blue = color,
-            "lavender" => self.lavender = color,
-            "text" => self.text = color,
-            "subtext1" => self.subtext1 = color,
-            "subtext0" => self.subtext0 = color,
-            "overlay1" => self.overlay1 = color,
-            "overlay0" => self.overlay0 = color,
-            "surface2" => self.surface2 = color,
-            "surface1" => self.surface1 = color,
-            "surface0" => self.surface0 = color,
-            "base" => self.base = color,
-            "mantle" => self.mantle = color,
-            "crust" => self.crust = color,
-            _ => return false,
-        }
-        true
-    }
+palette_swatches! {
+    0 => rosewater,
+    1 => flamingo,
+    2 => pink,
+    3 => mauve,
+    4 => red,
+    5 => maroon,
+    6 => peach,
+    7 => yellow,
+    8 => green,
+    9 => teal,
+    10 => sky,
+    11 => sapphire,
+    12 => blue,
+    13 => lavender,
+    14 => text,
+    15 => subtext1,
+    16 => subtext0,
+    17 => overlay1,
+    18 => overlay0,
+    19 => surface2,
+    20 => surface1,
+    21 => surface0,
+    22 => base,
+    23 => mantle,
+    24 => crust,
 }
 
 // ---------------------------------------------------------------------------
@@ -368,82 +316,6 @@ fn palette() -> Palette {
         Ok(active) => *active,
         Err(poisoned) => *poisoned.into_inner(),
     }
-}
-
-pub fn rosewater() -> Color {
-    palette().rosewater
-}
-pub fn flamingo() -> Color {
-    palette().flamingo
-}
-pub fn pink() -> Color {
-    palette().pink
-}
-pub fn mauve() -> Color {
-    palette().mauve
-}
-pub fn red() -> Color {
-    palette().red
-}
-pub fn maroon() -> Color {
-    palette().maroon
-}
-pub fn peach() -> Color {
-    palette().peach
-}
-pub fn yellow() -> Color {
-    palette().yellow
-}
-pub fn green() -> Color {
-    palette().green
-}
-pub fn teal() -> Color {
-    palette().teal
-}
-pub fn sky() -> Color {
-    palette().sky
-}
-pub fn sapphire() -> Color {
-    palette().sapphire
-}
-pub fn blue() -> Color {
-    palette().blue
-}
-pub fn lavender() -> Color {
-    palette().lavender
-}
-pub fn text() -> Color {
-    palette().text
-}
-pub fn subtext1() -> Color {
-    palette().subtext1
-}
-pub fn subtext0() -> Color {
-    palette().subtext0
-}
-pub fn overlay1() -> Color {
-    palette().overlay1
-}
-pub fn overlay0() -> Color {
-    palette().overlay0
-}
-pub fn surface2() -> Color {
-    palette().surface2
-}
-pub fn surface1() -> Color {
-    palette().surface1
-}
-pub fn surface0() -> Color {
-    palette().surface0
-}
-pub fn base() -> Color {
-    palette().base
-}
-pub fn mantle() -> Color {
-    palette().mantle
-}
-pub fn crust() -> Color {
-    palette().crust
 }
 
 // ---------------------------------------------------------------------------
