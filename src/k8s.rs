@@ -9,8 +9,8 @@ use kube::api::{Api, ListParams};
 use kube::config::{KubeConfigOptions, Kubeconfig};
 use kube::core::DynamicObject;
 use kube::discovery::{ApiResource, Discovery, Scope};
-use kube::runtime::watcher;
-use kube::{Client, Config};
+use kube::runtime::{WatchStreamExt, watcher};
+use kube::{Client, Config, ResourceExt};
 use tokio::sync::mpsc::Sender;
 use tokio::task::JoinHandle;
 
@@ -207,7 +207,9 @@ impl Cluster {
             if let Some(f) = fields {
                 cfg = cfg.fields(&f);
             }
-            let mut stream = watcher(api, cfg).boxed();
+            let mut stream = watcher(api, cfg)
+                .modify(|obj| obj.managed_fields_mut().clear())
+                .boxed();
             if tx.send(Msg::Reset { generation }).await.is_err() {
                 return;
             }
