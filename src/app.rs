@@ -814,7 +814,14 @@ impl App {
                 }
             }
             Msg::Metrics { generation, data } if generation == self.generation => {
+                let sort_uses_metrics = self
+                    .sort_column
+                    .and_then(|i| self.display_headers().get(i).copied())
+                    .is_some_and(|h| matches!(h, "CPU" | "MEM"));
                 self.metrics = data;
+                if sort_uses_metrics {
+                    self.invalidate_rows();
+                }
             }
             Msg::PulseData { generation, data } if generation == self.generation => {
                 self.pulse = data;
@@ -4595,6 +4602,48 @@ mod tests {
         app.switch_kind("services");
         assert_eq!(app.sort_column, None);
         assert!(!app.sort_desc);
+    }
+
+    #[tokio::test]
+    async fn metrics_update_invalidates_metric_sorted_rows() {
+        let (mut app, _rx) = test_app();
+        app.switch_kind("pods");
+        for name in ["a", "b"] {
+            apply(
+                &mut app,
+                json!({"apiVersion": "v1", "kind": "Pod",
+                       "metadata": {"name": name, "namespace": "default"}}),
+            );
+        }
+
+        let cpu_idx = app
+            .display_headers()
+            .iter()
+            .position(|h| *h == "CPU")
+            .unwrap();
+        app.sort_column = Some(cpu_idx);
+        app.sort_desc = true;
+        app.invalidate_rows();
+        let names: Vec<String> = app
+            .rows()
+            .iter()
+            .map(|o| o.metadata.name.clone().unwrap())
+            .collect();
+        assert_eq!(names, ["a", "b"]); // cached before metrics arrive
+
+        app.handle_msg(Msg::Metrics {
+            generation: app.generation,
+            data: HashMap::from([
+                ("default/a".to_string(), (10, 0)),
+                ("default/b".to_string(), (100, 0)),
+            ]),
+        });
+        let names: Vec<String> = app
+            .rows()
+            .iter()
+            .map(|o| o.metadata.name.clone().unwrap())
+            .collect();
+        assert_eq!(names, ["b", "a"]);
     }
 
     #[tokio::test]
