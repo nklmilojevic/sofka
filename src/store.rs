@@ -54,6 +54,11 @@ pub enum Msg {
         title: String,
         lines: Vec<String>,
     },
+    /// Result of an off-thread log save.
+    LogsSaved {
+        generation: u64,
+        result: Result<std::path::PathBuf, String>,
+    },
     /// Namespace list for the switcher, fetched off-thread.
     Namespaces {
         generation: u64,

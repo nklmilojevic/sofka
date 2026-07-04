@@ -855,6 +855,13 @@ impl App {
                     .scroll
                     .min(self.detail.lines.len().saturating_sub(1));
             }
+            Msg::LogsSaved { generation, result } if generation == self.log_gen => match result {
+                Ok(path) => {
+                    self.flash = format!("saved logs → {}", path.display());
+                    self.flash_err = false;
+                }
+                Err(e) => self.flash_warn(&format!("save failed: {e}")),
+            },
             Msg::Namespaces { generation, list } if generation == self.generation => {
                 // Keep the picker open and preserve the selection if possible.
                 let keep = self.ns_state.selected().unwrap_or(0);
@@ -2009,6 +2016,8 @@ impl App {
             self.flash_warn("no log lines to save");
             return;
         }
+        let genr = self.log_gen;
+        let tx = self.tx.clone();
         let ts = k8s_openapi::jiff::Timestamp::now().as_second();
         let safe: String = self
             .logs
@@ -2018,13 +2027,18 @@ impl App {
             .map(|c| if c.is_alphanumeric() { c } else { '-' })
             .collect();
         let path = std::env::temp_dir().join(format!("sofka-{safe}-{ts}.log"));
-        match std::fs::write(&path, text) {
-            Ok(_) => {
-                self.flash = format!("saved logs → {}", path.display());
-                self.flash_err = false;
-            }
-            Err(e) => self.flash_warn(&format!("save failed: {e}")),
-        }
+        tokio::spawn(async move {
+            let result = tokio::fs::write(&path, text)
+                .await
+                .map(|_| path)
+                .map_err(|e| e.to_string());
+            let _ = tx
+                .send(Msg::LogsSaved {
+                    generation: genr,
+                    result,
+                })
+                .await;
+        });
     }
 
     fn filtered_log_text(&self) -> String {
@@ -4963,6 +4977,26 @@ mod tests {
             app.filtered_log_text(),
             "api request started\napi request finished"
         );
+    }
+
+    #[tokio::test]
+    async fn stale_log_save_result_is_dropped() {
+        let (mut app, _rx) = test_app();
+        let stale = app.log_gen;
+        app.log_gen += 1;
+
+        app.handle_msg(Msg::LogsSaved {
+            generation: stale,
+            result: Err("old write failed".into()),
+        });
+        assert!(!app.flash.contains("old write failed"));
+
+        app.handle_msg(Msg::LogsSaved {
+            generation: app.log_gen,
+            result: Ok(std::env::temp_dir().join("sofka-test.log")),
+        });
+        assert!(app.flash.contains("sofka-test.log"));
+        assert!(!app.flash_err);
     }
 
     #[tokio::test]
