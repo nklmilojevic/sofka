@@ -230,6 +230,22 @@ pub fn cells(obj: &DynamicObject, plural: &str) -> (Vec<String>, Option<usize>) 
     }
 }
 
+/// Cells whose display value changes with wall time even when the Kubernetes
+/// resourceVersion is unchanged. Table rendering can override cached values
+/// with these without recomputing every curated column.
+pub fn volatile_cell(obj: &DynamicObject, plural: &str, header: &str) -> Option<String> {
+    match (plural, header) {
+        (_, "AGE") => Some(age(obj)),
+        ("jobs", "DURATION") if sget(&obj.data, &["status", "completionTime"]).is_none() => {
+            Some(job_duration(&obj.data))
+        }
+        ("cronjobs", "LAST-SCHEDULE") => {
+            Some(time_since(&obj.data, &["status", "lastScheduleTime"]))
+        }
+        _ => None,
+    }
+}
+
 // ----- helpers ------------------------------------------------------------
 
 /// Comma-joined CRD version names (`spec.versions[].name`), e.g. `v1,v1beta1`.

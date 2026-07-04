@@ -4,7 +4,7 @@
 //! drills into a child (workload -> pods, pod -> containers, namespace ->
 //! re-scope the previous view), and `esc` pops back.
 
-use std::cell::RefCell;
+use std::cell::{Ref, RefCell};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -331,6 +331,27 @@ impl SortKey {
 struct RowsCache {
     dirty: bool,
     keys: Vec<String>,
+    cells: HashMap<String, CellCacheEntry>,
+}
+
+struct CellCacheEntry {
+    plural: String,
+    resource_version: Option<String>,
+    cells: Vec<String>,
+    status_idx: Option<usize>,
+}
+
+pub(crate) struct TableCellCache<'a> {
+    cache: Ref<'a, RowsCache>,
+}
+
+impl TableCellCache<'_> {
+    pub(crate) fn get(&self, key: &str) -> Option<(&[String], Option<usize>)> {
+        self.cache
+            .cells
+            .get(key)
+            .map(|entry| (entry.cells.as_slice(), entry.status_idx))
+    }
 }
 
 /// A saved view, pushed onto the stack when drilling down.
@@ -523,6 +544,7 @@ impl App {
             rows_cache: RefCell::new(RowsCache {
                 dirty: true,
                 keys: Vec::new(),
+                cells: HashMap::new(),
             }),
         }
     }
@@ -779,19 +801,19 @@ impl App {
         match msg {
             Msg::Reset { generation } if generation == self.generation => {
                 self.store.clear();
-                self.invalidate_rows();
+                self.clear_rows_cache();
             }
             Msg::Applied {
                 generation,
                 key,
                 obj,
             } if generation == self.generation => {
-                self.store.apply(key, *obj);
-                self.invalidate_rows();
+                self.store.apply(key.clone(), *obj);
+                self.invalidate_row(&key);
             }
             Msg::Deleted { generation, key } if generation == self.generation => {
                 self.store.remove(&key);
-                self.invalidate_rows();
+                self.invalidate_row(&key);
             }
             Msg::Synced { generation } if generation == self.generation => self.store.synced = true,
             Msg::Error { generation, error } if generation == self.generation => {
@@ -960,6 +982,19 @@ impl App {
         self.rows_cache.borrow_mut().dirty = true;
     }
 
+    fn clear_rows_cache(&self) {
+        let mut cache = self.rows_cache.borrow_mut();
+        cache.dirty = true;
+        cache.keys.clear();
+        cache.cells.clear();
+    }
+
+    fn invalidate_row(&self, key: &str) {
+        let mut cache = self.rows_cache.borrow_mut();
+        cache.dirty = true;
+        cache.cells.remove(key);
+    }
+
     /// Does this object pass the current fuzzy filter?
     fn matches_filter(&self, o: &DynamicObject) -> bool {
         if self.filter.is_empty() {
@@ -1042,6 +1077,35 @@ impl App {
             .iter()
             .filter_map(|k| self.store.get(k))
             .collect()
+    }
+
+    pub(crate) fn ensure_table_cell_cache(&self, rows: &[&DynamicObject]) {
+        let mut cache = self.rows_cache.borrow_mut();
+        for obj in rows {
+            let key = row_key(obj);
+            let resource_version = obj.metadata.resource_version.clone();
+            let stale = cache.cells.get(&key).is_none_or(|entry| {
+                entry.plural != self.kind_plural || entry.resource_version != resource_version
+            });
+            if stale {
+                let (cells, status_idx) = crate::columns::cells(obj, &self.kind_plural);
+                cache.cells.insert(
+                    key,
+                    CellCacheEntry {
+                        plural: self.kind_plural.clone(),
+                        resource_version,
+                        cells,
+                        status_idx,
+                    },
+                );
+            }
+        }
+    }
+
+    pub(crate) fn table_cell_cache(&self) -> TableCellCache<'_> {
+        TableCellCache {
+            cache: self.rows_cache.borrow(),
+        }
     }
 
     /// The headers as displayed: kind columns, with NAMESPACE prepended when
@@ -4515,6 +4579,53 @@ mod tests {
 
         app.filter = "zzz".into();
         assert_eq!(app.filter_match_indices("kube-httpcache-0"), None); // no match
+    }
+
+    #[tokio::test]
+    async fn table_cell_cache_invalidates_on_apply() {
+        let (mut app, _rx) = test_app();
+        app.kind_plural = "pods".into();
+        apply(
+            &mut app,
+            json!({
+                "apiVersion": "v1",
+                "kind": "Pod",
+                "metadata": {
+                    "name": "web",
+                    "namespace": "default",
+                    "resourceVersion": "1"
+                },
+                "status": {"phase": "Pending"}
+            }),
+        );
+        {
+            let rows = app.rows();
+            app.ensure_table_cell_cache(&rows);
+            let key = row_key(rows[0]);
+            let cache = app.table_cell_cache();
+            let (cells, _) = cache.get(&key).unwrap();
+            assert_eq!(cells[2], "Pending");
+        }
+
+        apply(
+            &mut app,
+            json!({
+                "apiVersion": "v1",
+                "kind": "Pod",
+                "metadata": {
+                    "name": "web",
+                    "namespace": "default",
+                    "resourceVersion": "2"
+                },
+                "status": {"phase": "Running"}
+            }),
+        );
+        let rows = app.rows();
+        app.ensure_table_cell_cache(&rows);
+        let key = row_key(rows[0]);
+        let cache = app.table_cell_cache();
+        let (cells, _) = cache.get(&key).unwrap();
+        assert_eq!(cells[2], "Running");
     }
 
     #[tokio::test]

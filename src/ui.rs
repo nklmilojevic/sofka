@@ -15,6 +15,27 @@ use crate::{columns, theme};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
+enum TableCellText<'a> {
+    Borrowed(&'a str),
+    Owned(String),
+}
+
+impl<'a> TableCellText<'a> {
+    fn as_str(&self) -> &str {
+        match self {
+            TableCellText::Borrowed(value) => value,
+            TableCellText::Owned(value) => value,
+        }
+    }
+
+    fn into_cell(self) -> Cell<'a> {
+        match self {
+            TableCellText::Borrowed(value) => Cell::from(value),
+            TableCellText::Owned(value) => Cell::from(value),
+        }
+    }
+}
+
 pub fn draw(frame: &mut Frame, app: &mut App) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -203,36 +224,56 @@ fn draw_table(frame: &mut Frame, app: &mut App, area: Rect) {
     let offset = app.table_state.offset();
     let selected = app.table_state.selected();
 
-    let rows: Vec<Row> = app
+    let visible_objects: Vec<_> = app
         .rows()
-        .iter()
+        .into_iter()
         .skip(offset)
         .take(visible_rows)
+        .collect();
+    app.ensure_table_cell_cache(&visible_objects);
+    let cell_cache = app.table_cell_cache();
+    let base_headers = columns::headers(&app.kind_plural);
+
+    let rows: Vec<Row> = visible_objects
+        .iter()
         .map(|obj| {
-            let marked_row =
-                !app.marked.is_empty() && app.marked.contains(&crate::store::row_key(obj));
-            let (mut cells, status_idx) = columns::cells(obj, &app.kind_plural);
+            let row_key = crate::store::row_key(obj);
+            let marked_row = !app.marked.is_empty() && app.marked.contains(&row_key);
+            let (base_cells, status_idx) = cell_cache
+                .get(&row_key)
+                .expect("visible rows are warmed in the table cell cache");
             let mut style_idx = status_idx;
+            let mut cells = Vec::with_capacity(headers.len());
             if show_ns {
-                cells.insert(0, obj.metadata.namespace.clone().unwrap_or_default());
+                cells.push(TableCellText::Borrowed(
+                    obj.metadata.namespace.as_deref().unwrap_or_default(),
+                ));
                 style_idx = status_idx.map(|i| i + 1);
+            }
+            for (i, cell) in base_cells.iter().enumerate() {
+                let header = base_headers.get(i).copied().unwrap_or_default();
+                if let Some(value) = columns::volatile_cell(obj, &app.kind_plural, header) {
+                    cells.push(TableCellText::Owned(value));
+                } else {
+                    cells.push(TableCellText::Borrowed(cell));
+                }
             }
             let mut metrics_raw = None;
             if metrics_cols {
-                let name = obj.metadata.name.clone().unwrap_or_default();
+                let name = obj.metadata.name.as_deref().unwrap_or_default();
                 let key = if pods_view {
                     format!(
                         "{}/{}",
-                        obj.metadata.namespace.as_deref().unwrap_or(""),
+                        obj.metadata.namespace.as_deref().unwrap_or_default(),
                         name
                     )
                 } else {
-                    name
+                    name.to_string()
                 };
                 let (cpu, mem) = app.metrics.get(&key).copied().unwrap_or((0, 0));
                 metrics_raw = Some((cpu, mem));
-                cells.push(columns::fmt_cpu(cpu));
-                cells.push(columns::fmt_mem(mem));
+                cells.push(TableCellText::Owned(columns::fmt_cpu(cpu)));
+                cells.push(TableCellText::Owned(columns::fmt_mem(mem)));
             }
             // Combined colorer: the whole row takes a k9s-style status tint
             // (errors red, pending peach, completed/terminating dimmed, healthy
@@ -242,7 +283,7 @@ fn draw_table(frame: &mut Frame, app: &mut App, area: Rect) {
             // and NAME highlights the active fuzzy filter's matched chars.
             let status_val = style_idx
                 .and_then(|i| cells.get(i))
-                .map(String::as_str)
+                .map(TableCellText::as_str)
                 .unwrap_or("");
             // A pod is phase=Running the moment its sandbox starts, long before
             // every container passes its readiness probe — until READY is n/n,
@@ -250,7 +291,7 @@ fn draw_table(frame: &mut Frame, app: &mut App, area: Rect) {
             let running_not_ready = status_val == "Running"
                 && ready_idx
                     .and_then(|i| cells.get(i))
-                    .is_some_and(|r| !all_ready(r));
+                    .is_some_and(|r| !all_ready(r.as_str()));
             let status_key = if running_not_ready {
                 "PodInitializing"
             } else {
@@ -265,33 +306,33 @@ fn draw_table(frame: &mut Frame, app: &mut App, area: Rect) {
                     if marked_row {
                         // Marked rows override everything so a bulk selection
                         // stands out.
-                        Cell::from(c).style(
+                        c.into_cell().style(
                             Style::default()
                                 .fg(theme::mark())
                                 .add_modifier(Modifier::BOLD),
                         )
                     } else if Some(i) == style_idx {
-                        Cell::from(c).style(Style::default().fg(status_badge))
+                        c.into_cell().style(Style::default().fg(status_badge))
                     } else if i == name_col {
-                        render_name_cell(app, &c, row_color)
+                        render_name_cell(app, c.as_str(), row_color)
                     } else if Some(i) == age_idx {
-                        Cell::from(c).style(theme::dim())
+                        c.into_cell().style(theme::dim())
                     } else if Some(i) == restarts_idx {
-                        let n: i64 = c.trim().parse().unwrap_or(0);
+                        let n: i64 = c.as_str().trim().parse().unwrap_or(0);
                         let color = theme::restarts_severity(n).unwrap_or(row_color);
-                        Cell::from(c).style(Style::default().fg(color))
+                        c.into_cell().style(Style::default().fg(color))
                     } else if Some(i) == cpu_idx {
                         let color = metrics_raw
                             .and_then(|(cpu, _)| theme::cpu_severity(cpu))
                             .unwrap_or(row_color);
-                        Cell::from(c).style(Style::default().fg(color))
+                        c.into_cell().style(Style::default().fg(color))
                     } else if Some(i) == mem_idx {
                         let color = metrics_raw
                             .and_then(|(_, mem)| theme::mem_severity(mem))
                             .unwrap_or(row_color);
-                        Cell::from(c).style(Style::default().fg(color))
+                        c.into_cell().style(Style::default().fg(color))
                     } else {
-                        Cell::from(c).style(Style::default().fg(row_color))
+                        c.into_cell().style(Style::default().fg(row_color))
                     }
                 })
                 .collect();
