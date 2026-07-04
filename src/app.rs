@@ -1153,16 +1153,22 @@ impl App {
         self.flash_err = false;
     }
 
-    pub fn selected(&self) -> Option<DynamicObject> {
+    pub fn selected_ref(&self) -> Option<&DynamicObject> {
         let rows = self.rows();
         let idx = self.table_state.selected()?;
-        rows.get(idx).map(|o| (*o).clone())
+        rows.get(idx).copied()
+    }
+
+    pub fn selected(&self) -> Option<DynamicObject> {
+        self.selected_ref().cloned()
     }
 
     /// Toggle the mark on the current row (SPACE).
     fn toggle_mark(&mut self) {
-        let Some(obj) = self.selected() else { return };
-        let key = row_key(&obj);
+        let Some(obj) = self.selected_ref() else {
+            return;
+        };
+        let key = row_key(obj);
         if !self.marked.remove(&key) {
             self.marked.insert(key);
         }
@@ -1179,7 +1185,7 @@ impl App {
             )
         };
         if self.marked.is_empty() {
-            return self.selected().as_ref().map(to_pair).into_iter().collect();
+            return self.selected_ref().map(to_pair).into_iter().collect();
         }
         self.rows()
             .iter()
@@ -1378,7 +1384,7 @@ impl App {
             Mode::Table
         };
         // Remember the selected row so we can land back on it.
-        self.return_selection = self.selected().map(|o| row_key(&o));
+        self.return_selection = self.selected_ref().map(row_key);
     }
 
     /// Re-select the row remembered by [`set_return_mode`], by identity, so the
@@ -1394,13 +1400,13 @@ impl App {
 
     fn open_detail(&mut self) {
         self.set_return_mode();
-        let Some(obj) = self.selected() else {
+        let Some(obj) = self.selected_ref() else {
             return;
         };
         let title = obj.metadata.name.clone().unwrap_or_else(|| "object".into());
         self.detail = Scrollable {
             title: format!("{title} — YAML"),
-            lines: self.object_yaml(&obj),
+            lines: self.object_yaml(obj),
             scroll: 0,
         };
         self.mode = Mode::Detail;
@@ -1411,14 +1417,16 @@ impl App {
     /// or fails. The result arrives as `Msg::Detail`.
     fn describe(&mut self) {
         self.set_return_mode();
-        let Some(obj) = self.selected() else { return };
+        let Some(obj) = self.selected_ref() else {
+            return;
+        };
         let name = obj.metadata.name.clone().unwrap_or_default();
         let plural = self.kind_plural.clone();
         let ns = obj.metadata.namespace.clone();
 
         // Compute the YAML fallback up front while we hold the object; the
         // selection may change before the describe completes.
-        let yaml = self.object_yaml(&obj);
+        let yaml = self.object_yaml(obj);
         let yaml_title = format!("{name} — YAML");
 
         let tx = self.tx.clone();
@@ -1546,7 +1554,7 @@ impl App {
     /// preferred but events.k8s.io clusters still work.
     fn open_events(&mut self) {
         self.set_return_mode();
-        let Some(obj) = self.selected() else {
+        let Some(obj) = self.selected_ref() else {
             self.flash_warn("no selection for events");
             return;
         };
@@ -1661,13 +1669,15 @@ impl App {
     /// Logs for the current selection. For pods: stream every container. For
     /// workloads/services: list matching pods and aggregate all their logs.
     fn open_logs(&mut self) {
-        let Some(obj) = self.selected() else { return };
+        let Some(obj) = self.selected_ref() else {
+            return;
+        };
         let name = obj.metadata.name.clone().unwrap_or_default();
         let ns = obj.metadata.namespace.clone().unwrap_or_default();
 
         match self.kind_plural.as_str() {
             "pods" => {
-                let containers = container_names(&obj);
+                let containers = container_names(obj);
                 self.launch_logs(
                     LogSource::Pod {
                         ns,
@@ -1678,7 +1688,7 @@ impl App {
                 );
             }
             "deployments" | "statefulsets" | "daemonsets" | "replicasets" | "jobs" => {
-                match label_selector(&obj, "matchLabels") {
+                match label_selector(obj, "matchLabels") {
                     Some(labels) => self.launch_logs(
                         LogSource::Selector { ns, labels },
                         format!("{}/{name} — logs (all pods)", trim_s(&self.kind_plural)),
@@ -1686,7 +1696,7 @@ impl App {
                     None => self.flash_warn("no pod selector for logs"),
                 }
             }
-            "services" => match label_selector(&obj, "selector") {
+            "services" => match label_selector(obj, "selector") {
                 Some(labels) => self.launch_logs(
                     LogSource::Selector { ns, labels },
                     format!("svc/{name} — logs (all pods)"),
@@ -1946,7 +1956,9 @@ impl App {
             self.flash_warn("attach is only available for pods");
             return;
         }
-        let Some(obj) = self.selected() else { return };
+        let Some(obj) = self.selected_ref() else {
+            return;
+        };
         let name = obj.metadata.name.clone().unwrap_or_default();
         let ns = obj.metadata.namespace.clone().unwrap_or_default();
         let mut argv = self.kubectl_base();
@@ -1960,12 +1972,15 @@ impl App {
             self.flash_warn("'o' shows the node for a pod");
             return;
         }
-        let Some(obj) = self.selected() else { return };
+        let Some(obj) = self.selected_ref() else {
+            return;
+        };
         let Some(node) = obj.data.pointer("/spec/nodeName").and_then(Value::as_str) else {
             self.flash_warn("pod has no node assigned");
             return;
         };
         let node = node.to_string();
+        let pod_name = obj.metadata.name.clone().unwrap_or_default();
         let Some(nodes) = self.cluster.resolve("nodes") else {
             self.flash_warn("nodes kind unavailable");
             return;
@@ -1976,7 +1991,7 @@ impl App {
         self.namespace = String::new();
         self.labels = None;
         self.fields = Some(format!("metadata.name={node}"));
-        self.scope_label = Some(format!("host of {}", obj.metadata.name.unwrap_or_default()));
+        self.scope_label = Some(format!("host of {pod_name}"));
         self.filter.clear();
         self.reset_sort();
         self.table_state.select(Some(0));
@@ -1985,7 +2000,9 @@ impl App {
 
     /// Jump to the selected object's controller/owner (k9s Shift-J).
     fn jump_owner(&mut self) {
-        let Some(obj) = self.selected() else { return };
+        let Some(obj) = self.selected_ref() else {
+            return;
+        };
         let owners = obj
             .metadata
             .owner_references
@@ -2001,16 +2018,14 @@ impl App {
         };
         let ns = obj.metadata.namespace.clone().unwrap_or_default();
         let owner_name = owner.name.clone();
+        let child_name = obj.metadata.name.clone().unwrap_or_default();
         self.push_frame();
         self.kind_plural = kind.ar.plural.to_lowercase();
         self.kind = Some(kind);
         self.namespace = ns;
         self.labels = None;
         self.fields = Some(format!("metadata.name={owner_name}"));
-        self.scope_label = Some(format!(
-            "owner of {}",
-            obj.metadata.name.unwrap_or_default()
-        ));
+        self.scope_label = Some(format!("owner of {child_name}"));
         self.filter.clear();
         self.reset_sort();
         self.table_state.select(Some(0));
@@ -2078,7 +2093,9 @@ impl App {
 
     /// Copy the selected resource's name to the system clipboard (k9s `c`).
     fn copy_name(&mut self) {
-        let Some(obj) = self.selected() else { return };
+        let Some(obj) = self.selected_ref() else {
+            return;
+        };
         let name = obj.metadata.name.clone().unwrap_or_default();
         self.copy_to_clipboard_async(
             name.clone(),
@@ -2112,10 +2129,12 @@ impl App {
             self.flash_warn("previous logs are for pods (use the container picker elsewhere)");
             return;
         }
-        let Some(obj) = self.selected() else { return };
+        let Some(obj) = self.selected_ref() else {
+            return;
+        };
         let name = obj.metadata.name.clone().unwrap_or_default();
         let ns = obj.metadata.namespace.clone().unwrap_or_default();
-        let containers = container_names(&obj);
+        let containers = container_names(obj);
         let container = containers.into_iter().next();
         self.launch_logs(
             LogSource::Single {
@@ -2130,7 +2149,9 @@ impl App {
 
     /// Rollout-restart a workload by stamping the template annotation (k9s `r`).
     fn request_restart(&mut self) {
-        let Some(obj) = self.selected() else { return };
+        let Some(obj) = self.selected_ref() else {
+            return;
+        };
         let Some(kind) = self.kind.clone() else {
             return;
         };
@@ -2175,7 +2196,9 @@ impl App {
             self.flash_warn("set image applies to pods and workload controllers");
             return;
         }
-        let Some(obj) = self.selected() else { return };
+        let Some(obj) = self.selected_ref() else {
+            return;
+        };
         let ptr = if is_pod {
             "/spec/containers"
         } else {
@@ -2205,13 +2228,14 @@ impl App {
             self.flash_warn("no containers found");
             return;
         }
-        self.container_list = names;
-        self.image_values = images;
-        self.image_target = Some((
+        let target = (
             obj.metadata.namespace.clone().unwrap_or_default(),
             obj.metadata.name.clone().unwrap_or_default(),
             self.kind_plural.clone(),
-        ));
+        );
+        self.container_list = names;
+        self.image_values = images;
+        self.image_target = Some(target);
         self.container_state.select(Some(0));
         self.mode = Mode::SetImage;
     }
@@ -2279,7 +2303,9 @@ impl App {
     }
 
     fn request_edit(&mut self) {
-        let Some(obj) = self.selected() else { return };
+        let Some(obj) = self.selected_ref() else {
+            return;
+        };
         let name = obj.metadata.name.clone().unwrap_or_default();
         let mut argv = self.kubectl_base();
         argv.extend(["edit".into(), self.kind_plural.clone(), name]);
@@ -2295,7 +2321,9 @@ impl App {
             self.flash_warn("shell is only available for pods");
             return;
         }
-        let Some(obj) = self.selected() else { return };
+        let Some(obj) = self.selected_ref() else {
+            return;
+        };
         let name = obj.metadata.name.clone().unwrap_or_default();
         let ns = obj.metadata.namespace.clone().unwrap_or_default();
         let mut argv = self.kubectl_base();
@@ -2321,7 +2349,9 @@ impl App {
             self.flash_warn("scale applies to deployments/statefulsets/replicasets");
             return;
         }
-        let Some(obj) = self.selected() else { return };
+        let Some(obj) = self.selected_ref() else {
+            return;
+        };
         let name = obj.metadata.name.clone().unwrap_or_default();
         let ns = obj.metadata.namespace.clone().unwrap_or_default();
         let cur = obj
@@ -2336,7 +2366,9 @@ impl App {
     }
 
     fn request_port_forward(&mut self) {
-        let Some(obj) = self.selected() else { return };
+        let Some(obj) = self.selected_ref() else {
+            return;
+        };
         if !matches!(self.kind_plural.as_str(), "pods" | "services") {
             self.flash_warn("port-forward applies to pods/services");
             return;
@@ -2803,7 +2835,7 @@ impl App {
         else {
             return;
         };
-        let Some(obj) = self.selected() else {
+        let Some(obj) = self.selected_ref() else {
             self.flash_warn("no selection for plugin");
             return;
         };
