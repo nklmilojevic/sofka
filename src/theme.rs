@@ -584,6 +584,12 @@ mod tests {
     }
 
     #[test]
+    fn mocha_base_matches_golden_swatch() {
+        let p = builtin("catppuccin-mocha").unwrap();
+        assert_eq!(p.base, Color::Rgb(30, 30, 46));
+    }
+
+    #[test]
     fn parse_hex_forms() {
         assert_eq!(parse_hex("#1e1e2e"), Some(Color::Rgb(30, 30, 46)));
         assert_eq!(parse_hex("1e1e2e"), Some(Color::Rgb(30, 30, 46)));
