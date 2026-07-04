@@ -22,9 +22,9 @@ pub enum Msg {
     Synced {
         generation: u64,
     },
-    LogLine {
+    LogLines {
         generation: u64,
-        line: String,
+        lines: Vec<String>,
     },
     /// Point-in-time usage snapshot from the metrics API, keyed by "ns/name"
     /// (pods) or "name" (nodes) -> (cpu millicores, memory bytes).
@@ -48,12 +48,37 @@ pub enum Msg {
         /// Set when describe failed and we fell back to YAML.
         warn: Option<String>,
     },
+    /// Live Event rows for the selected object.
+    Events {
+        generation: u64,
+        title: String,
+        lines: Vec<String>,
+    },
+    /// Result of an off-thread log save.
+    LogsSaved {
+        generation: u64,
+        result: Result<std::path::PathBuf, String>,
+    },
+    /// Result of an off-thread clipboard copy.
+    ClipboardCopied {
+        generation: u64,
+        copied: bool,
+        success: String,
+        failure: String,
+    },
     /// Namespace list for the switcher, fetched off-thread.
     Namespaces {
+        generation: u64,
+        list: Vec<String>,
+    },
+    /// Kubeconfig context names for the switcher, fetched off-thread.
+    Contexts {
+        generation: u64,
         list: Vec<String>,
     },
     /// Result of an off-thread context switch (rebuilds client + discovery).
     ContextSwitched {
+        generation: u64,
         name: String,
         result: Result<Box<crate::k8s::Cluster>, String>,
     },
@@ -61,6 +86,7 @@ pub enum Msg {
     /// (empty = cluster default). Dropped if the active namespace has since
     /// changed. "*" = all.
     Rbac {
+        generation: u64,
         ns: String,
         allowed: std::collections::HashSet<String>,
     },

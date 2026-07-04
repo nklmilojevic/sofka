@@ -101,7 +101,7 @@ Not a marketing number - these are specific, checkable design choices:
   pods, node → its pods, pod → containers, namespace → re-scope, CRD → its
   custom resources. `esc` pops back.
 - **Command palette** (`:`) - fuzzy over the full resource catalog _and_
-  built-in commands (`ctx`, `pulse`, `xray`, `diff`, `pf`) together, plus
+  built-in commands (`ctx`, `pulse`, `xray`, `diff`, `events`, `pf`) together, plus
   fuzzy row **filtering** (`/`) with matched-character highlighting.
 - **Multiselect** (`space`) for bulk delete/kill/suspend/resume/reconcile.
 - **Pulse dashboard** (`:pulse`) - cluster-health tiles, refreshed every 5s.
@@ -114,6 +114,8 @@ Not a marketing number - these are specific, checkable design choices:
   resource.
 - **Diff** (`:diff`) - unified diff of the live object vs its
   `last-applied-configuration`.
+- **Events** (`:events` / `E`) - live Kubernetes Events for the selected
+  object, filtered by UID when available.
 - **RBAC-aware palette** - hides resource kinds you can't `list`.
 - **Namespace switcher** (`n`) and **context switcher** (`:ctx`).
 - **YAML view** (`y`) and **describe** (`d`, via `kubectl`).
@@ -216,7 +218,8 @@ sofka [RESOURCE] [-n NAMESPACE] [-A]
 | `shift-j`                 | jump to owner/controller                                                                                |
 | `o`                       | show the node hosting the selected pod                                                                  |
 | `ctrl-r`                  | refresh the watch                                                                                       |
-| `y` / `d`                 | view YAML / describe (`kubectl`)                                                                        |
+| `y` / `d` / `E`           | view YAML / describe (`kubectl`) / live events                                                          |
+| `:skin`                   | switch the color skin live (`:skin gruvbox-dark` applies directly)                                      |
 | `l` / `p`                 | logs (workload = all matching pods) / previous-container logs                                           |
 | `c`                       | copy resource name to clipboard                                                                         |
 | `e`                       | edit in `$EDITOR` (`kubectl edit`)                                                                      |
@@ -226,7 +229,8 @@ sofka [RESOURCE] [-n NAMESPACE] [-A]
 | `r`                       | rollout restart (workloads) / refresh (elsewhere)                                                       |
 | `f` / `shift-f`           | port-forward (pods/services) - runs in the background                                                   |
 | `t`                       | Flux: suspend/resume/reconcile menu                                                                     |
-| `ctrl-d` / `ctrl-k`       | delete / kill (marked rows, or current)                                                                 |
+| `C` / `U` / `D`           | nodes: cordon / uncordon / drain                                                                        |
+| `ctrl-d` / `ctrl-k`       | delete / force-delete (marked rows, or current); `f` toggles force in confirm                           |
 | `:q`, `ctrl-c`            | quit                                                                                                    |
 | `?`                       | help                                                                                                    |
 

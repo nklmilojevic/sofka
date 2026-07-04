@@ -4,24 +4,26 @@
 //! drills into a child (workload -> pods, pod -> containers, namespace ->
 //! re-scope the previous view), and `esc` pops back.
 
-use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
+use std::cell::{Ref, RefCell};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use anyhow::Result;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use futures_util::StreamExt;
 use fuzzy_matcher::FuzzyMatcher;
 use fuzzy_matcher::skim::SkimMatcherV2;
 use k8s_openapi::api::core::v1::Pod;
 use kube::Client;
-use kube::api::{Api, DeleteParams, ListParams, LogParams, Patch, PatchParams};
+use kube::api::{Api, DeleteParams, EvictParams, ListParams, LogParams, Patch, PatchParams};
 use kube::core::{DynamicObject, TypeMeta};
 use kube::discovery::ApiResource;
+use kube::runtime::watcher;
 use ratatui::widgets::{ListState, TableState};
 use serde_json::{Value, json};
-use tokio::sync::mpsc::UnboundedSender;
+use tokio::sync::mpsc::Sender;
 use tokio::task::JoinHandle;
 
 use crate::k8s::{Cluster, Kind};
@@ -37,6 +39,12 @@ const MAX_LOG_LINES: usize = 5_000;
 /// resume scrolling). Only a runaway firehose during a very long pause hits
 /// this; resuming follow trims back to [`MAX_LOG_LINES`].
 const MAX_LOG_LINES_PAUSED: usize = 100_000;
+
+/// Log streams batch lines before sending them through the UI channel. This
+/// avoids one wake-up/message per line under high-volume workloads while still
+/// flushing quickly for low-volume logs.
+const LOG_BATCH_LINES: usize = 64;
+const LOG_BATCH_MS: u64 = 50;
 
 /// Flux CD resource kinds whose spec has a `suspend: bool` field — every kind
 /// with a corresponding `flux suspend/resume` subcommand: kustomize- and
@@ -86,8 +94,10 @@ pub enum Mode {
     Pulse,
     Xray,
     Diff,
+    Events,
     FluxMenu,
     PortForwards,
+    Skins,
 }
 
 /// A request for the run loop to suspend the TUI and run an interactive
@@ -126,6 +136,8 @@ enum ConfirmAction {
         targets: Vec<(String, String)>,
         force: bool,
     },
+    /// One or more node names to cordon and drain.
+    Drain { targets: Vec<String> },
 }
 
 /// What the logs view is currently streaming, so it can be re-streamed when
@@ -168,7 +180,7 @@ enum PromptKind {
 
 pub struct Scrollable {
     pub title: String,
-    pub lines: Vec<String>,
+    pub lines: VecDeque<String>,
     /// Scroll offset in display rows. `usize` on purpose: a paused log buffer
     /// (100k lines, wrapped) far exceeds `u16`; views that hand this to a
     /// ratatui `Paragraph` clamp at the edge instead.
@@ -205,7 +217,9 @@ enum PaletteAction {
     Pulse,
     Xray,
     Diff,
+    Events,
     PortForwards,
+    Skin,
 }
 
 const PALETTE_COMMANDS: &[PaletteCommand] = &[
@@ -226,8 +240,16 @@ const PALETTE_COMMANDS: &[PaletteCommand] = &[
         names: &["diff"],
     },
     PaletteCommand {
+        action: PaletteAction::Events,
+        names: &["events", "event"],
+    },
+    PaletteCommand {
         action: PaletteAction::PortForwards,
         names: &["pf", "portforwards", "forwards"],
+    },
+    PaletteCommand {
+        action: PaletteAction::Skin,
+        names: &["skin", "skins"],
     },
     PaletteCommand {
         action: PaletteAction::Quit,
@@ -239,7 +261,7 @@ impl Scrollable {
     fn empty() -> Self {
         Self {
             title: String::new(),
-            lines: Vec::new(),
+            lines: VecDeque::new(),
             scroll: 0,
         }
     }
@@ -317,6 +339,27 @@ impl SortKey {
 struct RowsCache {
     dirty: bool,
     keys: Vec<String>,
+    cells: HashMap<String, CellCacheEntry>,
+}
+
+struct CellCacheEntry {
+    plural: String,
+    resource_version: Option<String>,
+    cells: Vec<String>,
+    status_idx: Option<usize>,
+}
+
+pub(crate) struct TableCellCache<'a> {
+    cache: Ref<'a, RowsCache>,
+}
+
+impl TableCellCache<'_> {
+    pub(crate) fn get(&self, key: &str) -> Option<(&[String], Option<usize>)> {
+        self.cache
+            .cells
+            .get(key)
+            .map(|entry| (entry.cells.as_slice(), entry.status_idx))
+    }
 }
 
 /// A saved view, pushed onto the stack when drilling down.
@@ -346,7 +389,7 @@ pub struct App {
     pub generation: u64,
     gen_flag: Arc<AtomicU64>,
     pub tasks: Vec<JoinHandle<()>>,
-    pub tx: UnboundedSender<Msg>,
+    pub tx: Sender<Msg>,
     stack: Vec<Frame>,
 
     pub mode: Mode,
@@ -400,6 +443,11 @@ pub struct App {
     pub port_forwards: Vec<PortForward>,
     pub pf_state: ListState,
 
+    pub skin_list: Vec<String>,
+    pub skin_state: ListState,
+    /// Per-swatch color overrides from config, re-applied when switching skins.
+    pub skin_colors: HashMap<String, String>,
+
     /// Current images aligned with `container_list`, for the Set-Image picker.
     pub image_values: Vec<String>,
     /// (namespace, name, plural) of the object being re-imaged.
@@ -424,6 +472,8 @@ pub struct App {
     log_gen: u64,
     log_flag: Arc<AtomicU64>,
     log_tasks: Vec<JoinHandle<()>>,
+    event_gen: u64,
+    event_task: Option<JoinHandle<()>>,
 
     pub pending: Option<Suspend>,
     /// Mode to return to when leaving a transient view (logs/detail/diff).
@@ -437,7 +487,7 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(cluster: Cluster, tx: UnboundedSender<Msg>) -> Self {
+    pub fn new(cluster: Cluster, tx: Sender<Msg>) -> Self {
         let namespace = cluster.default_namespace.clone();
         Self {
             cluster,
@@ -483,6 +533,12 @@ impl App {
             flux_menu_state: ListState::default(),
             port_forwards: Vec::new(),
             pf_state: ListState::default(),
+            skin_list: crate::theme::BUILTIN_NAMES
+                .iter()
+                .map(|name| (*name).to_string())
+                .collect(),
+            skin_state: ListState::default(),
+            skin_colors: HashMap::new(),
             image_values: Vec::new(),
             image_target: None,
             metrics: HashMap::new(),
@@ -497,6 +553,8 @@ impl App {
             log_gen: 0,
             log_flag: Arc::new(AtomicU64::new(0)),
             log_tasks: Vec::new(),
+            event_gen: 0,
+            event_task: None,
             pending: None,
             return_mode: Mode::Table,
             return_selection: None,
@@ -505,6 +563,7 @@ impl App {
             rows_cache: RefCell::new(RowsCache {
                 dirty: true,
                 keys: Vec::new(),
+                cells: HashMap::new(),
             }),
         }
     }
@@ -630,6 +689,7 @@ impl App {
         };
         let client = self.cluster.client.clone();
         let tx = self.tx.clone();
+        let genr = self.generation;
         // Namespace this review is computed for (echoed back so a stale result
         // from a previous namespace/context is dropped). SelfSubjectRulesReview
         // needs a concrete namespace, so "" falls back to "default".
@@ -677,10 +737,13 @@ impl App {
             if allowed.is_empty() {
                 return;
             }
-            let _ = tx.send(Msg::Rbac {
-                ns: current_ns,
-                allowed,
-            });
+            let _ = tx
+                .send(Msg::Rbac {
+                    generation: genr,
+                    ns: current_ns,
+                    allowed,
+                })
+                .await;
         });
     }
 
@@ -732,6 +795,7 @@ impl App {
                             generation: genr,
                             data,
                         })
+                        .await
                         .is_err()
                     {
                         break;
@@ -744,6 +808,7 @@ impl App {
     }
 
     fn bump_generation(&mut self) {
+        self.stop_event_stream();
         self.generation += 1;
         self.gen_flag.store(self.generation, Ordering::SeqCst);
         for t in self.tasks.drain(..) {
@@ -755,71 +820,46 @@ impl App {
         match msg {
             Msg::Reset { generation } if generation == self.generation => {
                 self.store.clear();
-                self.invalidate_rows();
+                self.clear_rows_cache();
             }
             Msg::Applied {
                 generation,
                 key,
                 obj,
             } if generation == self.generation => {
-                self.store.apply(key, *obj);
-                self.invalidate_rows();
+                self.store.apply(key.clone(), *obj);
+                self.invalidate_row(&key);
             }
             Msg::Deleted { generation, key } if generation == self.generation => {
                 self.store.remove(&key);
-                self.invalidate_rows();
+                self.invalidate_row(&key);
             }
             Msg::Synced { generation } if generation == self.generation => self.store.synced = true,
             Msg::Error { generation, error } if generation == self.generation => {
                 self.flash = format!("error: {error}");
                 self.flash_err = true;
             }
-            Msg::LogLine { generation, line } if generation == self.log_gen => {
-                // Strip carriage returns so progress output doesn't overwrite a
-                // row, and expand tabs to spaces — many loggers (e.g. Caddy's
-                // console encoder) separate `timestamp<tab>LEVEL<tab>message`
-                // with tabs, which the terminal renders as zero width, gluing
-                // the fields together. Spaces also make in-log search match.
-                self.logs
-                    .view
-                    .lines
-                    .push(line.replace('\r', "").replace('\t', " "));
-                // While following, keep a tight tail buffer. While paused, avoid
-                // trimming so indices don't shift under the frozen view (only a
-                // huge backlog hits the larger paused cap).
-                let cap = if self.logs.follow {
-                    MAX_LOG_LINES
-                } else {
-                    MAX_LOG_LINES_PAUSED
-                };
-                let overflow = self.logs.view.lines.len().saturating_sub(cap);
-                if overflow > 0 {
-                    // If we trim while paused, shift the anchored scroll by the
-                    // display rows the dropped lines occupied on screen —
-                    // filtered lines take none, wrapped lines take several —
-                    // so the frozen view stays put.
-                    if !self.logs.follow {
-                        let filter = self.logs.filter.to_lowercase();
-                        let rows: usize = self.logs.view.lines[..overflow]
-                            .iter()
-                            .filter(|l| filter.is_empty() || l.to_lowercase().contains(&filter))
-                            .map(|l| match self.logs.last_wrap_width {
-                                0 => 1,
-                                w => crate::ui::wrapped_height(l, w),
-                            })
-                            .sum();
-                        self.logs.view.scroll = self.logs.view.scroll.saturating_sub(rows);
-                    }
-                    self.logs.view.lines.drain(0..overflow);
-                }
+            Msg::LogLines { generation, lines } if generation == self.log_gen => {
+                self.push_log_lines(lines);
             }
             Msg::Metrics { generation, data } if generation == self.generation => {
+                let sort_uses_metrics = self
+                    .sort_column
+                    .and_then(|i| self.display_headers().get(i).copied())
+                    .is_some_and(|h| matches!(h, "CPU" | "MEM"));
                 self.metrics = data;
+                if sort_uses_metrics {
+                    self.invalidate_rows();
+                }
             }
             Msg::PulseData { generation, data } if generation == self.generation => {
                 self.pulse = data;
             }
-            Msg::Rbac { ns, allowed } if ns == self.namespace => {
+            Msg::Rbac {
+                generation,
+                ns,
+                allowed,
+            } if generation == self.generation && ns == self.namespace => {
                 self.rbac_allowed = Some(allowed);
             }
             Msg::XrayData { generation, items } if generation == self.generation => {
@@ -836,7 +876,7 @@ impl App {
             } if generation == self.generation => {
                 self.detail = Scrollable {
                     title,
-                    lines,
+                    lines: lines.into(),
                     scroll: 0,
                 };
                 self.mode = Mode::Detail;
@@ -844,14 +884,61 @@ impl App {
                     self.flash_warn(&w);
                 }
             }
-            Msg::Namespaces { list } => {
+            Msg::Events {
+                generation,
+                title,
+                lines,
+            } if generation == self.event_gen => {
+                self.detail.title = title;
+                self.detail.lines = lines.into();
+                self.detail.scroll = self
+                    .detail
+                    .scroll
+                    .min(self.detail.lines.len().saturating_sub(1));
+            }
+            Msg::LogsSaved { generation, result } if generation == self.log_gen => match result {
+                Ok(path) => {
+                    self.flash = format!("saved logs → {}", path.display());
+                    self.flash_err = false;
+                }
+                Err(e) => self.flash_warn(&format!("save failed: {e}")),
+            },
+            Msg::ClipboardCopied {
+                generation,
+                copied,
+                success,
+                failure,
+            } if generation == self.generation => {
+                if copied {
+                    self.flash = success;
+                    self.flash_err = false;
+                } else {
+                    self.flash_warn(&failure);
+                }
+            }
+            Msg::Namespaces { generation, list } if generation == self.generation => {
                 // Keep the picker open and preserve the selection if possible.
                 let keep = self.ns_state.selected().unwrap_or(0);
                 self.ns_list = list;
                 self.ns_state
                     .select(Some(keep.min(self.ns_list.len().saturating_sub(1))));
             }
-            Msg::ContextSwitched { name, result } => match result {
+            Msg::Contexts { generation, list } if generation == self.generation => {
+                if list.is_empty() {
+                    self.mode = Mode::Table;
+                    self.flash_warn("no contexts found in kubeconfig");
+                } else {
+                    let cur = self.cluster.context.clone();
+                    let idx = list.iter().position(|c| *c == cur).unwrap_or(0);
+                    self.ctx_list = list;
+                    self.ctx_state.select(Some(idx));
+                }
+            }
+            Msg::ContextSwitched {
+                generation,
+                name,
+                result,
+            } if generation == self.generation => match result {
                 Ok(cluster) => self.apply_context_switch(name, cluster),
                 Err(e) => self.flash_warn(&format!("context switch failed: {e}")),
             },
@@ -861,9 +948,70 @@ impl App {
 
     // ----- selection -----------------------------------------------------
 
+    fn push_log_lines<I>(&mut self, lines: I)
+    where
+        I: IntoIterator<Item = String>,
+    {
+        // Strip carriage returns so progress output doesn't overwrite a row,
+        // and expand tabs to spaces — many loggers separate timestamp/level/body
+        // with tabs, which some terminals render awkwardly in a TUI cell.
+        self.logs.view.lines.extend(
+            lines
+                .into_iter()
+                .map(|line| line.replace('\r', "").replace('\t', " ")),
+        );
+
+        // While following, keep a tight tail buffer. While paused, avoid
+        // trimming so indices don't shift under the frozen view (only a huge
+        // backlog hits the larger paused cap).
+        let cap = if self.logs.follow {
+            MAX_LOG_LINES
+        } else {
+            MAX_LOG_LINES_PAUSED
+        };
+        let overflow = self.logs.view.lines.len().saturating_sub(cap);
+        if overflow == 0 {
+            return;
+        }
+
+        // If we trim while paused, shift the anchored scroll by the display
+        // rows the dropped lines occupied on screen — filtered lines take none,
+        // wrapped lines take several — so the frozen view stays put.
+        if !self.logs.follow {
+            let filter = self.logs.filter.to_lowercase();
+            let rows: usize = self
+                .logs
+                .view
+                .lines
+                .iter()
+                .take(overflow)
+                .filter(|l| filter.is_empty() || l.to_lowercase().contains(&filter))
+                .map(|l| match self.logs.last_wrap_width {
+                    0 => 1,
+                    w => crate::ui::wrapped_height(l, w),
+                })
+                .sum();
+            self.logs.view.scroll = self.logs.view.scroll.saturating_sub(rows);
+        }
+        self.logs.view.lines.drain(0..overflow);
+    }
+
     /// Mark the cached row order/filter stale. Cheap; safe to over-call.
     fn invalidate_rows(&self) {
         self.rows_cache.borrow_mut().dirty = true;
+    }
+
+    fn clear_rows_cache(&self) {
+        let mut cache = self.rows_cache.borrow_mut();
+        cache.dirty = true;
+        cache.keys.clear();
+        cache.cells.clear();
+    }
+
+    fn invalidate_row(&self, key: &str) {
+        let mut cache = self.rows_cache.borrow_mut();
+        cache.dirty = true;
+        cache.cells.remove(key);
     }
 
     /// Does this object pass the current fuzzy filter?
@@ -892,50 +1040,91 @@ impl App {
             .map(|(_, idx)| idx)
     }
 
+    fn ensure_rows_cache(&self) {
+        let mut cache = self.rows_cache.borrow_mut();
+        if !cache.dirty {
+            return;
+        }
+
+        let headers = self.display_headers();
+        let sort_header = self.sort_column.and_then(|i| headers.get(i).copied());
+        // (primary sort key, (ns, name) tiebreak, store key)
+        let mut entries: Vec<(SortKey, (String, String), String)> = self
+            .store
+            .iter()
+            .filter(|(_, o)| self.matches_filter(o))
+            .map(|(k, o)| {
+                let primary = match sort_header {
+                    Some(h) => self.column_sort_key(o, h),
+                    None => SortKey::Text(String::new()),
+                };
+                let tie = (
+                    o.metadata.namespace.clone().unwrap_or_default(),
+                    o.metadata.name.clone().unwrap_or_default(),
+                );
+                (primary, tie, k.clone())
+            })
+            .collect();
+        let desc = self.sort_desc && sort_header.is_some();
+        entries.sort_by(|a, b| {
+            let mut ord = a.0.cmp_to(&b.0);
+            if desc {
+                ord = ord.reverse();
+            }
+            // Ties always fall back to namespace/name ascending.
+            ord.then_with(|| a.1.cmp(&b.1))
+        });
+        cache.keys = entries.into_iter().map(|(_, _, k)| k).collect();
+        cache.dirty = false;
+    }
+
+    /// Display-ordered, filtered row count, backed by the same cache as
+    /// [`rows`]. Use this when only the count is needed so a frame doesn't
+    /// rebuild a temporary `Vec<&DynamicObject>` just to call `len()`.
+    pub fn row_count(&self) -> usize {
+        self.ensure_rows_cache();
+        self.rows_cache.borrow().keys.len()
+    }
+
     /// Display-ordered, filtered rows. Backed by a cache that only recomputes
     /// the sort + fuzzy filter when the store, filter, or sort changes.
     pub fn rows(&self) -> Vec<&DynamicObject> {
-        {
-            let mut cache = self.rows_cache.borrow_mut();
-            if cache.dirty {
-                let headers = self.display_headers();
-                let sort_header = self.sort_column.and_then(|i| headers.get(i).copied());
-                // (primary sort key, (ns, name) tiebreak, store key)
-                let mut entries: Vec<(SortKey, (String, String), String)> = self
-                    .store
-                    .iter()
-                    .filter(|(_, o)| self.matches_filter(o))
-                    .map(|(k, o)| {
-                        let primary = match sort_header {
-                            Some(h) => self.column_sort_key(o, h),
-                            None => SortKey::Text(String::new()),
-                        };
-                        let tie = (
-                            o.metadata.namespace.clone().unwrap_or_default(),
-                            o.metadata.name.clone().unwrap_or_default(),
-                        );
-                        (primary, tie, k.clone())
-                    })
-                    .collect();
-                let desc = self.sort_desc && sort_header.is_some();
-                entries.sort_by(|a, b| {
-                    let mut ord = a.0.cmp_to(&b.0);
-                    if desc {
-                        ord = ord.reverse();
-                    }
-                    // Ties always fall back to namespace/name ascending.
-                    ord.then_with(|| a.1.cmp(&b.1))
-                });
-                cache.keys = entries.into_iter().map(|(_, _, k)| k).collect();
-                cache.dirty = false;
-            }
-        }
+        self.ensure_rows_cache();
         self.rows_cache
             .borrow()
             .keys
             .iter()
             .filter_map(|k| self.store.get(k))
             .collect()
+    }
+
+    pub(crate) fn ensure_table_cell_cache(&self, rows: &[&DynamicObject]) {
+        let mut cache = self.rows_cache.borrow_mut();
+        for obj in rows {
+            let key = row_key(obj);
+            let resource_version = obj.metadata.resource_version.clone();
+            let stale = cache.cells.get(&key).is_none_or(|entry| {
+                entry.plural != self.kind_plural || entry.resource_version != resource_version
+            });
+            if stale {
+                let (cells, status_idx) = crate::columns::cells(obj, &self.kind_plural);
+                cache.cells.insert(
+                    key,
+                    CellCacheEntry {
+                        plural: self.kind_plural.clone(),
+                        resource_version,
+                        cells,
+                        status_idx,
+                    },
+                );
+            }
+        }
+    }
+
+    pub(crate) fn table_cell_cache(&self) -> TableCellCache<'_> {
+        TableCellCache {
+            cache: self.rows_cache.borrow(),
+        }
     }
 
     /// The headers as displayed: kind columns, with NAMESPACE prepended when
@@ -1063,16 +1252,32 @@ impl App {
         self.flash_err = false;
     }
 
-    pub fn selected(&self) -> Option<DynamicObject> {
+    pub fn selected_ref(&self) -> Option<&DynamicObject> {
         let rows = self.rows();
         let idx = self.table_state.selected()?;
-        rows.get(idx).map(|o| (*o).clone())
+        rows.get(idx).copied()
+    }
+
+    pub fn selected(&self) -> Option<DynamicObject> {
+        self.selected_ref().cloned()
+    }
+
+    pub fn confirm_allows_force_toggle(&self) -> bool {
+        matches!(
+            self.confirm_action,
+            Some(ConfirmAction::Delete {
+                targets: _,
+                force: _
+            })
+        )
     }
 
     /// Toggle the mark on the current row (SPACE).
     fn toggle_mark(&mut self) {
-        let Some(obj) = self.selected() else { return };
-        let key = row_key(&obj);
+        let Some(obj) = self.selected_ref() else {
+            return;
+        };
+        let key = row_key(obj);
         if !self.marked.remove(&key) {
             self.marked.insert(key);
         }
@@ -1089,12 +1294,20 @@ impl App {
             )
         };
         if self.marked.is_empty() {
-            return self.selected().as_ref().map(to_pair).into_iter().collect();
+            return self.selected_ref().map(to_pair).into_iter().collect();
         }
         self.rows()
             .iter()
             .filter(|o| self.marked.contains(&row_key(o)))
             .map(|o| to_pair(o))
+            .collect()
+    }
+
+    fn node_action_targets(&self) -> Vec<String> {
+        self.action_targets()
+            .into_iter()
+            .map(|(name, _)| name)
+            .filter(|name| !name.is_empty())
             .collect()
     }
 
@@ -1288,7 +1501,7 @@ impl App {
             Mode::Table
         };
         // Remember the selected row so we can land back on it.
-        self.return_selection = self.selected().map(|o| row_key(&o));
+        self.return_selection = self.selected_ref().map(row_key);
     }
 
     /// Re-select the row remembered by [`set_return_mode`], by identity, so the
@@ -1304,13 +1517,13 @@ impl App {
 
     fn open_detail(&mut self) {
         self.set_return_mode();
-        let Some(obj) = self.selected() else {
+        let Some(obj) = self.selected_ref() else {
             return;
         };
         let title = obj.metadata.name.clone().unwrap_or_else(|| "object".into());
         self.detail = Scrollable {
             title: format!("{title} — YAML"),
-            lines: self.object_yaml(&obj),
+            lines: self.object_yaml(obj).into(),
             scroll: 0,
         };
         self.mode = Mode::Detail;
@@ -1321,14 +1534,16 @@ impl App {
     /// or fails. The result arrives as `Msg::Detail`.
     fn describe(&mut self) {
         self.set_return_mode();
-        let Some(obj) = self.selected() else { return };
+        let Some(obj) = self.selected_ref() else {
+            return;
+        };
         let name = obj.metadata.name.clone().unwrap_or_default();
         let plural = self.kind_plural.clone();
         let ns = obj.metadata.namespace.clone();
 
         // Compute the YAML fallback up front while we hold the object; the
         // selection may change before the describe completes.
-        let yaml = self.object_yaml(&obj);
+        let yaml = self.object_yaml(obj);
         let yaml_title = format!("{name} — YAML");
 
         let tx = self.tx.clone();
@@ -1375,7 +1590,7 @@ impl App {
                     warn: Some("kubectl not found; showing YAML".into()),
                 },
             };
-            let _ = tx.send(msg);
+            let _ = tx.send(msg).await;
         });
     }
 
@@ -1445,10 +1660,110 @@ impl App {
         }
         self.detail = Scrollable {
             title: format!("{name} — diff (last-applied → live)"),
-            lines,
+            lines: lines.into(),
             scroll: 0,
         };
         self.mode = Mode::Diff;
+    }
+
+    /// Live Events for the selected object, filtered by object UID when
+    /// available. Uses the discovered `events` resource, so core/v1 Events are
+    /// preferred but events.k8s.io clusters still work.
+    fn open_events(&mut self) {
+        self.set_return_mode();
+        let Some(obj) = self.selected_ref() else {
+            self.flash_warn("no selection for events");
+            return;
+        };
+        let Some(kind) = self.cluster.resolve("events") else {
+            self.flash_warn("events kind unavailable");
+            return;
+        };
+
+        let name = obj.metadata.name.clone().unwrap_or_default();
+        let ns = obj.metadata.namespace.clone().unwrap_or_default();
+        let title = format!("{name} — events");
+        let field = if kind.ar.group == "events.k8s.io" {
+            "regarding"
+        } else {
+            "involvedObject"
+        };
+        let selector = obj
+            .metadata
+            .uid
+            .as_ref()
+            .filter(|uid| !uid.is_empty())
+            .map(|uid| format!("{field}.uid={uid}"))
+            .unwrap_or_else(|| {
+                let mut parts = vec![format!("{field}.name={name}")];
+                if !ns.is_empty() {
+                    parts.push(format!("{field}.namespace={ns}"));
+                }
+                parts.join(",")
+            });
+
+        self.stop_event_stream();
+        let genr = self.event_gen;
+        self.detail = Scrollable {
+            title: title.clone(),
+            lines: vec!["loading events…".into()].into(),
+            scroll: 0,
+        };
+        self.flash = format!("events: {name}");
+        self.flash_err = false;
+        self.mode = Mode::Events;
+
+        let client = self.cluster.client.clone();
+        let tx = self.tx.clone();
+        let ar = kind.ar.clone();
+        let namespaced = kind.namespaced;
+        let watch_ns = ns;
+        let is_events_v1 = ar.group == "events.k8s.io";
+        let handle = tokio::spawn(async move {
+            let api: Api<DynamicObject> = if namespaced && !watch_ns.is_empty() {
+                Api::namespaced_with(client, &watch_ns, &ar)
+            } else {
+                Api::all_with(client, &ar)
+            };
+            let cfg = watcher::Config::default().any_semantic().fields(&selector);
+            let mut stream = watcher(api, cfg).boxed();
+            let mut items: HashMap<String, DynamicObject> = HashMap::new();
+
+            while let Some(event) = stream.next().await {
+                match event {
+                    Ok(watcher::Event::Init) => items.clear(),
+                    Ok(watcher::Event::Apply(obj)) | Ok(watcher::Event::InitApply(obj)) => {
+                        items.insert(row_key(&obj), obj);
+                    }
+                    Ok(watcher::Event::Delete(obj)) => {
+                        items.remove(&row_key(&obj));
+                    }
+                    Ok(watcher::Event::InitDone) => {}
+                    Err(e) => {
+                        let _ = tx
+                            .send(Msg::Events {
+                                generation: genr,
+                                title: title.clone(),
+                                lines: vec![format!("error: {e}")],
+                            })
+                            .await;
+                        continue;
+                    }
+                }
+
+                if !send_event_snapshot(&tx, genr, &title, &items, is_events_v1).await {
+                    break;
+                }
+            }
+        });
+        self.event_task = Some(handle);
+    }
+
+    fn stop_event_stream(&mut self) {
+        self.event_gen += 1;
+        if let Some(task) = self.event_task.take() {
+            task.abort();
+        }
     }
 
     // ----- containers / logs --------------------------------------------
@@ -1471,13 +1786,15 @@ impl App {
     /// Logs for the current selection. For pods: stream every container. For
     /// workloads/services: list matching pods and aggregate all their logs.
     fn open_logs(&mut self) {
-        let Some(obj) = self.selected() else { return };
+        let Some(obj) = self.selected_ref() else {
+            return;
+        };
         let name = obj.metadata.name.clone().unwrap_or_default();
         let ns = obj.metadata.namespace.clone().unwrap_or_default();
 
         match self.kind_plural.as_str() {
             "pods" => {
-                let containers = container_names(&obj);
+                let containers = container_names(obj);
                 self.launch_logs(
                     LogSource::Pod {
                         ns,
@@ -1488,7 +1805,7 @@ impl App {
                 );
             }
             "deployments" | "statefulsets" | "daemonsets" | "replicasets" | "jobs" => {
-                match label_selector(&obj, "matchLabels") {
+                match label_selector(obj, "matchLabels") {
                     Some(labels) => self.launch_logs(
                         LogSource::Selector { ns, labels },
                         format!("{}/{name} — logs (all pods)", trim_s(&self.kind_plural)),
@@ -1496,7 +1813,7 @@ impl App {
                     None => self.flash_warn("no pod selector for logs"),
                 }
             }
-            "services" => match label_selector(&obj, "selector") {
+            "services" => match label_selector(obj, "selector") {
                 Some(labels) => self.launch_logs(
                     LogSource::Selector { ns, labels },
                     format!("svc/{name} — logs (all pods)"),
@@ -1516,7 +1833,7 @@ impl App {
         // the selection is preserved. Log streams have their own lifecycle.
         self.logs.view = Scrollable {
             title,
-            lines: Vec::new(),
+            lines: VecDeque::new(),
             scroll: 0,
         };
         self.logs.follow = true;
@@ -1603,7 +1920,6 @@ impl App {
         let genr = self.log_gen;
         let flag = self.log_flag.clone();
         let handle = tokio::spawn(async move {
-            use futures_util::{AsyncBufReadExt, TryStreamExt};
             let api: Api<Pod> = Api::namespaced(client, &ns);
             let lp = LogParams {
                 follow: !previous,
@@ -1613,32 +1929,7 @@ impl App {
                 tail_lines: if previous { None } else { Some(300) },
                 ..Default::default()
             };
-            match api.log_stream(&pod, &lp).await {
-                Ok(stream) => {
-                    let mut lines = stream.lines();
-                    while let Ok(Some(line)) = lines.try_next().await {
-                        if flag.load(Ordering::SeqCst) != genr {
-                            break;
-                        }
-                        if tx
-                            .send(Msg::LogLine {
-                                generation: genr,
-                                line: format!("{prefix}{line}"),
-                            })
-                            .is_err()
-                        {
-                            break;
-                        }
-                    }
-                }
-                Err(e) => {
-                    // Surface stream errors in the log view itself.
-                    let _ = tx.send(Msg::LogLine {
-                        generation: genr,
-                        line: format!("[error] {e}"),
-                    });
-                }
-            }
+            forward_log_stream(api, pod, lp, prefix, tx, genr, flag).await;
         });
         self.log_tasks.push(handle);
     }
@@ -1649,7 +1940,6 @@ impl App {
         let genr = self.log_gen;
         let flag = self.log_flag.clone();
         let handle = tokio::spawn(async move {
-            use futures_util::{AsyncBufReadExt, TryStreamExt};
             let list_api: Api<Pod> = if ns.is_empty() {
                 Api::all(client.clone())
             } else {
@@ -1658,19 +1948,24 @@ impl App {
             let pods = match list_api.list(&ListParams::default().labels(&labels)).await {
                 Ok(p) => p,
                 Err(e) => {
-                    let _ = tx.send(Msg::LogLine {
-                        generation: genr,
-                        line: format!("[error] {e}"),
-                    });
+                    let _ = tx
+                        .send(Msg::LogLines {
+                            generation: genr,
+                            lines: vec![format!("[error] {e}")],
+                        })
+                        .await;
                     return;
                 }
             };
             if pods.items.is_empty() {
-                let _ = tx.send(Msg::LogLine {
-                    generation: genr,
-                    line: "(no matching pods)".into(),
-                });
+                let _ = tx
+                    .send(Msg::LogLines {
+                        generation: genr,
+                        lines: vec!["(no matching pods)".into()],
+                    })
+                    .await;
             }
+            let mut streams = tokio::task::JoinSet::new();
             for p in pods {
                 let pod_ns = p.metadata.namespace.clone().unwrap_or_default();
                 let pod_name = p.metadata.name.clone().unwrap_or_default();
@@ -1688,7 +1983,7 @@ impl App {
                     };
                     let (client, tx, flag) = (client.clone(), tx.clone(), flag.clone());
                     let (pn, pns) = (pod_name.clone(), pod_ns.clone());
-                    tokio::spawn(async move {
+                    streams.spawn(async move {
                         let api: Api<Pod> = Api::namespaced(client, &pns);
                         let lp = LogParams {
                             follow: true,
@@ -1697,24 +1992,13 @@ impl App {
                             tail_lines: Some(100),
                             ..Default::default()
                         };
-                        if let Ok(stream) = api.log_stream(&pn, &lp).await {
-                            let mut lines = stream.lines();
-                            while let Ok(Some(line)) = lines.try_next().await {
-                                if flag.load(Ordering::SeqCst) != genr {
-                                    break;
-                                }
-                                if tx
-                                    .send(Msg::LogLine {
-                                        generation: genr,
-                                        line: format!("{prefix}{line}"),
-                                    })
-                                    .is_err()
-                                {
-                                    break;
-                                }
-                            }
-                        }
+                        forward_log_stream(api, pn, lp, prefix, tx, genr, flag).await;
                     });
+                }
+            }
+            while streams.join_next().await.is_some() {
+                if flag.load(Ordering::SeqCst) != genr {
+                    break;
                 }
             }
         });
@@ -1728,24 +2012,40 @@ impl App {
         if targets.is_empty() {
             return;
         }
-        let verb = if force {
-            "Kill (force-delete)"
-        } else {
-            "Delete"
-        };
-        self.confirm_label = if targets.len() == 1 {
-            let (name, ns) = &targets[0];
-            let where_ns = if ns.is_empty() {
-                String::new()
-            } else {
-                format!(" in {ns}")
-            };
-            format!("{verb} {} {name}{where_ns}?", trim_s(&self.kind_plural))
-        } else {
-            format!("{verb} {} {}?", targets.len(), self.kind_plural)
-        };
+        self.confirm_label = delete_confirm_label(&self.kind_plural, &targets, force);
         self.confirm_action = Some(ConfirmAction::Delete { targets, force });
         self.mode = Mode::Confirm;
+    }
+
+    fn spawn_patch_action<F>(
+        &self,
+        kind: Kind,
+        targets: Vec<(String, String)>,
+        patch: Patch<Value>,
+        error_message: F,
+    ) where
+        F: Fn(&str, kube::Error) -> String + Send + 'static,
+    {
+        let client = self.cluster.client.clone();
+        let tx = self.tx.clone();
+        let genr = self.generation;
+        tokio::spawn(async move {
+            for (name, ns) in targets {
+                let api: Api<DynamicObject> = if kind.namespaced && !ns.is_empty() {
+                    Api::namespaced_with(client.clone(), &ns, &kind.ar)
+                } else {
+                    Api::all_with(client.clone(), &kind.ar)
+                };
+                if let Err(e) = api.patch(&name, &PatchParams::default(), &patch).await {
+                    let _ = tx
+                        .send(Msg::Error {
+                            generation: genr,
+                            error: error_message(&name, e),
+                        })
+                        .await;
+                }
+            }
+        });
     }
 
     fn do_delete(&mut self, targets: Vec<(String, String)>, force: bool) {
@@ -1773,10 +2073,159 @@ impl App {
                     Api::all_with(client.clone(), &kind.ar)
                 };
                 if let Err(e) = api.delete(&name, &dp).await {
-                    let _ = tx.send(Msg::Error {
-                        generation: genr,
-                        error: format!("delete {name} failed: {e}"),
-                    });
+                    let _ = tx
+                        .send(Msg::Error {
+                            generation: genr,
+                            error: format!("delete {name} failed: {e}"),
+                        })
+                        .await;
+                }
+            }
+        });
+    }
+
+    fn request_cordon(&mut self, unschedulable: bool) {
+        if self.kind_plural != "nodes" {
+            self.flash_warn("cordon/uncordon applies to nodes");
+            return;
+        }
+        let targets = self.node_action_targets();
+        if targets.is_empty() {
+            return;
+        }
+        self.do_cordon_nodes(targets, unschedulable);
+    }
+
+    fn do_cordon_nodes(&mut self, targets: Vec<String>, unschedulable: bool) {
+        let Some(kind) = self.kind.clone() else {
+            return;
+        };
+        let verb = if unschedulable {
+            "cordoning"
+        } else {
+            "uncordoning"
+        };
+        self.flash = if targets.len() == 1 {
+            format!("{verb} {}…", targets[0])
+        } else {
+            format!("{verb} {} nodes…", targets.len())
+        };
+        self.flash_err = false;
+        let targets = targets
+            .into_iter()
+            .map(|name| (name, String::new()))
+            .collect();
+        self.spawn_patch_action(
+            kind,
+            targets,
+            Patch::Merge(node_unschedulable_patch(unschedulable)),
+            move |name, e| format!("{verb} {name} failed: {e}"),
+        );
+    }
+
+    fn request_drain(&mut self) {
+        if self.kind_plural != "nodes" {
+            self.flash_warn("drain applies to nodes");
+            return;
+        }
+        let targets = self.node_action_targets();
+        if targets.is_empty() {
+            return;
+        }
+        self.confirm_label = if targets.len() == 1 {
+            format!("Drain node {}? Cordon and evict eligible pods.", targets[0])
+        } else {
+            format!(
+                "Drain {} nodes? Cordon and evict eligible pods.",
+                targets.len()
+            )
+        };
+        self.confirm_action = Some(ConfirmAction::Drain { targets });
+        self.mode = Mode::Confirm;
+    }
+
+    fn do_drain_nodes(&mut self, targets: Vec<String>) {
+        let Some(kind) = self.kind.clone() else {
+            return;
+        };
+        let client = self.cluster.client.clone();
+        let tx = self.tx.clone();
+        let genr = self.generation;
+        self.flash = if targets.len() == 1 {
+            format!("draining {}…", targets[0])
+        } else {
+            format!("draining {} nodes…", targets.len())
+        };
+        self.flash_err = false;
+        tokio::spawn(async move {
+            let nodes: Api<DynamicObject> = Api::all_with(client.clone(), &kind.ar);
+            let node_patch = Patch::Merge(node_unschedulable_patch(true));
+            let pods: Api<Pod> = Api::all(client.clone());
+            for node in targets {
+                if let Err(e) = nodes
+                    .patch(&node, &PatchParams::default(), &node_patch)
+                    .await
+                {
+                    let _ = tx
+                        .send(Msg::Error {
+                            generation: genr,
+                            error: format!("drain {node}: cordon failed: {e}"),
+                        })
+                        .await;
+                    continue;
+                }
+
+                let listed = pods
+                    .list(&ListParams::default().fields(&format!("spec.nodeName={node}")))
+                    .await;
+                let pod_list = match listed {
+                    Ok(list) => list,
+                    Err(e) => {
+                        let _ = tx
+                            .send(Msg::Error {
+                                generation: genr,
+                                error: format!("drain {node}: list pods failed: {e}"),
+                            })
+                            .await;
+                        continue;
+                    }
+                };
+
+                for pod in pod_list.items.iter().filter(|pod| drainable_pod(pod)) {
+                    let Some(name) = pod.metadata.name.as_deref() else {
+                        continue;
+                    };
+                    let ns = pod.metadata.namespace.as_deref().unwrap_or("default");
+                    let pod_api: Api<Pod> = Api::namespaced(client.clone(), ns);
+                    let evict = EvictParams {
+                        delete_options: Some(DeleteParams::default()),
+                        ..Default::default()
+                    };
+                    match pod_api.evict(name, &evict).await {
+                        Ok(_) => {}
+                        Err(e) if eviction_unsupported(&e) => {
+                            if let Err(delete_err) =
+                                pod_api.delete(name, &DeleteParams::default()).await
+                            {
+                                let _ = tx
+                                    .send(Msg::Error {
+                                        generation: genr,
+                                        error: format!(
+                                            "drain {node}: delete {ns}/{name} failed after eviction fallback: {delete_err}"
+                                        ),
+                                    })
+                                    .await;
+                            }
+                        }
+                        Err(e) => {
+                            let _ = tx
+                                .send(Msg::Error {
+                                    generation: genr,
+                                    error: format!("drain {node}: evict {ns}/{name} failed: {e}"),
+                                })
+                                .await;
+                        }
+                    }
                 }
             }
         });
@@ -1787,7 +2236,9 @@ impl App {
             self.flash_warn("attach is only available for pods");
             return;
         }
-        let Some(obj) = self.selected() else { return };
+        let Some(obj) = self.selected_ref() else {
+            return;
+        };
         let name = obj.metadata.name.clone().unwrap_or_default();
         let ns = obj.metadata.namespace.clone().unwrap_or_default();
         let mut argv = self.kubectl_base();
@@ -1801,12 +2252,15 @@ impl App {
             self.flash_warn("'o' shows the node for a pod");
             return;
         }
-        let Some(obj) = self.selected() else { return };
+        let Some(obj) = self.selected_ref() else {
+            return;
+        };
         let Some(node) = obj.data.pointer("/spec/nodeName").and_then(Value::as_str) else {
             self.flash_warn("pod has no node assigned");
             return;
         };
         let node = node.to_string();
+        let pod_name = obj.metadata.name.clone().unwrap_or_default();
         let Some(nodes) = self.cluster.resolve("nodes") else {
             self.flash_warn("nodes kind unavailable");
             return;
@@ -1817,7 +2271,7 @@ impl App {
         self.namespace = String::new();
         self.labels = None;
         self.fields = Some(format!("metadata.name={node}"));
-        self.scope_label = Some(format!("host of {}", obj.metadata.name.unwrap_or_default()));
+        self.scope_label = Some(format!("host of {pod_name}"));
         self.filter.clear();
         self.reset_sort();
         self.table_state.select(Some(0));
@@ -1826,7 +2280,9 @@ impl App {
 
     /// Jump to the selected object's controller/owner (k9s Shift-J).
     fn jump_owner(&mut self) {
-        let Some(obj) = self.selected() else { return };
+        let Some(obj) = self.selected_ref() else {
+            return;
+        };
         let owners = obj
             .metadata
             .owner_references
@@ -1842,16 +2298,14 @@ impl App {
         };
         let ns = obj.metadata.namespace.clone().unwrap_or_default();
         let owner_name = owner.name.clone();
+        let child_name = obj.metadata.name.clone().unwrap_or_default();
         self.push_frame();
         self.kind_plural = kind.ar.plural.to_lowercase();
         self.kind = Some(kind);
         self.namespace = ns;
         self.labels = None;
         self.fields = Some(format!("metadata.name={owner_name}"));
-        self.scope_label = Some(format!(
-            "owner of {}",
-            obj.metadata.name.unwrap_or_default()
-        ));
+        self.scope_label = Some(format!("owner of {child_name}"));
         self.filter.clear();
         self.reset_sort();
         self.table_state.select(Some(0));
@@ -1860,32 +2314,28 @@ impl App {
 
     /// Copy the (filtered) log buffer to the clipboard (k9s `c` in logs).
     fn copy_logs(&mut self) {
-        let f = self.logs.filter.to_lowercase();
-        let text = self
-            .logs
-            .view
-            .lines
-            .iter()
-            .filter(|l| f.is_empty() || l.to_lowercase().contains(&f))
-            .cloned()
-            .collect::<Vec<_>>()
-            .join("\n");
+        let text = self.filtered_log_text();
         if text.is_empty() {
             self.flash_warn("no log lines to copy");
             return;
         }
         let n = text.lines().count();
-        if copy_to_clipboard(&text) {
-            self.flash = format!("copied {n} log lines");
-            self.flash_err = false;
-        } else {
-            self.flash_warn("no clipboard tool found (pbcopy/xclip/wl-copy)");
-        }
+        self.copy_to_clipboard_async(
+            text,
+            format!("copied {n} log lines"),
+            "no clipboard target found (pbcopy/xclip/wl-copy/OSC 52)",
+        );
     }
 
-    /// Save the log buffer to a temp file (k9s Ctrl-S).
+    /// Save the filtered log buffer to a temp file (k9s Ctrl-S).
     fn save_logs(&mut self) {
-        let text = self.logs.view.lines.join("\n");
+        let text = self.filtered_log_text();
+        if text.is_empty() {
+            self.flash_warn("no log lines to save");
+            return;
+        }
+        let genr = self.log_gen;
+        let tx = self.tx.clone();
         let ts = k8s_openapi::jiff::Timestamp::now().as_second();
         let safe: String = self
             .logs
@@ -1895,25 +2345,62 @@ impl App {
             .map(|c| if c.is_alphanumeric() { c } else { '-' })
             .collect();
         let path = std::env::temp_dir().join(format!("sofka-{safe}-{ts}.log"));
-        match std::fs::write(&path, text) {
-            Ok(_) => {
-                self.flash = format!("saved logs → {}", path.display());
-                self.flash_err = false;
-            }
-            Err(e) => self.flash_warn(&format!("save failed: {e}")),
-        }
+        tokio::spawn(async move {
+            let result = tokio::fs::write(&path, text)
+                .await
+                .map(|_| path)
+                .map_err(|e| e.to_string());
+            let _ = tx
+                .send(Msg::LogsSaved {
+                    generation: genr,
+                    result,
+                })
+                .await;
+        });
+    }
+
+    fn filtered_log_text(&self) -> String {
+        let f = self.logs.filter.to_lowercase();
+        self.logs
+            .view
+            .lines
+            .iter()
+            .filter(|l| f.is_empty() || l.to_lowercase().contains(&f))
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 
     /// Copy the selected resource's name to the system clipboard (k9s `c`).
     fn copy_name(&mut self) {
-        let Some(obj) = self.selected() else { return };
+        let Some(obj) = self.selected_ref() else {
+            return;
+        };
         let name = obj.metadata.name.clone().unwrap_or_default();
-        if copy_to_clipboard(&name) {
-            self.flash = format!("copied: {name}");
-            self.flash_err = false;
-        } else {
-            self.flash_warn("no clipboard tool found (pbcopy/xclip/wl-copy)");
-        }
+        self.copy_to_clipboard_async(
+            name.clone(),
+            format!("copied: {name}"),
+            "no clipboard target found (pbcopy/xclip/wl-copy/OSC 52)",
+        );
+    }
+
+    fn copy_to_clipboard_async(&self, text: String, success: String, failure: &str) {
+        let tx = self.tx.clone();
+        let genr = self.generation;
+        let failure = failure.to_string();
+        tokio::spawn(async move {
+            let copied = tokio::task::spawn_blocking(move || copy_to_clipboard(&text))
+                .await
+                .unwrap_or(false);
+            let _ = tx
+                .send(Msg::ClipboardCopied {
+                    generation: genr,
+                    copied,
+                    success,
+                    failure,
+                })
+                .await;
+        });
     }
 
     /// Previous-container logs for the selected pod (k9s `p` on a pod row).
@@ -1922,10 +2409,12 @@ impl App {
             self.flash_warn("previous logs are for pods (use the container picker elsewhere)");
             return;
         }
-        let Some(obj) = self.selected() else { return };
+        let Some(obj) = self.selected_ref() else {
+            return;
+        };
         let name = obj.metadata.name.clone().unwrap_or_default();
         let ns = obj.metadata.namespace.clone().unwrap_or_default();
-        let containers = container_names(&obj);
+        let containers = container_names(obj);
         let container = containers.into_iter().next();
         self.launch_logs(
             LogSource::Single {
@@ -1940,32 +2429,23 @@ impl App {
 
     /// Rollout-restart a workload by stamping the template annotation (k9s `r`).
     fn request_restart(&mut self) {
-        let Some(obj) = self.selected() else { return };
+        let Some(obj) = self.selected_ref() else {
+            return;
+        };
         let Some(kind) = self.kind.clone() else {
             return;
         };
         let name = obj.metadata.name.clone().unwrap_or_default();
         let ns = obj.metadata.namespace.clone().unwrap_or_default();
         let now = k8s_openapi::jiff::Timestamp::now().to_string();
-        let client = self.cluster.client.clone();
-        let tx = self.tx.clone();
-        let genr = self.generation;
         self.flash = format!("restarting {name}…");
         self.flash_err = false;
-        tokio::spawn(async move {
-            let api: Api<DynamicObject> = Api::namespaced_with(client, &ns, &kind.ar);
-            let patch = Patch::Strategic(json!({
-                "spec": { "template": { "metadata": { "annotations": {
-                    "kubectl.kubernetes.io/restartedAt": now
-                }}}}
-            }));
-            if let Err(e) = api.patch(&name, &PatchParams::default(), &patch).await {
-                let _ = tx.send(Msg::Error {
-                    generation: genr,
-                    error: format!("restart failed: {e}"),
-                });
-            }
-        });
+        self.spawn_patch_action(
+            kind,
+            vec![(name, ns)],
+            Patch::Strategic(restart_patch(&now)),
+            |_, e| format!("restart failed: {e}"),
+        );
     }
 
     /// Open the Set-Image picker for the selected workload/pod (k9s `i`).
@@ -1983,7 +2463,9 @@ impl App {
             self.flash_warn("set image applies to pods and workload controllers");
             return;
         }
-        let Some(obj) = self.selected() else { return };
+        let Some(obj) = self.selected_ref() else {
+            return;
+        };
         let ptr = if is_pod {
             "/spec/containers"
         } else {
@@ -2013,13 +2495,14 @@ impl App {
             self.flash_warn("no containers found");
             return;
         }
-        self.container_list = names;
-        self.image_values = images;
-        self.image_target = Some((
+        let target = (
             obj.metadata.namespace.clone().unwrap_or_default(),
             obj.metadata.name.clone().unwrap_or_default(),
             self.kind_plural.clone(),
-        ));
+        );
+        self.container_list = names;
+        self.image_values = images;
+        self.image_target = Some(target);
         self.container_state.select(Some(0));
         self.mode = Mode::SetImage;
     }
@@ -2061,31 +2544,20 @@ impl App {
         let Some(kind) = self.kind.clone() else {
             return;
         };
-        let client = self.cluster.client.clone();
-        let tx = self.tx.clone();
-        let genr = self.generation;
-        let containers = json!([{ "name": container, "image": image }]);
-        let patch_doc = if plural == "pods" {
-            json!({ "spec": { "containers": containers } })
-        } else {
-            json!({ "spec": { "template": { "spec": { "containers": containers } } } })
-        };
         self.flash = format!("setting image: {container} → {image}");
         self.flash_err = false;
-        tokio::spawn(async move {
-            let api: Api<DynamicObject> = Api::namespaced_with(client, &ns, &kind.ar);
-            let patch = Patch::Strategic(patch_doc);
-            if let Err(e) = api.patch(&name, &PatchParams::default(), &patch).await {
-                let _ = tx.send(Msg::Error {
-                    generation: genr,
-                    error: format!("set image failed: {e}"),
-                });
-            }
-        });
+        self.spawn_patch_action(
+            kind,
+            vec![(name, ns)],
+            Patch::Strategic(set_image_patch(&plural, &container, &image)),
+            |_, e| format!("set image failed: {e}"),
+        );
     }
 
     fn request_edit(&mut self) {
-        let Some(obj) = self.selected() else { return };
+        let Some(obj) = self.selected_ref() else {
+            return;
+        };
         let name = obj.metadata.name.clone().unwrap_or_default();
         let mut argv = self.kubectl_base();
         argv.extend(["edit".into(), self.kind_plural.clone(), name]);
@@ -2101,7 +2573,9 @@ impl App {
             self.flash_warn("shell is only available for pods");
             return;
         }
-        let Some(obj) = self.selected() else { return };
+        let Some(obj) = self.selected_ref() else {
+            return;
+        };
         let name = obj.metadata.name.clone().unwrap_or_default();
         let ns = obj.metadata.namespace.clone().unwrap_or_default();
         let mut argv = self.kubectl_base();
@@ -2127,7 +2601,9 @@ impl App {
             self.flash_warn("scale applies to deployments/statefulsets/replicasets");
             return;
         }
-        let Some(obj) = self.selected() else { return };
+        let Some(obj) = self.selected_ref() else {
+            return;
+        };
         let name = obj.metadata.name.clone().unwrap_or_default();
         let ns = obj.metadata.namespace.clone().unwrap_or_default();
         let cur = obj
@@ -2142,7 +2618,9 @@ impl App {
     }
 
     fn request_port_forward(&mut self) {
-        let Some(obj) = self.selected() else { return };
+        let Some(obj) = self.selected_ref() else {
+            return;
+        };
         if !matches!(self.kind_plural.as_str(), "pods" | "services") {
             self.flash_warn("port-forward applies to pods/services");
             return;
@@ -2224,6 +2702,51 @@ impl App {
         }
     }
 
+    fn open_skins(&mut self) {
+        self.skin_state.select(if self.skin_list.is_empty() {
+            None
+        } else {
+            Some(0)
+        });
+        self.mode = Mode::Skins;
+    }
+
+    fn key_skins(&mut self, key: KeyEvent) {
+        let len = self.skin_list.len();
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('q') => self.mode = Mode::Table,
+            KeyCode::Char('j') | KeyCode::Down => list_step(&mut self.skin_state, len, true),
+            KeyCode::Char('k') | KeyCode::Up => list_step(&mut self.skin_state, len, false),
+            KeyCode::Enter => {
+                if let Some(name) = self
+                    .skin_state
+                    .selected()
+                    .and_then(|i| self.skin_list.get(i).cloned())
+                {
+                    self.apply_skin(&name);
+                }
+                self.mode = Mode::Table;
+            }
+            _ => {}
+        }
+    }
+
+    fn apply_skin(&mut self, name: &str) {
+        let name = name.trim();
+        if name.is_empty() {
+            self.open_skins();
+            return;
+        }
+        if crate::theme::builtin(&name.to_ascii_lowercase()).is_none() {
+            self.flash_warn(&format!("unknown skin: {name}"));
+            return;
+        }
+        let palette = crate::theme::resolve_skin(Some(name), &self.skin_colors);
+        crate::theme::set(palette);
+        self.flash = format!("skin: {name}");
+        self.flash_err = false;
+    }
+
     /// Stop (kill) the selected forward. Others keep running.
     fn stop_selected_port_forward(&mut self) {
         let Some(i) = self.pf_state.selected() else {
@@ -2246,21 +2769,14 @@ impl App {
         let Some(kind) = self.kind.clone() else {
             return;
         };
-        let client = self.cluster.client.clone();
-        let tx = self.tx.clone();
-        let genr = self.generation;
         self.flash = format!("scaling {name} → {replicas}");
         self.flash_err = false;
-        tokio::spawn(async move {
-            let api: Api<DynamicObject> = Api::namespaced_with(client, &ns, &kind.ar);
-            let patch = Patch::Merge(json!({ "spec": { "replicas": replicas } }));
-            if let Err(e) = api.patch(&name, &PatchParams::default(), &patch).await {
-                let _ = tx.send(Msg::Error {
-                    generation: genr,
-                    error: format!("scale failed: {e}"),
-                });
-            }
-        });
+        self.spawn_patch_action(
+            kind,
+            vec![(name, ns)],
+            Patch::Merge(scale_patch(replicas)),
+            |_, e| format!("scale failed: {e}"),
+        );
     }
 
     /// Open the Flux suspend/resume menu (`t`) for the marked rows, or the
@@ -2316,9 +2832,6 @@ impl App {
         let Some(kind) = self.kind.clone() else {
             return;
         };
-        let client = self.cluster.client.clone();
-        let tx = self.tx.clone();
-        let genr = self.generation;
         let verb = if suspend { "suspending" } else { "resuming" };
         self.flash = if targets.len() == 1 {
             format!("{verb} {}…", targets[0].0)
@@ -2327,18 +2840,12 @@ impl App {
         };
         self.flash_err = false;
         self.marked.clear();
-        tokio::spawn(async move {
-            let patch = Patch::Merge(json!({ "spec": { "suspend": suspend } }));
-            for (name, ns) in targets {
-                let api: Api<DynamicObject> = Api::namespaced_with(client.clone(), &ns, &kind.ar);
-                if let Err(e) = api.patch(&name, &PatchParams::default(), &patch).await {
-                    let _ = tx.send(Msg::Error {
-                        generation: genr,
-                        error: format!("{verb} {name} failed: {e}"),
-                    });
-                }
-            }
-        });
+        self.spawn_patch_action(
+            kind,
+            targets,
+            Patch::Merge(suspend_patch(suspend)),
+            move |name, e| format!("{verb} {name} failed: {e}"),
+        );
     }
 
     /// Force an immediate Flux reconciliation, bypassing the normal interval —
@@ -2348,9 +2855,6 @@ impl App {
         let Some(kind) = self.kind.clone() else {
             return;
         };
-        let client = self.cluster.client.clone();
-        let tx = self.tx.clone();
-        let genr = self.generation;
         let now = k8s_openapi::jiff::Timestamp::now().to_string();
         self.flash = if targets.len() == 1 {
             format!("reconciling {}…", targets[0].0)
@@ -2359,20 +2863,12 @@ impl App {
         };
         self.flash_err = false;
         self.marked.clear();
-        tokio::spawn(async move {
-            let patch = Patch::Merge(json!({
-                "metadata": { "annotations": { "reconcile.fluxcd.io/requestedAt": now } }
-            }));
-            for (name, ns) in targets {
-                let api: Api<DynamicObject> = Api::namespaced_with(client.clone(), &ns, &kind.ar);
-                if let Err(e) = api.patch(&name, &PatchParams::default(), &patch).await {
-                    let _ = tx.send(Msg::Error {
-                        generation: genr,
-                        error: format!("reconcile {name} failed: {e}"),
-                    });
-                }
-            }
-        });
+        self.spawn_patch_action(
+            kind,
+            targets,
+            Patch::Merge(reconcile_patch(&now)),
+            |name, e| format!("reconcile {name} failed: {e}"),
+        );
     }
 
     /// Force an immediate External Secrets Operator refresh on the marked rows
@@ -2398,9 +2894,6 @@ impl App {
         let Some(kind) = self.kind.clone() else {
             return;
         };
-        let client = self.cluster.client.clone();
-        let tx = self.tx.clone();
-        let genr = self.generation;
         let now = k8s_openapi::jiff::Timestamp::now().as_second().to_string();
         self.flash = if targets.len() == 1 {
             format!("refreshing {}…", targets[0].0)
@@ -2409,20 +2902,12 @@ impl App {
         };
         self.flash_err = false;
         self.marked.clear();
-        tokio::spawn(async move {
-            let patch = Patch::Merge(json!({
-                "metadata": { "annotations": { "force-sync": now } }
-            }));
-            for (name, ns) in targets {
-                let api: Api<DynamicObject> = Api::namespaced_with(client.clone(), &ns, &kind.ar);
-                if let Err(e) = api.patch(&name, &PatchParams::default(), &patch).await {
-                    let _ = tx.send(Msg::Error {
-                        generation: genr,
-                        error: format!("refresh {name} failed: {e}"),
-                    });
-                }
-            }
-        });
+        self.spawn_patch_action(
+            kind,
+            targets,
+            Patch::Merge(external_secret_refresh_patch(&now)),
+            |name, e| format!("refresh {name} failed: {e}"),
+        );
     }
 
     fn flash_warn(&mut self, msg: &str) {
@@ -2470,7 +2955,7 @@ impl App {
             Mode::Table => self.key_table(key),
             Mode::Command => self.key_command(key),
             Mode::Filter => self.key_filter(key),
-            Mode::Detail | Mode::Diff => self.key_scroll(key, true),
+            Mode::Detail | Mode::Diff | Mode::Events => self.key_scroll(key, true),
             Mode::Logs => self.key_logs(key),
             Mode::LogFilter => self.key_log_filter(key),
             Mode::Help => {
@@ -2491,6 +2976,7 @@ impl App {
             Mode::Xray => self.key_xray(key),
             Mode::FluxMenu => self.key_flux_menu(key),
             Mode::PortForwards => self.key_port_forwards(key),
+            Mode::Skins => self.key_skins(key),
         }
         Ok(())
     }
@@ -2534,6 +3020,7 @@ impl App {
             KeyCode::Enter => self.drill(),
             KeyCode::Char('y') => self.open_detail(),
             KeyCode::Char('d') => self.describe(),
+            KeyCode::Char('E') => self.open_events(),
             KeyCode::Char('l') => self.open_logs(),
             KeyCode::Char('p') => self.open_previous_logs(),
             KeyCode::Char('e') => self.request_edit(),
@@ -2550,6 +3037,9 @@ impl App {
             KeyCode::Char('o') => self.show_node(),
             KeyCode::Char('c') => self.copy_name(),
             KeyCode::Char('J') => self.jump_owner(),
+            KeyCode::Char('C') => self.request_cordon(true),
+            KeyCode::Char('U') => self.request_cordon(false),
+            KeyCode::Char('D') => self.request_drain(),
             // Sorting: S cycles the column, I inverts the direction.
             KeyCode::Char('S') => self.cycle_sort(),
             KeyCode::Char('I') => self.toggle_sort_dir(),
@@ -2600,7 +3090,7 @@ impl App {
         else {
             return;
         };
-        let Some(obj) = self.selected() else {
+        let Some(obj) = self.selected_ref() else {
             self.flash_warn("no selection for plugin");
             return;
         };
@@ -2678,7 +3168,9 @@ impl App {
             PaletteAction::Pulse => self.open_pulse(),
             PaletteAction::Xray => self.open_xray(),
             PaletteAction::Diff => self.open_diff(),
+            PaletteAction::Events => self.open_events(),
             PaletteAction::PortForwards => self.open_port_forwards(),
+            PaletteAction::Skin => self.open_skins(),
         }
     }
 
@@ -2688,6 +3180,18 @@ impl App {
         let cmd = cmd.trim();
         if cmd.is_empty() {
             return false;
+        }
+        let mut parts = cmd.split_whitespace();
+        if let Some(first) = parts.next()
+            && first.eq_ignore_ascii_case("skin")
+        {
+            let rest = parts.collect::<Vec<_>>().join(" ");
+            if rest.is_empty() {
+                self.open_skins();
+            } else {
+                self.apply_skin(&rest);
+            }
+            return true;
         }
         let action = PALETTE_COMMANDS
             .iter()
@@ -2794,6 +3298,8 @@ impl App {
                 // landing back on the same row.
                 if !detail {
                     self.stop_log_stream();
+                } else if self.mode == Mode::Events {
+                    self.stop_event_stream();
                 }
                 self.mode = self.return_mode;
                 if self.return_mode == Mode::Table {
@@ -2951,6 +3457,7 @@ impl App {
         let client = self.cluster.client.clone();
         let kind = self.cluster.resolve("namespaces").map(|k| k.ar);
         let tx = self.tx.clone();
+        let genr = self.generation;
         tokio::spawn(async move {
             let Some(ar) = kind else { return };
             let api: Api<DynamicObject> = Api::all_with(client, &ar);
@@ -2962,7 +3469,12 @@ impl App {
                     .collect();
                 names.sort();
                 names.insert(0, "<all>".into());
-                let _ = tx.send(Msg::Namespaces { list: names });
+                let _ = tx
+                    .send(Msg::Namespaces {
+                        generation: genr,
+                        list: names,
+                    })
+                    .await;
             }
         });
     }
@@ -3061,18 +3573,22 @@ impl App {
     }
 
     fn open_contexts(&mut self) {
-        let mut list = Cluster::list_contexts();
-        list.sort();
-        if list.is_empty() {
-            self.flash_warn("no contexts found in kubeconfig");
-            return;
-        }
-        let cur = self.cluster.context.clone();
-        let idx = list.iter().position(|c| *c == cur).unwrap_or(0);
-        self.ctx_list = list;
         self.ctx_filter.clear();
-        self.ctx_state.select(Some(idx));
+        self.ctx_list.clear();
+        self.ctx_state.select(None);
         self.mode = Mode::Contexts;
+        let tx = self.tx.clone();
+        let genr = self.generation;
+        tokio::spawn(async move {
+            let mut list = Cluster::list_contexts();
+            list.sort();
+            let _ = tx
+                .send(Msg::Contexts {
+                    generation: genr,
+                    list,
+                })
+                .await;
+        });
     }
 
     /// Contexts for the switcher, fuzzy-matched against the type-to-filter
@@ -3145,12 +3661,19 @@ impl App {
         self.store.clear();
         self.invalidate_rows();
         let tx = self.tx.clone();
+        let genr = self.generation;
         tokio::spawn(async move {
             let result = Cluster::connect_context(&name)
                 .await
                 .map(Box::new)
                 .map_err(|e| e.to_string());
-            let _ = tx.send(Msg::ContextSwitched { name, result });
+            let _ = tx
+                .send(Msg::ContextSwitched {
+                    generation: genr,
+                    name,
+                    result,
+                })
+                .await;
         });
     }
 
@@ -3268,6 +3791,7 @@ impl App {
                         generation: genr,
                         data: p,
                     })
+                    .await
                     .is_err()
                 {
                     break;
@@ -3313,8 +3837,14 @@ impl App {
             return;
         };
         let root_kind = trim_s(&self.kind_plural).to_string();
-        let rs = self.cluster.resolve("replicasets").map(|k| k.ar);
-        let pods = self.cluster.resolve("pods").map(|k| k.ar);
+        let pool_kinds: Vec<(String, ApiResource, bool)> = xray_pool_plurals(&root_kind)
+            .iter()
+            .filter_map(|plural| {
+                self.cluster
+                    .resolve(plural)
+                    .map(|k| (trim_s(plural).to_string(), k.ar, k.namespaced))
+            })
+            .collect();
 
         let client = self.cluster.client.clone();
         let tx = self.tx.clone();
@@ -3329,16 +3859,9 @@ impl App {
                 }
                 let roots = list_kind(&client, &root_ar, root_nsd, &ns).await;
                 let mut pool: Vec<(String, DynamicObject)> = Vec::new();
-                if root_kind != "pod" {
-                    if let Some(ar) = &rs {
-                        for o in list_kind(&client, ar, true, &ns).await {
-                            pool.push(("replicaset".into(), o));
-                        }
-                    }
-                    if let Some(ar) = &pods {
-                        for o in list_kind(&client, ar, true, &ns).await {
-                            pool.push(("pod".into(), o));
-                        }
+                for (label, ar, namespaced) in &pool_kinds {
+                    for o in list_kind(&client, ar, *namespaced, &ns).await {
+                        pool.push((label.clone(), o));
                     }
                 }
 
@@ -3365,6 +3888,7 @@ impl App {
                         generation: genr,
                         items,
                     })
+                    .await
                     .is_err()
                 {
                     break;
@@ -3474,11 +3998,31 @@ impl App {
     fn key_confirm(&mut self, key: KeyEvent) {
         match key.code {
             KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
-                if let Some(ConfirmAction::Delete { targets, force }) = self.confirm_action.take() {
-                    self.do_delete(targets, force);
-                    self.marked.clear();
+                if let Some(action) = self.confirm_action.take() {
+                    match action {
+                        ConfirmAction::Delete { targets, force } => {
+                            self.do_delete(targets, force);
+                            self.marked.clear();
+                        }
+                        ConfirmAction::Drain { targets } => {
+                            self.do_drain_nodes(targets);
+                            self.marked.clear();
+                        }
+                    }
                 }
                 self.mode = Mode::Table;
+            }
+            KeyCode::Char('f') | KeyCode::Char('F') => {
+                let update = match self.confirm_action.as_mut() {
+                    Some(ConfirmAction::Delete { targets, force }) => {
+                        *force = !*force;
+                        Some((targets.clone(), *force))
+                    }
+                    _ => None,
+                };
+                if let Some((targets, force)) = update {
+                    self.confirm_label = delete_confirm_label(&self.kind_plural, &targets, force);
+                }
             }
             _ => {
                 self.confirm_action = None;
@@ -3538,6 +4082,98 @@ impl App {
 }
 
 // ----- free helpers ------------------------------------------------------
+
+fn restart_patch(restarted_at: &str) -> Value {
+    json!({
+        "spec": { "template": { "metadata": { "annotations": {
+            "kubectl.kubernetes.io/restartedAt": restarted_at
+        }}}}
+    })
+}
+
+fn set_image_patch(plural: &str, container: &str, image: &str) -> Value {
+    let containers = json!([{ "name": container, "image": image }]);
+    if plural == "pods" {
+        json!({ "spec": { "containers": containers } })
+    } else {
+        json!({ "spec": { "template": { "spec": { "containers": containers } } } })
+    }
+}
+
+fn scale_patch(replicas: i32) -> Value {
+    json!({ "spec": { "replicas": replicas } })
+}
+
+fn suspend_patch(suspend: bool) -> Value {
+    json!({ "spec": { "suspend": suspend } })
+}
+
+fn reconcile_patch(requested_at: &str) -> Value {
+    json!({
+        "metadata": { "annotations": { "reconcile.fluxcd.io/requestedAt": requested_at } }
+    })
+}
+
+fn external_secret_refresh_patch(force_sync: &str) -> Value {
+    json!({
+        "metadata": { "annotations": { "force-sync": force_sync } }
+    })
+}
+
+fn node_unschedulable_patch(unschedulable: bool) -> Value {
+    json!({ "spec": { "unschedulable": unschedulable } })
+}
+
+fn delete_confirm_label(kind_plural: &str, targets: &[(String, String)], force: bool) -> String {
+    let verb = if force { "Force delete" } else { "Delete" };
+    if targets.len() == 1 {
+        let (name, ns) = &targets[0];
+        let where_ns = if ns.is_empty() {
+            String::new()
+        } else {
+            format!(" in {ns}")
+        };
+        format!("{verb} {} {name}{where_ns}?", trim_s(kind_plural))
+    } else {
+        format!("{verb} {} {}?", targets.len(), kind_plural)
+    }
+}
+
+fn drainable_pod(pod: &Pod) -> bool {
+    if pod.metadata.deletion_timestamp.is_some() {
+        return false;
+    }
+    if pod
+        .metadata
+        .annotations
+        .as_ref()
+        .is_some_and(|a| a.contains_key("kubernetes.io/config.mirror"))
+    {
+        return false;
+    }
+    if pod
+        .metadata
+        .owner_references
+        .as_ref()
+        .is_some_and(|owners| {
+            owners
+                .iter()
+                .any(|owner| owner.kind.eq_ignore_ascii_case("DaemonSet"))
+        })
+    {
+        return false;
+    }
+    !matches!(
+        pod.status
+            .as_ref()
+            .and_then(|status| status.phase.as_deref()),
+        Some("Succeeded" | "Failed")
+    )
+}
+
+fn eviction_unsupported(err: &kube::Error) -> bool {
+    matches!(err, kube::Error::Api(api_err) if matches!(api_err.code, 404 | 405))
+}
 
 /// Pick a version name to query a CRD's custom resources: the storage version
 /// if flagged, else the first served version, else the first listed.
@@ -3602,6 +4238,16 @@ fn trim_s(plural: &str) -> &str {
     plural.strip_suffix('s').unwrap_or(plural)
 }
 
+fn xray_pool_plurals(root_kind: &str) -> &'static [&'static str] {
+    match root_kind {
+        "pod" => &[],
+        "cronjob" => &["jobs", "pods"],
+        "job" | "daemonset" | "replicaset" | "statefulset" => &["pods"],
+        "deployment" => &["replicasets", "pods"],
+        _ => &["replicasets", "pods"],
+    }
+}
+
 /// Columns whose cell is a count/number and should sort numerically.
 fn is_numeric_header(header: &str) -> bool {
     matches!(
@@ -3643,7 +4289,8 @@ fn list_step(state: &mut ListState, len: usize, down: bool) {
     state.select(Some(next));
 }
 
-/// Copy text to the system clipboard via the first available OS tool.
+/// Copy text to the system clipboard via the first available OS tool, falling
+/// back to OSC 52 for remote terminals where local clipboard tools are absent.
 fn copy_to_clipboard(text: &str) -> bool {
     use std::io::Write;
     use std::process::{Command, Stdio};
@@ -3675,7 +4322,229 @@ fn copy_to_clipboard(text: &str) -> bool {
             return true;
         }
     }
-    false
+    copy_to_clipboard_osc52(text)
+}
+
+fn copy_to_clipboard_osc52(text: &str) -> bool {
+    use std::fs::OpenOptions;
+    use std::io::{Write, stdout};
+
+    let sequence = osc52_sequence(text);
+    if let Ok(mut tty) = OpenOptions::new().write(true).open("/dev/tty") {
+        return tty
+            .write_all(sequence.as_bytes())
+            .and_then(|_| tty.flush())
+            .is_ok();
+    }
+
+    let mut out = stdout();
+    out.write_all(sequence.as_bytes())
+        .and_then(|_| out.flush())
+        .is_ok()
+}
+
+fn osc52_sequence(text: &str) -> String {
+    use base64::Engine;
+
+    let encoded = base64::engine::general_purpose::STANDARD.encode(text.as_bytes());
+    format!("\x1b]52;c;{encoded}\x07")
+}
+
+async fn forward_log_stream(
+    api: Api<Pod>,
+    pod: String,
+    lp: LogParams,
+    prefix: String,
+    tx: Sender<Msg>,
+    generation: u64,
+    flag: Arc<AtomicU64>,
+) {
+    use futures_util::{AsyncBufReadExt, TryStreamExt};
+    use tokio::time::MissedTickBehavior;
+
+    let stream = match api.log_stream(&pod, &lp).await {
+        Ok(stream) => stream,
+        Err(e) => {
+            let _ = tx
+                .send(Msg::LogLines {
+                    generation,
+                    lines: vec![format!("[error] {e}")],
+                })
+                .await;
+            return;
+        }
+    };
+
+    let mut lines = stream.lines();
+    let mut batch = Vec::with_capacity(LOG_BATCH_LINES);
+    let mut flush = tokio::time::interval(Duration::from_millis(LOG_BATCH_MS));
+    flush.set_missed_tick_behavior(MissedTickBehavior::Skip);
+
+    loop {
+        if flag.load(Ordering::SeqCst) != generation {
+            break;
+        }
+
+        tokio::select! {
+            next = lines.try_next() => {
+                match next {
+                    Ok(Some(line)) => {
+                        batch.push(format!("{prefix}{line}"));
+                        if batch.len() >= LOG_BATCH_LINES
+                            && !send_log_batch(&tx, generation, &mut batch).await
+                        {
+                            break;
+                        }
+                    }
+                    Ok(None) => break,
+                    Err(e) => {
+                        batch.push(format!("[error] {e}"));
+                        break;
+                    }
+                }
+            }
+            _ = flush.tick(), if !batch.is_empty() => {
+                if !send_log_batch(&tx, generation, &mut batch).await {
+                    break;
+                }
+            }
+        }
+    }
+
+    if flag.load(Ordering::SeqCst) == generation {
+        let _ = send_log_batch(&tx, generation, &mut batch).await;
+    }
+}
+
+async fn send_log_batch(tx: &Sender<Msg>, generation: u64, batch: &mut Vec<String>) -> bool {
+    if batch.is_empty() {
+        return true;
+    }
+    let lines = std::mem::take(batch);
+    tx.send(Msg::LogLines { generation, lines }).await.is_ok()
+}
+
+async fn send_event_snapshot(
+    tx: &Sender<Msg>,
+    generation: u64,
+    title: &str,
+    items: &HashMap<String, DynamicObject>,
+    events_v1: bool,
+) -> bool {
+    tx.send(Msg::Events {
+        generation,
+        title: title.to_string(),
+        lines: format_event_lines(items.values(), events_v1),
+    })
+    .await
+    .is_ok()
+}
+
+fn format_event_lines<'a, I>(events: I, events_v1: bool) -> Vec<String>
+where
+    I: IntoIterator<Item = &'a DynamicObject>,
+{
+    let mut rows: Vec<(String, String)> = events
+        .into_iter()
+        .map(|event| {
+            let seen = event_time(event, events_v1);
+            (seen.clone(), event_line(event, events_v1, &seen))
+        })
+        .collect();
+    rows.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+
+    let mut lines = vec![format!(
+        "{:<20} {:<8} {:<24} {:>5} {}",
+        "LAST SEEN", "TYPE", "REASON", "COUNT", "MESSAGE"
+    )];
+    if rows.is_empty() {
+        lines.push("(no events)".into());
+    } else {
+        lines.extend(rows.into_iter().map(|(_, line)| line));
+    }
+    lines
+}
+
+fn event_line(event: &DynamicObject, events_v1: bool, seen: &str) -> String {
+    let typ = svalue(&event.data, &["type"]).unwrap_or_default();
+    let reason = svalue(&event.data, &["reason"]).unwrap_or_default();
+    let count = event_count(event, events_v1);
+    let message = if events_v1 {
+        svalue(&event.data, &["note"])
+            .or_else(|| svalue(&event.data, &["message"]))
+            .unwrap_or_default()
+    } else {
+        svalue(&event.data, &["message"])
+            .or_else(|| svalue(&event.data, &["note"]))
+            .unwrap_or_default()
+    };
+    format!(
+        "{:<20} {:<8} {:<24} {:>5} {}",
+        compact_event_time(seen),
+        typ,
+        reason,
+        count,
+        message.replace('\n', " ")
+    )
+}
+
+fn event_count(event: &DynamicObject, events_v1: bool) -> i64 {
+    if events_v1 {
+        ivalue(&event.data, &["series", "count"])
+            .or_else(|| ivalue(&event.data, &["deprecatedCount"]))
+            .unwrap_or(1)
+    } else {
+        ivalue(&event.data, &["count"]).unwrap_or(1)
+    }
+}
+
+fn event_time(event: &DynamicObject, events_v1: bool) -> String {
+    let data = &event.data;
+    let value = if events_v1 {
+        svalue(data, &["series", "lastObservedTime"])
+            .or_else(|| svalue(data, &["eventTime"]))
+            .or_else(|| svalue(data, &["deprecatedLastTimestamp"]))
+            .or_else(|| svalue(data, &["deprecatedFirstTimestamp"]))
+    } else {
+        svalue(data, &["lastTimestamp"])
+            .or_else(|| svalue(data, &["eventTime"]))
+            .or_else(|| svalue(data, &["firstTimestamp"]))
+    };
+    value
+        .or_else(|| {
+            event
+                .metadata
+                .creation_timestamp
+                .as_ref()
+                .map(|ts| ts.0.to_string())
+        })
+        .unwrap_or_default()
+}
+
+fn compact_event_time(raw: &str) -> String {
+    let trimmed = raw.trim_end_matches('Z');
+    if let Some((date, time)) = trimmed.split_once('T') {
+        let time = time.split('.').next().unwrap_or(time);
+        format!("{date} {time}")
+    } else {
+        raw.to_string()
+    }
+}
+
+fn svalue(v: &Value, path: &[&str]) -> Option<String> {
+    let mut cur = v;
+    for p in path {
+        cur = cur.get(p)?;
+    }
+    cur.as_str().map(String::from)
+}
+
+fn ivalue(v: &Value, path: &[&str]) -> Option<i64> {
+    let mut cur = v;
+    for p in path {
+        cur = cur.get(p)?;
+    }
+    cur.as_i64()
 }
 
 /// Recursively flatten an object and its owned children into xray rows.
@@ -3723,6 +4592,25 @@ fn emit_xray(
 fn xray_status(kind: &str, o: &DynamicObject) -> String {
     match kind {
         "pod" => phase(o),
+        "job" => format!(
+            "{}/{}",
+            o.data
+                .pointer("/status/succeeded")
+                .and_then(Value::as_i64)
+                .unwrap_or(0),
+            o.data
+                .pointer("/spec/completions")
+                .and_then(Value::as_i64)
+                .unwrap_or(1)
+                .max(1),
+        ),
+        "cronjob" => format!(
+            "active {}",
+            o.data
+                .pointer("/status/active")
+                .and_then(Value::as_array)
+                .map_or(0, |items| items.len()),
+        ),
         "deployment" | "replicaset" | "statefulset" => format!(
             "{}/{}",
             o.data
@@ -3842,14 +4730,14 @@ mod tests {
     use super::*;
     use crate::store::row_key;
     use serde_json::json;
-    use tokio::sync::mpsc::{self, UnboundedReceiver};
+    use tokio::sync::mpsc::{self, Receiver};
 
     fn obj(v: serde_json::Value) -> DynamicObject {
         serde_json::from_value(v).unwrap()
     }
 
-    fn test_app() -> (App, UnboundedReceiver<Msg>) {
-        let (tx, rx) = mpsc::unbounded_channel();
+    fn test_app() -> (App, Receiver<Msg>) {
+        let (tx, rx) = mpsc::channel(1024);
         (App::new(Cluster::fake(), tx), rx)
     }
 
@@ -3907,7 +4795,7 @@ mod tests {
     fn scrollable_scroll_clamps() {
         let mut s = Scrollable {
             title: String::new(),
-            lines: vec!["a".into(), "b".into(), "c".into()],
+            lines: vec!["a".into(), "b".into(), "c".into()].into(),
             scroll: 0,
         };
         s.scroll_by(100);
@@ -3998,6 +4886,53 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn table_cell_cache_invalidates_on_apply() {
+        let (mut app, _rx) = test_app();
+        app.kind_plural = "pods".into();
+        apply(
+            &mut app,
+            json!({
+                "apiVersion": "v1",
+                "kind": "Pod",
+                "metadata": {
+                    "name": "web",
+                    "namespace": "default",
+                    "resourceVersion": "1"
+                },
+                "status": {"phase": "Pending"}
+            }),
+        );
+        {
+            let rows = app.rows();
+            app.ensure_table_cell_cache(&rows);
+            let key = row_key(rows[0]);
+            let cache = app.table_cell_cache();
+            let (cells, _) = cache.get(&key).unwrap();
+            assert_eq!(cells[2], "Pending");
+        }
+
+        apply(
+            &mut app,
+            json!({
+                "apiVersion": "v1",
+                "kind": "Pod",
+                "metadata": {
+                    "name": "web",
+                    "namespace": "default",
+                    "resourceVersion": "2"
+                },
+                "status": {"phase": "Running"}
+            }),
+        );
+        let rows = app.rows();
+        app.ensure_table_cell_cache(&rows);
+        let key = row_key(rows[0]);
+        let cache = app.table_cell_cache();
+        let (cells, _) = cache.get(&key).unwrap();
+        assert_eq!(cells[2], "Running");
+    }
+
+    #[tokio::test]
     async fn palette_merges_commands_with_resources() {
         let (mut app, _rx) = test_app();
 
@@ -4043,6 +4978,23 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn skin_palette_command_opens_picker() {
+        let (mut app, _rx) = test_app();
+        assert!(app.run_palette_command("skin"));
+        assert_eq!(app.mode, Mode::Skins);
+        assert_eq!(
+            app.skin_list.first().map(String::as_str),
+            Some("catppuccin-mocha")
+        );
+
+        app.mode = Mode::Table;
+        assert!(app.run_palette_command("skin no-such-skin"));
+        assert_eq!(app.mode, Mode::Table);
+        assert!(app.flash_err);
+        assert!(app.flash.contains("unknown skin"), "{}", app.flash);
+    }
+
+    #[tokio::test]
     async fn logs_pause_freezes_and_survives_new_lines() {
         let (mut app, _rx) = test_app();
         app.mode = Mode::Logs;
@@ -4061,9 +5013,9 @@ mod tests {
 
         // Lines keep streaming while paused; the frozen offset must not drift.
         for i in 0..500 {
-            app.handle_msg(Msg::LogLine {
+            app.handle_msg(Msg::LogLines {
                 generation: app.log_gen,
-                line: format!("line {i}"),
+                lines: vec![format!("line {i}")],
             });
         }
         assert!(!app.logs.follow);
@@ -4230,6 +5182,69 @@ mod tests {
         app.handle_key(press(KeyCode::Char('y'))).unwrap();
         assert!(app.marked.is_empty());
         assert_eq!(app.mode, Mode::Table);
+    }
+
+    #[tokio::test]
+    async fn delete_confirm_force_can_toggle() {
+        let (mut app, _rx) = test_app();
+        app.switch_kind("pods");
+        apply(
+            &mut app,
+            json!({"apiVersion": "v1", "kind": "Pod",
+                   "metadata": {"name": "web", "namespace": "default"}}),
+        );
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL))
+            .unwrap();
+        assert_eq!(app.mode, Mode::Confirm);
+        assert!(app.confirm_allows_force_toggle());
+        assert!(app.confirm_label.starts_with("Delete pod web"));
+        assert!(matches!(
+            app.confirm_action,
+            Some(ConfirmAction::Delete { force: false, .. })
+        ));
+
+        app.handle_key(press(KeyCode::Char('f'))).unwrap();
+        assert!(app.confirm_label.starts_with("Force delete pod web"));
+        assert!(matches!(
+            app.confirm_action,
+            Some(ConfirmAction::Delete { force: true, .. })
+        ));
+
+        app.handle_key(press(KeyCode::Char('f'))).unwrap();
+        assert!(app.confirm_label.starts_with("Delete pod web"));
+        assert!(matches!(
+            app.confirm_action,
+            Some(ConfirmAction::Delete { force: false, .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn node_drain_key_opens_confirm_for_marked_nodes() {
+        let (mut app, _rx) = test_app();
+        app.switch_kind("nodes");
+        for n in ["node-a", "node-b"] {
+            apply(
+                &mut app,
+                json!({"apiVersion": "v1", "kind": "Node",
+                       "metadata": {"name": n}}),
+            );
+        }
+        app.handle_key(press(KeyCode::Char(' '))).unwrap();
+        app.handle_key(press(KeyCode::Char(' '))).unwrap();
+
+        app.handle_key(press(KeyCode::Char('D'))).unwrap();
+        assert_eq!(app.mode, Mode::Confirm);
+        assert_eq!(
+            app.confirm_label,
+            "Drain 2 nodes? Cordon and evict eligible pods."
+        );
+        assert!(!app.confirm_allows_force_toggle());
+        let Some(ConfirmAction::Drain { mut targets }) = app.confirm_action.take() else {
+            panic!("expected drain confirm action");
+        };
+        targets.sort();
+        assert_eq!(targets, vec!["node-a".to_string(), "node-b".to_string()]);
     }
 
     #[tokio::test]
@@ -4414,6 +5429,35 @@ mod tests {
         assert_eq!(app.mode, Mode::PortForwards);
     }
 
+    #[tokio::test]
+    async fn events_palette_command_dispatches() {
+        let (mut app, _rx) = test_app();
+        assert!(app.run_palette_command("events"));
+        assert_eq!(app.mode, Mode::Table);
+        assert!(app.flash_err);
+        assert!(app.flash.contains("events"), "{}", app.flash);
+    }
+
+    #[test]
+    fn event_lines_show_core_event_fields() {
+        let event = obj(json!({
+            "apiVersion": "v1",
+            "kind": "Event",
+            "metadata": {"name": "web.123", "namespace": "default"},
+            "type": "Warning",
+            "reason": "FailedScheduling",
+            "message": "0/3 nodes are available",
+            "count": 4,
+            "lastTimestamp": "2026-07-04T12:34:56Z"
+        }));
+        let lines = format_event_lines([&event], false);
+        assert!(lines[0].contains("LAST SEEN"));
+        assert!(lines[1].contains("Warning"));
+        assert!(lines[1].contains("FailedScheduling"));
+        assert!(lines[1].contains("0/3 nodes are available"));
+        assert!(lines[1].contains("4"));
+    }
+
     fn spawn_test_child(argv0: &str, arg: &str) -> tokio::process::Child {
         tokio::process::Command::new(argv0)
             .arg(arg)
@@ -4484,6 +5528,52 @@ mod tests {
         assert_eq!(crd_served_version(&d2).as_deref(), Some("v1"));
     }
 
+    #[test]
+    fn mutating_action_patch_payloads_are_stable() {
+        assert_eq!(
+            restart_patch("2026-07-04T12:00:00Z"),
+            json!({
+                "spec": { "template": { "metadata": { "annotations": {
+                    "kubectl.kubernetes.io/restartedAt": "2026-07-04T12:00:00Z"
+                }}}}
+            })
+        );
+        assert_eq!(
+            set_image_patch("pods", "app", "nginx:1.27"),
+            json!({ "spec": { "containers": [{ "name": "app", "image": "nginx:1.27" }] } })
+        );
+        assert_eq!(
+            set_image_patch("deployments", "app", "nginx:1.27"),
+            json!({
+                "spec": { "template": { "spec": {
+                    "containers": [{ "name": "app", "image": "nginx:1.27" }]
+                }}}
+            })
+        );
+        assert_eq!(scale_patch(3), json!({ "spec": { "replicas": 3 } }));
+        assert_eq!(suspend_patch(true), json!({ "spec": { "suspend": true } }));
+        assert_eq!(
+            reconcile_patch("2026-07-04T12:00:00Z"),
+            json!({
+                "metadata": { "annotations": {
+                    "reconcile.fluxcd.io/requestedAt": "2026-07-04T12:00:00Z"
+                }}
+            })
+        );
+        assert_eq!(
+            external_secret_refresh_patch("1783166400"),
+            json!({ "metadata": { "annotations": { "force-sync": "1783166400" } } })
+        );
+        assert_eq!(
+            node_unschedulable_patch(true),
+            json!({ "spec": { "unschedulable": true } })
+        );
+        assert_eq!(
+            node_unschedulable_patch(false),
+            json!({ "spec": { "unschedulable": false } })
+        );
+    }
+
     #[tokio::test]
     async fn crd_drill_builds_kind_from_spec() {
         let (mut app, _rx) = test_app();
@@ -4523,12 +5613,12 @@ mod tests {
     async fn log_lines_expand_tabs_and_strip_cr() {
         let (mut app, _rx) = test_app();
         // Caddy-style tab-separated line (level would be color-wrapped too).
-        app.handle_msg(Msg::LogLine {
+        app.handle_msg(Msg::LogLines {
             generation: app.log_gen,
-            line: "2026/07/01 09:21:14.062\tINFO\tProvisioning WAF\r".into(),
+            lines: vec!["2026/07/01 09:21:14.062\tINFO\tProvisioning WAF\r".into()],
         });
         assert_eq!(
-            app.logs.view.lines.last().unwrap(),
+            app.logs.view.lines.back().unwrap(),
             "2026/07/01 09:21:14.062 INFO Provisioning WAF"
         );
     }
@@ -4537,17 +5627,89 @@ mod tests {
     async fn log_buffer_is_capped() {
         let (mut app, _rx) = test_app();
         for i in 0..(MAX_LOG_LINES + 50) {
-            app.handle_msg(Msg::LogLine {
+            app.handle_msg(Msg::LogLines {
                 generation: app.log_gen,
-                line: format!("line {i}"),
+                lines: vec![format!("line {i}")],
             });
         }
         assert_eq!(app.logs.view.lines.len(), MAX_LOG_LINES);
         // Oldest lines dropped; newest retained.
         assert_eq!(
-            app.logs.view.lines.last().unwrap(),
+            app.logs.view.lines.back().unwrap(),
             &format!("line {}", MAX_LOG_LINES + 49)
         );
+    }
+
+    #[tokio::test]
+    async fn filtered_log_text_respects_active_filter() {
+        let (mut app, _rx) = test_app();
+        app.handle_msg(Msg::LogLines {
+            generation: app.log_gen,
+            lines: vec![
+                "api request started".into(),
+                "worker finished".into(),
+                "api request finished".into(),
+            ],
+        });
+
+        assert_eq!(
+            app.filtered_log_text(),
+            "api request started\nworker finished\napi request finished"
+        );
+        app.logs.filter = "api".into();
+        assert_eq!(
+            app.filtered_log_text(),
+            "api request started\napi request finished"
+        );
+    }
+
+    #[tokio::test]
+    async fn stale_log_save_result_is_dropped() {
+        let (mut app, _rx) = test_app();
+        let stale = app.log_gen;
+        app.log_gen += 1;
+
+        app.handle_msg(Msg::LogsSaved {
+            generation: stale,
+            result: Err("old write failed".into()),
+        });
+        assert!(!app.flash.contains("old write failed"));
+
+        app.handle_msg(Msg::LogsSaved {
+            generation: app.log_gen,
+            result: Ok(std::env::temp_dir().join("sofka-test.log")),
+        });
+        assert!(app.flash.contains("sofka-test.log"));
+        assert!(!app.flash_err);
+    }
+
+    #[tokio::test]
+    async fn stale_clipboard_result_is_dropped() {
+        let (mut app, _rx) = test_app();
+        let stale = app.generation;
+        app.bump_generation();
+
+        app.handle_msg(Msg::ClipboardCopied {
+            generation: stale,
+            copied: false,
+            success: "copied stale".into(),
+            failure: "stale failed".into(),
+        });
+        assert!(!app.flash.contains("stale failed"));
+
+        app.handle_msg(Msg::ClipboardCopied {
+            generation: app.generation,
+            copied: true,
+            success: "copied current".into(),
+            failure: "current failed".into(),
+        });
+        assert_eq!(app.flash, "copied current");
+        assert!(!app.flash_err);
+    }
+
+    #[test]
+    fn osc52_sequence_base64_encodes_clipboard_text() {
+        assert_eq!(osc52_sequence("sofka"), "\x1b]52;c;c29ma2E=\x07");
     }
 
     #[tokio::test]
@@ -4595,6 +5757,48 @@ mod tests {
         app.switch_kind("services");
         assert_eq!(app.sort_column, None);
         assert!(!app.sort_desc);
+    }
+
+    #[tokio::test]
+    async fn metrics_update_invalidates_metric_sorted_rows() {
+        let (mut app, _rx) = test_app();
+        app.switch_kind("pods");
+        for name in ["a", "b"] {
+            apply(
+                &mut app,
+                json!({"apiVersion": "v1", "kind": "Pod",
+                       "metadata": {"name": name, "namespace": "default"}}),
+            );
+        }
+
+        let cpu_idx = app
+            .display_headers()
+            .iter()
+            .position(|h| *h == "CPU")
+            .unwrap();
+        app.sort_column = Some(cpu_idx);
+        app.sort_desc = true;
+        app.invalidate_rows();
+        let names: Vec<String> = app
+            .rows()
+            .iter()
+            .map(|o| o.metadata.name.clone().unwrap())
+            .collect();
+        assert_eq!(names, ["a", "b"]); // cached before metrics arrive
+
+        app.handle_msg(Msg::Metrics {
+            generation: app.generation,
+            data: HashMap::from([
+                ("default/a".to_string(), (10, 0)),
+                ("default/b".to_string(), (100, 0)),
+            ]),
+        });
+        let names: Vec<String> = app
+            .rows()
+            .iter()
+            .map(|o| o.metadata.name.clone().unwrap())
+            .collect();
+        assert_eq!(names, ["b", "a"]);
     }
 
     #[tokio::test]
@@ -4682,9 +5886,9 @@ mod tests {
         let (mut app, _rx) = test_app();
         app.logs.follow = false; // autoscroll OFF
         let lg = app.log_gen;
-        let line = |i: usize| Msg::LogLine {
+        let line = |i: usize| Msg::LogLines {
             generation: lg,
-            line: format!("line {i}"),
+            lines: vec![format!("line {i}")],
         };
         // Well past the *following* cap, but under the paused cap: nothing is
         // dropped, so a frozen view never appears to resume scrolling.
@@ -4708,23 +5912,23 @@ mod tests {
         app.logs.view.scroll = 500;
         let lg = app.log_gen;
         // The first line is the one trimmed later: 25 chars → 3 rows at width 10.
-        app.handle_msg(Msg::LogLine {
+        app.handle_msg(Msg::LogLines {
             generation: lg,
-            line: "a".repeat(25),
+            lines: vec!["a".repeat(25)],
         });
         for i in 1..MAX_LOG_LINES_PAUSED {
-            app.handle_msg(Msg::LogLine {
+            app.handle_msg(Msg::LogLines {
                 generation: lg,
-                line: format!("l{i}"),
+                lines: vec![format!("l{i}")],
             });
         }
         assert_eq!(app.logs.view.lines.len(), MAX_LOG_LINES_PAUSED);
         assert_eq!(app.logs.view.scroll, 500); // nothing trimmed yet
         // One more line overflows the paused cap: the wrapped first line drains
         // and the frozen anchor shifts by its 3 display rows, not by 1 line.
-        app.handle_msg(Msg::LogLine {
+        app.handle_msg(Msg::LogLines {
             generation: lg,
-            line: "x".into(),
+            lines: vec!["x".into()],
         });
         assert_eq!(app.logs.view.lines.len(), MAX_LOG_LINES_PAUSED);
         assert_eq!(app.logs.view.scroll, 497);
@@ -4737,6 +5941,7 @@ mod tests {
         let mut other = HashSet::new();
         other.insert("secrets".to_string());
         app.handle_msg(Msg::Rbac {
+            generation: app.generation,
             ns: "kube-system".into(),
             allowed: other,
         });
@@ -4745,12 +5950,69 @@ mod tests {
         let mut here = HashSet::new();
         here.insert("pods".to_string());
         app.handle_msg(Msg::Rbac {
+            generation: app.generation,
             ns: "default".into(),
             allowed: here,
         });
         assert!(app.rbac_allowed.is_some());
         assert!(app.rbac_visible("pods"));
         assert!(!app.rbac_visible("secrets"));
+    }
+
+    #[tokio::test]
+    async fn stale_async_picker_results_are_dropped() {
+        let (mut app, _rx) = test_app();
+        let stale = app.generation;
+        app.bump_generation();
+
+        app.ns_list = vec!["<all>".into()];
+        app.handle_msg(Msg::Namespaces {
+            generation: stale,
+            list: vec!["<all>".into(), "stale".into()],
+        });
+        assert_eq!(app.ns_list, vec!["<all>".to_string()]);
+
+        app.ctx_list = vec!["test".into()];
+        app.handle_msg(Msg::Contexts {
+            generation: stale,
+            list: vec!["stale-context".into()],
+        });
+        assert_eq!(app.ctx_list, vec!["test".to_string()]);
+
+        let flash = app.flash.clone();
+        app.handle_msg(Msg::ContextSwitched {
+            generation: stale,
+            name: "old-context".into(),
+            result: Err("old failure".into()),
+        });
+        assert_eq!(app.flash, flash);
+    }
+
+    #[tokio::test]
+    async fn context_list_result_selects_current_context() {
+        let (mut app, _rx) = test_app();
+        app.handle_msg(Msg::Contexts {
+            generation: app.generation,
+            list: vec!["prod".into(), "test".into()],
+        });
+        assert_eq!(app.ctx_list, vec!["prod".to_string(), "test".to_string()]);
+        assert_eq!(app.ctx_state.selected(), Some(1));
+    }
+
+    #[tokio::test]
+    async fn rbac_for_old_generation_is_dropped() {
+        let (mut app, _rx) = test_app();
+        let stale = app.generation;
+        app.bump_generation();
+
+        let mut allowed = HashSet::new();
+        allowed.insert("secrets".to_string());
+        app.handle_msg(Msg::Rbac {
+            generation: stale,
+            ns: "default".into(),
+            allowed,
+        });
+        assert!(app.rbac_allowed.is_none());
     }
 
     #[test]
@@ -4799,6 +6061,109 @@ mod tests {
         assert!(names.contains(&"app".to_string()));
         assert!(names.contains(&"sidecar".to_string()));
         assert!(names.contains(&"init".to_string()));
+    }
+
+    #[test]
+    fn drainable_pod_skips_daemonset_mirror_and_completed_pods() {
+        let pod = |v| serde_json::from_value::<Pod>(v).unwrap();
+        assert!(drainable_pod(&pod(json!({
+            "metadata": {"name": "web", "namespace": "default"},
+            "status": {"phase": "Running"}
+        }))));
+        assert!(!drainable_pod(&pod(json!({
+            "metadata": {
+                "name": "ds",
+                "ownerReferences": [{"kind": "DaemonSet", "name": "agent", "uid": "ds"}]
+            },
+            "status": {"phase": "Running"}
+        }))));
+        assert!(!drainable_pod(&pod(json!({
+            "metadata": {
+                "name": "static",
+                "annotations": {"kubernetes.io/config.mirror": "mirror"}
+            },
+            "status": {"phase": "Running"}
+        }))));
+        assert!(!drainable_pod(&pod(json!({
+            "metadata": {"name": "done"},
+            "status": {"phase": "Succeeded"}
+        }))));
+    }
+
+    #[test]
+    fn xray_pool_plurals_include_cronjob_chain() {
+        assert_eq!(xray_pool_plurals("cronjob"), &["jobs", "pods"]);
+        assert_eq!(xray_pool_plurals("job"), &["pods"]);
+        assert_eq!(xray_pool_plurals("pod"), &[] as &[&str]);
+        assert_eq!(xray_pool_plurals("deployment"), &["replicasets", "pods"]);
+    }
+
+    #[test]
+    fn xray_emits_cronjob_job_pod_container_chain() {
+        let cron = obj(json!({
+            "apiVersion": "batch/v1",
+            "kind": "CronJob",
+            "metadata": {"name": "backup", "namespace": "default", "uid": "cron-uid"},
+            "status": {"active": [{"name": "backup-1"}]}
+        }));
+        let job = obj(json!({
+            "apiVersion": "batch/v1",
+            "kind": "Job",
+            "metadata": {
+                "name": "backup-1",
+                "namespace": "default",
+                "uid": "job-uid",
+                "ownerReferences": [{
+                    "apiVersion": "batch/v1",
+                    "kind": "CronJob",
+                    "name": "backup",
+                    "uid": "cron-uid"
+                }]
+            },
+            "spec": {"completions": 1},
+            "status": {"succeeded": 1}
+        }));
+        let pod = obj(json!({
+            "apiVersion": "v1",
+            "kind": "Pod",
+            "metadata": {
+                "name": "backup-1-pod",
+                "namespace": "default",
+                "uid": "pod-uid",
+                "ownerReferences": [{
+                    "apiVersion": "batch/v1",
+                    "kind": "Job",
+                    "name": "backup-1",
+                    "uid": "job-uid"
+                }]
+            },
+            "spec": {"containers": [{"name": "worker"}]},
+            "status": {"phase": "Running"}
+        }));
+        let mut children = std::collections::HashMap::new();
+        children.insert("cron-uid".to_string(), vec![("job".to_string(), job)]);
+        children.insert("job-uid".to_string(), vec![("pod".to_string(), pod)]);
+
+        let mut items = Vec::new();
+        emit_xray("cronjob", &cron, 0, &children, &mut items);
+
+        assert_eq!(items.len(), 4);
+        assert_eq!(items[0].kind, "cronjob");
+        assert_eq!(items[0].name, "backup");
+        assert_eq!(items[0].depth, 0);
+        assert_eq!(items[0].status, "active 1");
+        assert_eq!(items[1].kind, "job");
+        assert_eq!(items[1].name, "backup-1");
+        assert_eq!(items[1].depth, 1);
+        assert_eq!(items[1].status, "1/1");
+        assert_eq!(items[2].kind, "pod");
+        assert_eq!(items[2].name, "backup-1-pod");
+        assert_eq!(items[2].depth, 2);
+        assert_eq!(items[2].status, "Running");
+        assert_eq!(items[3].kind, "container");
+        assert_eq!(items[3].name, "backup-1-pod");
+        assert_eq!(items[3].depth, 3);
+        assert_eq!(items[3].container.as_deref(), Some("worker"));
     }
 
     #[test]

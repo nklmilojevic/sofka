@@ -21,6 +21,8 @@ use tokio::sync::mpsc;
 use crate::app::App;
 use crate::k8s::Cluster;
 
+const EVENT_CHANNEL_CAP: usize = 4096;
+
 /// sofka: navigate, observe, and inspect your Kubernetes clusters.
 #[derive(Parser, Debug)]
 #[command(name = "sofka", version, about)]
@@ -53,10 +55,9 @@ async fn main() -> Result<()> {
     let args = Args::parse();
     let cfg = config::Config::load();
 
-    // Install the color skin before anything renders. Startup-only: changing
-    // the skin requires a restart. Must run before ratatui::init() below —
-    // resolve_skin's dark/light auto-detection queries the terminal directly
-    // and expects a plain (non-alternate-screen, non-raw-mode) terminal.
+    // Install the initial color skin before anything renders. Auto-detecting
+    // dark/light mode queries the terminal directly, so it belongs before
+    // ratatui switches to the alternate screen.
     theme::init(theme::resolve_skin(
         cfg.skin.name.as_deref(),
         &cfg.skin.colors,
@@ -99,10 +100,11 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
-    let (tx, mut rx) = mpsc::unbounded_channel();
+    let (tx, mut rx) = mpsc::channel(EVENT_CHANNEL_CAP);
     let mut app = App::new(cluster, tx);
     app.user_aliases = cfg.aliases.clone();
     app.plugins = cfg.plugins.clone();
+    app.skin_colors = cfg.skin.colors.clone();
     if args.all_namespaces {
         app.namespace = String::new();
     } else if let Some(ns) = args.namespace {
@@ -128,7 +130,7 @@ async fn main() -> Result<()> {
 
 /// Populate the store from the watch for a short window, then render one frame
 /// to an in-memory backend and print it. Headless UI smoke test.
-async fn snapshot(app: &mut App, rx: &mut mpsc::UnboundedReceiver<store::Msg>) -> Result<()> {
+async fn snapshot(app: &mut App, rx: &mut mpsc::Receiver<store::Msg>) -> Result<()> {
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
 
@@ -193,7 +195,8 @@ async fn snapshot(app: &mut App, rx: &mut mpsc::UnboundedReceiver<store::Msg>) -
                         "   ports:".into(),
                         "-  - containerPort: 8080".into(),
                         "+  - containerPort: 9090".into(),
-                    ],
+                    ]
+                    .into(),
                     scroll: 0,
                 };
                 app.mode = app::Mode::Diff;
@@ -260,7 +263,7 @@ fn suspend_and_run(terminal: &mut ratatui::DefaultTerminal, argv: &[String]) {
 async fn run(
     terminal: &mut ratatui::DefaultTerminal,
     app: &mut App,
-    rx: &mut mpsc::UnboundedReceiver<store::Msg>,
+    rx: &mut mpsc::Receiver<store::Msg>,
 ) -> Result<()> {
     let mut reader = crossterm::event::EventStream::new();
     let mut tick = tokio::time::interval(Duration::from_secs(1));

@@ -15,6 +15,27 @@ use crate::{columns, theme};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
+enum TableCellText<'a> {
+    Borrowed(&'a str),
+    Owned(String),
+}
+
+impl<'a> TableCellText<'a> {
+    fn as_str(&self) -> &str {
+        match self {
+            TableCellText::Borrowed(value) => value,
+            TableCellText::Owned(value) => value,
+        }
+    }
+
+    fn into_cell(self) -> Cell<'a> {
+        match self {
+            TableCellText::Borrowed(value) => Cell::from(value),
+            TableCellText::Owned(value) => Cell::from(value),
+        }
+    }
+}
+
 pub fn draw(frame: &mut Frame, app: &mut App) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -31,6 +52,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     match app.mode {
         Mode::Detail => draw_scrollable(frame, &app.detail, chunks[1], theme::sky()),
         Mode::Diff => draw_diff(frame, &app.detail, chunks[1]),
+        Mode::Events => draw_scrollable(frame, &app.detail, chunks[1], theme::peach()),
         Mode::Logs | Mode::LogFilter => draw_logs(frame, app, chunks[1]),
         Mode::Help => draw_help(frame, chunks[1]),
         Mode::Pulse => draw_pulse(frame, app, chunks[1]),
@@ -48,6 +70,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         Mode::Prompt => draw_prompt_popup(frame, app, chunks[1]),
         Mode::Command => draw_palette(frame, app, chunks[1]),
         Mode::FluxMenu => draw_flux_menu(frame, app, chunks[1]),
+        Mode::Skins => draw_skins(frame, app, chunks[1]),
         _ => {}
     }
 
@@ -180,34 +203,78 @@ fn draw_table(frame: &mut Frame, app: &mut App, area: Rect) {
     let cpu_idx = headers.iter().position(|h| *h == "CPU");
     let mem_idx = headers.iter().position(|h| *h == "MEM");
 
-    let rows: Vec<Row> = app
+    let count = app.row_count();
+    let visible_rows = area.height.saturating_sub(3).max(1) as usize;
+    if count == 0 {
+        *app.table_state.offset_mut() = 0;
+    } else {
+        if app.table_state.selected().is_some_and(|i| i >= count) {
+            app.table_state.select(Some(count - 1));
+        }
+        let selected = app.table_state.selected();
+        let mut offset = app.table_state.offset().min(count.saturating_sub(1));
+        if let Some(sel) = selected {
+            if sel < offset {
+                offset = sel;
+            } else if sel >= offset + visible_rows {
+                offset = sel + 1 - visible_rows;
+            }
+        }
+        *app.table_state.offset_mut() = offset;
+    }
+    let offset = app.table_state.offset();
+    let selected = app.table_state.selected();
+
+    let visible_objects: Vec<_> = app
         .rows()
+        .into_iter()
+        .skip(offset)
+        .take(visible_rows)
+        .collect();
+    app.ensure_table_cell_cache(&visible_objects);
+    let cell_cache = app.table_cell_cache();
+    let base_headers = columns::headers(&app.kind_plural);
+
+    let rows: Vec<Row> = visible_objects
         .iter()
         .map(|obj| {
-            let marked_row =
-                !app.marked.is_empty() && app.marked.contains(&crate::store::row_key(obj));
-            let (mut cells, status_idx) = columns::cells(obj, &app.kind_plural);
+            let row_key = crate::store::row_key(obj);
+            let marked_row = !app.marked.is_empty() && app.marked.contains(&row_key);
+            let (base_cells, status_idx) = cell_cache
+                .get(&row_key)
+                .expect("visible rows are warmed in the table cell cache");
             let mut style_idx = status_idx;
+            let mut cells = Vec::with_capacity(headers.len());
             if show_ns {
-                cells.insert(0, obj.metadata.namespace.clone().unwrap_or_default());
+                cells.push(TableCellText::Borrowed(
+                    obj.metadata.namespace.as_deref().unwrap_or_default(),
+                ));
                 style_idx = status_idx.map(|i| i + 1);
+            }
+            for (i, cell) in base_cells.iter().enumerate() {
+                let header = base_headers.get(i).copied().unwrap_or_default();
+                if let Some(value) = columns::volatile_cell(obj, &app.kind_plural, header) {
+                    cells.push(TableCellText::Owned(value));
+                } else {
+                    cells.push(TableCellText::Borrowed(cell));
+                }
             }
             let mut metrics_raw = None;
             if metrics_cols {
-                let name = obj.metadata.name.clone().unwrap_or_default();
+                let name = obj.metadata.name.as_deref().unwrap_or_default();
                 let key = if pods_view {
                     format!(
                         "{}/{}",
-                        obj.metadata.namespace.as_deref().unwrap_or(""),
+                        obj.metadata.namespace.as_deref().unwrap_or_default(),
                         name
                     )
                 } else {
-                    name
+                    name.to_string()
                 };
                 let (cpu, mem) = app.metrics.get(&key).copied().unwrap_or((0, 0));
                 metrics_raw = Some((cpu, mem));
-                cells.push(columns::fmt_cpu(cpu));
-                cells.push(columns::fmt_mem(mem));
+                cells.push(TableCellText::Owned(columns::fmt_cpu(cpu)));
+                cells.push(TableCellText::Owned(columns::fmt_mem(mem)));
             }
             // Combined colorer: the whole row takes a k9s-style status tint
             // (errors red, pending peach, completed/terminating dimmed, healthy
@@ -217,7 +284,7 @@ fn draw_table(frame: &mut Frame, app: &mut App, area: Rect) {
             // and NAME highlights the active fuzzy filter's matched chars.
             let status_val = style_idx
                 .and_then(|i| cells.get(i))
-                .map(String::as_str)
+                .map(TableCellText::as_str)
                 .unwrap_or("");
             // A pod is phase=Running the moment its sandbox starts, long before
             // every container passes its readiness probe — until READY is n/n,
@@ -225,7 +292,7 @@ fn draw_table(frame: &mut Frame, app: &mut App, area: Rect) {
             let running_not_ready = status_val == "Running"
                 && ready_idx
                     .and_then(|i| cells.get(i))
-                    .is_some_and(|r| !all_ready(r));
+                    .is_some_and(|r| !all_ready(r.as_str()));
             let status_key = if running_not_ready {
                 "PodInitializing"
             } else {
@@ -240,33 +307,33 @@ fn draw_table(frame: &mut Frame, app: &mut App, area: Rect) {
                     if marked_row {
                         // Marked rows override everything so a bulk selection
                         // stands out.
-                        Cell::from(c).style(
+                        c.into_cell().style(
                             Style::default()
                                 .fg(theme::mark())
                                 .add_modifier(Modifier::BOLD),
                         )
                     } else if Some(i) == style_idx {
-                        Cell::from(c).style(Style::default().fg(status_badge))
+                        c.into_cell().style(Style::default().fg(status_badge))
                     } else if i == name_col {
-                        render_name_cell(app, &c, row_color)
+                        render_name_cell(app, c.as_str(), row_color)
                     } else if Some(i) == age_idx {
-                        Cell::from(c).style(theme::dim())
+                        c.into_cell().style(theme::dim())
                     } else if Some(i) == restarts_idx {
-                        let n: i64 = c.trim().parse().unwrap_or(0);
+                        let n: i64 = c.as_str().trim().parse().unwrap_or(0);
                         let color = theme::restarts_severity(n).unwrap_or(row_color);
-                        Cell::from(c).style(Style::default().fg(color))
+                        c.into_cell().style(Style::default().fg(color))
                     } else if Some(i) == cpu_idx {
                         let color = metrics_raw
                             .and_then(|(cpu, _)| theme::cpu_severity(cpu))
                             .unwrap_or(row_color);
-                        Cell::from(c).style(Style::default().fg(color))
+                        c.into_cell().style(Style::default().fg(color))
                     } else if Some(i) == mem_idx {
                         let color = metrics_raw
                             .and_then(|(_, mem)| theme::mem_severity(mem))
                             .unwrap_or(row_color);
-                        Cell::from(c).style(Style::default().fg(color))
+                        c.into_cell().style(Style::default().fg(color))
                     } else {
-                        Cell::from(c).style(Style::default().fg(row_color))
+                        c.into_cell().style(Style::default().fg(row_color))
                     }
                 })
                 .collect();
@@ -306,7 +373,6 @@ fn draw_table(frame: &mut Frame, app: &mut App, area: Rect) {
         })
         .collect();
 
-    let count = app.rows().len();
     let kind_label = app
         .kind
         .as_ref()
@@ -325,6 +391,13 @@ fn draw_table(frame: &mut Frame, app: &mut App, area: Rect) {
     }
     title.push(Span::raw(" "));
 
+    let mut render_state = ratatui::widgets::TableState::default();
+    let render_selected = if count > 0 {
+        selected.map(|i| i.saturating_sub(offset))
+    } else {
+        None
+    };
+    render_state.select(render_selected);
     let table = Table::new(rows, widths)
         .header(header_row)
         .row_highlight_style(theme::selected_row())
@@ -343,7 +416,7 @@ fn draw_table(frame: &mut Frame, app: &mut App, area: Rect) {
                 .title(Line::from(title)),
         );
 
-    frame.render_stateful_widget(table, area, &mut app.table_state);
+    frame.render_stateful_widget(table, area, &mut render_state);
 }
 
 /// `true` when a `n/m` READY cell has every container ready. Cells that
@@ -396,13 +469,14 @@ fn draw_scrollable(
     area: Rect,
     accent: ratatui::style::Color,
 ) {
+    let inner_h = area.height.saturating_sub(2) as usize;
+    let (start, end) = visible_line_window(view.lines.len(), view.scroll, inner_h);
     let text: Vec<Line> = view
         .lines
-        .iter()
+        .range(start..end)
         .map(|l| Line::from(highlight_yaml(l)))
         .collect();
-    let scroll = view.scroll.min(u16::MAX as usize) as u16;
-    let p = Paragraph::new(text).scroll((scroll, 0)).block(
+    let p = Paragraph::new(text).block(
         Block::default()
             .borders(Borders::ALL)
             .border_type(BorderType::Rounded)
@@ -1022,9 +1096,11 @@ fn klog_level(l: &str, level: char) -> bool {
 
 /// Unified-diff view with +/- line coloring.
 fn draw_diff(frame: &mut Frame, view: &crate::app::Scrollable, area: Rect) {
+    let inner_h = area.height.saturating_sub(2) as usize;
+    let (start, end) = visible_line_window(view.lines.len(), view.scroll, inner_h);
     let lines: Vec<Line> = view
         .lines
-        .iter()
+        .range(start..end)
         .map(|l| {
             let color = match l.chars().next() {
                 Some('+') => theme::green(),
@@ -1034,8 +1110,7 @@ fn draw_diff(frame: &mut Frame, view: &crate::app::Scrollable, area: Rect) {
             Line::from(Span::styled(l.clone(), Style::default().fg(color)))
         })
         .collect();
-    let scroll = view.scroll.min(u16::MAX as usize) as u16;
-    let p = Paragraph::new(lines).scroll((scroll, 0)).block(
+    let p = Paragraph::new(lines).block(
         Block::default()
             .borders(Borders::ALL)
             .border_type(BorderType::Rounded)
@@ -1043,6 +1118,12 @@ fn draw_diff(frame: &mut Frame, view: &crate::app::Scrollable, area: Rect) {
             .title(Span::styled(format!(" {} ", view.title), theme::title())),
     );
     frame.render_widget(p, area);
+}
+
+fn visible_line_window(len: usize, scroll: usize, height: usize) -> (usize, usize) {
+    let start = scroll.min(len);
+    let end = start.saturating_add(height).min(len);
+    (start, end)
 }
 
 /// YAML / `kubectl describe` colorization: comments dimmed, section headers in
@@ -1141,7 +1222,9 @@ fn draw_help(frame: &mut Frame, area: Rect) {
             ":xray · :diff",
             "hierarchical tree · live-vs-last-applied diff",
         ),
+        bind(":events · E", "events for the selected object"),
         bind(":pf", "view/stop background port-forwards"),
+        bind(":skin", "switch color skin live"),
         bind(
             "enter",
             "drill down (deploy→pods, pod→containers, ns→re-scope)",
@@ -1177,8 +1260,12 @@ fn draw_help(frame: &mut Frame, area: Rect) {
             "t",
             "flux: suspend/resume/reconcile menu (ks/hr/repos/buckets…)",
         ),
+        bind("C · U · D", "nodes: cordon · uncordon · drain"),
         bind("space", "mark/unmark row for bulk actions (esc clears)"),
-        bind("ctrl-d · ctrl-k", "delete · kill (marked rows, or current)"),
+        bind(
+            "ctrl-d · ctrl-k",
+            "delete · force-delete (f toggles in confirm)",
+        ),
         Line::from(""),
         Line::from(Span::styled("  Logs view", theme::title())),
         bind("/ · s · w · t", "search · autoscroll · wrap · timestamps"),
@@ -1200,8 +1287,6 @@ fn draw_help(frame: &mut Frame, area: Rect) {
 }
 
 fn draw_namespaces(frame: &mut Frame, app: &mut App, area: Rect) {
-    let popup = centered_rect(40, 60, area);
-    frame.render_widget(Clear, popup);
     let names = app.filtered_namespaces();
     let items: Vec<ListItem> = names
         .iter()
@@ -1220,23 +1305,18 @@ fn draw_namespaces(frame: &mut Frame, app: &mut App, area: Rect) {
     } else {
         format!(" Namespaces · /{}_ ", app.ns_filter)
     };
-    let list = List::new(items)
-        .highlight_style(theme::selected_row())
-        .highlight_symbol("▌ ")
-        .highlight_spacing(HighlightSpacing::Always)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_type(BorderType::Rounded)
-                .border_style(theme::border_focused())
-                .title(Span::styled(title, theme::title())),
-        );
-    frame.render_stateful_widget(list, popup, &mut app.ns_state);
+    render_popup_list(
+        frame,
+        area,
+        40,
+        60,
+        items,
+        Span::styled(title, theme::title()),
+        &mut app.ns_state,
+    );
 }
 
 fn draw_contexts(frame: &mut Frame, app: &mut App, area: Rect) {
-    let popup = centered_rect(50, 60, area);
-    frame.render_widget(Clear, popup);
     let current = app.cluster.context.clone();
     let items: Vec<ListItem> = app
         .filtered_contexts()
@@ -1259,26 +1339,21 @@ fn draw_contexts(frame: &mut Frame, app: &mut App, area: Rect) {
     } else {
         format!(" Contexts · /{}_ ", app.ctx_filter)
     };
-    let list = List::new(items)
-        .highlight_style(theme::selected_row())
-        .highlight_symbol("▌ ")
-        .highlight_spacing(HighlightSpacing::Always)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_type(BorderType::Rounded)
-                .border_style(theme::border_focused())
-                .title(Span::styled(title, theme::title())),
-        );
-    frame.render_stateful_widget(list, popup, &mut app.ctx_state);
+    render_popup_list(
+        frame,
+        area,
+        50,
+        60,
+        items,
+        Span::styled(title, theme::title()),
+        &mut app.ctx_state,
+    );
 }
 
 /// Flux suspend/resume action menu (`t`). Deliberately a menu rather than a
 /// single-key toggle, so acting on a live resource always takes an explicit,
 /// visible choice.
 fn draw_flux_menu(frame: &mut Frame, app: &mut App, area: Rect) {
-    let popup = centered_rect(36, 24, area);
-    frame.render_widget(Clear, popup);
     let count = app.marked.len().max(1);
     let target = if count == 1 {
         "current selection".to_string()
@@ -1296,18 +1371,15 @@ fn draw_flux_menu(frame: &mut Frame, app: &mut App, area: Rect) {
             ListItem::new(Span::styled(*label, Style::default().fg(color)))
         })
         .collect();
-    let list = List::new(items)
-        .highlight_style(theme::selected_row())
-        .highlight_symbol("▌ ")
-        .highlight_spacing(HighlightSpacing::Always)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_type(BorderType::Rounded)
-                .border_style(theme::border_focused())
-                .title(Span::styled(format!(" Flux: {target} "), theme::title())),
-        );
-    frame.render_stateful_widget(list, popup, &mut app.flux_menu_state);
+    render_popup_list(
+        frame,
+        area,
+        36,
+        24,
+        items,
+        Span::styled(format!(" Flux: {target} "), theme::title()),
+        &mut app.flux_menu_state,
+    );
 }
 
 /// Background port-forwards (`:pf`). A full-width view, not a popup — closing
@@ -1327,47 +1399,56 @@ fn draw_port_forwards(frame: &mut Frame, app: &mut App, area: Rect) {
         " Port-forwards [{}]  (x/s stop · esc close — others keep running) ",
         app.port_forwards.len()
     );
-    let list = List::new(items)
-        .highlight_style(theme::selected_row())
-        .highlight_symbol("▌ ")
-        .highlight_spacing(HighlightSpacing::Always)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_type(BorderType::Rounded)
-                .border_style(theme::border_focused())
-                .title(Span::styled(title, theme::title())),
-        );
-    frame.render_stateful_widget(list, area, &mut app.pf_state);
+    render_framed_list(
+        frame,
+        area,
+        items,
+        Span::styled(title, theme::title()),
+        &mut app.pf_state,
+    );
+}
+
+fn draw_skins(frame: &mut Frame, app: &mut App, area: Rect) {
+    let items: Vec<ListItem> = app
+        .skin_list
+        .iter()
+        .map(|name| {
+            ListItem::new(Span::styled(
+                name.clone(),
+                Style::default().fg(theme::text()),
+            ))
+        })
+        .collect();
+    render_popup_list(
+        frame,
+        area,
+        42,
+        58,
+        items,
+        Span::styled(" Skins (enter apply · esc close) ", theme::title()),
+        &mut app.skin_state,
+    );
 }
 
 fn draw_containers(frame: &mut Frame, app: &mut App, area: Rect) {
-    let popup = centered_rect(50, 60, area);
-    frame.render_widget(Clear, popup);
     let items: Vec<ListItem> = app
         .container_list
         .iter()
         .map(|c| ListItem::new(Span::styled(c.clone(), Style::default().fg(theme::text()))))
         .collect();
-    let list = List::new(items)
-        .highlight_style(theme::selected_row())
-        .highlight_symbol("▌ ")
-        .highlight_spacing(HighlightSpacing::Always)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_type(BorderType::Rounded)
-                .border_style(theme::border_focused())
-                .title(Span::styled(
-                    " Containers (⏎ logs · p previous) ",
-                    theme::title(),
-                )),
-        );
-    frame.render_stateful_widget(list, popup, &mut app.container_state);
+    render_popup_list(
+        frame,
+        area,
+        50,
+        60,
+        items,
+        Span::styled(" Containers (⏎ logs · p previous) ", theme::title()),
+        &mut app.container_state,
+    );
 }
 
 fn draw_prompt_popup(frame: &mut Frame, app: &App, area: Rect) {
-    let popup = centered_rect(60, 34, area);
+    let popup = centered_rect_with_min(60, 34, 44, 8, area);
     frame.render_widget(Clear, popup);
     let lines = vec![
         Line::from(""),
@@ -1397,8 +1478,6 @@ fn draw_prompt_popup(frame: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_set_image(frame: &mut Frame, app: &mut App, area: Rect) {
-    let popup = centered_rect(70, 60, area);
-    frame.render_widget(Clear, popup);
     let items: Vec<ListItem> = app
         .container_list
         .iter()
@@ -1412,25 +1491,19 @@ fn draw_set_image(frame: &mut Frame, app: &mut App, area: Rect) {
             ]))
         })
         .collect();
-    let list = List::new(items)
-        .highlight_style(theme::selected_row())
-        .highlight_symbol("▌ ")
-        .highlight_spacing(HighlightSpacing::Always)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_type(BorderType::Rounded)
-                .border_style(theme::border_focused())
-                .title(Span::styled(
-                    " Set Image (⏎ to edit container) ",
-                    theme::title(),
-                )),
-        );
-    frame.render_stateful_widget(list, popup, &mut app.container_state);
+    render_popup_list(
+        frame,
+        area,
+        70,
+        60,
+        items,
+        Span::styled(" Set Image (⏎ to edit container) ", theme::title()),
+        &mut app.container_state,
+    );
 }
 
 fn draw_confirm(frame: &mut Frame, app: &App, area: Rect) {
-    let popup = centered_rect(50, 20, area);
+    let popup = centered_rect_with_min(50, 20, 56, 7, area);
     frame.render_widget(Clear, popup);
     let lines = vec![
         Line::from(""),
@@ -1440,7 +1513,7 @@ fn draw_confirm(frame: &mut Frame, app: &App, area: Rect) {
         )),
         Line::from(""),
         Line::from(Span::styled(
-            "  [y] confirm    [n] cancel",
+            confirm_action_hint(app.confirm_allows_force_toggle(), ConfirmHintStyle::Popup),
             Style::default().fg(theme::yellow()),
         )),
     ];
@@ -1489,21 +1562,13 @@ fn draw_palette(frame: &mut Frame, app: &mut App, area: Rect) {
         .collect();
     let mut state = ListState::default();
     state.select(Some(app.cmd_sel));
-    let list = List::new(items)
-        .highlight_style(theme::selected_row())
-        .highlight_symbol("▌ ")
-        .highlight_spacing(HighlightSpacing::Always)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_type(BorderType::Rounded)
-                .border_style(theme::border_focused())
-                .title(Span::styled(
-                    " commands & resources (tab/↑↓ · ⏎) ",
-                    theme::title(),
-                )),
-        );
-    frame.render_stateful_widget(list, rect, &mut state);
+    render_framed_list(
+        frame,
+        rect,
+        items,
+        Span::styled(" commands & resources (tab/↑↓ · ⏎) ", theme::title()),
+        &mut state,
+    );
 }
 
 /// Xray hierarchical tree (owner → children → containers).
@@ -1543,18 +1608,13 @@ fn draw_xray(frame: &mut Frame, app: &mut App, area: Rect) {
         " Xray [{}]  (⏎ logs · r refresh · esc back) ",
         app.xray_items.len()
     );
-    let list = List::new(items)
-        .highlight_style(theme::selected_row())
-        .highlight_symbol("▌ ")
-        .highlight_spacing(HighlightSpacing::Always)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_type(BorderType::Rounded)
-                .border_style(theme::border_focused())
-                .title(Span::styled(title, theme::title())),
-        );
-    frame.render_stateful_widget(list, area, &mut app.xray_state);
+    render_framed_list(
+        frame,
+        area,
+        items,
+        Span::styled(title, theme::title()),
+        &mut app.xray_state,
+    );
 }
 
 /// Pulse dashboard: cluster-health tiles.
@@ -1705,7 +1765,7 @@ fn draw_prompt(frame: &mut Frame, app: &App, area: Rect) {
             Span::styled("█", Style::default().fg(theme::teal())),
         ]),
         Mode::Confirm => Line::from(Span::styled(
-            "  y/enter: confirm   n/esc: cancel",
+            confirm_action_hint(app.confirm_allows_force_toggle(), ConfirmHintStyle::Prompt),
             Style::default().fg(theme::yellow()),
         )),
         Mode::Logs => {
@@ -1762,23 +1822,77 @@ fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
     );
 }
 
-fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
-    let vertical = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Percentage((100 - percent_y) / 2),
-            Constraint::Percentage(percent_y),
-            Constraint::Percentage((100 - percent_y) / 2),
-        ])
-        .split(r);
-    Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Percentage((100 - percent_x) / 2),
-            Constraint::Percentage(percent_x),
-            Constraint::Percentage((100 - percent_x) / 2),
-        ])
-        .split(vertical[1])[1]
+#[derive(Clone, Copy)]
+enum ConfirmHintStyle {
+    Popup,
+    Prompt,
+}
+
+fn confirm_action_hint(allows_force: bool, style: ConfirmHintStyle) -> &'static str {
+    match (allows_force, style) {
+        (true, ConfirmHintStyle::Popup) => "  [y] confirm    [f] toggle force    [n] cancel",
+        (false, ConfirmHintStyle::Popup) => "  [y] confirm    [n] cancel",
+        (true, ConfirmHintStyle::Prompt) => "  y/enter: confirm   f: toggle force   n/esc: cancel",
+        (false, ConfirmHintStyle::Prompt) => "  y/enter: confirm   n/esc: cancel",
+    }
+}
+
+fn render_popup_list<'a, T>(
+    frame: &mut Frame,
+    area: Rect,
+    percent_x: u16,
+    percent_y: u16,
+    items: Vec<ListItem<'a>>,
+    title: T,
+    state: &mut ListState,
+) where
+    T: Into<Line<'a>>,
+{
+    let popup = centered_rect_with_min(percent_x, percent_y, 32, 8, area);
+    frame.render_widget(Clear, popup);
+    render_framed_list(frame, popup, items, title, state);
+}
+
+fn render_framed_list<'a, T>(
+    frame: &mut Frame,
+    area: Rect,
+    items: Vec<ListItem<'a>>,
+    title: T,
+    state: &mut ListState,
+) where
+    T: Into<Line<'a>>,
+{
+    let list = List::new(items)
+        .highlight_style(theme::selected_row())
+        .highlight_symbol("▌ ")
+        .highlight_spacing(HighlightSpacing::Always)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .border_style(theme::border_focused())
+                .title(title.into()),
+        );
+    frame.render_stateful_widget(list, area, state);
+}
+
+fn centered_rect_with_min(
+    percent_x: u16,
+    percent_y: u16,
+    min_width: u16,
+    min_height: u16,
+    r: Rect,
+) -> Rect {
+    let pct_w = (u32::from(r.width) * u32::from(percent_x.min(100)) / 100) as u16;
+    let pct_h = (u32::from(r.height) * u32::from(percent_y.min(100)) / 100) as u16;
+    let width = pct_w.max(min_width).min(r.width);
+    let height = pct_h.max(min_height).min(r.height);
+    Rect {
+        x: r.x + (r.width - width) / 2,
+        y: r.y + (r.height - height) / 2,
+        width,
+        height,
+    }
 }
 
 #[cfg(test)]
@@ -1836,6 +1950,49 @@ mod tests {
         assert_eq!(wrapped_height("五五五五五五", 10), 2);
         // ANSI escapes don't consume columns.
         assert_eq!(wrapped_height("\x1b[31maaaaaaaaaa\x1b[0m", 10), 1);
+    }
+
+    #[test]
+    fn visible_line_window_clamps_to_viewport() {
+        assert_eq!(visible_line_window(100, 10, 20), (10, 30));
+        assert_eq!(visible_line_window(100, 95, 20), (95, 100));
+        assert_eq!(visible_line_window(100, 150, 20), (100, 100));
+        assert_eq!(visible_line_window(100, 10, 0), (10, 10));
+    }
+
+    #[test]
+    fn centered_rect_with_min_keeps_popups_readable() {
+        let area = Rect {
+            x: 10,
+            y: 20,
+            width: 100,
+            height: 20,
+        };
+        assert_eq!(
+            centered_rect_with_min(50, 20, 56, 7, area),
+            Rect {
+                x: 32,
+                y: 26,
+                width: 56,
+                height: 7,
+            }
+        );
+
+        let tiny = Rect {
+            x: 3,
+            y: 4,
+            width: 40,
+            height: 5,
+        };
+        assert_eq!(centered_rect_with_min(50, 20, 56, 7, tiny), tiny);
+    }
+
+    #[test]
+    fn confirm_hint_mentions_force_only_when_supported() {
+        assert!(confirm_action_hint(true, ConfirmHintStyle::Popup).contains("toggle force"));
+        assert!(confirm_action_hint(true, ConfirmHintStyle::Prompt).contains("toggle force"));
+        assert!(!confirm_action_hint(false, ConfirmHintStyle::Popup).contains("toggle force"));
+        assert!(!confirm_action_hint(false, ConfirmHintStyle::Prompt).contains("toggle force"));
     }
 
     #[test]
