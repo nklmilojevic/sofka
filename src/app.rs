@@ -2017,6 +2017,37 @@ impl App {
         self.mode = Mode::Confirm;
     }
 
+    fn spawn_patch_action<F>(
+        &self,
+        kind: Kind,
+        targets: Vec<(String, String)>,
+        patch: Patch<Value>,
+        error_message: F,
+    ) where
+        F: Fn(&str, kube::Error) -> String + Send + 'static,
+    {
+        let client = self.cluster.client.clone();
+        let tx = self.tx.clone();
+        let genr = self.generation;
+        tokio::spawn(async move {
+            for (name, ns) in targets {
+                let api: Api<DynamicObject> = if kind.namespaced && !ns.is_empty() {
+                    Api::namespaced_with(client.clone(), &ns, &kind.ar)
+                } else {
+                    Api::all_with(client.clone(), &kind.ar)
+                };
+                if let Err(e) = api.patch(&name, &PatchParams::default(), &patch).await {
+                    let _ = tx
+                        .send(Msg::Error {
+                            generation: genr,
+                            error: error_message(&name, e),
+                        })
+                        .await;
+                }
+            }
+        });
+    }
+
     fn do_delete(&mut self, targets: Vec<(String, String)>, force: bool) {
         let Some(kind) = self.kind.clone() else {
             return;
@@ -2069,10 +2100,6 @@ impl App {
         let Some(kind) = self.kind.clone() else {
             return;
         };
-        let client = self.cluster.client.clone();
-        let tx = self.tx.clone();
-        let genr = self.generation;
-        let patch_doc = node_unschedulable_patch(unschedulable);
         let verb = if unschedulable {
             "cordoning"
         } else {
@@ -2084,20 +2111,16 @@ impl App {
             format!("{verb} {} nodes…", targets.len())
         };
         self.flash_err = false;
-        tokio::spawn(async move {
-            let api: Api<DynamicObject> = Api::all_with(client, &kind.ar);
-            let patch = Patch::Merge(patch_doc);
-            for name in targets {
-                if let Err(e) = api.patch(&name, &PatchParams::default(), &patch).await {
-                    let _ = tx
-                        .send(Msg::Error {
-                            generation: genr,
-                            error: format!("{verb} {name} failed: {e}"),
-                        })
-                        .await;
-                }
-            }
-        });
+        let targets = targets
+            .into_iter()
+            .map(|name| (name, String::new()))
+            .collect();
+        self.spawn_patch_action(
+            kind,
+            targets,
+            Patch::Merge(node_unschedulable_patch(unschedulable)),
+            move |name, e| format!("{verb} {name} failed: {e}"),
+        );
     }
 
     fn request_drain(&mut self) {
@@ -2415,23 +2438,14 @@ impl App {
         let name = obj.metadata.name.clone().unwrap_or_default();
         let ns = obj.metadata.namespace.clone().unwrap_or_default();
         let now = k8s_openapi::jiff::Timestamp::now().to_string();
-        let client = self.cluster.client.clone();
-        let tx = self.tx.clone();
-        let genr = self.generation;
         self.flash = format!("restarting {name}…");
         self.flash_err = false;
-        tokio::spawn(async move {
-            let api: Api<DynamicObject> = Api::namespaced_with(client, &ns, &kind.ar);
-            let patch = Patch::Strategic(restart_patch(&now));
-            if let Err(e) = api.patch(&name, &PatchParams::default(), &patch).await {
-                let _ = tx
-                    .send(Msg::Error {
-                        generation: genr,
-                        error: format!("restart failed: {e}"),
-                    })
-                    .await;
-            }
-        });
+        self.spawn_patch_action(
+            kind,
+            vec![(name, ns)],
+            Patch::Strategic(restart_patch(&now)),
+            |_, e| format!("restart failed: {e}"),
+        );
     }
 
     /// Open the Set-Image picker for the selected workload/pod (k9s `i`).
@@ -2530,24 +2544,14 @@ impl App {
         let Some(kind) = self.kind.clone() else {
             return;
         };
-        let client = self.cluster.client.clone();
-        let tx = self.tx.clone();
-        let genr = self.generation;
-        let patch_doc = set_image_patch(&plural, &container, &image);
         self.flash = format!("setting image: {container} → {image}");
         self.flash_err = false;
-        tokio::spawn(async move {
-            let api: Api<DynamicObject> = Api::namespaced_with(client, &ns, &kind.ar);
-            let patch = Patch::Strategic(patch_doc);
-            if let Err(e) = api.patch(&name, &PatchParams::default(), &patch).await {
-                let _ = tx
-                    .send(Msg::Error {
-                        generation: genr,
-                        error: format!("set image failed: {e}"),
-                    })
-                    .await;
-            }
-        });
+        self.spawn_patch_action(
+            kind,
+            vec![(name, ns)],
+            Patch::Strategic(set_image_patch(&plural, &container, &image)),
+            |_, e| format!("set image failed: {e}"),
+        );
     }
 
     fn request_edit(&mut self) {
@@ -2765,23 +2769,14 @@ impl App {
         let Some(kind) = self.kind.clone() else {
             return;
         };
-        let client = self.cluster.client.clone();
-        let tx = self.tx.clone();
-        let genr = self.generation;
         self.flash = format!("scaling {name} → {replicas}");
         self.flash_err = false;
-        tokio::spawn(async move {
-            let api: Api<DynamicObject> = Api::namespaced_with(client, &ns, &kind.ar);
-            let patch = Patch::Merge(scale_patch(replicas));
-            if let Err(e) = api.patch(&name, &PatchParams::default(), &patch).await {
-                let _ = tx
-                    .send(Msg::Error {
-                        generation: genr,
-                        error: format!("scale failed: {e}"),
-                    })
-                    .await;
-            }
-        });
+        self.spawn_patch_action(
+            kind,
+            vec![(name, ns)],
+            Patch::Merge(scale_patch(replicas)),
+            |_, e| format!("scale failed: {e}"),
+        );
     }
 
     /// Open the Flux suspend/resume menu (`t`) for the marked rows, or the
@@ -2837,9 +2832,6 @@ impl App {
         let Some(kind) = self.kind.clone() else {
             return;
         };
-        let client = self.cluster.client.clone();
-        let tx = self.tx.clone();
-        let genr = self.generation;
         let verb = if suspend { "suspending" } else { "resuming" };
         self.flash = if targets.len() == 1 {
             format!("{verb} {}…", targets[0].0)
@@ -2848,20 +2840,12 @@ impl App {
         };
         self.flash_err = false;
         self.marked.clear();
-        tokio::spawn(async move {
-            let patch = Patch::Merge(suspend_patch(suspend));
-            for (name, ns) in targets {
-                let api: Api<DynamicObject> = Api::namespaced_with(client.clone(), &ns, &kind.ar);
-                if let Err(e) = api.patch(&name, &PatchParams::default(), &patch).await {
-                    let _ = tx
-                        .send(Msg::Error {
-                            generation: genr,
-                            error: format!("{verb} {name} failed: {e}"),
-                        })
-                        .await;
-                }
-            }
-        });
+        self.spawn_patch_action(
+            kind,
+            targets,
+            Patch::Merge(suspend_patch(suspend)),
+            move |name, e| format!("{verb} {name} failed: {e}"),
+        );
     }
 
     /// Force an immediate Flux reconciliation, bypassing the normal interval —
@@ -2871,9 +2855,6 @@ impl App {
         let Some(kind) = self.kind.clone() else {
             return;
         };
-        let client = self.cluster.client.clone();
-        let tx = self.tx.clone();
-        let genr = self.generation;
         let now = k8s_openapi::jiff::Timestamp::now().to_string();
         self.flash = if targets.len() == 1 {
             format!("reconciling {}…", targets[0].0)
@@ -2882,20 +2863,12 @@ impl App {
         };
         self.flash_err = false;
         self.marked.clear();
-        tokio::spawn(async move {
-            let patch = Patch::Merge(reconcile_patch(&now));
-            for (name, ns) in targets {
-                let api: Api<DynamicObject> = Api::namespaced_with(client.clone(), &ns, &kind.ar);
-                if let Err(e) = api.patch(&name, &PatchParams::default(), &patch).await {
-                    let _ = tx
-                        .send(Msg::Error {
-                            generation: genr,
-                            error: format!("reconcile {name} failed: {e}"),
-                        })
-                        .await;
-                }
-            }
-        });
+        self.spawn_patch_action(
+            kind,
+            targets,
+            Patch::Merge(reconcile_patch(&now)),
+            |name, e| format!("reconcile {name} failed: {e}"),
+        );
     }
 
     /// Force an immediate External Secrets Operator refresh on the marked rows
@@ -2921,9 +2894,6 @@ impl App {
         let Some(kind) = self.kind.clone() else {
             return;
         };
-        let client = self.cluster.client.clone();
-        let tx = self.tx.clone();
-        let genr = self.generation;
         let now = k8s_openapi::jiff::Timestamp::now().as_second().to_string();
         self.flash = if targets.len() == 1 {
             format!("refreshing {}…", targets[0].0)
@@ -2932,20 +2902,12 @@ impl App {
         };
         self.flash_err = false;
         self.marked.clear();
-        tokio::spawn(async move {
-            let patch = Patch::Merge(external_secret_refresh_patch(&now));
-            for (name, ns) in targets {
-                let api: Api<DynamicObject> = Api::namespaced_with(client.clone(), &ns, &kind.ar);
-                if let Err(e) = api.patch(&name, &PatchParams::default(), &patch).await {
-                    let _ = tx
-                        .send(Msg::Error {
-                            generation: genr,
-                            error: format!("refresh {name} failed: {e}"),
-                        })
-                        .await;
-                }
-            }
-        });
+        self.spawn_patch_action(
+            kind,
+            targets,
+            Patch::Merge(external_secret_refresh_patch(&now)),
+            |name, e| format!("refresh {name} failed: {e}"),
+        );
     }
 
     fn flash_warn(&mut self, msg: &str) {
