@@ -3636,8 +3636,14 @@ impl App {
             return;
         };
         let root_kind = trim_s(&self.kind_plural).to_string();
-        let rs = self.cluster.resolve("replicasets").map(|k| k.ar);
-        let pods = self.cluster.resolve("pods").map(|k| k.ar);
+        let pool_kinds: Vec<(String, ApiResource, bool)> = xray_pool_plurals(&root_kind)
+            .iter()
+            .filter_map(|plural| {
+                self.cluster
+                    .resolve(plural)
+                    .map(|k| (trim_s(plural).to_string(), k.ar, k.namespaced))
+            })
+            .collect();
 
         let client = self.cluster.client.clone();
         let tx = self.tx.clone();
@@ -3652,16 +3658,9 @@ impl App {
                 }
                 let roots = list_kind(&client, &root_ar, root_nsd, &ns).await;
                 let mut pool: Vec<(String, DynamicObject)> = Vec::new();
-                if root_kind != "pod" {
-                    if let Some(ar) = &rs {
-                        for o in list_kind(&client, ar, true, &ns).await {
-                            pool.push(("replicaset".into(), o));
-                        }
-                    }
-                    if let Some(ar) = &pods {
-                        for o in list_kind(&client, ar, true, &ns).await {
-                            pool.push(("pod".into(), o));
-                        }
+                for (label, ar, namespaced) in &pool_kinds {
+                    for o in list_kind(&client, ar, *namespaced, &ns).await {
+                        pool.push((label.clone(), o));
                     }
                 }
 
@@ -3961,6 +3960,16 @@ fn container_names(obj: &DynamicObject) -> Vec<String> {
 /// Trim a trailing plural "s" for breadcrumb labels (deployments -> deployment).
 fn trim_s(plural: &str) -> &str {
     plural.strip_suffix('s').unwrap_or(plural)
+}
+
+fn xray_pool_plurals(root_kind: &str) -> &'static [&'static str] {
+    match root_kind {
+        "pod" => &[],
+        "cronjob" => &["jobs", "pods"],
+        "job" | "daemonset" | "replicaset" | "statefulset" => &["pods"],
+        "deployment" => &["replicasets", "pods"],
+        _ => &["replicasets", "pods"],
+    }
 }
 
 /// Columns whose cell is a count/number and should sort numerically.
@@ -4307,6 +4316,25 @@ fn emit_xray(
 fn xray_status(kind: &str, o: &DynamicObject) -> String {
     match kind {
         "pod" => phase(o),
+        "job" => format!(
+            "{}/{}",
+            o.data
+                .pointer("/status/succeeded")
+                .and_then(Value::as_i64)
+                .unwrap_or(0),
+            o.data
+                .pointer("/spec/completions")
+                .and_then(Value::as_i64)
+                .unwrap_or(1)
+                .max(1),
+        ),
+        "cronjob" => format!(
+            "active {}",
+            o.data
+                .pointer("/status/active")
+                .and_then(Value::as_array)
+                .map_or(0, |items| items.len()),
+        ),
         "deployment" | "replicaset" | "statefulset" => format!(
             "{}/{}",
             o.data
@@ -5669,6 +5697,82 @@ mod tests {
         assert!(names.contains(&"app".to_string()));
         assert!(names.contains(&"sidecar".to_string()));
         assert!(names.contains(&"init".to_string()));
+    }
+
+    #[test]
+    fn xray_pool_plurals_include_cronjob_chain() {
+        assert_eq!(xray_pool_plurals("cronjob"), &["jobs", "pods"]);
+        assert_eq!(xray_pool_plurals("job"), &["pods"]);
+        assert_eq!(xray_pool_plurals("pod"), &[] as &[&str]);
+        assert_eq!(xray_pool_plurals("deployment"), &["replicasets", "pods"]);
+    }
+
+    #[test]
+    fn xray_emits_cronjob_job_pod_container_chain() {
+        let cron = obj(json!({
+            "apiVersion": "batch/v1",
+            "kind": "CronJob",
+            "metadata": {"name": "backup", "namespace": "default", "uid": "cron-uid"},
+            "status": {"active": [{"name": "backup-1"}]}
+        }));
+        let job = obj(json!({
+            "apiVersion": "batch/v1",
+            "kind": "Job",
+            "metadata": {
+                "name": "backup-1",
+                "namespace": "default",
+                "uid": "job-uid",
+                "ownerReferences": [{
+                    "apiVersion": "batch/v1",
+                    "kind": "CronJob",
+                    "name": "backup",
+                    "uid": "cron-uid"
+                }]
+            },
+            "spec": {"completions": 1},
+            "status": {"succeeded": 1}
+        }));
+        let pod = obj(json!({
+            "apiVersion": "v1",
+            "kind": "Pod",
+            "metadata": {
+                "name": "backup-1-pod",
+                "namespace": "default",
+                "uid": "pod-uid",
+                "ownerReferences": [{
+                    "apiVersion": "batch/v1",
+                    "kind": "Job",
+                    "name": "backup-1",
+                    "uid": "job-uid"
+                }]
+            },
+            "spec": {"containers": [{"name": "worker"}]},
+            "status": {"phase": "Running"}
+        }));
+        let mut children = std::collections::HashMap::new();
+        children.insert("cron-uid".to_string(), vec![("job".to_string(), job)]);
+        children.insert("job-uid".to_string(), vec![("pod".to_string(), pod)]);
+
+        let mut items = Vec::new();
+        emit_xray("cronjob", &cron, 0, &children, &mut items);
+
+        assert_eq!(items.len(), 4);
+        assert_eq!(items[0].kind, "cronjob");
+        assert_eq!(items[0].name, "backup");
+        assert_eq!(items[0].depth, 0);
+        assert_eq!(items[0].status, "active 1");
+        assert_eq!(items[1].kind, "job");
+        assert_eq!(items[1].name, "backup-1");
+        assert_eq!(items[1].depth, 1);
+        assert_eq!(items[1].status, "1/1");
+        assert_eq!(items[2].kind, "pod");
+        assert_eq!(items[2].name, "backup-1-pod");
+        assert_eq!(items[2].depth, 2);
+        assert_eq!(items[2].status, "Running");
+        assert_eq!(items[3].kind, "container");
+        assert_eq!(items[3].name, "backup-1-pod");
+        assert_eq!(items[3].depth, 3);
+        assert_eq!(items[3].container.as_deref(), Some("worker"));
     }
 
     #[test]
