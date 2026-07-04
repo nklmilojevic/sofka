@@ -1258,8 +1258,12 @@ fn draw_help(frame: &mut Frame, area: Rect) {
             "t",
             "flux: suspend/resume/reconcile menu (ks/hr/repos/buckets…)",
         ),
+        bind("C · U · D", "nodes: cordon · uncordon · drain"),
         bind("space", "mark/unmark row for bulk actions (esc clears)"),
-        bind("ctrl-d · ctrl-k", "delete · kill (marked rows, or current)"),
+        bind(
+            "ctrl-d · ctrl-k",
+            "delete · force-delete (f toggles in confirm)",
+        ),
         Line::from(""),
         Line::from(Span::styled("  Logs view", theme::title())),
         bind("/ · s · w · t", "search · autoscroll · wrap · timestamps"),
@@ -1513,6 +1517,11 @@ fn draw_set_image(frame: &mut Frame, app: &mut App, area: Rect) {
 fn draw_confirm(frame: &mut Frame, app: &App, area: Rect) {
     let popup = centered_rect(50, 20, area);
     frame.render_widget(Clear, popup);
+    let action_hint = if app.confirm_allows_force_toggle() {
+        "  [y] confirm    [f] toggle force    [n] cancel"
+    } else {
+        "  [y] confirm    [n] cancel"
+    };
     let lines = vec![
         Line::from(""),
         Line::from(Span::styled(
@@ -1521,7 +1530,7 @@ fn draw_confirm(frame: &mut Frame, app: &App, area: Rect) {
         )),
         Line::from(""),
         Line::from(Span::styled(
-            "  [y] confirm    [n] cancel",
+            action_hint,
             Style::default().fg(theme::yellow()),
         )),
     ];

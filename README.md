@@ -228,7 +228,8 @@ sofka [RESOURCE] [-n NAMESPACE] [-A]
 | `r`                       | rollout restart (workloads) / refresh (elsewhere)                                                       |
 | `f` / `shift-f`           | port-forward (pods/services) - runs in the background                                                   |
 | `t`                       | Flux: suspend/resume/reconcile menu                                                                     |
-| `ctrl-d` / `ctrl-k`       | delete / kill (marked rows, or current)                                                                 |
+| `C` / `U` / `D`           | nodes: cordon / uncordon / drain                                                                        |
+| `ctrl-d` / `ctrl-k`       | delete / force-delete (marked rows, or current); `f` toggles force in confirm                           |
 | `:q`, `ctrl-c`            | quit                                                                                                    |
 | `?`                       | help                                                                                                    |
 

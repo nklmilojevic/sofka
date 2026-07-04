@@ -17,7 +17,7 @@ use fuzzy_matcher::FuzzyMatcher;
 use fuzzy_matcher::skim::SkimMatcherV2;
 use k8s_openapi::api::core::v1::Pod;
 use kube::Client;
-use kube::api::{Api, DeleteParams, ListParams, LogParams, Patch, PatchParams};
+use kube::api::{Api, DeleteParams, EvictParams, ListParams, LogParams, Patch, PatchParams};
 use kube::core::{DynamicObject, TypeMeta};
 use kube::discovery::ApiResource;
 use kube::runtime::watcher;
@@ -135,6 +135,8 @@ enum ConfirmAction {
         targets: Vec<(String, String)>,
         force: bool,
     },
+    /// One or more node names to cordon and drain.
+    Drain { targets: Vec<String> },
 }
 
 /// What the logs view is currently streaming, so it can be re-streamed when
@@ -1243,6 +1245,16 @@ impl App {
         self.selected_ref().cloned()
     }
 
+    pub fn confirm_allows_force_toggle(&self) -> bool {
+        matches!(
+            self.confirm_action,
+            Some(ConfirmAction::Delete {
+                targets: _,
+                force: _
+            })
+        )
+    }
+
     /// Toggle the mark on the current row (SPACE).
     fn toggle_mark(&mut self) {
         let Some(obj) = self.selected_ref() else {
@@ -1271,6 +1283,14 @@ impl App {
             .iter()
             .filter(|o| self.marked.contains(&row_key(o)))
             .map(|o| to_pair(o))
+            .collect()
+    }
+
+    fn node_action_targets(&self) -> Vec<String> {
+        self.action_targets()
+            .into_iter()
+            .map(|(name, _)| name)
+            .filter(|name| !name.is_empty())
             .collect()
     }
 
@@ -1975,22 +1995,7 @@ impl App {
         if targets.is_empty() {
             return;
         }
-        let verb = if force {
-            "Kill (force-delete)"
-        } else {
-            "Delete"
-        };
-        self.confirm_label = if targets.len() == 1 {
-            let (name, ns) = &targets[0];
-            let where_ns = if ns.is_empty() {
-                String::new()
-            } else {
-                format!(" in {ns}")
-            };
-            format!("{verb} {} {name}{where_ns}?", trim_s(&self.kind_plural))
-        } else {
-            format!("{verb} {} {}?", targets.len(), self.kind_plural)
-        };
+        self.confirm_label = delete_confirm_label(&self.kind_plural, &targets, force);
         self.confirm_action = Some(ConfirmAction::Delete { targets, force });
         self.mode = Mode::Confirm;
     }
@@ -2026,6 +2031,161 @@ impl App {
                             error: format!("delete {name} failed: {e}"),
                         })
                         .await;
+                }
+            }
+        });
+    }
+
+    fn request_cordon(&mut self, unschedulable: bool) {
+        if self.kind_plural != "nodes" {
+            self.flash_warn("cordon/uncordon applies to nodes");
+            return;
+        }
+        let targets = self.node_action_targets();
+        if targets.is_empty() {
+            return;
+        }
+        self.do_cordon_nodes(targets, unschedulable);
+    }
+
+    fn do_cordon_nodes(&mut self, targets: Vec<String>, unschedulable: bool) {
+        let Some(kind) = self.kind.clone() else {
+            return;
+        };
+        let client = self.cluster.client.clone();
+        let tx = self.tx.clone();
+        let genr = self.generation;
+        let patch_doc = node_unschedulable_patch(unschedulable);
+        let verb = if unschedulable {
+            "cordoning"
+        } else {
+            "uncordoning"
+        };
+        self.flash = if targets.len() == 1 {
+            format!("{verb} {}…", targets[0])
+        } else {
+            format!("{verb} {} nodes…", targets.len())
+        };
+        self.flash_err = false;
+        tokio::spawn(async move {
+            let api: Api<DynamicObject> = Api::all_with(client, &kind.ar);
+            let patch = Patch::Merge(patch_doc);
+            for name in targets {
+                if let Err(e) = api.patch(&name, &PatchParams::default(), &patch).await {
+                    let _ = tx
+                        .send(Msg::Error {
+                            generation: genr,
+                            error: format!("{verb} {name} failed: {e}"),
+                        })
+                        .await;
+                }
+            }
+        });
+    }
+
+    fn request_drain(&mut self) {
+        if self.kind_plural != "nodes" {
+            self.flash_warn("drain applies to nodes");
+            return;
+        }
+        let targets = self.node_action_targets();
+        if targets.is_empty() {
+            return;
+        }
+        self.confirm_label = if targets.len() == 1 {
+            format!("Drain node {}? Cordon and evict eligible pods.", targets[0])
+        } else {
+            format!(
+                "Drain {} nodes? Cordon and evict eligible pods.",
+                targets.len()
+            )
+        };
+        self.confirm_action = Some(ConfirmAction::Drain { targets });
+        self.mode = Mode::Confirm;
+    }
+
+    fn do_drain_nodes(&mut self, targets: Vec<String>) {
+        let Some(kind) = self.kind.clone() else {
+            return;
+        };
+        let client = self.cluster.client.clone();
+        let tx = self.tx.clone();
+        let genr = self.generation;
+        self.flash = if targets.len() == 1 {
+            format!("draining {}…", targets[0])
+        } else {
+            format!("draining {} nodes…", targets.len())
+        };
+        self.flash_err = false;
+        tokio::spawn(async move {
+            let nodes: Api<DynamicObject> = Api::all_with(client.clone(), &kind.ar);
+            let node_patch = Patch::Merge(node_unschedulable_patch(true));
+            let pods: Api<Pod> = Api::all(client.clone());
+            for node in targets {
+                if let Err(e) = nodes
+                    .patch(&node, &PatchParams::default(), &node_patch)
+                    .await
+                {
+                    let _ = tx
+                        .send(Msg::Error {
+                            generation: genr,
+                            error: format!("drain {node}: cordon failed: {e}"),
+                        })
+                        .await;
+                    continue;
+                }
+
+                let listed = pods
+                    .list(&ListParams::default().fields(&format!("spec.nodeName={node}")))
+                    .await;
+                let pod_list = match listed {
+                    Ok(list) => list,
+                    Err(e) => {
+                        let _ = tx
+                            .send(Msg::Error {
+                                generation: genr,
+                                error: format!("drain {node}: list pods failed: {e}"),
+                            })
+                            .await;
+                        continue;
+                    }
+                };
+
+                for pod in pod_list.items.iter().filter(|pod| drainable_pod(pod)) {
+                    let Some(name) = pod.metadata.name.as_deref() else {
+                        continue;
+                    };
+                    let ns = pod.metadata.namespace.as_deref().unwrap_or("default");
+                    let pod_api: Api<Pod> = Api::namespaced(client.clone(), ns);
+                    let evict = EvictParams {
+                        delete_options: Some(DeleteParams::default()),
+                        ..Default::default()
+                    };
+                    match pod_api.evict(name, &evict).await {
+                        Ok(_) => {}
+                        Err(e) if eviction_unsupported(&e) => {
+                            if let Err(delete_err) =
+                                pod_api.delete(name, &DeleteParams::default()).await
+                            {
+                                let _ = tx
+                                    .send(Msg::Error {
+                                        generation: genr,
+                                        error: format!(
+                                            "drain {node}: delete {ns}/{name} failed after eviction fallback: {delete_err}"
+                                        ),
+                                    })
+                                    .await;
+                            }
+                        }
+                        Err(e) => {
+                            let _ = tx
+                                .send(Msg::Error {
+                                    generation: genr,
+                                    error: format!("drain {node}: evict {ns}/{name} failed: {e}"),
+                                })
+                                .await;
+                        }
+                    }
                 }
             }
         });
@@ -2852,6 +3012,9 @@ impl App {
             KeyCode::Char('o') => self.show_node(),
             KeyCode::Char('c') => self.copy_name(),
             KeyCode::Char('J') => self.jump_owner(),
+            KeyCode::Char('C') => self.request_cordon(true),
+            KeyCode::Char('U') => self.request_cordon(false),
+            KeyCode::Char('D') => self.request_drain(),
             // Sorting: S cycles the column, I inverts the direction.
             KeyCode::Char('S') => self.cycle_sort(),
             KeyCode::Char('I') => self.toggle_sort_dir(),
@@ -3797,11 +3960,31 @@ impl App {
     fn key_confirm(&mut self, key: KeyEvent) {
         match key.code {
             KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
-                if let Some(ConfirmAction::Delete { targets, force }) = self.confirm_action.take() {
-                    self.do_delete(targets, force);
-                    self.marked.clear();
+                if let Some(action) = self.confirm_action.take() {
+                    match action {
+                        ConfirmAction::Delete { targets, force } => {
+                            self.do_delete(targets, force);
+                            self.marked.clear();
+                        }
+                        ConfirmAction::Drain { targets } => {
+                            self.do_drain_nodes(targets);
+                            self.marked.clear();
+                        }
+                    }
                 }
                 self.mode = Mode::Table;
+            }
+            KeyCode::Char('f') | KeyCode::Char('F') => {
+                let update = match self.confirm_action.as_mut() {
+                    Some(ConfirmAction::Delete { targets, force }) => {
+                        *force = !*force;
+                        Some((targets.clone(), *force))
+                    }
+                    _ => None,
+                };
+                if let Some((targets, force)) = update {
+                    self.confirm_label = delete_confirm_label(&self.kind_plural, &targets, force);
+                }
             }
             _ => {
                 self.confirm_action = None;
@@ -3897,6 +4080,61 @@ fn external_secret_refresh_patch(force_sync: &str) -> Value {
     json!({
         "metadata": { "annotations": { "force-sync": force_sync } }
     })
+}
+
+fn node_unschedulable_patch(unschedulable: bool) -> Value {
+    json!({ "spec": { "unschedulable": unschedulable } })
+}
+
+fn delete_confirm_label(kind_plural: &str, targets: &[(String, String)], force: bool) -> String {
+    let verb = if force { "Force delete" } else { "Delete" };
+    if targets.len() == 1 {
+        let (name, ns) = &targets[0];
+        let where_ns = if ns.is_empty() {
+            String::new()
+        } else {
+            format!(" in {ns}")
+        };
+        format!("{verb} {} {name}{where_ns}?", trim_s(kind_plural))
+    } else {
+        format!("{verb} {} {}?", targets.len(), kind_plural)
+    }
+}
+
+fn drainable_pod(pod: &Pod) -> bool {
+    if pod.metadata.deletion_timestamp.is_some() {
+        return false;
+    }
+    if pod
+        .metadata
+        .annotations
+        .as_ref()
+        .is_some_and(|a| a.contains_key("kubernetes.io/config.mirror"))
+    {
+        return false;
+    }
+    if pod
+        .metadata
+        .owner_references
+        .as_ref()
+        .is_some_and(|owners| {
+            owners
+                .iter()
+                .any(|owner| owner.kind.eq_ignore_ascii_case("DaemonSet"))
+        })
+    {
+        return false;
+    }
+    !matches!(
+        pod.status
+            .as_ref()
+            .and_then(|status| status.phase.as_deref()),
+        Some("Succeeded" | "Failed")
+    )
+}
+
+fn eviction_unsupported(err: &kube::Error) -> bool {
+    matches!(err, kube::Error::Api(api_err) if matches!(api_err.code, 404 | 405))
 }
 
 /// Pick a version name to query a CRD's custom resources: the storage version
@@ -4892,6 +5130,69 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn delete_confirm_force_can_toggle() {
+        let (mut app, _rx) = test_app();
+        app.switch_kind("pods");
+        apply(
+            &mut app,
+            json!({"apiVersion": "v1", "kind": "Pod",
+                   "metadata": {"name": "web", "namespace": "default"}}),
+        );
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL))
+            .unwrap();
+        assert_eq!(app.mode, Mode::Confirm);
+        assert!(app.confirm_allows_force_toggle());
+        assert!(app.confirm_label.starts_with("Delete pod web"));
+        assert!(matches!(
+            app.confirm_action,
+            Some(ConfirmAction::Delete { force: false, .. })
+        ));
+
+        app.handle_key(press(KeyCode::Char('f'))).unwrap();
+        assert!(app.confirm_label.starts_with("Force delete pod web"));
+        assert!(matches!(
+            app.confirm_action,
+            Some(ConfirmAction::Delete { force: true, .. })
+        ));
+
+        app.handle_key(press(KeyCode::Char('f'))).unwrap();
+        assert!(app.confirm_label.starts_with("Delete pod web"));
+        assert!(matches!(
+            app.confirm_action,
+            Some(ConfirmAction::Delete { force: false, .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn node_drain_key_opens_confirm_for_marked_nodes() {
+        let (mut app, _rx) = test_app();
+        app.switch_kind("nodes");
+        for n in ["node-a", "node-b"] {
+            apply(
+                &mut app,
+                json!({"apiVersion": "v1", "kind": "Node",
+                       "metadata": {"name": n}}),
+            );
+        }
+        app.handle_key(press(KeyCode::Char(' '))).unwrap();
+        app.handle_key(press(KeyCode::Char(' '))).unwrap();
+
+        app.handle_key(press(KeyCode::Char('D'))).unwrap();
+        assert_eq!(app.mode, Mode::Confirm);
+        assert_eq!(
+            app.confirm_label,
+            "Drain 2 nodes? Cordon and evict eligible pods."
+        );
+        assert!(!app.confirm_allows_force_toggle());
+        let Some(ConfirmAction::Drain { mut targets }) = app.confirm_action.take() else {
+            panic!("expected drain confirm action");
+        };
+        targets.sort();
+        assert_eq!(targets, vec!["node-a".to_string(), "node-b".to_string()]);
+    }
+
+    #[tokio::test]
     async fn esc_clears_marks_before_popping() {
         let (mut app, _rx) = test_app();
         app.switch_kind("pods");
@@ -5207,6 +5508,14 @@ mod tests {
         assert_eq!(
             external_secret_refresh_patch("1783166400"),
             json!({ "metadata": { "annotations": { "force-sync": "1783166400" } } })
+        );
+        assert_eq!(
+            node_unschedulable_patch(true),
+            json!({ "spec": { "unschedulable": true } })
+        );
+        assert_eq!(
+            node_unschedulable_patch(false),
+            json!({ "spec": { "unschedulable": false } })
         );
     }
 
@@ -5697,6 +6006,33 @@ mod tests {
         assert!(names.contains(&"app".to_string()));
         assert!(names.contains(&"sidecar".to_string()));
         assert!(names.contains(&"init".to_string()));
+    }
+
+    #[test]
+    fn drainable_pod_skips_daemonset_mirror_and_completed_pods() {
+        let pod = |v| serde_json::from_value::<Pod>(v).unwrap();
+        assert!(drainable_pod(&pod(json!({
+            "metadata": {"name": "web", "namespace": "default"},
+            "status": {"phase": "Running"}
+        }))));
+        assert!(!drainable_pod(&pod(json!({
+            "metadata": {
+                "name": "ds",
+                "ownerReferences": [{"kind": "DaemonSet", "name": "agent", "uid": "ds"}]
+            },
+            "status": {"phase": "Running"}
+        }))));
+        assert!(!drainable_pod(&pod(json!({
+            "metadata": {
+                "name": "static",
+                "annotations": {"kubernetes.io/config.mirror": "mirror"}
+            },
+            "status": {"phase": "Running"}
+        }))));
+        assert!(!drainable_pod(&pod(json!({
+            "metadata": {"name": "done"},
+            "status": {"phase": "Succeeded"}
+        }))));
     }
 
     #[test]
