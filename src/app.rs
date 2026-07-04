@@ -869,6 +869,17 @@ impl App {
                 self.ns_state
                     .select(Some(keep.min(self.ns_list.len().saturating_sub(1))));
             }
+            Msg::Contexts { generation, list } if generation == self.generation => {
+                if list.is_empty() {
+                    self.mode = Mode::Table;
+                    self.flash_warn("no contexts found in kubeconfig");
+                } else {
+                    let cur = self.cluster.context.clone();
+                    let idx = list.iter().position(|c| *c == cur).unwrap_or(0);
+                    self.ctx_list = list;
+                    self.ctx_state.select(Some(idx));
+                }
+            }
             Msg::ContextSwitched {
                 generation,
                 name,
@@ -3232,18 +3243,22 @@ impl App {
     }
 
     fn open_contexts(&mut self) {
-        let mut list = Cluster::list_contexts();
-        list.sort();
-        if list.is_empty() {
-            self.flash_warn("no contexts found in kubeconfig");
-            return;
-        }
-        let cur = self.cluster.context.clone();
-        let idx = list.iter().position(|c| *c == cur).unwrap_or(0);
-        self.ctx_list = list;
         self.ctx_filter.clear();
-        self.ctx_state.select(Some(idx));
+        self.ctx_list.clear();
+        self.ctx_state.select(None);
         self.mode = Mode::Contexts;
+        let tx = self.tx.clone();
+        let genr = self.generation;
+        tokio::spawn(async move {
+            let mut list = Cluster::list_contexts();
+            list.sort();
+            let _ = tx
+                .send(Msg::Contexts {
+                    generation: genr,
+                    list,
+                })
+                .await;
+        });
     }
 
     /// Contexts for the switcher, fuzzy-matched against the type-to-filter
@@ -5259,6 +5274,13 @@ mod tests {
         });
         assert_eq!(app.ns_list, vec!["<all>".to_string()]);
 
+        app.ctx_list = vec!["test".into()];
+        app.handle_msg(Msg::Contexts {
+            generation: stale,
+            list: vec!["stale-context".into()],
+        });
+        assert_eq!(app.ctx_list, vec!["test".to_string()]);
+
         let flash = app.flash.clone();
         app.handle_msg(Msg::ContextSwitched {
             generation: stale,
@@ -5266,6 +5288,17 @@ mod tests {
             result: Err("old failure".into()),
         });
         assert_eq!(app.flash, flash);
+    }
+
+    #[tokio::test]
+    async fn context_list_result_selects_current_context() {
+        let (mut app, _rx) = test_app();
+        app.handle_msg(Msg::Contexts {
+            generation: app.generation,
+            list: vec!["prod".into(), "test".into()],
+        });
+        assert_eq!(app.ctx_list, vec!["prod".to_string(), "test".to_string()]);
+        assert_eq!(app.ctx_state.selected(), Some(1));
     }
 
     #[tokio::test]

@@ -64,6 +64,11 @@ pub enum Msg {
         generation: u64,
         list: Vec<String>,
     },
+    /// Kubeconfig context names for the switcher, fetched off-thread.
+    Contexts {
+        generation: u64,
+        list: Vec<String>,
+    },
     /// Result of an off-thread context switch (rebuilds client + discovery).
     ContextSwitched {
         generation: u64,
