@@ -1448,7 +1448,7 @@ fn draw_containers(frame: &mut Frame, app: &mut App, area: Rect) {
 }
 
 fn draw_prompt_popup(frame: &mut Frame, app: &App, area: Rect) {
-    let popup = centered_rect(60, 34, area);
+    let popup = centered_rect_with_min(60, 34, 44, 8, area);
     frame.render_widget(Clear, popup);
     let lines = vec![
         Line::from(""),
@@ -1503,13 +1503,8 @@ fn draw_set_image(frame: &mut Frame, app: &mut App, area: Rect) {
 }
 
 fn draw_confirm(frame: &mut Frame, app: &App, area: Rect) {
-    let popup = centered_rect(50, 20, area);
+    let popup = centered_rect_with_min(50, 20, 56, 7, area);
     frame.render_widget(Clear, popup);
-    let action_hint = if app.confirm_allows_force_toggle() {
-        "  [y] confirm    [f] toggle force    [n] cancel"
-    } else {
-        "  [y] confirm    [n] cancel"
-    };
     let lines = vec![
         Line::from(""),
         Line::from(Span::styled(
@@ -1518,7 +1513,7 @@ fn draw_confirm(frame: &mut Frame, app: &App, area: Rect) {
         )),
         Line::from(""),
         Line::from(Span::styled(
-            action_hint,
+            confirm_action_hint(app.confirm_allows_force_toggle(), ConfirmHintStyle::Popup),
             Style::default().fg(theme::yellow()),
         )),
     ];
@@ -1770,7 +1765,7 @@ fn draw_prompt(frame: &mut Frame, app: &App, area: Rect) {
             Span::styled("█", Style::default().fg(theme::teal())),
         ]),
         Mode::Confirm => Line::from(Span::styled(
-            "  y/enter: confirm   n/esc: cancel",
+            confirm_action_hint(app.confirm_allows_force_toggle(), ConfirmHintStyle::Prompt),
             Style::default().fg(theme::yellow()),
         )),
         Mode::Logs => {
@@ -1827,6 +1822,21 @@ fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
     );
 }
 
+#[derive(Clone, Copy)]
+enum ConfirmHintStyle {
+    Popup,
+    Prompt,
+}
+
+fn confirm_action_hint(allows_force: bool, style: ConfirmHintStyle) -> &'static str {
+    match (allows_force, style) {
+        (true, ConfirmHintStyle::Popup) => "  [y] confirm    [f] toggle force    [n] cancel",
+        (false, ConfirmHintStyle::Popup) => "  [y] confirm    [n] cancel",
+        (true, ConfirmHintStyle::Prompt) => "  y/enter: confirm   f: toggle force   n/esc: cancel",
+        (false, ConfirmHintStyle::Prompt) => "  y/enter: confirm   n/esc: cancel",
+    }
+}
+
 fn render_popup_list<'a, T>(
     frame: &mut Frame,
     area: Rect,
@@ -1838,7 +1848,7 @@ fn render_popup_list<'a, T>(
 ) where
     T: Into<Line<'a>>,
 {
-    let popup = centered_rect(percent_x, percent_y, area);
+    let popup = centered_rect_with_min(percent_x, percent_y, 32, 8, area);
     frame.render_widget(Clear, popup);
     render_framed_list(frame, popup, items, title, state);
 }
@@ -1866,23 +1876,23 @@ fn render_framed_list<'a, T>(
     frame.render_stateful_widget(list, area, state);
 }
 
-fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
-    let vertical = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Percentage((100 - percent_y) / 2),
-            Constraint::Percentage(percent_y),
-            Constraint::Percentage((100 - percent_y) / 2),
-        ])
-        .split(r);
-    Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Percentage((100 - percent_x) / 2),
-            Constraint::Percentage(percent_x),
-            Constraint::Percentage((100 - percent_x) / 2),
-        ])
-        .split(vertical[1])[1]
+fn centered_rect_with_min(
+    percent_x: u16,
+    percent_y: u16,
+    min_width: u16,
+    min_height: u16,
+    r: Rect,
+) -> Rect {
+    let pct_w = (u32::from(r.width) * u32::from(percent_x.min(100)) / 100) as u16;
+    let pct_h = (u32::from(r.height) * u32::from(percent_y.min(100)) / 100) as u16;
+    let width = pct_w.max(min_width).min(r.width);
+    let height = pct_h.max(min_height).min(r.height);
+    Rect {
+        x: r.x + (r.width - width) / 2,
+        y: r.y + (r.height - height) / 2,
+        width,
+        height,
+    }
 }
 
 #[cfg(test)]
@@ -1948,6 +1958,41 @@ mod tests {
         assert_eq!(visible_line_window(100, 95, 20), (95, 100));
         assert_eq!(visible_line_window(100, 150, 20), (100, 100));
         assert_eq!(visible_line_window(100, 10, 0), (10, 10));
+    }
+
+    #[test]
+    fn centered_rect_with_min_keeps_popups_readable() {
+        let area = Rect {
+            x: 10,
+            y: 20,
+            width: 100,
+            height: 20,
+        };
+        assert_eq!(
+            centered_rect_with_min(50, 20, 56, 7, area),
+            Rect {
+                x: 32,
+                y: 26,
+                width: 56,
+                height: 7,
+            }
+        );
+
+        let tiny = Rect {
+            x: 3,
+            y: 4,
+            width: 40,
+            height: 5,
+        };
+        assert_eq!(centered_rect_with_min(50, 20, 56, 7, tiny), tiny);
+    }
+
+    #[test]
+    fn confirm_hint_mentions_force_only_when_supported() {
+        assert!(confirm_action_hint(true, ConfirmHintStyle::Popup).contains("toggle force"));
+        assert!(confirm_action_hint(true, ConfirmHintStyle::Prompt).contains("toggle force"));
+        assert!(!confirm_action_hint(false, ConfirmHintStyle::Popup).contains("toggle force"));
+        assert!(!confirm_action_hint(false, ConfirmHintStyle::Prompt).contains("toggle force"));
     }
 
     #[test]
