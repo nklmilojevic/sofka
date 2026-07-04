@@ -1287,8 +1287,6 @@ fn draw_help(frame: &mut Frame, area: Rect) {
 }
 
 fn draw_namespaces(frame: &mut Frame, app: &mut App, area: Rect) {
-    let popup = centered_rect(40, 60, area);
-    frame.render_widget(Clear, popup);
     let names = app.filtered_namespaces();
     let items: Vec<ListItem> = names
         .iter()
@@ -1307,23 +1305,18 @@ fn draw_namespaces(frame: &mut Frame, app: &mut App, area: Rect) {
     } else {
         format!(" Namespaces · /{}_ ", app.ns_filter)
     };
-    let list = List::new(items)
-        .highlight_style(theme::selected_row())
-        .highlight_symbol("▌ ")
-        .highlight_spacing(HighlightSpacing::Always)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_type(BorderType::Rounded)
-                .border_style(theme::border_focused())
-                .title(Span::styled(title, theme::title())),
-        );
-    frame.render_stateful_widget(list, popup, &mut app.ns_state);
+    render_popup_list(
+        frame,
+        area,
+        40,
+        60,
+        items,
+        Span::styled(title, theme::title()),
+        &mut app.ns_state,
+    );
 }
 
 fn draw_contexts(frame: &mut Frame, app: &mut App, area: Rect) {
-    let popup = centered_rect(50, 60, area);
-    frame.render_widget(Clear, popup);
     let current = app.cluster.context.clone();
     let items: Vec<ListItem> = app
         .filtered_contexts()
@@ -1346,26 +1339,21 @@ fn draw_contexts(frame: &mut Frame, app: &mut App, area: Rect) {
     } else {
         format!(" Contexts · /{}_ ", app.ctx_filter)
     };
-    let list = List::new(items)
-        .highlight_style(theme::selected_row())
-        .highlight_symbol("▌ ")
-        .highlight_spacing(HighlightSpacing::Always)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_type(BorderType::Rounded)
-                .border_style(theme::border_focused())
-                .title(Span::styled(title, theme::title())),
-        );
-    frame.render_stateful_widget(list, popup, &mut app.ctx_state);
+    render_popup_list(
+        frame,
+        area,
+        50,
+        60,
+        items,
+        Span::styled(title, theme::title()),
+        &mut app.ctx_state,
+    );
 }
 
 /// Flux suspend/resume action menu (`t`). Deliberately a menu rather than a
 /// single-key toggle, so acting on a live resource always takes an explicit,
 /// visible choice.
 fn draw_flux_menu(frame: &mut Frame, app: &mut App, area: Rect) {
-    let popup = centered_rect(36, 24, area);
-    frame.render_widget(Clear, popup);
     let count = app.marked.len().max(1);
     let target = if count == 1 {
         "current selection".to_string()
@@ -1383,18 +1371,15 @@ fn draw_flux_menu(frame: &mut Frame, app: &mut App, area: Rect) {
             ListItem::new(Span::styled(*label, Style::default().fg(color)))
         })
         .collect();
-    let list = List::new(items)
-        .highlight_style(theme::selected_row())
-        .highlight_symbol("▌ ")
-        .highlight_spacing(HighlightSpacing::Always)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_type(BorderType::Rounded)
-                .border_style(theme::border_focused())
-                .title(Span::styled(format!(" Flux: {target} "), theme::title())),
-        );
-    frame.render_stateful_widget(list, popup, &mut app.flux_menu_state);
+    render_popup_list(
+        frame,
+        area,
+        36,
+        24,
+        items,
+        Span::styled(format!(" Flux: {target} "), theme::title()),
+        &mut app.flux_menu_state,
+    );
 }
 
 /// Background port-forwards (`:pf`). A full-width view, not a popup — closing
@@ -1414,23 +1399,16 @@ fn draw_port_forwards(frame: &mut Frame, app: &mut App, area: Rect) {
         " Port-forwards [{}]  (x/s stop · esc close — others keep running) ",
         app.port_forwards.len()
     );
-    let list = List::new(items)
-        .highlight_style(theme::selected_row())
-        .highlight_symbol("▌ ")
-        .highlight_spacing(HighlightSpacing::Always)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_type(BorderType::Rounded)
-                .border_style(theme::border_focused())
-                .title(Span::styled(title, theme::title())),
-        );
-    frame.render_stateful_widget(list, area, &mut app.pf_state);
+    render_framed_list(
+        frame,
+        area,
+        items,
+        Span::styled(title, theme::title()),
+        &mut app.pf_state,
+    );
 }
 
 fn draw_skins(frame: &mut Frame, app: &mut App, area: Rect) {
-    let popup = centered_rect(42, 58, area);
-    frame.render_widget(Clear, popup);
     let items: Vec<ListItem> = app
         .skin_list
         .iter()
@@ -1441,46 +1419,32 @@ fn draw_skins(frame: &mut Frame, app: &mut App, area: Rect) {
             ))
         })
         .collect();
-    let list = List::new(items)
-        .highlight_style(theme::selected_row())
-        .highlight_symbol("▌ ")
-        .highlight_spacing(HighlightSpacing::Always)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_type(BorderType::Rounded)
-                .border_style(theme::border_focused())
-                .title(Span::styled(
-                    " Skins (enter apply · esc close) ",
-                    theme::title(),
-                )),
-        );
-    frame.render_stateful_widget(list, popup, &mut app.skin_state);
+    render_popup_list(
+        frame,
+        area,
+        42,
+        58,
+        items,
+        Span::styled(" Skins (enter apply · esc close) ", theme::title()),
+        &mut app.skin_state,
+    );
 }
 
 fn draw_containers(frame: &mut Frame, app: &mut App, area: Rect) {
-    let popup = centered_rect(50, 60, area);
-    frame.render_widget(Clear, popup);
     let items: Vec<ListItem> = app
         .container_list
         .iter()
         .map(|c| ListItem::new(Span::styled(c.clone(), Style::default().fg(theme::text()))))
         .collect();
-    let list = List::new(items)
-        .highlight_style(theme::selected_row())
-        .highlight_symbol("▌ ")
-        .highlight_spacing(HighlightSpacing::Always)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_type(BorderType::Rounded)
-                .border_style(theme::border_focused())
-                .title(Span::styled(
-                    " Containers (⏎ logs · p previous) ",
-                    theme::title(),
-                )),
-        );
-    frame.render_stateful_widget(list, popup, &mut app.container_state);
+    render_popup_list(
+        frame,
+        area,
+        50,
+        60,
+        items,
+        Span::styled(" Containers (⏎ logs · p previous) ", theme::title()),
+        &mut app.container_state,
+    );
 }
 
 fn draw_prompt_popup(frame: &mut Frame, app: &App, area: Rect) {
@@ -1514,8 +1478,6 @@ fn draw_prompt_popup(frame: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_set_image(frame: &mut Frame, app: &mut App, area: Rect) {
-    let popup = centered_rect(70, 60, area);
-    frame.render_widget(Clear, popup);
     let items: Vec<ListItem> = app
         .container_list
         .iter()
@@ -1529,21 +1491,15 @@ fn draw_set_image(frame: &mut Frame, app: &mut App, area: Rect) {
             ]))
         })
         .collect();
-    let list = List::new(items)
-        .highlight_style(theme::selected_row())
-        .highlight_symbol("▌ ")
-        .highlight_spacing(HighlightSpacing::Always)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_type(BorderType::Rounded)
-                .border_style(theme::border_focused())
-                .title(Span::styled(
-                    " Set Image (⏎ to edit container) ",
-                    theme::title(),
-                )),
-        );
-    frame.render_stateful_widget(list, popup, &mut app.container_state);
+    render_popup_list(
+        frame,
+        area,
+        70,
+        60,
+        items,
+        Span::styled(" Set Image (⏎ to edit container) ", theme::title()),
+        &mut app.container_state,
+    );
 }
 
 fn draw_confirm(frame: &mut Frame, app: &App, area: Rect) {
@@ -1611,21 +1567,13 @@ fn draw_palette(frame: &mut Frame, app: &mut App, area: Rect) {
         .collect();
     let mut state = ListState::default();
     state.select(Some(app.cmd_sel));
-    let list = List::new(items)
-        .highlight_style(theme::selected_row())
-        .highlight_symbol("▌ ")
-        .highlight_spacing(HighlightSpacing::Always)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_type(BorderType::Rounded)
-                .border_style(theme::border_focused())
-                .title(Span::styled(
-                    " commands & resources (tab/↑↓ · ⏎) ",
-                    theme::title(),
-                )),
-        );
-    frame.render_stateful_widget(list, rect, &mut state);
+    render_framed_list(
+        frame,
+        rect,
+        items,
+        Span::styled(" commands & resources (tab/↑↓ · ⏎) ", theme::title()),
+        &mut state,
+    );
 }
 
 /// Xray hierarchical tree (owner → children → containers).
@@ -1665,18 +1613,13 @@ fn draw_xray(frame: &mut Frame, app: &mut App, area: Rect) {
         " Xray [{}]  (⏎ logs · r refresh · esc back) ",
         app.xray_items.len()
     );
-    let list = List::new(items)
-        .highlight_style(theme::selected_row())
-        .highlight_symbol("▌ ")
-        .highlight_spacing(HighlightSpacing::Always)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_type(BorderType::Rounded)
-                .border_style(theme::border_focused())
-                .title(Span::styled(title, theme::title())),
-        );
-    frame.render_stateful_widget(list, area, &mut app.xray_state);
+    render_framed_list(
+        frame,
+        area,
+        items,
+        Span::styled(title, theme::title()),
+        &mut app.xray_state,
+    );
 }
 
 /// Pulse dashboard: cluster-health tiles.
@@ -1882,6 +1825,45 @@ fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
         .alignment(Alignment::Right),
         cols[1],
     );
+}
+
+fn render_popup_list<'a, T>(
+    frame: &mut Frame,
+    area: Rect,
+    percent_x: u16,
+    percent_y: u16,
+    items: Vec<ListItem<'a>>,
+    title: T,
+    state: &mut ListState,
+) where
+    T: Into<Line<'a>>,
+{
+    let popup = centered_rect(percent_x, percent_y, area);
+    frame.render_widget(Clear, popup);
+    render_framed_list(frame, popup, items, title, state);
+}
+
+fn render_framed_list<'a, T>(
+    frame: &mut Frame,
+    area: Rect,
+    items: Vec<ListItem<'a>>,
+    title: T,
+    state: &mut ListState,
+) where
+    T: Into<Line<'a>>,
+{
+    let list = List::new(items)
+        .highlight_style(theme::selected_row())
+        .highlight_symbol("▌ ")
+        .highlight_spacing(HighlightSpacing::Always)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .border_style(theme::border_focused())
+                .title(title.into()),
+        );
+    frame.render_stateful_widget(list, area, state);
 }
 
 fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
