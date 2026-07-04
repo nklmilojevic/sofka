@@ -2177,11 +2177,7 @@ impl App {
         self.flash_err = false;
         tokio::spawn(async move {
             let api: Api<DynamicObject> = Api::namespaced_with(client, &ns, &kind.ar);
-            let patch = Patch::Strategic(json!({
-                "spec": { "template": { "metadata": { "annotations": {
-                    "kubectl.kubernetes.io/restartedAt": now
-                }}}}
-            }));
+            let patch = Patch::Strategic(restart_patch(&now));
             if let Err(e) = api.patch(&name, &PatchParams::default(), &patch).await {
                 let _ = tx
                     .send(Msg::Error {
@@ -2292,12 +2288,7 @@ impl App {
         let client = self.cluster.client.clone();
         let tx = self.tx.clone();
         let genr = self.generation;
-        let containers = json!([{ "name": container, "image": image }]);
-        let patch_doc = if plural == "pods" {
-            json!({ "spec": { "containers": containers } })
-        } else {
-            json!({ "spec": { "template": { "spec": { "containers": containers } } } })
-        };
+        let patch_doc = set_image_patch(&plural, &container, &image);
         self.flash = format!("setting image: {container} → {image}");
         self.flash_err = false;
         tokio::spawn(async move {
@@ -2491,7 +2482,7 @@ impl App {
         self.flash_err = false;
         tokio::spawn(async move {
             let api: Api<DynamicObject> = Api::namespaced_with(client, &ns, &kind.ar);
-            let patch = Patch::Merge(json!({ "spec": { "replicas": replicas } }));
+            let patch = Patch::Merge(scale_patch(replicas));
             if let Err(e) = api.patch(&name, &PatchParams::default(), &patch).await {
                 let _ = tx
                     .send(Msg::Error {
@@ -2568,7 +2559,7 @@ impl App {
         self.flash_err = false;
         self.marked.clear();
         tokio::spawn(async move {
-            let patch = Patch::Merge(json!({ "spec": { "suspend": suspend } }));
+            let patch = Patch::Merge(suspend_patch(suspend));
             for (name, ns) in targets {
                 let api: Api<DynamicObject> = Api::namespaced_with(client.clone(), &ns, &kind.ar);
                 if let Err(e) = api.patch(&name, &PatchParams::default(), &patch).await {
@@ -2602,9 +2593,7 @@ impl App {
         self.flash_err = false;
         self.marked.clear();
         tokio::spawn(async move {
-            let patch = Patch::Merge(json!({
-                "metadata": { "annotations": { "reconcile.fluxcd.io/requestedAt": now } }
-            }));
+            let patch = Patch::Merge(reconcile_patch(&now));
             for (name, ns) in targets {
                 let api: Api<DynamicObject> = Api::namespaced_with(client.clone(), &ns, &kind.ar);
                 if let Err(e) = api.patch(&name, &PatchParams::default(), &patch).await {
@@ -2654,9 +2643,7 @@ impl App {
         self.flash_err = false;
         self.marked.clear();
         tokio::spawn(async move {
-            let patch = Patch::Merge(json!({
-                "metadata": { "annotations": { "force-sync": now } }
-            }));
+            let patch = Patch::Merge(external_secret_refresh_patch(&now));
             for (name, ns) in targets {
                 let api: Api<DynamicObject> = Api::namespaced_with(client.clone(), &ns, &kind.ar);
                 if let Err(e) = api.patch(&name, &PatchParams::default(), &patch).await {
@@ -3807,6 +3794,43 @@ impl App {
 }
 
 // ----- free helpers ------------------------------------------------------
+
+fn restart_patch(restarted_at: &str) -> Value {
+    json!({
+        "spec": { "template": { "metadata": { "annotations": {
+            "kubectl.kubernetes.io/restartedAt": restarted_at
+        }}}}
+    })
+}
+
+fn set_image_patch(plural: &str, container: &str, image: &str) -> Value {
+    let containers = json!([{ "name": container, "image": image }]);
+    if plural == "pods" {
+        json!({ "spec": { "containers": containers } })
+    } else {
+        json!({ "spec": { "template": { "spec": { "containers": containers } } } })
+    }
+}
+
+fn scale_patch(replicas: i32) -> Value {
+    json!({ "spec": { "replicas": replicas } })
+}
+
+fn suspend_patch(suspend: bool) -> Value {
+    json!({ "spec": { "suspend": suspend } })
+}
+
+fn reconcile_patch(requested_at: &str) -> Value {
+    json!({
+        "metadata": { "annotations": { "reconcile.fluxcd.io/requestedAt": requested_at } }
+    })
+}
+
+fn external_secret_refresh_patch(force_sync: &str) -> Value {
+    json!({
+        "metadata": { "annotations": { "force-sync": force_sync } }
+    })
+}
 
 /// Pick a version name to query a CRD's custom resources: the storage version
 /// if flagged, else the first served version, else the first listed.
@@ -5003,6 +5027,44 @@ mod tests {
             {"name": "v1", "served": true}
         ]}});
         assert_eq!(crd_served_version(&d2).as_deref(), Some("v1"));
+    }
+
+    #[test]
+    fn mutating_action_patch_payloads_are_stable() {
+        assert_eq!(
+            restart_patch("2026-07-04T12:00:00Z"),
+            json!({
+                "spec": { "template": { "metadata": { "annotations": {
+                    "kubectl.kubernetes.io/restartedAt": "2026-07-04T12:00:00Z"
+                }}}}
+            })
+        );
+        assert_eq!(
+            set_image_patch("pods", "app", "nginx:1.27"),
+            json!({ "spec": { "containers": [{ "name": "app", "image": "nginx:1.27" }] } })
+        );
+        assert_eq!(
+            set_image_patch("deployments", "app", "nginx:1.27"),
+            json!({
+                "spec": { "template": { "spec": {
+                    "containers": [{ "name": "app", "image": "nginx:1.27" }]
+                }}}
+            })
+        );
+        assert_eq!(scale_patch(3), json!({ "spec": { "replicas": 3 } }));
+        assert_eq!(suspend_patch(true), json!({ "spec": { "suspend": true } }));
+        assert_eq!(
+            reconcile_patch("2026-07-04T12:00:00Z"),
+            json!({
+                "metadata": { "annotations": {
+                    "reconcile.fluxcd.io/requestedAt": "2026-07-04T12:00:00Z"
+                }}
+            })
+        );
+        assert_eq!(
+            external_secret_refresh_patch("1783166400"),
+            json!({ "metadata": { "annotations": { "force-sync": "1783166400" } } })
+        );
     }
 
     #[tokio::test]
