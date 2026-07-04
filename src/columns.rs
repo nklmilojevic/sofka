@@ -22,8 +22,29 @@ pub fn headers(plural: &str) -> Vec<&'static str> {
         "namespaces" => vec!["NAME", "STATUS", "AGE"],
         "configmaps" => vec!["NAME", "DATA", "AGE"],
         "secrets" => vec!["NAME", "TYPE", "DATA", "AGE"],
-        "jobs" => vec!["NAME", "COMPLETIONS", "AGE"],
-        "cronjobs" => vec!["NAME", "SCHEDULE", "SUSPEND", "ACTIVE", "AGE"],
+        "jobs" => vec!["NAME", "COMPLETIONS", "DURATION", "AGE"],
+        "cronjobs" => vec![
+            "NAME",
+            "SCHEDULE",
+            "SUSPEND",
+            "ACTIVE",
+            "LAST-SCHEDULE",
+            "AGE",
+        ],
+        "events" => vec![
+            "NAME", "TYPE", "REASON", "OBJECT", "MESSAGE", "COUNT", "AGE",
+        ],
+        "horizontalpodautoscalers" => {
+            vec![
+                "NAME",
+                "REFERENCE",
+                "TARGETS",
+                "MINPODS",
+                "MAXPODS",
+                "REPLICAS",
+                "AGE",
+            ]
+        }
         "persistentvolumeclaims" => vec!["NAME", "STATUS", "VOLUME", "CAPACITY", "AGE"],
         "persistentvolumes" => vec!["NAME", "CAPACITY", "STATUS", "CLAIM", "AGE"],
         "ingresses" => vec!["NAME", "CLASS", "HOSTS", "AGE"],
@@ -31,6 +52,17 @@ pub fn headers(plural: &str) -> Vec<&'static str> {
         "customresourcedefinitions" => vec!["NAME", "GROUP", "KIND", "VERSIONS", "SCOPE", "AGE"],
         "kustomizations" | "helmreleases" => {
             vec!["NAME", "READY", "MESSAGE", "REVISION", "SUSPENDED", "AGE"]
+        }
+        "gitrepositories" | "helmrepositories" | "ocirepositories" | "buckets" => {
+            vec![
+                "NAME",
+                "READY",
+                "MESSAGE",
+                "REVISION",
+                "URL",
+                "SUSPENDED",
+                "AGE",
+            ]
         }
         _ => vec!["NAME", "AGE"],
     }
@@ -117,13 +149,38 @@ pub fn cells(obj: &DynamicObject, plural: &str) -> (Vec<String>, Option<usize>) 
                 iget(d, &["status", "succeeded"]),
                 iget(d, &["spec", "completions"]).max(1)
             );
-            (vec![name, comp, age], None)
+            let duration = job_duration(d);
+            (vec![name, comp, duration, age], None)
         }
         "cronjobs" => {
             let sched = sget(d, &["spec", "schedule"]).unwrap_or_default();
             let suspend = bget(d, &["spec", "suspend"]).to_string();
             let active = count_arr(d, &["status", "active"]).to_string();
-            (vec![name, sched, suspend, active, age], None)
+            let last_schedule = time_since(d, &["status", "lastScheduleTime"]);
+            (vec![name, sched, suspend, active, last_schedule, age], None)
+        }
+        "events" => {
+            let typ = sget(d, &["type"]).unwrap_or_default();
+            let reason = sget(d, &["reason"]).unwrap_or_default();
+            let involved = event_object(d);
+            let message = event_message(d);
+            let count = event_count(d).to_string();
+            (vec![name, typ, reason, involved, message, count, age], None)
+        }
+        "horizontalpodautoscalers" => {
+            let reference = hpa_reference(d);
+            let targets = hpa_targets(d);
+            let min = iopt(d, &["spec", "minReplicas"]).unwrap_or(1).to_string();
+            let max = iopt(d, &["spec", "maxReplicas"])
+                .map(|n| n.to_string())
+                .unwrap_or_default();
+            let replicas = iopt(d, &["status", "currentReplicas"])
+                .unwrap_or(0)
+                .to_string();
+            (
+                vec![name, reference, targets, min, max, replicas, age],
+                None,
+            )
         }
         "persistentvolumeclaims" => {
             let status = sget(d, &["status", "phase"]).unwrap_or_default();
@@ -158,6 +215,16 @@ pub fn cells(obj: &DynamicObject, plural: &str) -> (Vec<String>, Option<usize>) 
             let revision = flux_revision(d);
             let suspended = bget(d, &["spec", "suspend"]).to_string();
             (vec![name, ready, msg, revision, suspended, age], Some(1))
+        }
+        "gitrepositories" | "helmrepositories" | "ocirepositories" | "buckets" => {
+            let (ready, msg) = ready_condition(d);
+            let revision = flux_source_revision(d);
+            let url = flux_source_url(d);
+            let suspended = bget(d, &["spec", "suspend"]).to_string();
+            (
+                vec![name, ready, msg, revision, url, suspended, age],
+                Some(1),
+            )
         }
         _ => (vec![name, age], None),
     }
@@ -223,12 +290,44 @@ fn flux_revision(d: &Value) -> String {
         .unwrap_or_default()
 }
 
+fn flux_source_revision(d: &Value) -> String {
+    sget(d, &["status", "artifact", "revision"])
+        .or_else(|| sget(d, &["status", "lastAppliedRevision"]))
+        .or_else(|| sget(d, &["status", "lastAttemptedRevision"]))
+        .unwrap_or_default()
+}
+
+fn flux_source_url(d: &Value) -> String {
+    sget(d, &["spec", "url"])
+        .or_else(|| {
+            let endpoint = sget(d, &["spec", "endpoint"]);
+            let bucket = sget(d, &["spec", "bucketName"]);
+            match (endpoint, bucket) {
+                (Some(endpoint), Some(bucket)) => {
+                    Some(format!("{}/{}", endpoint.trim_end_matches('/'), bucket))
+                }
+                (Some(endpoint), None) => Some(endpoint),
+                (None, Some(bucket)) => Some(bucket),
+                (None, None) => None,
+            }
+        })
+        .unwrap_or_default()
+}
+
 fn sget(v: &Value, path: &[&str]) -> Option<String> {
     let mut cur = v;
     for p in path {
         cur = cur.get(p)?;
     }
     cur.as_str().map(|s| s.to_string())
+}
+
+fn iopt(v: &Value, path: &[&str]) -> Option<i64> {
+    let mut cur = v;
+    for p in path {
+        cur = cur.get(p)?;
+    }
+    cur.as_i64()
 }
 
 fn iget(v: &Value, path: &[&str]) -> i64 {
@@ -288,6 +387,27 @@ pub fn age(obj: &DynamicObject) -> String {
 pub fn age_secs(obj: &DynamicObject) -> Option<i64> {
     let ts = obj.metadata.creation_timestamp.as_ref()?;
     Some((Timestamp::now().as_second() - ts.0.as_second()).max(0))
+}
+
+fn timestamp_secs(d: &Value, path: &[&str]) -> Option<i64> {
+    sget(d, path)
+        .and_then(|s| s.parse::<Timestamp>().ok())
+        .map(|ts| ts.as_second())
+}
+
+fn time_since(d: &Value, path: &[&str]) -> String {
+    timestamp_secs(d, path)
+        .map(|secs| humanize((Timestamp::now().as_second() - secs).max(0)))
+        .unwrap_or_else(|| "<none>".into())
+}
+
+fn job_duration(d: &Value) -> String {
+    let Some(start) = timestamp_secs(d, &["status", "startTime"]) else {
+        return "<none>".into();
+    };
+    let end = timestamp_secs(d, &["status", "completionTime"])
+        .unwrap_or_else(|| Timestamp::now().as_second());
+    humanize((end - start).max(0))
 }
 
 fn humanize(secs: i64) -> String {
@@ -479,6 +599,133 @@ fn count_endpoints(d: &Value) -> String {
         "<none>".into()
     } else {
         n.to_string()
+    }
+}
+
+fn event_object(d: &Value) -> String {
+    let Some(obj) = d.get("regarding").or_else(|| d.get("involvedObject")) else {
+        return "<none>".into();
+    };
+    let kind = obj.get("kind").and_then(Value::as_str).unwrap_or_default();
+    let name = obj.get("name").and_then(Value::as_str).unwrap_or_default();
+    match (kind.is_empty(), name.is_empty()) {
+        (false, false) => format!("{kind}/{name}"),
+        (false, true) => kind.to_string(),
+        (true, false) => name.to_string(),
+        (true, true) => "<none>".into(),
+    }
+}
+
+fn event_message(d: &Value) -> String {
+    sget(d, &["message"])
+        .or_else(|| sget(d, &["note"]))
+        .unwrap_or_default()
+        .replace(['\n', '\r'], " ")
+}
+
+fn event_count(d: &Value) -> i64 {
+    iopt(d, &["series", "count"])
+        .or_else(|| iopt(d, &["deprecatedCount"]))
+        .or_else(|| iopt(d, &["count"]))
+        .unwrap_or(1)
+}
+
+fn hpa_reference(d: &Value) -> String {
+    let kind = sget(d, &["spec", "scaleTargetRef", "kind"]).unwrap_or_default();
+    let name = sget(d, &["spec", "scaleTargetRef", "name"]).unwrap_or_default();
+    match (kind.is_empty(), name.is_empty()) {
+        (false, false) => format!("{kind}/{name}"),
+        (false, true) => kind,
+        (true, false) => name,
+        (true, true) => "<none>".into(),
+    }
+}
+
+fn hpa_targets(d: &Value) -> String {
+    if let Some(target) = iopt(d, &["spec", "targetCPUUtilizationPercentage"]) {
+        let current = iopt(d, &["status", "currentCPUUtilizationPercentage"])
+            .map(|n| format!("{n}%"))
+            .unwrap_or_else(|| "<unknown>".into());
+        return format!("{current}/{target}%");
+    }
+
+    let Some(metrics) = d.pointer("/spec/metrics").and_then(Value::as_array) else {
+        return "<none>".into();
+    };
+    if metrics.is_empty() {
+        return "<none>".into();
+    }
+
+    let current = d
+        .pointer("/status/currentMetrics")
+        .and_then(Value::as_array);
+    let mut targets: Vec<String> = metrics
+        .iter()
+        .zip(
+            current
+                .into_iter()
+                .flatten()
+                .map(Some)
+                .chain(std::iter::repeat(None)),
+        )
+        .take(3)
+        .map(|(metric, current)| hpa_metric(metric, current))
+        .collect();
+    if metrics.len() > 3 {
+        targets.push(format!("+{}", metrics.len() - 3));
+    }
+    targets.join(",")
+}
+
+fn hpa_metric(metric: &Value, current: Option<&Value>) -> String {
+    let typ = metric
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or("Metric");
+    let (path, default_name) = match typ {
+        "ContainerResource" => ("containerResource", "container"),
+        "External" => ("external", "external"),
+        "Object" => ("object", "object"),
+        "Pods" => ("pods", "pods"),
+        "Resource" => ("resource", "resource"),
+        _ => ("", typ),
+    };
+    let name = if path.is_empty() {
+        default_name.to_string()
+    } else {
+        metric
+            .pointer(&format!("/{path}/name"))
+            .or_else(|| metric.pointer(&format!("/{path}/metric/name")))
+            .and_then(Value::as_str)
+            .unwrap_or(default_name)
+            .to_string()
+    };
+    let target = if path.is_empty() {
+        None
+    } else {
+        metric.pointer(&format!("/{path}/target"))
+    }
+    .map(hpa_metric_value)
+    .unwrap_or_else(|| "<target>".into());
+    let current = if path.is_empty() {
+        None
+    } else {
+        current.and_then(|m| m.pointer(&format!("/{path}/current")))
+    }
+    .map(hpa_metric_value)
+    .unwrap_or_else(|| "?".into());
+    format!("{name}: {current}/{target}")
+}
+
+fn hpa_metric_value(metric: &Value) -> String {
+    if let Some(n) = metric.get("averageUtilization").and_then(Value::as_i64) {
+        format!("{n}%")
+    } else if let Some(s) = metric.get("averageValue").and_then(Value::as_str) {
+        s.to_string()
+    } else if let Some(s) = metric.get("value").and_then(Value::as_str) {
+        s.to_string()
+    } else {
+        "?".into()
     }
 }
 
@@ -690,6 +937,188 @@ mod tests {
     }
 
     #[test]
+    fn flux_source_cells_show_ready_revision_url() {
+        let git = obj(json!({
+            "apiVersion": "source.toolkit.fluxcd.io/v1",
+            "kind": "GitRepository",
+            "metadata": {"name": "apps", "namespace": "flux-system"},
+            "spec": {"url": "https://github.com/example/apps", "suspend": true},
+            "status": {
+                "artifact": {"revision": "main@sha1:abc123"},
+                "conditions": [
+                    {"type": "Ready", "status": "True", "message": "stored artifact"}
+                ]
+            }
+        }));
+        let (cells, status_idx) = cells(&git, "gitrepositories");
+        assert_eq!(
+            headers("gitrepositories"),
+            vec![
+                "NAME",
+                "READY",
+                "MESSAGE",
+                "REVISION",
+                "URL",
+                "SUSPENDED",
+                "AGE"
+            ]
+        );
+        assert_eq!(cells[0], "apps");
+        assert_eq!(cells[1], "True");
+        assert_eq!(cells[2], "stored artifact");
+        assert_eq!(cells[3], "main@sha1:abc123");
+        assert_eq!(cells[4], "https://github.com/example/apps");
+        assert_eq!(cells[5], "true");
+        assert_eq!(status_idx, Some(1));
+    }
+
+    #[test]
+    fn bucket_cells_build_url_from_endpoint_and_bucket_name() {
+        let bucket = obj(json!({
+            "apiVersion": "source.toolkit.fluxcd.io/v1beta2",
+            "kind": "Bucket",
+            "metadata": {"name": "charts"},
+            "spec": {"endpoint": "https://s3.example.com/", "bucketName": "charts"},
+            "status": {
+                "artifact": {"revision": "sha256:abc123"},
+                "conditions": [{"type": "Ready", "status": "False", "message": "denied"}]
+            }
+        }));
+        let (cells, status_idx) = cells(&bucket, "buckets");
+        assert_eq!(cells[1], "False");
+        assert_eq!(cells[2], "denied");
+        assert_eq!(cells[3], "sha256:abc123");
+        assert_eq!(cells[4], "https://s3.example.com/charts");
+        assert_eq!(cells[5], "false");
+        assert_eq!(status_idx, Some(1));
+    }
+
+    #[test]
+    fn job_cells_include_duration() {
+        let job = obj(json!({
+            "apiVersion": "batch/v1",
+            "kind": "Job",
+            "metadata": {"name": "migrate"},
+            "spec": {"completions": 3},
+            "status": {
+                "succeeded": 2,
+                "startTime": "2024-01-01T00:00:00Z",
+                "completionTime": "2024-01-01T01:05:00Z"
+            }
+        }));
+        let (cells, _) = cells(&job, "jobs");
+        assert_eq!(
+            headers("jobs"),
+            vec!["NAME", "COMPLETIONS", "DURATION", "AGE"]
+        );
+        assert_eq!(cells[1], "2/3");
+        assert_eq!(cells[2], "1h5m");
+    }
+
+    #[test]
+    fn cronjob_cells_include_last_schedule() {
+        let cron = obj(json!({
+            "apiVersion": "batch/v1",
+            "kind": "CronJob",
+            "metadata": {"name": "backup"},
+            "spec": {"schedule": "*/15 * * * *", "suspend": false},
+            "status": {"active": [{"name": "backup-1"}]}
+        }));
+        let (cells, _) = cells(&cron, "cronjobs");
+        assert_eq!(
+            headers("cronjobs"),
+            vec![
+                "NAME",
+                "SCHEDULE",
+                "SUSPEND",
+                "ACTIVE",
+                "LAST-SCHEDULE",
+                "AGE"
+            ]
+        );
+        assert_eq!(cells[1], "*/15 * * * *");
+        assert_eq!(cells[2], "false");
+        assert_eq!(cells[3], "1");
+        assert_eq!(cells[4], "<none>");
+    }
+
+    #[test]
+    fn event_cells_show_object_message_and_count() {
+        let event = obj(json!({
+            "apiVersion": "events.k8s.io/v1",
+            "kind": "Event",
+            "metadata": {"name": "nginx.abc"},
+            "type": "Warning",
+            "reason": "BackOff",
+            "regarding": {"kind": "Pod", "name": "nginx"},
+            "note": "Back-off restarting\nfailed container",
+            "series": {"count": 7}
+        }));
+        let (cells, status_idx) = cells(&event, "events");
+        assert_eq!(
+            headers("events"),
+            vec![
+                "NAME", "TYPE", "REASON", "OBJECT", "MESSAGE", "COUNT", "AGE"
+            ]
+        );
+        assert_eq!(cells[1], "Warning");
+        assert_eq!(cells[2], "BackOff");
+        assert_eq!(cells[3], "Pod/nginx");
+        assert_eq!(cells[4], "Back-off restarting failed container");
+        assert_eq!(cells[5], "7");
+        assert_eq!(status_idx, None);
+    }
+
+    #[test]
+    fn hpa_cells_show_reference_targets_and_replicas() {
+        let hpa = obj(json!({
+            "apiVersion": "autoscaling/v2",
+            "kind": "HorizontalPodAutoscaler",
+            "metadata": {"name": "web"},
+            "spec": {
+                "scaleTargetRef": {"kind": "Deployment", "name": "web"},
+                "minReplicas": 2,
+                "maxReplicas": 10,
+                "metrics": [{
+                    "type": "Resource",
+                    "resource": {
+                        "name": "cpu",
+                        "target": {"type": "Utilization", "averageUtilization": 80}
+                    }
+                }]
+            },
+            "status": {
+                "currentReplicas": 4,
+                "currentMetrics": [{
+                    "type": "Resource",
+                    "resource": {
+                        "name": "cpu",
+                        "current": {"averageUtilization": 42}
+                    }
+                }]
+            }
+        }));
+        let (cells, _) = cells(&hpa, "horizontalpodautoscalers");
+        assert_eq!(
+            headers("horizontalpodautoscalers"),
+            vec![
+                "NAME",
+                "REFERENCE",
+                "TARGETS",
+                "MINPODS",
+                "MAXPODS",
+                "REPLICAS",
+                "AGE"
+            ]
+        );
+        assert_eq!(cells[1], "Deployment/web");
+        assert_eq!(cells[2], "cpu: 42%/80%");
+        assert_eq!(cells[3], "2");
+        assert_eq!(cells[4], "10");
+        assert_eq!(cells[5], "4");
+    }
+
+    #[test]
     fn flux_object_without_status_reads_unknown() {
         let ks = obj(json!({
             "apiVersion": "kustomize.toolkit.fluxcd.io/v1",
@@ -734,6 +1163,8 @@ mod tests {
             "secrets",
             "jobs",
             "cronjobs",
+            "events",
+            "horizontalpodautoscalers",
             "persistentvolumeclaims",
             "persistentvolumes",
             "ingresses",
@@ -741,6 +1172,10 @@ mod tests {
             "customresourcedefinitions",
             "kustomizations",
             "helmreleases",
+            "gitrepositories",
+            "helmrepositories",
+            "ocirepositories",
+            "buckets",
             "widgets",
         ];
 
