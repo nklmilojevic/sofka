@@ -427,13 +427,16 @@ fn draw_scrollable(
     area: Rect,
     accent: ratatui::style::Color,
 ) {
+    let inner_h = area.height.saturating_sub(2) as usize;
+    let (start, end) = visible_line_window(view.lines.len(), view.scroll, inner_h);
     let text: Vec<Line> = view
         .lines
+        .get(start..end)
+        .unwrap_or_default()
         .iter()
         .map(|l| Line::from(highlight_yaml(l)))
         .collect();
-    let scroll = view.scroll.min(u16::MAX as usize) as u16;
-    let p = Paragraph::new(text).scroll((scroll, 0)).block(
+    let p = Paragraph::new(text).block(
         Block::default()
             .borders(Borders::ALL)
             .border_type(BorderType::Rounded)
@@ -1053,8 +1056,12 @@ fn klog_level(l: &str, level: char) -> bool {
 
 /// Unified-diff view with +/- line coloring.
 fn draw_diff(frame: &mut Frame, view: &crate::app::Scrollable, area: Rect) {
+    let inner_h = area.height.saturating_sub(2) as usize;
+    let (start, end) = visible_line_window(view.lines.len(), view.scroll, inner_h);
     let lines: Vec<Line> = view
         .lines
+        .get(start..end)
+        .unwrap_or_default()
         .iter()
         .map(|l| {
             let color = match l.chars().next() {
@@ -1065,8 +1072,7 @@ fn draw_diff(frame: &mut Frame, view: &crate::app::Scrollable, area: Rect) {
             Line::from(Span::styled(l.clone(), Style::default().fg(color)))
         })
         .collect();
-    let scroll = view.scroll.min(u16::MAX as usize) as u16;
-    let p = Paragraph::new(lines).scroll((scroll, 0)).block(
+    let p = Paragraph::new(lines).block(
         Block::default()
             .borders(Borders::ALL)
             .border_type(BorderType::Rounded)
@@ -1074,6 +1080,12 @@ fn draw_diff(frame: &mut Frame, view: &crate::app::Scrollable, area: Rect) {
             .title(Span::styled(format!(" {} ", view.title), theme::title())),
     );
     frame.render_widget(p, area);
+}
+
+fn visible_line_window(len: usize, scroll: usize, height: usize) -> (usize, usize) {
+    let start = scroll.min(len);
+    let end = start.saturating_add(height).min(len);
+    (start, end)
 }
 
 /// YAML / `kubectl describe` colorization: comments dimmed, section headers in
@@ -1868,6 +1880,14 @@ mod tests {
         assert_eq!(wrapped_height("五五五五五五", 10), 2);
         // ANSI escapes don't consume columns.
         assert_eq!(wrapped_height("\x1b[31maaaaaaaaaa\x1b[0m", 10), 1);
+    }
+
+    #[test]
+    fn visible_line_window_clamps_to_viewport() {
+        assert_eq!(visible_line_window(100, 10, 20), (10, 30));
+        assert_eq!(visible_line_window(100, 95, 20), (95, 100));
+        assert_eq!(visible_line_window(100, 150, 20), (100, 100));
+        assert_eq!(visible_line_window(100, 10, 0), (10, 10));
     }
 
     #[test]
