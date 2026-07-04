@@ -11,7 +11,7 @@ use kube::core::DynamicObject;
 use kube::discovery::{ApiResource, Discovery, Scope};
 use kube::runtime::watcher;
 use kube::{Client, Config};
-use tokio::sync::mpsc::UnboundedSender;
+use tokio::sync::mpsc::Sender;
 use tokio::task::JoinHandle;
 
 use crate::store::{Msg, row_key};
@@ -186,7 +186,7 @@ impl Cluster {
         labels: Option<String>,
         fields: Option<String>,
         generation: u64,
-        tx: UnboundedSender<Msg>,
+        tx: Sender<Msg>,
     ) -> JoinHandle<()> {
         let client = self.client.clone();
         let ar = kind.ar.clone();
@@ -208,7 +208,9 @@ impl Cluster {
                 cfg = cfg.fields(&f);
             }
             let mut stream = watcher(api, cfg).boxed();
-            let _ = tx.send(Msg::Reset { generation });
+            if tx.send(Msg::Reset { generation }).await.is_err() {
+                return;
+            }
 
             while let Some(event) = stream.next().await {
                 let msg = match event {
@@ -230,7 +232,7 @@ impl Cluster {
                         error: e.to_string(),
                     },
                 };
-                if tx.send(msg).is_err() {
+                if tx.send(msg).await.is_err() {
                     break; // UI gone
                 }
             }

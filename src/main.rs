@@ -21,6 +21,8 @@ use tokio::sync::mpsc;
 use crate::app::App;
 use crate::k8s::Cluster;
 
+const EVENT_CHANNEL_CAP: usize = 4096;
+
 /// sofka: navigate, observe, and inspect your Kubernetes clusters.
 #[derive(Parser, Debug)]
 #[command(name = "sofka", version, about)]
@@ -99,7 +101,7 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
-    let (tx, mut rx) = mpsc::unbounded_channel();
+    let (tx, mut rx) = mpsc::channel(EVENT_CHANNEL_CAP);
     let mut app = App::new(cluster, tx);
     app.user_aliases = cfg.aliases.clone();
     app.plugins = cfg.plugins.clone();
@@ -128,7 +130,7 @@ async fn main() -> Result<()> {
 
 /// Populate the store from the watch for a short window, then render one frame
 /// to an in-memory backend and print it. Headless UI smoke test.
-async fn snapshot(app: &mut App, rx: &mut mpsc::UnboundedReceiver<store::Msg>) -> Result<()> {
+async fn snapshot(app: &mut App, rx: &mut mpsc::Receiver<store::Msg>) -> Result<()> {
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
 
@@ -260,7 +262,7 @@ fn suspend_and_run(terminal: &mut ratatui::DefaultTerminal, argv: &[String]) {
 async fn run(
     terminal: &mut ratatui::DefaultTerminal,
     app: &mut App,
-    rx: &mut mpsc::UnboundedReceiver<store::Msg>,
+    rx: &mut mpsc::Receiver<store::Msg>,
 ) -> Result<()> {
     let mut reader = crossterm::event::EventStream::new();
     let mut tick = tokio::time::interval(Duration::from_secs(1));

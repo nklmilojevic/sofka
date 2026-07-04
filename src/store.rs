@@ -22,9 +22,9 @@ pub enum Msg {
     Synced {
         generation: u64,
     },
-    LogLine {
+    LogLines {
         generation: u64,
-        line: String,
+        lines: Vec<String>,
     },
     /// Point-in-time usage snapshot from the metrics API, keyed by "ns/name"
     /// (pods) or "name" (nodes) -> (cpu millicores, memory bytes).

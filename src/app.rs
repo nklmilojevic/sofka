@@ -21,7 +21,7 @@ use kube::core::{DynamicObject, TypeMeta};
 use kube::discovery::ApiResource;
 use ratatui::widgets::{ListState, TableState};
 use serde_json::{Value, json};
-use tokio::sync::mpsc::UnboundedSender;
+use tokio::sync::mpsc::Sender;
 use tokio::task::JoinHandle;
 
 use crate::k8s::{Cluster, Kind};
@@ -37,6 +37,12 @@ const MAX_LOG_LINES: usize = 5_000;
 /// resume scrolling). Only a runaway firehose during a very long pause hits
 /// this; resuming follow trims back to [`MAX_LOG_LINES`].
 const MAX_LOG_LINES_PAUSED: usize = 100_000;
+
+/// Log streams batch lines before sending them through the UI channel. This
+/// avoids one wake-up/message per line under high-volume workloads while still
+/// flushing quickly for low-volume logs.
+const LOG_BATCH_LINES: usize = 64;
+const LOG_BATCH_MS: u64 = 50;
 
 /// Flux CD resource kinds whose spec has a `suspend: bool` field — every kind
 /// with a corresponding `flux suspend/resume` subcommand: kustomize- and
@@ -346,7 +352,7 @@ pub struct App {
     pub generation: u64,
     gen_flag: Arc<AtomicU64>,
     pub tasks: Vec<JoinHandle<()>>,
-    pub tx: UnboundedSender<Msg>,
+    pub tx: Sender<Msg>,
     stack: Vec<Frame>,
 
     pub mode: Mode,
@@ -437,7 +443,7 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(cluster: Cluster, tx: UnboundedSender<Msg>) -> Self {
+    pub fn new(cluster: Cluster, tx: Sender<Msg>) -> Self {
         let namespace = cluster.default_namespace.clone();
         Self {
             cluster,
@@ -677,10 +683,12 @@ impl App {
             if allowed.is_empty() {
                 return;
             }
-            let _ = tx.send(Msg::Rbac {
-                ns: current_ns,
-                allowed,
-            });
+            let _ = tx
+                .send(Msg::Rbac {
+                    ns: current_ns,
+                    allowed,
+                })
+                .await;
         });
     }
 
@@ -732,6 +740,7 @@ impl App {
                             generation: genr,
                             data,
                         })
+                        .await
                         .is_err()
                     {
                         break;
@@ -774,44 +783,8 @@ impl App {
                 self.flash = format!("error: {error}");
                 self.flash_err = true;
             }
-            Msg::LogLine { generation, line } if generation == self.log_gen => {
-                // Strip carriage returns so progress output doesn't overwrite a
-                // row, and expand tabs to spaces — many loggers (e.g. Caddy's
-                // console encoder) separate `timestamp<tab>LEVEL<tab>message`
-                // with tabs, which the terminal renders as zero width, gluing
-                // the fields together. Spaces also make in-log search match.
-                self.logs
-                    .view
-                    .lines
-                    .push(line.replace('\r', "").replace('\t', " "));
-                // While following, keep a tight tail buffer. While paused, avoid
-                // trimming so indices don't shift under the frozen view (only a
-                // huge backlog hits the larger paused cap).
-                let cap = if self.logs.follow {
-                    MAX_LOG_LINES
-                } else {
-                    MAX_LOG_LINES_PAUSED
-                };
-                let overflow = self.logs.view.lines.len().saturating_sub(cap);
-                if overflow > 0 {
-                    // If we trim while paused, shift the anchored scroll by the
-                    // display rows the dropped lines occupied on screen —
-                    // filtered lines take none, wrapped lines take several —
-                    // so the frozen view stays put.
-                    if !self.logs.follow {
-                        let filter = self.logs.filter.to_lowercase();
-                        let rows: usize = self.logs.view.lines[..overflow]
-                            .iter()
-                            .filter(|l| filter.is_empty() || l.to_lowercase().contains(&filter))
-                            .map(|l| match self.logs.last_wrap_width {
-                                0 => 1,
-                                w => crate::ui::wrapped_height(l, w),
-                            })
-                            .sum();
-                        self.logs.view.scroll = self.logs.view.scroll.saturating_sub(rows);
-                    }
-                    self.logs.view.lines.drain(0..overflow);
-                }
+            Msg::LogLines { generation, lines } if generation == self.log_gen => {
+                self.push_log_lines(lines);
             }
             Msg::Metrics { generation, data } if generation == self.generation => {
                 let sort_uses_metrics = self
@@ -867,6 +840,50 @@ impl App {
     }
 
     // ----- selection -----------------------------------------------------
+
+    fn push_log_lines<I>(&mut self, lines: I)
+    where
+        I: IntoIterator<Item = String>,
+    {
+        // Strip carriage returns so progress output doesn't overwrite a row,
+        // and expand tabs to spaces — many loggers separate timestamp/level/body
+        // with tabs, which some terminals render awkwardly in a TUI cell.
+        self.logs.view.lines.extend(
+            lines
+                .into_iter()
+                .map(|line| line.replace('\r', "").replace('\t', " ")),
+        );
+
+        // While following, keep a tight tail buffer. While paused, avoid
+        // trimming so indices don't shift under the frozen view (only a huge
+        // backlog hits the larger paused cap).
+        let cap = if self.logs.follow {
+            MAX_LOG_LINES
+        } else {
+            MAX_LOG_LINES_PAUSED
+        };
+        let overflow = self.logs.view.lines.len().saturating_sub(cap);
+        if overflow == 0 {
+            return;
+        }
+
+        // If we trim while paused, shift the anchored scroll by the display
+        // rows the dropped lines occupied on screen — filtered lines take none,
+        // wrapped lines take several — so the frozen view stays put.
+        if !self.logs.follow {
+            let filter = self.logs.filter.to_lowercase();
+            let rows: usize = self.logs.view.lines[..overflow]
+                .iter()
+                .filter(|l| filter.is_empty() || l.to_lowercase().contains(&filter))
+                .map(|l| match self.logs.last_wrap_width {
+                    0 => 1,
+                    w => crate::ui::wrapped_height(l, w),
+                })
+                .sum();
+            self.logs.view.scroll = self.logs.view.scroll.saturating_sub(rows);
+        }
+        self.logs.view.lines.drain(0..overflow);
+    }
 
     /// Mark the cached row order/filter stale. Cheap; safe to over-call.
     fn invalidate_rows(&self) {
@@ -1382,7 +1399,7 @@ impl App {
                     warn: Some("kubectl not found; showing YAML".into()),
                 },
             };
-            let _ = tx.send(msg);
+            let _ = tx.send(msg).await;
         });
     }
 
@@ -1610,7 +1627,6 @@ impl App {
         let genr = self.log_gen;
         let flag = self.log_flag.clone();
         let handle = tokio::spawn(async move {
-            use futures_util::{AsyncBufReadExt, TryStreamExt};
             let api: Api<Pod> = Api::namespaced(client, &ns);
             let lp = LogParams {
                 follow: !previous,
@@ -1620,32 +1636,7 @@ impl App {
                 tail_lines: if previous { None } else { Some(300) },
                 ..Default::default()
             };
-            match api.log_stream(&pod, &lp).await {
-                Ok(stream) => {
-                    let mut lines = stream.lines();
-                    while let Ok(Some(line)) = lines.try_next().await {
-                        if flag.load(Ordering::SeqCst) != genr {
-                            break;
-                        }
-                        if tx
-                            .send(Msg::LogLine {
-                                generation: genr,
-                                line: format!("{prefix}{line}"),
-                            })
-                            .is_err()
-                        {
-                            break;
-                        }
-                    }
-                }
-                Err(e) => {
-                    // Surface stream errors in the log view itself.
-                    let _ = tx.send(Msg::LogLine {
-                        generation: genr,
-                        line: format!("[error] {e}"),
-                    });
-                }
-            }
+            forward_log_stream(api, pod, lp, prefix, tx, genr, flag).await;
         });
         self.log_tasks.push(handle);
     }
@@ -1656,7 +1647,6 @@ impl App {
         let genr = self.log_gen;
         let flag = self.log_flag.clone();
         let handle = tokio::spawn(async move {
-            use futures_util::{AsyncBufReadExt, TryStreamExt};
             let list_api: Api<Pod> = if ns.is_empty() {
                 Api::all(client.clone())
             } else {
@@ -1665,19 +1655,24 @@ impl App {
             let pods = match list_api.list(&ListParams::default().labels(&labels)).await {
                 Ok(p) => p,
                 Err(e) => {
-                    let _ = tx.send(Msg::LogLine {
-                        generation: genr,
-                        line: format!("[error] {e}"),
-                    });
+                    let _ = tx
+                        .send(Msg::LogLines {
+                            generation: genr,
+                            lines: vec![format!("[error] {e}")],
+                        })
+                        .await;
                     return;
                 }
             };
             if pods.items.is_empty() {
-                let _ = tx.send(Msg::LogLine {
-                    generation: genr,
-                    line: "(no matching pods)".into(),
-                });
+                let _ = tx
+                    .send(Msg::LogLines {
+                        generation: genr,
+                        lines: vec!["(no matching pods)".into()],
+                    })
+                    .await;
             }
+            let mut streams = tokio::task::JoinSet::new();
             for p in pods {
                 let pod_ns = p.metadata.namespace.clone().unwrap_or_default();
                 let pod_name = p.metadata.name.clone().unwrap_or_default();
@@ -1695,7 +1690,7 @@ impl App {
                     };
                     let (client, tx, flag) = (client.clone(), tx.clone(), flag.clone());
                     let (pn, pns) = (pod_name.clone(), pod_ns.clone());
-                    tokio::spawn(async move {
+                    streams.spawn(async move {
                         let api: Api<Pod> = Api::namespaced(client, &pns);
                         let lp = LogParams {
                             follow: true,
@@ -1704,24 +1699,13 @@ impl App {
                             tail_lines: Some(100),
                             ..Default::default()
                         };
-                        if let Ok(stream) = api.log_stream(&pn, &lp).await {
-                            let mut lines = stream.lines();
-                            while let Ok(Some(line)) = lines.try_next().await {
-                                if flag.load(Ordering::SeqCst) != genr {
-                                    break;
-                                }
-                                if tx
-                                    .send(Msg::LogLine {
-                                        generation: genr,
-                                        line: format!("{prefix}{line}"),
-                                    })
-                                    .is_err()
-                                {
-                                    break;
-                                }
-                            }
-                        }
+                        forward_log_stream(api, pn, lp, prefix, tx, genr, flag).await;
                     });
+                }
+            }
+            while streams.join_next().await.is_some() {
+                if flag.load(Ordering::SeqCst) != genr {
+                    break;
                 }
             }
         });
@@ -1780,10 +1764,12 @@ impl App {
                     Api::all_with(client.clone(), &kind.ar)
                 };
                 if let Err(e) = api.delete(&name, &dp).await {
-                    let _ = tx.send(Msg::Error {
-                        generation: genr,
-                        error: format!("delete {name} failed: {e}"),
-                    });
+                    let _ = tx
+                        .send(Msg::Error {
+                            generation: genr,
+                            error: format!("delete {name} failed: {e}"),
+                        })
+                        .await;
                 }
             }
         });
@@ -1967,10 +1953,12 @@ impl App {
                 }}}}
             }));
             if let Err(e) = api.patch(&name, &PatchParams::default(), &patch).await {
-                let _ = tx.send(Msg::Error {
-                    generation: genr,
-                    error: format!("restart failed: {e}"),
-                });
+                let _ = tx
+                    .send(Msg::Error {
+                        generation: genr,
+                        error: format!("restart failed: {e}"),
+                    })
+                    .await;
             }
         });
     }
@@ -2083,10 +2071,12 @@ impl App {
             let api: Api<DynamicObject> = Api::namespaced_with(client, &ns, &kind.ar);
             let patch = Patch::Strategic(patch_doc);
             if let Err(e) = api.patch(&name, &PatchParams::default(), &patch).await {
-                let _ = tx.send(Msg::Error {
-                    generation: genr,
-                    error: format!("set image failed: {e}"),
-                });
+                let _ = tx
+                    .send(Msg::Error {
+                        generation: genr,
+                        error: format!("set image failed: {e}"),
+                    })
+                    .await;
             }
         });
     }
@@ -2262,10 +2252,12 @@ impl App {
             let api: Api<DynamicObject> = Api::namespaced_with(client, &ns, &kind.ar);
             let patch = Patch::Merge(json!({ "spec": { "replicas": replicas } }));
             if let Err(e) = api.patch(&name, &PatchParams::default(), &patch).await {
-                let _ = tx.send(Msg::Error {
-                    generation: genr,
-                    error: format!("scale failed: {e}"),
-                });
+                let _ = tx
+                    .send(Msg::Error {
+                        generation: genr,
+                        error: format!("scale failed: {e}"),
+                    })
+                    .await;
             }
         });
     }
@@ -2339,10 +2331,12 @@ impl App {
             for (name, ns) in targets {
                 let api: Api<DynamicObject> = Api::namespaced_with(client.clone(), &ns, &kind.ar);
                 if let Err(e) = api.patch(&name, &PatchParams::default(), &patch).await {
-                    let _ = tx.send(Msg::Error {
-                        generation: genr,
-                        error: format!("{verb} {name} failed: {e}"),
-                    });
+                    let _ = tx
+                        .send(Msg::Error {
+                            generation: genr,
+                            error: format!("{verb} {name} failed: {e}"),
+                        })
+                        .await;
                 }
             }
         });
@@ -2373,10 +2367,12 @@ impl App {
             for (name, ns) in targets {
                 let api: Api<DynamicObject> = Api::namespaced_with(client.clone(), &ns, &kind.ar);
                 if let Err(e) = api.patch(&name, &PatchParams::default(), &patch).await {
-                    let _ = tx.send(Msg::Error {
-                        generation: genr,
-                        error: format!("reconcile {name} failed: {e}"),
-                    });
+                    let _ = tx
+                        .send(Msg::Error {
+                            generation: genr,
+                            error: format!("reconcile {name} failed: {e}"),
+                        })
+                        .await;
                 }
             }
         });
@@ -2423,10 +2419,12 @@ impl App {
             for (name, ns) in targets {
                 let api: Api<DynamicObject> = Api::namespaced_with(client.clone(), &ns, &kind.ar);
                 if let Err(e) = api.patch(&name, &PatchParams::default(), &patch).await {
-                    let _ = tx.send(Msg::Error {
-                        generation: genr,
-                        error: format!("refresh {name} failed: {e}"),
-                    });
+                    let _ = tx
+                        .send(Msg::Error {
+                            generation: genr,
+                            error: format!("refresh {name} failed: {e}"),
+                        })
+                        .await;
                 }
             }
         });
@@ -2969,7 +2967,7 @@ impl App {
                     .collect();
                 names.sort();
                 names.insert(0, "<all>".into());
-                let _ = tx.send(Msg::Namespaces { list: names });
+                let _ = tx.send(Msg::Namespaces { list: names }).await;
             }
         });
     }
@@ -3157,7 +3155,7 @@ impl App {
                 .await
                 .map(Box::new)
                 .map_err(|e| e.to_string());
-            let _ = tx.send(Msg::ContextSwitched { name, result });
+            let _ = tx.send(Msg::ContextSwitched { name, result }).await;
         });
     }
 
@@ -3275,6 +3273,7 @@ impl App {
                         generation: genr,
                         data: p,
                     })
+                    .await
                     .is_err()
                 {
                     break;
@@ -3372,6 +3371,7 @@ impl App {
                         generation: genr,
                         items,
                     })
+                    .await
                     .is_err()
                 {
                     break;
@@ -3685,6 +3685,80 @@ fn copy_to_clipboard(text: &str) -> bool {
     false
 }
 
+async fn forward_log_stream(
+    api: Api<Pod>,
+    pod: String,
+    lp: LogParams,
+    prefix: String,
+    tx: Sender<Msg>,
+    generation: u64,
+    flag: Arc<AtomicU64>,
+) {
+    use futures_util::{AsyncBufReadExt, TryStreamExt};
+    use tokio::time::MissedTickBehavior;
+
+    let stream = match api.log_stream(&pod, &lp).await {
+        Ok(stream) => stream,
+        Err(e) => {
+            let _ = tx
+                .send(Msg::LogLines {
+                    generation,
+                    lines: vec![format!("[error] {e}")],
+                })
+                .await;
+            return;
+        }
+    };
+
+    let mut lines = stream.lines();
+    let mut batch = Vec::with_capacity(LOG_BATCH_LINES);
+    let mut flush = tokio::time::interval(Duration::from_millis(LOG_BATCH_MS));
+    flush.set_missed_tick_behavior(MissedTickBehavior::Skip);
+
+    loop {
+        if flag.load(Ordering::SeqCst) != generation {
+            break;
+        }
+
+        tokio::select! {
+            next = lines.try_next() => {
+                match next {
+                    Ok(Some(line)) => {
+                        batch.push(format!("{prefix}{line}"));
+                        if batch.len() >= LOG_BATCH_LINES
+                            && !send_log_batch(&tx, generation, &mut batch).await
+                        {
+                            break;
+                        }
+                    }
+                    Ok(None) => break,
+                    Err(e) => {
+                        batch.push(format!("[error] {e}"));
+                        break;
+                    }
+                }
+            }
+            _ = flush.tick(), if !batch.is_empty() => {
+                if !send_log_batch(&tx, generation, &mut batch).await {
+                    break;
+                }
+            }
+        }
+    }
+
+    if flag.load(Ordering::SeqCst) == generation {
+        let _ = send_log_batch(&tx, generation, &mut batch).await;
+    }
+}
+
+async fn send_log_batch(tx: &Sender<Msg>, generation: u64, batch: &mut Vec<String>) -> bool {
+    if batch.is_empty() {
+        return true;
+    }
+    let lines = std::mem::take(batch);
+    tx.send(Msg::LogLines { generation, lines }).await.is_ok()
+}
+
 /// Recursively flatten an object and its owned children into xray rows.
 fn emit_xray(
     kind: &str,
@@ -3849,14 +3923,14 @@ mod tests {
     use super::*;
     use crate::store::row_key;
     use serde_json::json;
-    use tokio::sync::mpsc::{self, UnboundedReceiver};
+    use tokio::sync::mpsc::{self, Receiver};
 
     fn obj(v: serde_json::Value) -> DynamicObject {
         serde_json::from_value(v).unwrap()
     }
 
-    fn test_app() -> (App, UnboundedReceiver<Msg>) {
-        let (tx, rx) = mpsc::unbounded_channel();
+    fn test_app() -> (App, Receiver<Msg>) {
+        let (tx, rx) = mpsc::channel(1024);
         (App::new(Cluster::fake(), tx), rx)
     }
 
@@ -4068,9 +4142,9 @@ mod tests {
 
         // Lines keep streaming while paused; the frozen offset must not drift.
         for i in 0..500 {
-            app.handle_msg(Msg::LogLine {
+            app.handle_msg(Msg::LogLines {
                 generation: app.log_gen,
-                line: format!("line {i}"),
+                lines: vec![format!("line {i}")],
             });
         }
         assert!(!app.logs.follow);
@@ -4530,9 +4604,9 @@ mod tests {
     async fn log_lines_expand_tabs_and_strip_cr() {
         let (mut app, _rx) = test_app();
         // Caddy-style tab-separated line (level would be color-wrapped too).
-        app.handle_msg(Msg::LogLine {
+        app.handle_msg(Msg::LogLines {
             generation: app.log_gen,
-            line: "2026/07/01 09:21:14.062\tINFO\tProvisioning WAF\r".into(),
+            lines: vec!["2026/07/01 09:21:14.062\tINFO\tProvisioning WAF\r".into()],
         });
         assert_eq!(
             app.logs.view.lines.last().unwrap(),
@@ -4544,9 +4618,9 @@ mod tests {
     async fn log_buffer_is_capped() {
         let (mut app, _rx) = test_app();
         for i in 0..(MAX_LOG_LINES + 50) {
-            app.handle_msg(Msg::LogLine {
+            app.handle_msg(Msg::LogLines {
                 generation: app.log_gen,
-                line: format!("line {i}"),
+                lines: vec![format!("line {i}")],
             });
         }
         assert_eq!(app.logs.view.lines.len(), MAX_LOG_LINES);
@@ -4731,9 +4805,9 @@ mod tests {
         let (mut app, _rx) = test_app();
         app.logs.follow = false; // autoscroll OFF
         let lg = app.log_gen;
-        let line = |i: usize| Msg::LogLine {
+        let line = |i: usize| Msg::LogLines {
             generation: lg,
-            line: format!("line {i}"),
+            lines: vec![format!("line {i}")],
         };
         // Well past the *following* cap, but under the paused cap: nothing is
         // dropped, so a frozen view never appears to resume scrolling.
@@ -4757,23 +4831,23 @@ mod tests {
         app.logs.view.scroll = 500;
         let lg = app.log_gen;
         // The first line is the one trimmed later: 25 chars → 3 rows at width 10.
-        app.handle_msg(Msg::LogLine {
+        app.handle_msg(Msg::LogLines {
             generation: lg,
-            line: "a".repeat(25),
+            lines: vec!["a".repeat(25)],
         });
         for i in 1..MAX_LOG_LINES_PAUSED {
-            app.handle_msg(Msg::LogLine {
+            app.handle_msg(Msg::LogLines {
                 generation: lg,
-                line: format!("l{i}"),
+                lines: vec![format!("l{i}")],
             });
         }
         assert_eq!(app.logs.view.lines.len(), MAX_LOG_LINES_PAUSED);
         assert_eq!(app.logs.view.scroll, 500); // nothing trimmed yet
         // One more line overflows the paused cap: the wrapped first line drains
         // and the frozen anchor shifts by its 3 display rows, not by 1 line.
-        app.handle_msg(Msg::LogLine {
+        app.handle_msg(Msg::LogLines {
             generation: lg,
-            line: "x".into(),
+            lines: vec!["x".into()],
         });
         assert_eq!(app.logs.view.lines.len(), MAX_LOG_LINES_PAUSED);
         assert_eq!(app.logs.view.scroll, 497);
