@@ -982,44 +982,56 @@ impl App {
             .map(|(_, idx)| idx)
     }
 
+    fn ensure_rows_cache(&self) {
+        let mut cache = self.rows_cache.borrow_mut();
+        if !cache.dirty {
+            return;
+        }
+
+        let headers = self.display_headers();
+        let sort_header = self.sort_column.and_then(|i| headers.get(i).copied());
+        // (primary sort key, (ns, name) tiebreak, store key)
+        let mut entries: Vec<(SortKey, (String, String), String)> = self
+            .store
+            .iter()
+            .filter(|(_, o)| self.matches_filter(o))
+            .map(|(k, o)| {
+                let primary = match sort_header {
+                    Some(h) => self.column_sort_key(o, h),
+                    None => SortKey::Text(String::new()),
+                };
+                let tie = (
+                    o.metadata.namespace.clone().unwrap_or_default(),
+                    o.metadata.name.clone().unwrap_or_default(),
+                );
+                (primary, tie, k.clone())
+            })
+            .collect();
+        let desc = self.sort_desc && sort_header.is_some();
+        entries.sort_by(|a, b| {
+            let mut ord = a.0.cmp_to(&b.0);
+            if desc {
+                ord = ord.reverse();
+            }
+            // Ties always fall back to namespace/name ascending.
+            ord.then_with(|| a.1.cmp(&b.1))
+        });
+        cache.keys = entries.into_iter().map(|(_, _, k)| k).collect();
+        cache.dirty = false;
+    }
+
+    /// Display-ordered, filtered row count, backed by the same cache as
+    /// [`rows`]. Use this when only the count is needed so a frame doesn't
+    /// rebuild a temporary `Vec<&DynamicObject>` just to call `len()`.
+    pub fn row_count(&self) -> usize {
+        self.ensure_rows_cache();
+        self.rows_cache.borrow().keys.len()
+    }
+
     /// Display-ordered, filtered rows. Backed by a cache that only recomputes
     /// the sort + fuzzy filter when the store, filter, or sort changes.
     pub fn rows(&self) -> Vec<&DynamicObject> {
-        {
-            let mut cache = self.rows_cache.borrow_mut();
-            if cache.dirty {
-                let headers = self.display_headers();
-                let sort_header = self.sort_column.and_then(|i| headers.get(i).copied());
-                // (primary sort key, (ns, name) tiebreak, store key)
-                let mut entries: Vec<(SortKey, (String, String), String)> = self
-                    .store
-                    .iter()
-                    .filter(|(_, o)| self.matches_filter(o))
-                    .map(|(k, o)| {
-                        let primary = match sort_header {
-                            Some(h) => self.column_sort_key(o, h),
-                            None => SortKey::Text(String::new()),
-                        };
-                        let tie = (
-                            o.metadata.namespace.clone().unwrap_or_default(),
-                            o.metadata.name.clone().unwrap_or_default(),
-                        );
-                        (primary, tie, k.clone())
-                    })
-                    .collect();
-                let desc = self.sort_desc && sort_header.is_some();
-                entries.sort_by(|a, b| {
-                    let mut ord = a.0.cmp_to(&b.0);
-                    if desc {
-                        ord = ord.reverse();
-                    }
-                    // Ties always fall back to namespace/name ascending.
-                    ord.then_with(|| a.1.cmp(&b.1))
-                });
-                cache.keys = entries.into_iter().map(|(_, _, k)| k).collect();
-                cache.dirty = false;
-            }
-        }
+        self.ensure_rows_cache();
         self.rows_cache
             .borrow()
             .keys

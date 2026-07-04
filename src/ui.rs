@@ -181,7 +181,7 @@ fn draw_table(frame: &mut Frame, app: &mut App, area: Rect) {
     let cpu_idx = headers.iter().position(|h| *h == "CPU");
     let mem_idx = headers.iter().position(|h| *h == "MEM");
 
-    let count = app.rows().len();
+    let count = app.row_count();
     let visible_rows = area.height.saturating_sub(3).max(1) as usize;
     if count == 0 {
         *app.table_state.offset_mut() = 0;
