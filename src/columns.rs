@@ -8,64 +8,242 @@ use k8s_openapi::jiff::Timestamp;
 use kube::core::DynamicObject;
 use serde_json::Value;
 
+type CellFn = for<'a> fn(&CellContext<'a>) -> String;
+
+struct Column {
+    header: &'static str,
+    extract: CellFn,
+    is_status: bool,
+}
+
+struct CellContext<'a> {
+    obj: &'a DynamicObject,
+    data: &'a Value,
+    name: &'a str,
+    age: &'a str,
+}
+
+const fn column(header: &'static str, extract: CellFn) -> Column {
+    Column {
+        header,
+        extract,
+        is_status: false,
+    }
+}
+
+const fn status_column(header: &'static str, extract: CellFn) -> Column {
+    Column {
+        header,
+        extract,
+        is_status: true,
+    }
+}
+
+const POD_COLUMNS: &[Column] = &[
+    column("NAME", col_name),
+    column("READY", col_pod_ready),
+    status_column("STATUS", col_pod_status),
+    column("RESTARTS", col_pod_restarts),
+    column("IP", col_pod_ip),
+    column("NODE", col_pod_node),
+    column("AGE", col_age),
+];
+
+const DEPLOYMENT_COLUMNS: &[Column] = &[
+    column("NAME", col_name),
+    column("READY", col_deploy_ready),
+    column("UP-TO-DATE", col_deploy_updated),
+    column("AVAILABLE", col_deploy_available),
+    column("AGE", col_age),
+];
+
+const REPLICASET_COLUMNS: &[Column] = &[
+    column("NAME", col_name),
+    column("DESIRED", col_rs_desired),
+    column("CURRENT", col_rs_current),
+    column("READY", col_rs_ready),
+    column("AGE", col_age),
+];
+
+const STATEFULSET_COLUMNS: &[Column] = &[
+    column("NAME", col_name),
+    column("READY", col_sts_ready),
+    column("AGE", col_age),
+];
+
+const DAEMONSET_COLUMNS: &[Column] = &[
+    column("NAME", col_name),
+    column("DESIRED", col_ds_desired),
+    column("CURRENT", col_ds_current),
+    column("READY", col_ds_ready),
+    column("AVAILABLE", col_ds_available),
+    column("AGE", col_age),
+];
+
+const SERVICE_COLUMNS: &[Column] = &[
+    column("NAME", col_name),
+    column("TYPE", col_service_type),
+    column("CLUSTER-IP", col_service_cluster_ip),
+    column("EXTERNAL-IP", col_service_external_ip),
+    column("PORTS", col_service_ports),
+    column("AGE", col_age),
+];
+
+const NODE_COLUMNS: &[Column] = &[
+    column("NAME", col_name),
+    status_column("STATUS", col_node_status),
+    column("ROLES", col_node_roles),
+    column("VERSION", col_node_version),
+    column("AGE", col_age),
+];
+
+const NAMESPACE_COLUMNS: &[Column] = &[
+    column("NAME", col_name),
+    status_column("STATUS", col_namespace_status),
+    column("AGE", col_age),
+];
+
+const CONFIGMAP_COLUMNS: &[Column] = &[
+    column("NAME", col_name),
+    column("DATA", col_configmap_data),
+    column("AGE", col_age),
+];
+
+const SECRET_COLUMNS: &[Column] = &[
+    column("NAME", col_name),
+    column("TYPE", col_secret_type),
+    column("DATA", col_secret_data),
+    column("AGE", col_age),
+];
+
+const JOB_COLUMNS: &[Column] = &[
+    column("NAME", col_name),
+    column("COMPLETIONS", col_job_completions),
+    column("DURATION", col_job_duration),
+    column("AGE", col_age),
+];
+
+const CRONJOB_COLUMNS: &[Column] = &[
+    column("NAME", col_name),
+    column("SCHEDULE", col_cronjob_schedule),
+    column("SUSPEND", col_cronjob_suspend),
+    column("ACTIVE", col_cronjob_active),
+    column("LAST-SCHEDULE", col_cronjob_last_schedule),
+    column("AGE", col_age),
+];
+
+const EVENT_COLUMNS: &[Column] = &[
+    column("NAME", col_name),
+    column("TYPE", col_event_type),
+    column("REASON", col_event_reason),
+    column("OBJECT", col_event_object),
+    column("MESSAGE", col_event_message),
+    column("COUNT", col_event_count),
+    column("AGE", col_age),
+];
+
+const HPA_COLUMNS: &[Column] = &[
+    column("NAME", col_name),
+    column("REFERENCE", col_hpa_reference),
+    column("TARGETS", col_hpa_targets),
+    column("MINPODS", col_hpa_minpods),
+    column("MAXPODS", col_hpa_maxpods),
+    column("REPLICAS", col_hpa_replicas),
+    column("AGE", col_age),
+];
+
+const PVC_COLUMNS: &[Column] = &[
+    column("NAME", col_name),
+    status_column("STATUS", col_pvc_status),
+    column("VOLUME", col_pvc_volume),
+    column("CAPACITY", col_pvc_capacity),
+    column("AGE", col_age),
+];
+
+const PV_COLUMNS: &[Column] = &[
+    column("NAME", col_name),
+    column("CAPACITY", col_pv_capacity),
+    status_column("STATUS", col_pv_status),
+    column("CLAIM", col_pv_claim),
+    column("AGE", col_age),
+];
+
+const INGRESS_COLUMNS: &[Column] = &[
+    column("NAME", col_name),
+    column("CLASS", col_ingress_class),
+    column("HOSTS", col_ingress_hosts),
+    column("AGE", col_age),
+];
+
+const ENDPOINT_COLUMNS: &[Column] = &[
+    column("NAME", col_name),
+    column("ENDPOINTS", col_endpoint_count),
+    column("AGE", col_age),
+];
+
+const CRD_COLUMNS: &[Column] = &[
+    column("NAME", col_name),
+    column("GROUP", col_crd_group),
+    column("KIND", col_crd_kind),
+    column("VERSIONS", col_crd_versions),
+    column("SCOPE", col_crd_scope),
+    column("AGE", col_age),
+];
+
+const FLUX_OBJECT_COLUMNS: &[Column] = &[
+    column("NAME", col_name),
+    status_column("READY", col_flux_ready),
+    column("MESSAGE", col_flux_message),
+    column("REVISION", col_flux_revision),
+    column("SUSPENDED", col_flux_suspended),
+    column("AGE", col_age),
+];
+
+const FLUX_SOURCE_COLUMNS: &[Column] = &[
+    column("NAME", col_name),
+    status_column("READY", col_flux_ready),
+    column("MESSAGE", col_flux_message),
+    column("REVISION", col_flux_source_revision),
+    column("URL", col_flux_source_url),
+    column("SUSPENDED", col_flux_suspended),
+    column("AGE", col_age),
+];
+
+const DEFAULT_COLUMNS: &[Column] = &[column("NAME", col_name), column("AGE", col_age)];
+
+fn columns_for(plural: &str) -> &'static [Column] {
+    match plural {
+        "pods" => POD_COLUMNS,
+        "deployments" => DEPLOYMENT_COLUMNS,
+        "replicasets" => REPLICASET_COLUMNS,
+        "statefulsets" => STATEFULSET_COLUMNS,
+        "daemonsets" => DAEMONSET_COLUMNS,
+        "services" => SERVICE_COLUMNS,
+        "nodes" => NODE_COLUMNS,
+        "namespaces" => NAMESPACE_COLUMNS,
+        "configmaps" => CONFIGMAP_COLUMNS,
+        "secrets" => SECRET_COLUMNS,
+        "jobs" => JOB_COLUMNS,
+        "cronjobs" => CRONJOB_COLUMNS,
+        "events" => EVENT_COLUMNS,
+        "horizontalpodautoscalers" => HPA_COLUMNS,
+        "persistentvolumeclaims" => PVC_COLUMNS,
+        "persistentvolumes" => PV_COLUMNS,
+        "ingresses" => INGRESS_COLUMNS,
+        "endpoints" => ENDPOINT_COLUMNS,
+        "customresourcedefinitions" => CRD_COLUMNS,
+        "kustomizations" | "helmreleases" => FLUX_OBJECT_COLUMNS,
+        "gitrepositories" | "helmrepositories" | "ocirepositories" | "buckets" => {
+            FLUX_SOURCE_COLUMNS
+        }
+        _ => DEFAULT_COLUMNS,
+    }
+}
+
 /// Headers for a kind, excluding the leading NAMESPACE column (the table view
 /// prepends that when listing across namespaces).
 pub fn headers(plural: &str) -> Vec<&'static str> {
-    match plural {
-        "pods" => vec!["NAME", "READY", "STATUS", "RESTARTS", "IP", "NODE", "AGE"],
-        "deployments" => vec!["NAME", "READY", "UP-TO-DATE", "AVAILABLE", "AGE"],
-        "replicasets" => vec!["NAME", "DESIRED", "CURRENT", "READY", "AGE"],
-        "statefulsets" => vec!["NAME", "READY", "AGE"],
-        "daemonsets" => vec!["NAME", "DESIRED", "CURRENT", "READY", "AVAILABLE", "AGE"],
-        "services" => vec!["NAME", "TYPE", "CLUSTER-IP", "EXTERNAL-IP", "PORTS", "AGE"],
-        "nodes" => vec!["NAME", "STATUS", "ROLES", "VERSION", "AGE"],
-        "namespaces" => vec!["NAME", "STATUS", "AGE"],
-        "configmaps" => vec!["NAME", "DATA", "AGE"],
-        "secrets" => vec!["NAME", "TYPE", "DATA", "AGE"],
-        "jobs" => vec!["NAME", "COMPLETIONS", "DURATION", "AGE"],
-        "cronjobs" => vec![
-            "NAME",
-            "SCHEDULE",
-            "SUSPEND",
-            "ACTIVE",
-            "LAST-SCHEDULE",
-            "AGE",
-        ],
-        "events" => vec![
-            "NAME", "TYPE", "REASON", "OBJECT", "MESSAGE", "COUNT", "AGE",
-        ],
-        "horizontalpodautoscalers" => {
-            vec![
-                "NAME",
-                "REFERENCE",
-                "TARGETS",
-                "MINPODS",
-                "MAXPODS",
-                "REPLICAS",
-                "AGE",
-            ]
-        }
-        "persistentvolumeclaims" => vec!["NAME", "STATUS", "VOLUME", "CAPACITY", "AGE"],
-        "persistentvolumes" => vec!["NAME", "CAPACITY", "STATUS", "CLAIM", "AGE"],
-        "ingresses" => vec!["NAME", "CLASS", "HOSTS", "AGE"],
-        "endpoints" => vec!["NAME", "ENDPOINTS", "AGE"],
-        "customresourcedefinitions" => vec!["NAME", "GROUP", "KIND", "VERSIONS", "SCOPE", "AGE"],
-        "kustomizations" | "helmreleases" => {
-            vec!["NAME", "READY", "MESSAGE", "REVISION", "SUSPENDED", "AGE"]
-        }
-        "gitrepositories" | "helmrepositories" | "ocirepositories" | "buckets" => {
-            vec![
-                "NAME",
-                "READY",
-                "MESSAGE",
-                "REVISION",
-                "URL",
-                "SUSPENDED",
-                "AGE",
-            ]
-        }
-        _ => vec!["NAME", "AGE"],
-    }
+    columns_for(plural).iter().map(|c| c.header).collect()
 }
 
 /// Cells for one object, aligned with [`headers`]. The 2nd return value is the
@@ -73,161 +251,16 @@ pub fn headers(plural: &str) -> Vec<&'static str> {
 pub fn cells(obj: &DynamicObject, plural: &str) -> (Vec<String>, Option<usize>) {
     let name = obj.metadata.name.clone().unwrap_or_default();
     let age = age(obj);
-    let d = &obj.data;
-
-    match plural {
-        "pods" => {
-            let (ready, status, restarts) = pod_summary(obj);
-            let ip = sget(d, &["status", "podIP"]).unwrap_or_else(|| "<none>".into());
-            let node = sget(d, &["spec", "nodeName"]).unwrap_or_else(|| "<none>".into());
-            (vec![name, ready, status, restarts, ip, node, age], Some(2))
-        }
-        "deployments" => {
-            let ready = format!(
-                "{}/{}",
-                iget(d, &["status", "readyReplicas"]),
-                iget(d, &["status", "replicas"])
-            );
-            let utd = iget(d, &["status", "updatedReplicas"]).to_string();
-            let avail = iget(d, &["status", "availableReplicas"]).to_string();
-            (vec![name, ready, utd, avail, age], None)
-        }
-        "replicasets" => {
-            let desired = iget(d, &["spec", "replicas"]).to_string();
-            let current = iget(d, &["status", "replicas"]).to_string();
-            let ready = iget(d, &["status", "readyReplicas"]).to_string();
-            (vec![name, desired, current, ready, age], None)
-        }
-        "statefulsets" => {
-            let ready = format!(
-                "{}/{}",
-                iget(d, &["status", "readyReplicas"]),
-                iget(d, &["spec", "replicas"])
-            );
-            (vec![name, ready, age], None)
-        }
-        "daemonsets" => (
-            vec![
-                name,
-                iget(d, &["status", "desiredNumberScheduled"]).to_string(),
-                iget(d, &["status", "currentNumberScheduled"]).to_string(),
-                iget(d, &["status", "numberReady"]).to_string(),
-                iget(d, &["status", "numberAvailable"]).to_string(),
-                age,
-            ],
-            None,
-        ),
-        "services" => {
-            let typ = sget(d, &["spec", "type"]).unwrap_or_else(|| "ClusterIP".into());
-            let cip = sget(d, &["spec", "clusterIP"]).unwrap_or_else(|| "<none>".into());
-            let eip = external_ip(d, &typ);
-            let ports = svc_ports(d);
-            (vec![name, typ, cip, eip, ports, age], None)
-        }
-        "nodes" => {
-            let status = node_ready(d);
-            let roles = node_roles(obj);
-            let ver = sget(d, &["status", "nodeInfo", "kubeletVersion"]).unwrap_or_default();
-            (vec![name, status, roles, ver, age], Some(1))
-        }
-        "namespaces" => {
-            let status = sget(d, &["status", "phase"]).unwrap_or_else(|| "Active".into());
-            (vec![name, status, age], Some(1))
-        }
-        "configmaps" => {
-            let n = count_obj(d, &["data"]) + count_obj(d, &["binaryData"]);
-            (vec![name, n.to_string(), age], None)
-        }
-        "secrets" => {
-            let typ = sget(d, &["type"]).unwrap_or_else(|| "Opaque".into());
-            let n = count_obj(d, &["data"]);
-            (vec![name, typ, n.to_string(), age], None)
-        }
-        "jobs" => {
-            let comp = format!(
-                "{}/{}",
-                iget(d, &["status", "succeeded"]),
-                iget(d, &["spec", "completions"]).max(1)
-            );
-            let duration = job_duration(d);
-            (vec![name, comp, duration, age], None)
-        }
-        "cronjobs" => {
-            let sched = sget(d, &["spec", "schedule"]).unwrap_or_default();
-            let suspend = bget(d, &["spec", "suspend"]).to_string();
-            let active = count_arr(d, &["status", "active"]).to_string();
-            let last_schedule = time_since(d, &["status", "lastScheduleTime"]);
-            (vec![name, sched, suspend, active, last_schedule, age], None)
-        }
-        "events" => {
-            let typ = sget(d, &["type"]).unwrap_or_default();
-            let reason = sget(d, &["reason"]).unwrap_or_default();
-            let involved = event_object(d);
-            let message = event_message(d);
-            let count = event_count(d).to_string();
-            (vec![name, typ, reason, involved, message, count, age], None)
-        }
-        "horizontalpodautoscalers" => {
-            let reference = hpa_reference(d);
-            let targets = hpa_targets(d);
-            let min = iopt(d, &["spec", "minReplicas"]).unwrap_or(1).to_string();
-            let max = iopt(d, &["spec", "maxReplicas"])
-                .map(|n| n.to_string())
-                .unwrap_or_default();
-            let replicas = iopt(d, &["status", "currentReplicas"])
-                .unwrap_or(0)
-                .to_string();
-            (
-                vec![name, reference, targets, min, max, replicas, age],
-                None,
-            )
-        }
-        "persistentvolumeclaims" => {
-            let status = sget(d, &["status", "phase"]).unwrap_or_default();
-            let vol = sget(d, &["spec", "volumeName"]).unwrap_or_default();
-            let cap = sget(d, &["status", "capacity", "storage"]).unwrap_or_default();
-            (vec![name, status, vol, cap, age], Some(1))
-        }
-        "persistentvolumes" => {
-            let cap = sget(d, &["spec", "capacity", "storage"]).unwrap_or_default();
-            let status = sget(d, &["status", "phase"]).unwrap_or_default();
-            let claim = sget(d, &["spec", "claimRef", "name"]).unwrap_or_default();
-            (vec![name, cap, status, claim, age], Some(2))
-        }
-        "ingresses" => {
-            let class = sget(d, &["spec", "ingressClassName"]).unwrap_or_else(|| "<none>".into());
-            let hosts = ingress_hosts(d);
-            (vec![name, class, hosts, age], None)
-        }
-        "endpoints" => {
-            let eps = count_endpoints(d);
-            (vec![name, eps, age], None)
-        }
-        "customresourcedefinitions" => {
-            let group = sget(d, &["spec", "group"]).unwrap_or_default();
-            let ckind = sget(d, &["spec", "names", "kind"]).unwrap_or_default();
-            let versions = crd_versions(d);
-            let scope = sget(d, &["spec", "scope"]).unwrap_or_default();
-            (vec![name, group, ckind, versions, scope, age], None)
-        }
-        "kustomizations" | "helmreleases" => {
-            let (ready, msg) = ready_condition(d);
-            let revision = flux_revision(d);
-            let suspended = bget(d, &["spec", "suspend"]).to_string();
-            (vec![name, ready, msg, revision, suspended, age], Some(1))
-        }
-        "gitrepositories" | "helmrepositories" | "ocirepositories" | "buckets" => {
-            let (ready, msg) = ready_condition(d);
-            let revision = flux_source_revision(d);
-            let url = flux_source_url(d);
-            let suspended = bget(d, &["spec", "suspend"]).to_string();
-            (
-                vec![name, ready, msg, revision, url, suspended, age],
-                Some(1),
-            )
-        }
-        _ => (vec![name, age], None),
-    }
+    let ctx = CellContext {
+        obj,
+        data: &obj.data,
+        name: &name,
+        age: &age,
+    };
+    let columns = columns_for(plural);
+    let values = columns.iter().map(|c| (c.extract)(&ctx)).collect();
+    let status_idx = columns.iter().position(|c| c.is_status);
+    (values, status_idx)
 }
 
 /// Cells whose display value changes with wall time even when the Kubernetes
@@ -246,7 +279,285 @@ pub fn volatile_cell(obj: &DynamicObject, plural: &str, header: &str) -> Option<
     }
 }
 
+fn col_name(ctx: &CellContext<'_>) -> String {
+    ctx.name.to_string()
+}
+
+fn col_age(ctx: &CellContext<'_>) -> String {
+    ctx.age.to_string()
+}
+
+fn col_pod_ready(ctx: &CellContext<'_>) -> String {
+    pod_summary(ctx.obj).0
+}
+
+fn col_pod_status(ctx: &CellContext<'_>) -> String {
+    pod_summary(ctx.obj).1
+}
+
+fn col_pod_restarts(ctx: &CellContext<'_>) -> String {
+    pod_summary(ctx.obj).2
+}
+
+fn col_pod_ip(ctx: &CellContext<'_>) -> String {
+    sget(ctx.data, &["status", "podIP"]).unwrap_or_else(|| "<none>".into())
+}
+
+fn col_pod_node(ctx: &CellContext<'_>) -> String {
+    sget(ctx.data, &["spec", "nodeName"]).unwrap_or_else(|| "<none>".into())
+}
+
+fn col_deploy_ready(ctx: &CellContext<'_>) -> String {
+    format!(
+        "{}/{}",
+        iget(ctx.data, &["status", "readyReplicas"]),
+        iget(ctx.data, &["status", "replicas"])
+    )
+}
+
+fn col_deploy_updated(ctx: &CellContext<'_>) -> String {
+    iget(ctx.data, &["status", "updatedReplicas"]).to_string()
+}
+
+fn col_deploy_available(ctx: &CellContext<'_>) -> String {
+    iget(ctx.data, &["status", "availableReplicas"]).to_string()
+}
+
+fn col_rs_desired(ctx: &CellContext<'_>) -> String {
+    iget(ctx.data, &["spec", "replicas"]).to_string()
+}
+
+fn col_rs_current(ctx: &CellContext<'_>) -> String {
+    iget(ctx.data, &["status", "replicas"]).to_string()
+}
+
+fn col_rs_ready(ctx: &CellContext<'_>) -> String {
+    iget(ctx.data, &["status", "readyReplicas"]).to_string()
+}
+
+fn col_sts_ready(ctx: &CellContext<'_>) -> String {
+    format!(
+        "{}/{}",
+        iget(ctx.data, &["status", "readyReplicas"]),
+        iget(ctx.data, &["spec", "replicas"])
+    )
+}
+
+fn col_ds_desired(ctx: &CellContext<'_>) -> String {
+    iget(ctx.data, &["status", "desiredNumberScheduled"]).to_string()
+}
+
+fn col_ds_current(ctx: &CellContext<'_>) -> String {
+    iget(ctx.data, &["status", "currentNumberScheduled"]).to_string()
+}
+
+fn col_ds_ready(ctx: &CellContext<'_>) -> String {
+    iget(ctx.data, &["status", "numberReady"]).to_string()
+}
+
+fn col_ds_available(ctx: &CellContext<'_>) -> String {
+    iget(ctx.data, &["status", "numberAvailable"]).to_string()
+}
+
+fn col_service_type(ctx: &CellContext<'_>) -> String {
+    service_type(ctx.data)
+}
+
+fn col_service_cluster_ip(ctx: &CellContext<'_>) -> String {
+    sget(ctx.data, &["spec", "clusterIP"]).unwrap_or_else(|| "<none>".into())
+}
+
+fn col_service_external_ip(ctx: &CellContext<'_>) -> String {
+    external_ip(ctx.data, &service_type(ctx.data))
+}
+
+fn col_service_ports(ctx: &CellContext<'_>) -> String {
+    svc_ports(ctx.data)
+}
+
+fn col_node_status(ctx: &CellContext<'_>) -> String {
+    node_ready(ctx.data)
+}
+
+fn col_node_roles(ctx: &CellContext<'_>) -> String {
+    node_roles(ctx.obj)
+}
+
+fn col_node_version(ctx: &CellContext<'_>) -> String {
+    sget(ctx.data, &["status", "nodeInfo", "kubeletVersion"]).unwrap_or_default()
+}
+
+fn col_namespace_status(ctx: &CellContext<'_>) -> String {
+    sget(ctx.data, &["status", "phase"]).unwrap_or_else(|| "Active".into())
+}
+
+fn col_configmap_data(ctx: &CellContext<'_>) -> String {
+    (count_obj(ctx.data, &["data"]) + count_obj(ctx.data, &["binaryData"])).to_string()
+}
+
+fn col_secret_type(ctx: &CellContext<'_>) -> String {
+    sget(ctx.data, &["type"]).unwrap_or_else(|| "Opaque".into())
+}
+
+fn col_secret_data(ctx: &CellContext<'_>) -> String {
+    count_obj(ctx.data, &["data"]).to_string()
+}
+
+fn col_job_completions(ctx: &CellContext<'_>) -> String {
+    format!(
+        "{}/{}",
+        iget(ctx.data, &["status", "succeeded"]),
+        iget(ctx.data, &["spec", "completions"]).max(1)
+    )
+}
+
+fn col_job_duration(ctx: &CellContext<'_>) -> String {
+    job_duration(ctx.data)
+}
+
+fn col_cronjob_schedule(ctx: &CellContext<'_>) -> String {
+    sget(ctx.data, &["spec", "schedule"]).unwrap_or_default()
+}
+
+fn col_cronjob_suspend(ctx: &CellContext<'_>) -> String {
+    bget(ctx.data, &["spec", "suspend"]).to_string()
+}
+
+fn col_cronjob_active(ctx: &CellContext<'_>) -> String {
+    count_arr(ctx.data, &["status", "active"]).to_string()
+}
+
+fn col_cronjob_last_schedule(ctx: &CellContext<'_>) -> String {
+    time_since(ctx.data, &["status", "lastScheduleTime"])
+}
+
+fn col_event_type(ctx: &CellContext<'_>) -> String {
+    sget(ctx.data, &["type"]).unwrap_or_default()
+}
+
+fn col_event_reason(ctx: &CellContext<'_>) -> String {
+    sget(ctx.data, &["reason"]).unwrap_or_default()
+}
+
+fn col_event_object(ctx: &CellContext<'_>) -> String {
+    event_object(ctx.data)
+}
+
+fn col_event_message(ctx: &CellContext<'_>) -> String {
+    event_message(ctx.data)
+}
+
+fn col_event_count(ctx: &CellContext<'_>) -> String {
+    event_count(ctx.data).to_string()
+}
+
+fn col_hpa_reference(ctx: &CellContext<'_>) -> String {
+    hpa_reference(ctx.data)
+}
+
+fn col_hpa_targets(ctx: &CellContext<'_>) -> String {
+    hpa_targets(ctx.data)
+}
+
+fn col_hpa_minpods(ctx: &CellContext<'_>) -> String {
+    iopt(ctx.data, &["spec", "minReplicas"])
+        .unwrap_or(1)
+        .to_string()
+}
+
+fn col_hpa_maxpods(ctx: &CellContext<'_>) -> String {
+    iopt(ctx.data, &["spec", "maxReplicas"])
+        .map(|n| n.to_string())
+        .unwrap_or_default()
+}
+
+fn col_hpa_replicas(ctx: &CellContext<'_>) -> String {
+    iopt(ctx.data, &["status", "currentReplicas"])
+        .unwrap_or(0)
+        .to_string()
+}
+
+fn col_pvc_status(ctx: &CellContext<'_>) -> String {
+    sget(ctx.data, &["status", "phase"]).unwrap_or_default()
+}
+
+fn col_pvc_volume(ctx: &CellContext<'_>) -> String {
+    sget(ctx.data, &["spec", "volumeName"]).unwrap_or_default()
+}
+
+fn col_pvc_capacity(ctx: &CellContext<'_>) -> String {
+    sget(ctx.data, &["status", "capacity", "storage"]).unwrap_or_default()
+}
+
+fn col_pv_capacity(ctx: &CellContext<'_>) -> String {
+    sget(ctx.data, &["spec", "capacity", "storage"]).unwrap_or_default()
+}
+
+fn col_pv_status(ctx: &CellContext<'_>) -> String {
+    sget(ctx.data, &["status", "phase"]).unwrap_or_default()
+}
+
+fn col_pv_claim(ctx: &CellContext<'_>) -> String {
+    sget(ctx.data, &["spec", "claimRef", "name"]).unwrap_or_default()
+}
+
+fn col_ingress_class(ctx: &CellContext<'_>) -> String {
+    sget(ctx.data, &["spec", "ingressClassName"]).unwrap_or_else(|| "<none>".into())
+}
+
+fn col_ingress_hosts(ctx: &CellContext<'_>) -> String {
+    ingress_hosts(ctx.data)
+}
+
+fn col_endpoint_count(ctx: &CellContext<'_>) -> String {
+    count_endpoints(ctx.data)
+}
+
+fn col_crd_group(ctx: &CellContext<'_>) -> String {
+    sget(ctx.data, &["spec", "group"]).unwrap_or_default()
+}
+
+fn col_crd_kind(ctx: &CellContext<'_>) -> String {
+    sget(ctx.data, &["spec", "names", "kind"]).unwrap_or_default()
+}
+
+fn col_crd_versions(ctx: &CellContext<'_>) -> String {
+    crd_versions(ctx.data)
+}
+
+fn col_crd_scope(ctx: &CellContext<'_>) -> String {
+    sget(ctx.data, &["spec", "scope"]).unwrap_or_default()
+}
+
+fn col_flux_ready(ctx: &CellContext<'_>) -> String {
+    ready_condition(ctx.data).0
+}
+
+fn col_flux_message(ctx: &CellContext<'_>) -> String {
+    ready_condition(ctx.data).1
+}
+
+fn col_flux_revision(ctx: &CellContext<'_>) -> String {
+    flux_revision(ctx.data)
+}
+
+fn col_flux_source_revision(ctx: &CellContext<'_>) -> String {
+    flux_source_revision(ctx.data)
+}
+
+fn col_flux_source_url(ctx: &CellContext<'_>) -> String {
+    flux_source_url(ctx.data)
+}
+
+fn col_flux_suspended(ctx: &CellContext<'_>) -> String {
+    bget(ctx.data, &["spec", "suspend"]).to_string()
+}
+
 // ----- helpers ------------------------------------------------------------
+
+fn service_type(d: &Value) -> String {
+    sget(d, &["spec", "type"]).unwrap_or_else(|| "ClusterIP".into())
+}
 
 /// Comma-joined CRD version names (`spec.versions[].name`), e.g. `v1,v1beta1`.
 fn crd_versions(d: &Value) -> String {
