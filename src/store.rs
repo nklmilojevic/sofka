@@ -48,6 +48,12 @@ pub enum Msg {
         /// Set when describe failed and we fell back to YAML.
         warn: Option<String>,
     },
+    /// Live Event rows for the selected object.
+    Events {
+        generation: u64,
+        title: String,
+        lines: Vec<String>,
+    },
     /// Namespace list for the switcher, fetched off-thread.
     Namespaces {
         list: Vec<String>,

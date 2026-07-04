@@ -31,6 +31,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     match app.mode {
         Mode::Detail => draw_scrollable(frame, &app.detail, chunks[1], theme::sky()),
         Mode::Diff => draw_diff(frame, &app.detail, chunks[1]),
+        Mode::Events => draw_scrollable(frame, &app.detail, chunks[1], theme::peach()),
         Mode::Logs | Mode::LogFilter => draw_logs(frame, app, chunks[1]),
         Mode::Help => draw_help(frame, chunks[1]),
         Mode::Pulse => draw_pulse(frame, app, chunks[1]),
@@ -1171,6 +1172,7 @@ fn draw_help(frame: &mut Frame, area: Rect) {
             ":xray · :diff",
             "hierarchical tree · live-vs-last-applied diff",
         ),
+        bind(":events · E", "events for the selected object"),
         bind(":pf", "view/stop background port-forwards"),
         bind(
             "enter",

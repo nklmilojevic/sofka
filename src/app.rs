@@ -12,6 +12,7 @@ use std::time::Duration;
 
 use anyhow::Result;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use futures_util::StreamExt;
 use fuzzy_matcher::FuzzyMatcher;
 use fuzzy_matcher::skim::SkimMatcherV2;
 use k8s_openapi::api::core::v1::Pod;
@@ -19,6 +20,7 @@ use kube::Client;
 use kube::api::{Api, DeleteParams, ListParams, LogParams, Patch, PatchParams};
 use kube::core::{DynamicObject, TypeMeta};
 use kube::discovery::ApiResource;
+use kube::runtime::watcher;
 use ratatui::widgets::{ListState, TableState};
 use serde_json::{Value, json};
 use tokio::sync::mpsc::Sender;
@@ -92,6 +94,7 @@ pub enum Mode {
     Pulse,
     Xray,
     Diff,
+    Events,
     FluxMenu,
     PortForwards,
 }
@@ -211,6 +214,7 @@ enum PaletteAction {
     Pulse,
     Xray,
     Diff,
+    Events,
     PortForwards,
 }
 
@@ -230,6 +234,10 @@ const PALETTE_COMMANDS: &[PaletteCommand] = &[
     PaletteCommand {
         action: PaletteAction::Diff,
         names: &["diff"],
+    },
+    PaletteCommand {
+        action: PaletteAction::Events,
+        names: &["events", "event"],
     },
     PaletteCommand {
         action: PaletteAction::PortForwards,
@@ -430,6 +438,8 @@ pub struct App {
     log_gen: u64,
     log_flag: Arc<AtomicU64>,
     log_tasks: Vec<JoinHandle<()>>,
+    event_gen: u64,
+    event_task: Option<JoinHandle<()>>,
 
     pub pending: Option<Suspend>,
     /// Mode to return to when leaving a transient view (logs/detail/diff).
@@ -503,6 +513,8 @@ impl App {
             log_gen: 0,
             log_flag: Arc::new(AtomicU64::new(0)),
             log_tasks: Vec::new(),
+            event_gen: 0,
+            event_task: None,
             pending: None,
             return_mode: Mode::Table,
             return_selection: None,
@@ -753,6 +765,7 @@ impl App {
     }
 
     fn bump_generation(&mut self) {
+        self.stop_event_stream();
         self.generation += 1;
         self.gen_flag.store(self.generation, Ordering::SeqCst);
         for t in self.tasks.drain(..) {
@@ -823,6 +836,18 @@ impl App {
                 if let Some(w) = warn {
                     self.flash_warn(&w);
                 }
+            }
+            Msg::Events {
+                generation,
+                title,
+                lines,
+            } if generation == self.event_gen => {
+                self.detail.title = title;
+                self.detail.lines = lines;
+                self.detail.scroll = self
+                    .detail
+                    .scroll
+                    .min(self.detail.lines.len().saturating_sub(1));
             }
             Msg::Namespaces { list } => {
                 // Keep the picker open and preserve the selection if possible.
@@ -1473,6 +1498,106 @@ impl App {
             scroll: 0,
         };
         self.mode = Mode::Diff;
+    }
+
+    /// Live Events for the selected object, filtered by object UID when
+    /// available. Uses the discovered `events` resource, so core/v1 Events are
+    /// preferred but events.k8s.io clusters still work.
+    fn open_events(&mut self) {
+        self.set_return_mode();
+        let Some(obj) = self.selected() else {
+            self.flash_warn("no selection for events");
+            return;
+        };
+        let Some(kind) = self.cluster.resolve("events") else {
+            self.flash_warn("events kind unavailable");
+            return;
+        };
+
+        let name = obj.metadata.name.clone().unwrap_or_default();
+        let ns = obj.metadata.namespace.clone().unwrap_or_default();
+        let title = format!("{name} — events");
+        let field = if kind.ar.group == "events.k8s.io" {
+            "regarding"
+        } else {
+            "involvedObject"
+        };
+        let selector = obj
+            .metadata
+            .uid
+            .as_ref()
+            .filter(|uid| !uid.is_empty())
+            .map(|uid| format!("{field}.uid={uid}"))
+            .unwrap_or_else(|| {
+                let mut parts = vec![format!("{field}.name={name}")];
+                if !ns.is_empty() {
+                    parts.push(format!("{field}.namespace={ns}"));
+                }
+                parts.join(",")
+            });
+
+        self.stop_event_stream();
+        let genr = self.event_gen;
+        self.detail = Scrollable {
+            title: title.clone(),
+            lines: vec!["loading events…".into()],
+            scroll: 0,
+        };
+        self.flash = format!("events: {name}");
+        self.flash_err = false;
+        self.mode = Mode::Events;
+
+        let client = self.cluster.client.clone();
+        let tx = self.tx.clone();
+        let ar = kind.ar.clone();
+        let namespaced = kind.namespaced;
+        let watch_ns = ns;
+        let is_events_v1 = ar.group == "events.k8s.io";
+        let handle = tokio::spawn(async move {
+            let api: Api<DynamicObject> = if namespaced && !watch_ns.is_empty() {
+                Api::namespaced_with(client, &watch_ns, &ar)
+            } else {
+                Api::all_with(client, &ar)
+            };
+            let cfg = watcher::Config::default().any_semantic().fields(&selector);
+            let mut stream = watcher(api, cfg).boxed();
+            let mut items: HashMap<String, DynamicObject> = HashMap::new();
+
+            while let Some(event) = stream.next().await {
+                match event {
+                    Ok(watcher::Event::Init) => items.clear(),
+                    Ok(watcher::Event::Apply(obj)) | Ok(watcher::Event::InitApply(obj)) => {
+                        items.insert(row_key(&obj), obj);
+                    }
+                    Ok(watcher::Event::Delete(obj)) => {
+                        items.remove(&row_key(&obj));
+                    }
+                    Ok(watcher::Event::InitDone) => {}
+                    Err(e) => {
+                        let _ = tx
+                            .send(Msg::Events {
+                                generation: genr,
+                                title: title.clone(),
+                                lines: vec![format!("error: {e}")],
+                            })
+                            .await;
+                        continue;
+                    }
+                }
+
+                if !send_event_snapshot(&tx, genr, &title, &items, is_events_v1).await {
+                    break;
+                }
+            }
+        });
+        self.event_task = Some(handle);
+    }
+
+    fn stop_event_stream(&mut self) {
+        self.event_gen += 1;
+        if let Some(task) = self.event_task.take() {
+            task.abort();
+        }
     }
 
     // ----- containers / logs --------------------------------------------
@@ -2475,7 +2600,7 @@ impl App {
             Mode::Table => self.key_table(key),
             Mode::Command => self.key_command(key),
             Mode::Filter => self.key_filter(key),
-            Mode::Detail | Mode::Diff => self.key_scroll(key, true),
+            Mode::Detail | Mode::Diff | Mode::Events => self.key_scroll(key, true),
             Mode::Logs => self.key_logs(key),
             Mode::LogFilter => self.key_log_filter(key),
             Mode::Help => {
@@ -2539,6 +2664,7 @@ impl App {
             KeyCode::Enter => self.drill(),
             KeyCode::Char('y') => self.open_detail(),
             KeyCode::Char('d') => self.describe(),
+            KeyCode::Char('E') => self.open_events(),
             KeyCode::Char('l') => self.open_logs(),
             KeyCode::Char('p') => self.open_previous_logs(),
             KeyCode::Char('e') => self.request_edit(),
@@ -2683,6 +2809,7 @@ impl App {
             PaletteAction::Pulse => self.open_pulse(),
             PaletteAction::Xray => self.open_xray(),
             PaletteAction::Diff => self.open_diff(),
+            PaletteAction::Events => self.open_events(),
             PaletteAction::PortForwards => self.open_port_forwards(),
         }
     }
@@ -2799,6 +2926,8 @@ impl App {
                 // landing back on the same row.
                 if !detail {
                     self.stop_log_stream();
+                } else if self.mode == Mode::Events {
+                    self.stop_event_stream();
                 }
                 self.mode = self.return_mode;
                 if self.return_mode == Mode::Table {
@@ -3759,6 +3888,129 @@ async fn send_log_batch(tx: &Sender<Msg>, generation: u64, batch: &mut Vec<Strin
     tx.send(Msg::LogLines { generation, lines }).await.is_ok()
 }
 
+async fn send_event_snapshot(
+    tx: &Sender<Msg>,
+    generation: u64,
+    title: &str,
+    items: &HashMap<String, DynamicObject>,
+    events_v1: bool,
+) -> bool {
+    tx.send(Msg::Events {
+        generation,
+        title: title.to_string(),
+        lines: format_event_lines(items.values(), events_v1),
+    })
+    .await
+    .is_ok()
+}
+
+fn format_event_lines<'a, I>(events: I, events_v1: bool) -> Vec<String>
+where
+    I: IntoIterator<Item = &'a DynamicObject>,
+{
+    let mut rows: Vec<(String, String)> = events
+        .into_iter()
+        .map(|event| {
+            let seen = event_time(event, events_v1);
+            (seen.clone(), event_line(event, events_v1, &seen))
+        })
+        .collect();
+    rows.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+
+    let mut lines = vec![format!(
+        "{:<20} {:<8} {:<24} {:>5} {}",
+        "LAST SEEN", "TYPE", "REASON", "COUNT", "MESSAGE"
+    )];
+    if rows.is_empty() {
+        lines.push("(no events)".into());
+    } else {
+        lines.extend(rows.into_iter().map(|(_, line)| line));
+    }
+    lines
+}
+
+fn event_line(event: &DynamicObject, events_v1: bool, seen: &str) -> String {
+    let typ = svalue(&event.data, &["type"]).unwrap_or_default();
+    let reason = svalue(&event.data, &["reason"]).unwrap_or_default();
+    let count = event_count(event, events_v1);
+    let message = if events_v1 {
+        svalue(&event.data, &["note"])
+            .or_else(|| svalue(&event.data, &["message"]))
+            .unwrap_or_default()
+    } else {
+        svalue(&event.data, &["message"])
+            .or_else(|| svalue(&event.data, &["note"]))
+            .unwrap_or_default()
+    };
+    format!(
+        "{:<20} {:<8} {:<24} {:>5} {}",
+        compact_event_time(seen),
+        typ,
+        reason,
+        count,
+        message.replace('\n', " ")
+    )
+}
+
+fn event_count(event: &DynamicObject, events_v1: bool) -> i64 {
+    if events_v1 {
+        ivalue(&event.data, &["series", "count"])
+            .or_else(|| ivalue(&event.data, &["deprecatedCount"]))
+            .unwrap_or(1)
+    } else {
+        ivalue(&event.data, &["count"]).unwrap_or(1)
+    }
+}
+
+fn event_time(event: &DynamicObject, events_v1: bool) -> String {
+    let data = &event.data;
+    let value = if events_v1 {
+        svalue(data, &["series", "lastObservedTime"])
+            .or_else(|| svalue(data, &["eventTime"]))
+            .or_else(|| svalue(data, &["deprecatedLastTimestamp"]))
+            .or_else(|| svalue(data, &["deprecatedFirstTimestamp"]))
+    } else {
+        svalue(data, &["lastTimestamp"])
+            .or_else(|| svalue(data, &["eventTime"]))
+            .or_else(|| svalue(data, &["firstTimestamp"]))
+    };
+    value
+        .or_else(|| {
+            event
+                .metadata
+                .creation_timestamp
+                .as_ref()
+                .map(|ts| ts.0.to_string())
+        })
+        .unwrap_or_default()
+}
+
+fn compact_event_time(raw: &str) -> String {
+    let trimmed = raw.trim_end_matches('Z');
+    if let Some((date, time)) = trimmed.split_once('T') {
+        let time = time.split('.').next().unwrap_or(time);
+        format!("{date} {time}")
+    } else {
+        raw.to_string()
+    }
+}
+
+fn svalue(v: &Value, path: &[&str]) -> Option<String> {
+    let mut cur = v;
+    for p in path {
+        cur = cur.get(p)?;
+    }
+    cur.as_str().map(String::from)
+}
+
+fn ivalue(v: &Value, path: &[&str]) -> Option<i64> {
+    let mut cur = v;
+    for p in path {
+        cur = cur.get(p)?;
+    }
+    cur.as_i64()
+}
+
 /// Recursively flatten an object and its owned children into xray rows.
 fn emit_xray(
     kind: &str,
@@ -4493,6 +4745,35 @@ mod tests {
         let (mut app, _rx) = test_app();
         assert!(app.run_palette_command("pf"));
         assert_eq!(app.mode, Mode::PortForwards);
+    }
+
+    #[tokio::test]
+    async fn events_palette_command_dispatches() {
+        let (mut app, _rx) = test_app();
+        assert!(app.run_palette_command("events"));
+        assert_eq!(app.mode, Mode::Table);
+        assert!(app.flash_err);
+        assert!(app.flash.contains("events"), "{}", app.flash);
+    }
+
+    #[test]
+    fn event_lines_show_core_event_fields() {
+        let event = obj(json!({
+            "apiVersion": "v1",
+            "kind": "Event",
+            "metadata": {"name": "web.123", "namespace": "default"},
+            "type": "Warning",
+            "reason": "FailedScheduling",
+            "message": "0/3 nodes are available",
+            "count": 4,
+            "lastTimestamp": "2026-07-04T12:34:56Z"
+        }));
+        let lines = format_event_lines([&event], false);
+        assert!(lines[0].contains("LAST SEEN"));
+        assert!(lines[1].contains("Warning"));
+        assert!(lines[1].contains("FailedScheduling"));
+        assert!(lines[1].contains("0/3 nodes are available"));
+        assert!(lines[1].contains("4"));
     }
 
     fn spawn_test_child(argv0: &str, arg: &str) -> tokio::process::Child {
