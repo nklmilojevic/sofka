@@ -74,6 +74,11 @@ _release bump:
     #!/usr/bin/env bash
     set -euo pipefail
     bump="{{ bump }}"
+    if command -v op >/dev/null 2>&1; then
+      gh() { op plugin run -- gh "$@"; }
+    else
+      gh() { command gh "$@"; }
+    fi
     just _ensure-release-ready
     latest="$(gh release view --json tagName -q .tagName 2>/dev/null || true)"
     if test -z "$latest"; then latest="v0.0.0"; fi
@@ -106,6 +111,11 @@ _release bump:
 _ensure-release-ready:
     #!/usr/bin/env bash
     set -euo pipefail
+    if command -v op >/dev/null 2>&1; then
+      gh() { op plugin run -- gh "$@"; }
+    else
+      gh() { command gh "$@"; }
+    fi
     gh auth status >/dev/null
     test -z "$(git status --porcelain)" || { echo "working tree must be clean"; exit 1; }
     git fetch origin main --tags
