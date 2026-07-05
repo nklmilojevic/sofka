@@ -130,12 +130,23 @@ Not a marketing number - these are specific, checkable design choices:
 
 ## Installation
 
+### Download from Github
+
 Prebuilt binaries for macOS (aarch64/x86_64) and Linux (aarch64/x86_64) are
 attached to each [GitHub release](https://github.com/nklmilojevic/sofka/releases).
+
+### Nix
+
 Nix users can run it directly without installing anything:
 
-```
+```sh
 nix run github:nklmilojevic/sofka
+```
+
+### Cargo
+
+```sh
+cargo install sofka
 ```
 
 or build from source (see [Development](#development)).
