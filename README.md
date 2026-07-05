@@ -186,6 +186,9 @@ name = "gruvbox-dark"
 [skin.colors]            # optional per-swatch overrides
 red = "#fb4934"
 
+[skin.contexts]          # per-context skin overrides — e.g. prod goes light
+prod = "catppuccin-latte"
+
 [[plugins]]
 key = "g"
 name = "argocd-sync"

@@ -739,8 +739,31 @@ impl App {
         }
         let palette = crate::theme::resolve_skin(Some(name), &self.skin_colors);
         crate::theme::set(palette);
+        // A manual choice becomes the session skin, so it survives context
+        // switches into contexts without a `[skin.contexts]` override.
+        self.session_skin = Some(name.to_string());
         self.flash = format!("skin: {name}");
         self.flash_err = false;
+    }
+
+    /// Re-resolve the skin when the context changes: a `[skin.contexts]`
+    /// override for the new context wins, otherwise the session skin (config
+    /// `skin.name`, the auto-detected default, or the last `:skin` choice).
+    pub(super) fn apply_context_skin(&mut self, context: &str) {
+        let Some(name) = self
+            .context_skins
+            .get(context)
+            .cloned()
+            .or_else(|| self.session_skin.clone())
+        else {
+            return;
+        };
+        if crate::theme::builtin(&name.trim().to_ascii_lowercase()).is_none() {
+            self.flash_warn(&format!("unknown skin '{name}' for context {context}"));
+            return;
+        }
+        let palette = crate::theme::resolve_skin(Some(&name), &self.skin_colors);
+        crate::theme::set(palette);
     }
 
     /// Stop (kill) the selected forward. Others keep running.

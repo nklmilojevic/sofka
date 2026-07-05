@@ -242,6 +242,7 @@ impl App {
         // Permissions differ per cluster — drop the old allow-list.
         self.rbac_allowed = None;
         self.last_rbac_ns = None;
+        self.apply_context_skin(&name);
         self.flash = format!("context: {name}");
         self.flash_err = false;
         self.switch_kind("pods");
