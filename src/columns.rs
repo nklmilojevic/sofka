@@ -172,6 +172,13 @@ const INGRESS_COLUMNS: &[Column] = &[
     column("NAME", col_name),
     column("CLASS", col_ingress_class),
     column("HOSTS", col_ingress_hosts),
+    column("ADDRESS", col_ingress_address),
+    column("AGE", col_age),
+];
+
+const HTTPROUTE_COLUMNS: &[Column] = &[
+    column("NAME", col_name),
+    column("HOSTNAMES", col_httproute_hostnames),
     column("AGE", col_age),
 ];
 
@@ -230,6 +237,7 @@ fn columns_for(plural: &str) -> &'static [Column] {
         "persistentvolumeclaims" => PVC_COLUMNS,
         "persistentvolumes" => PV_COLUMNS,
         "ingresses" => INGRESS_COLUMNS,
+        "httproutes" => HTTPROUTE_COLUMNS,
         "endpoints" => ENDPOINT_COLUMNS,
         "customresourcedefinitions" => CRD_COLUMNS,
         "kustomizations" | "helmreleases" => FLUX_OBJECT_COLUMNS,
@@ -507,6 +515,14 @@ fn col_ingress_class(ctx: &CellContext<'_>) -> String {
 
 fn col_ingress_hosts(ctx: &CellContext<'_>) -> String {
     ingress_hosts(ctx.data)
+}
+
+fn col_ingress_address(ctx: &CellContext<'_>) -> String {
+    ingress_address(ctx.data)
+}
+
+fn col_httproute_hostnames(ctx: &CellContext<'_>) -> String {
+    httproute_hostnames(ctx.data)
 }
 
 fn col_endpoint_count(ctx: &CellContext<'_>) -> String {
@@ -898,6 +914,38 @@ fn ingress_hosts(d: &Value) -> String {
             rules
                 .iter()
                 .filter_map(|r| r.get("host").and_then(Value::as_str).map(String::from))
+                .collect::<Vec<_>>()
+                .join(",")
+        })
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "*".into())
+}
+
+fn ingress_address(d: &Value) -> String {
+    d.pointer("/status/loadBalancer/ingress")
+        .and_then(Value::as_array)
+        .map(|ing| {
+            ing.iter()
+                .filter_map(|i| {
+                    i.get("ip")
+                        .or_else(|| i.get("hostname"))
+                        .and_then(Value::as_str)
+                        .map(String::from)
+                })
+                .collect::<Vec<_>>()
+                .join(",")
+        })
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "<none>".into())
+}
+
+fn httproute_hostnames(d: &Value) -> String {
+    d.pointer("/spec/hostnames")
+        .and_then(Value::as_array)
+        .map(|hosts| {
+            hosts
+                .iter()
+                .filter_map(|h| h.as_str().map(String::from))
                 .collect::<Vec<_>>()
                 .join(",")
         })
@@ -1459,6 +1507,64 @@ mod tests {
     }
 
     #[test]
+    fn ingress_cells_show_class_hosts_and_address() {
+        let ing = obj(json!({
+            "apiVersion": "networking.k8s.io/v1",
+            "kind": "Ingress",
+            "metadata": {"name": "web"},
+            "spec": {
+                "ingressClassName": "nginx",
+                "rules": [{"host": "app.example.com"}, {"host": "api.example.com"}]
+            },
+            "status": {"loadBalancer": {"ingress": [{"ip": "203.0.113.10"}]}}
+        }));
+        let (cells, _) = cells(&ing, "ingresses");
+        assert_eq!(
+            headers("ingresses"),
+            ["NAME", "CLASS", "HOSTS", "ADDRESS", "AGE"]
+        );
+        assert_eq!(cells[1], "nginx");
+        assert_eq!(cells[2], "app.example.com,api.example.com");
+        assert_eq!(cells[3], "203.0.113.10");
+    }
+
+    #[test]
+    fn ingress_address_falls_back_to_hostname_then_none() {
+        let hostname = obj(json!({
+            "apiVersion": "networking.k8s.io/v1", "kind": "Ingress",
+            "metadata": {"name": "lb"},
+            "status": {"loadBalancer": {"ingress": [{"hostname": "abc.elb.amazonaws.com"}]}}
+        }));
+        assert_eq!(cells(&hostname, "ingresses").0[3], "abc.elb.amazonaws.com");
+
+        let pending = obj(json!({
+            "apiVersion": "networking.k8s.io/v1", "kind": "Ingress",
+            "metadata": {"name": "pending"}
+        }));
+        assert_eq!(cells(&pending, "ingresses").0[3], "<none>");
+    }
+
+    #[test]
+    fn httproute_cells_show_hostnames() {
+        let route = obj(json!({
+            "apiVersion": "gateway.networking.k8s.io/v1",
+            "kind": "HTTPRoute",
+            "metadata": {"name": "web"},
+            "spec": {"hostnames": ["app.example.com", "www.example.com"]}
+        }));
+        let (row, idx) = cells(&route, "httproutes");
+        assert_eq!(headers("httproutes"), ["NAME", "HOSTNAMES", "AGE"]);
+        assert_eq!(row[1], "app.example.com,www.example.com");
+        assert_eq!(idx, None);
+
+        let wildcard = obj(json!({
+            "apiVersion": "gateway.networking.k8s.io/v1", "kind": "HTTPRoute",
+            "metadata": {"name": "any"}
+        }));
+        assert_eq!(cells(&wildcard, "httproutes").0[1], "*");
+    }
+
+    #[test]
     fn unknown_kind_falls_back_to_name_age() {
         let o = obj(json!({
             "apiVersion": "example.com/v1", "kind": "Widget",
@@ -1495,6 +1601,7 @@ mod tests {
             "persistentvolumeclaims",
             "persistentvolumes",
             "ingresses",
+            "httproutes",
             "endpoints",
             "customresourcedefinitions",
             "kustomizations",
