@@ -156,14 +156,10 @@ impl App {
             self.reset_sort();
             self.table_state.select(Some(0));
         }
-        self.namespace = ns.clone();
-        let label = if ns.is_empty() {
-            "all namespaces".to_string()
-        } else {
-            ns
-        };
-        self.flash = format!("namespace: {label}");
+        self.namespace = ns;
+        self.flash = format!("namespace: {}", self.namespace_label());
         self.flash_err = false;
+        self.record_history();
         self.start_watch();
     }
 }
