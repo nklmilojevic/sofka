@@ -61,6 +61,7 @@ impl App {
             KeyCode::Char(':') => {
                 self.mode = Mode::Command;
                 self.command.clear();
+                self.ensure_namespace_cache();
                 self.update_suggestions();
             }
             KeyCode::Char('/') => self.mode = Mode::Filter,
@@ -218,19 +219,37 @@ impl App {
                     Some((h, rest)) => (h.to_string(), rest.split_whitespace().next()),
                     None => (typed.clone(), None),
                 };
-                // An exact typed built-in wins (stable muscle memory), then the
-                // highlighted suggestion, then the raw typed text as a resource.
-                if self.run_palette_command(&typed) {
-                    // handled
-                } else if let Some(s) = picked {
-                    match s.kind {
-                        SuggestKind::Command => {
-                            self.run_palette_command(&s.label);
+                match picked.as_ref().map(|s| s.kind) {
+                    // Argument completions act on the highlighted suggestion:
+                    // apply the completed namespace/context, not the partial
+                    // text still in the buffer.
+                    Some(SuggestKind::Namespace) => {
+                        if let Some(s) = picked {
+                            self.switch_kind_ns(&head, Some(s.label.as_str()));
                         }
-                        SuggestKind::Resource => self.switch_kind_ns(&s.label, ns_arg),
                     }
-                } else if !head.is_empty() {
-                    self.switch_kind_ns(&head, ns_arg);
+                    Some(SuggestKind::Context) => {
+                        if let Some(s) = picked {
+                            self.switch_context(s.label);
+                        }
+                    }
+                    // An exact typed built-in wins (stable muscle memory), then
+                    // the highlighted suggestion, then the raw text as a resource.
+                    _ => {
+                        if self.run_palette_command(&typed) {
+                            // handled
+                        } else if let Some(s) = picked {
+                            match s.kind {
+                                SuggestKind::Command => {
+                                    self.run_palette_command(&s.label);
+                                }
+                                SuggestKind::Resource => self.switch_kind_ns(&s.label, ns_arg),
+                                SuggestKind::Namespace | SuggestKind::Context => {}
+                            }
+                        } else if !head.is_empty() {
+                            self.switch_kind_ns(&head, ns_arg);
+                        }
+                    }
                 }
             }
             KeyCode::Backspace => {
@@ -297,6 +316,26 @@ impl App {
     /// Only the first word is matched — anything after it is the namespace
     /// argument of `:kind namespace` and must not perturb the kind match.
     pub(super) fn update_suggestions(&mut self) {
+        // Once a second word begins (`:<head> <arg>`), complete the argument:
+        // context names after `:ctx`, namespaces after a resource kind. Fall
+        // through to first-word matching when the head isn't completable, so a
+        // half-typed head still lists commands/resources.
+        if let Some((head, arg)) = self.command.split_once(char::is_whitespace).map(|(h, r)| {
+            (
+                h.trim().to_string(),
+                r.split_whitespace().next().unwrap_or("").to_string(),
+            )
+        }) {
+            if is_ctx_command(&head) {
+                self.suggest_contexts(&arg);
+                return;
+            }
+            if self.cluster.resolve(&head).is_some() {
+                self.suggest_namespaces(&arg);
+                return;
+            }
+        }
+
         let q = self.command.split_whitespace().next().unwrap_or("");
         let mut scored: Vec<(i64, Suggestion)> = Vec::new();
 
@@ -352,6 +391,68 @@ impl App {
 
         scored.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.label.cmp(&b.1.label)));
         self.cmd_suggestions = scored.into_iter().take(100).map(|(_, s)| s).collect();
+        self.cmd_sel = 0;
+    }
+
+    /// Palette completions for `:<kind> <ns>`: cached namespaces fuzzy-matched
+    /// against the partial argument, with a literal `all` for all-namespaces.
+    /// An empty argument lists everything. Falls back gracefully to just `all`
+    /// when the namespace cache is empty (e.g. listing is RBAC-restricted) —
+    /// the raw typed namespace is still accepted verbatim on Enter.
+    fn suggest_namespaces(&mut self, arg: &str) {
+        let mut names: Vec<String> = vec!["all".to_string()];
+        names.extend(
+            self.ns_list
+                .iter()
+                .filter(|n| n.as_str() != "<all>")
+                .cloned(),
+        );
+        let mut scored: Vec<(i64, String)> = Vec::new();
+        for n in names {
+            let score = if arg.is_empty() {
+                0
+            } else if let Some(s) = self.matcher.fuzzy_match(&n, arg) {
+                s
+            } else {
+                continue;
+            };
+            scored.push((score, n));
+        }
+        scored.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+        self.cmd_suggestions = scored
+            .into_iter()
+            .take(100)
+            .map(|(_, label)| Suggestion {
+                label,
+                kind: SuggestKind::Namespace,
+            })
+            .collect();
+        self.cmd_sel = 0;
+    }
+
+    /// Palette completions for `:ctx <name>`: cached kubeconfig contexts
+    /// fuzzy-matched against the partial argument (empty lists all).
+    fn suggest_contexts(&mut self, arg: &str) {
+        let mut scored: Vec<(i64, String)> = Vec::new();
+        for c in &self.all_contexts {
+            let score = if arg.is_empty() {
+                0
+            } else if let Some(s) = self.matcher.fuzzy_match(c, arg) {
+                s
+            } else {
+                continue;
+            };
+            scored.push((score, c.clone()));
+        }
+        scored.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+        self.cmd_suggestions = scored
+            .into_iter()
+            .take(100)
+            .map(|(_, label)| Suggestion {
+                label,
+                kind: SuggestKind::Context,
+            })
+            .collect();
         self.cmd_sel = 0;
     }
 
@@ -533,4 +634,12 @@ impl App {
             _ => {}
         }
     }
+}
+
+/// True when `head` is one of the `:ctx` command's names, i.e. the argument
+/// after it should complete against kubeconfig contexts.
+fn is_ctx_command(head: &str) -> bool {
+    PALETTE_COMMANDS
+        .iter()
+        .any(|c| matches!(c.action, PaletteAction::Ctx) && c.names.contains(&head))
 }

@@ -108,9 +108,13 @@ async fn main() -> Result<()> {
         .unwrap_or(&session_skin)
         .clone();
     theme::init(theme::resolve_skin(Some(&initial_skin), &cfg.skin.colors));
+    theme::set_background(cfg.skin.background);
 
     let (tx, mut rx) = mpsc::channel(EVENT_CHANNEL_CAP);
     let mut app = App::new(cluster, tx);
+    // Kubeconfig contexts are stable for the session; cache them once so the
+    // palette can complete `:ctx <name>` without re-reading the file per keystroke.
+    app.all_contexts = Cluster::list_contexts();
     app.user_aliases = cfg.aliases.clone();
     app.plugins = cfg.plugins.clone();
     app.skin_colors = cfg.skin.colors.clone();

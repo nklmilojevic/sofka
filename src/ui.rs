@@ -37,6 +37,15 @@ impl<'a> TableCellText<'a> {
 }
 
 pub fn draw(frame: &mut Frame, app: &mut App) {
+    // Fill the whole frame with the skin's background first (when enabled), so
+    // every view that only sets foreground colors sits on it. Widgets that set
+    // their own background (the selection bar, gauges, search highlights) still
+    // win where they draw.
+    if let Some(bg) = theme::background() {
+        let area = frame.area();
+        frame.buffer_mut().set_style(area, Style::default().bg(bg));
+    }
+
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -1454,7 +1463,7 @@ fn draw_containers(frame: &mut Frame, app: &mut App, area: Rect) {
 
 fn draw_prompt_popup(frame: &mut Frame, app: &App, area: Rect) {
     let popup = centered_rect_with_min(60, 34, 44, 8, area);
-    frame.render_widget(Clear, popup);
+    clear_region(frame, popup);
     let lines = vec![
         Line::from(""),
         Line::from(Span::styled(
@@ -1509,7 +1518,7 @@ fn draw_set_image(frame: &mut Frame, app: &mut App, area: Rect) {
 
 fn draw_confirm(frame: &mut Frame, app: &App, area: Rect) {
     let popup = centered_rect_with_min(50, 20, 56, 7, area);
-    frame.render_widget(Clear, popup);
+    clear_region(frame, popup);
     let lines = vec![
         Line::from(""),
         Line::from(Span::styled(
@@ -1548,7 +1557,7 @@ fn draw_palette(frame: &mut Frame, app: &mut App, area: Rect) {
         width: w,
         height: h,
     };
-    frame.render_widget(Clear, rect);
+    clear_region(frame, rect);
     let items: Vec<ListItem> = app
         .cmd_suggestions
         .iter()
@@ -1563,6 +1572,16 @@ fn draw_palette(frame: &mut Frame, app: &mut App, area: Rect) {
                 s.label.clone(),
                 Style::default().fg(theme::text()),
             )),
+            // Argument completions echo the header colors (namespace green,
+            // context mauve) with a tag, so they read as an argument choice.
+            SuggestKind::Namespace => ListItem::new(Line::from(vec![
+                Span::styled(s.label.clone(), Style::default().fg(theme::green())),
+                Span::styled("  ns", theme::dim()),
+            ])),
+            SuggestKind::Context => ListItem::new(Line::from(vec![
+                Span::styled(s.label.clone(), Style::default().fg(theme::mauve())),
+                Span::styled("  ctx", theme::dim()),
+            ])),
         })
         .collect();
     let mut state = ListState::default();
@@ -1842,6 +1861,16 @@ fn confirm_action_hint(allows_force: bool, style: ConfirmHintStyle) -> &'static 
     }
 }
 
+/// Clear a popup region before drawing on top of it. `Clear` resets the cells
+/// to the terminal default; with the skin background enabled that would punch a
+/// transparent hole through the fill, so repaint `base` over the cleared cells.
+fn clear_region(frame: &mut Frame, area: Rect) {
+    frame.render_widget(Clear, area);
+    if let Some(bg) = theme::background() {
+        frame.buffer_mut().set_style(area, Style::default().bg(bg));
+    }
+}
+
 fn render_popup_list<'a, T>(
     frame: &mut Frame,
     area: Rect,
@@ -1854,7 +1883,7 @@ fn render_popup_list<'a, T>(
     T: Into<Line<'a>>,
 {
     let popup = centered_rect_with_min(percent_x, percent_y, 32, 8, area);
-    frame.render_widget(Clear, popup);
+    clear_region(frame, popup);
     render_framed_list(frame, popup, items, title, state);
 }
 
@@ -1903,6 +1932,52 @@ fn centered_rect_with_min(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `set_background(true)` fills the whole frame — including cells no widget
+    /// draws on and popup regions cleared by `Clear` — with the skin's `base`,
+    /// while `false` leaves the terminal background (Reset) untouched.
+    #[tokio::test]
+    async fn background_fill_paints_base_when_enabled() {
+        use crate::app::Suggestion;
+        use crate::k8s::Cluster;
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let (tx, _rx) = tokio::sync::mpsc::channel(16);
+        let mut app = App::new(Cluster::fake(), tx);
+        app.command = "de".into();
+        app.mode = Mode::Command; // draw a popup so a Clear region is exercised
+        app.cmd_suggestions = vec![Suggestion {
+            label: "deployments".into(),
+            kind: SuggestKind::Resource,
+        }];
+
+        let render = |app: &mut App| {
+            let mut term = Terminal::new(TestBackend::new(80, 24)).unwrap();
+            term.draw(|f| draw(f, app)).unwrap();
+            term.backend().buffer().clone()
+        };
+
+        // Assertions avoid the exact palette value (theme state is a shared
+        // global that parallel tests mutate); they check the fill *behavior*.
+        theme::set_background(false);
+        let off = render(&mut app);
+        // Off: an untouched corner keeps the terminal default background.
+        assert_eq!(off[(0, 0)].bg, ratatui::style::Color::Reset);
+
+        theme::set_background(true);
+        let on = render(&mut app);
+        // On: the corner (no widget draws there) is now a solid fill, and at
+        // least one full row — popup interior included — shares that one color.
+        let fill = on[(0, 0)].bg;
+        assert_ne!(fill, ratatui::style::Color::Reset);
+        assert!(
+            (0..on.area.height).any(|y| (0..on.area.width).all(|x| on[(x, y)].bg == fill)),
+            "expected a row uniformly filled with the background color"
+        );
+
+        theme::set_background(false); // don't leak global state to other tests
+    }
 
     #[test]
     fn all_ready_requires_full_fraction() {

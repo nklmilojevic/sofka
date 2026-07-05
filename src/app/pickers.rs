@@ -4,10 +4,22 @@ impl App {
     /// Open the namespace switcher immediately with a loading placeholder, then
     /// fetch the list off-thread (it arrives as `Msg::Namespaces`).
     pub(super) fn open_namespaces(&mut self) {
-        self.ns_list = vec!["<all>".into()];
+        // Show whatever is cached immediately (instant reopen); a fresh fetch
+        // refreshes it. Only fall back to the bare `<all>` placeholder when the
+        // cache is empty.
+        if self.ns_list.is_empty() {
+            self.ns_list = vec!["<all>".into()];
+        }
         self.ns_state.select(Some(0));
         self.ns_filter.clear();
         self.mode = Mode::Namespaces;
+        self.spawn_namespace_fetch();
+    }
+
+    /// Fetch the namespace list off-thread; it arrives as `Msg::Namespaces` and
+    /// refreshes `ns_list`, which backs both the switcher popup and `:<kind>
+    /// <ns>` palette completion.
+    pub(super) fn spawn_namespace_fetch(&self) {
         let client = self.cluster.client.clone();
         let kind = self.cluster.resolve("namespaces").map(|k| k.ar);
         let tx = self.tx.clone();
@@ -31,6 +43,16 @@ impl App {
                     .await;
             }
         });
+    }
+
+    /// Warm the namespace cache when the command palette opens, so `:<kind>
+    /// <ns>` can offer completions without waiting for the switcher popup. A
+    /// no-op once real namespaces are cached (the `<all>` sentinel doesn't
+    /// count).
+    pub(super) fn ensure_namespace_cache(&mut self) {
+        if !self.ns_list.iter().any(|n| n != "<all>") {
+            self.spawn_namespace_fetch();
+        }
     }
 
     /// Namespaces for the switcher: `<all>` is always pinned first, the rest
@@ -239,6 +261,9 @@ impl App {
         self.fields = None;
         self.scope_label = None;
         self.filter.clear();
+        // The old cluster's namespaces don't apply here — drop them so palette
+        // completion re-fetches against the new cluster on the next `:`.
+        self.ns_list.clear();
         // Permissions differ per cluster — drop the old allow-list.
         self.rbac_allowed = None;
         self.last_rbac_ns = None;

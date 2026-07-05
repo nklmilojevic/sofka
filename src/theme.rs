@@ -26,6 +26,7 @@
 #![allow(dead_code)]
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{OnceLock, RwLock};
 
 use ratatui::style::{Color, Modifier, Style};
@@ -323,6 +324,26 @@ fn palette() -> Palette {
         Ok(active) => *active,
         Err(poisoned) => *poisoned.into_inner(),
     }
+}
+
+/// Whether views are filled with the skin's own background (`base`) rather than
+/// left transparent. Independent of the active palette so it survives a live
+/// `:skin`/context switch.
+static BACKGROUND: AtomicBool = AtomicBool::new(false);
+
+/// Enable (or disable) painting the palette's `base` swatch as the app
+/// background. Off by default, so sofka inherits the terminal's — possibly
+/// transparent — background. On, every view is filled with the skin's own
+/// background color: pair it with `[skin.contexts]` to make e.g. a light prod
+/// skin visibly glow.
+pub fn set_background(on: bool) {
+    BACKGROUND.store(on, Ordering::Relaxed);
+}
+
+/// The background fill color when enabled, or `None` to leave the terminal
+/// background untouched.
+pub fn background() -> Option<Color> {
+    BACKGROUND.load(Ordering::Relaxed).then(base)
 }
 
 // ---------------------------------------------------------------------------

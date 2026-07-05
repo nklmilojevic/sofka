@@ -187,18 +187,23 @@ pub struct Scrollable {
     pub scroll: usize,
 }
 
-/// One command-palette suggestion — either a built-in command (`:ctx`, `:pulse`)
-/// or a resource kind from the catalog. Both are fuzzy-matched together.
+/// One command-palette suggestion — a built-in command (`:ctx`, `:pulse`), a
+/// resource kind from the catalog, or an argument completion (a namespace after
+/// `:<kind>`, a context after `:ctx`). Fuzzy-matched together.
 #[derive(Clone)]
 pub struct Suggestion {
     pub label: String,
     pub kind: SuggestKind,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum SuggestKind {
     Command,
     Resource,
+    /// Namespace argument for `:<kind> <ns>` — Enter switches kind + namespace.
+    Namespace,
+    /// Context argument for `:ctx <name>` — Enter switches context.
+    Context,
 }
 
 /// A built-in palette action, plus the names/aliases that select it. The first
@@ -441,6 +446,9 @@ pub struct App {
     pub ctx_state: ListState,
     /// Type-to-filter buffer for the context switcher.
     pub ctx_filter: String,
+    /// All kubeconfig context names, cached once at startup for `:ctx <name>`
+    /// palette completion (the switcher popup uses `ctx_list`).
+    pub all_contexts: Vec<String>,
     /// User aliases from config, re-applied when switching context.
     pub user_aliases: HashMap<String, String>,
     /// User-defined shell-out plugins.
@@ -549,6 +557,7 @@ impl App {
             ctx_list: Vec::new(),
             ctx_state: ListState::default(),
             ctx_filter: String::new(),
+            all_contexts: Vec::new(),
             user_aliases: HashMap::new(),
             plugins: Vec::new(),
             rbac_allowed: None,

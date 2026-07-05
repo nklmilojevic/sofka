@@ -37,11 +37,15 @@ pub struct Config {
 /// accordingly. `colors` overrides individual swatches by name with
 /// `#rrggbb` hex values. `contexts` maps a kubeconfig context name to a skin
 /// that overrides `name` while that context is active — e.g. a light skin on
-/// prod as a visual "careful now" cue.
+/// prod as a visual "careful now" cue. `background` fills every view with the
+/// skin's own background swatch instead of leaving the terminal background
+/// showing through; combined with a light `[skin.contexts]` skin it makes the
+/// prod context unmistakably bright.
 ///
 /// ```toml
 /// [skin]
 /// name = "gruvbox"
+/// background = true       # paint the skin's background (default: false)
 ///
 /// [skin.colors]
 /// red   = "#fb4934"
@@ -56,6 +60,9 @@ pub struct Skin {
     pub name: Option<String>,
     pub colors: HashMap<String, String>,
     pub contexts: HashMap<String, String>,
+    /// Fill views with the skin's `base` background swatch (default: false,
+    /// i.e. transparent — inherit the terminal background).
+    pub background: bool,
 }
 
 /// A shell-out plugin (k9s-style). Bound to `key` on resources matching

@@ -1448,19 +1448,48 @@ fn trim_plural_suffix() {
 #[tokio::test]
 async fn command_with_namespace_switches_both() {
     let (mut app, _rx) = test_app();
+    // A cached namespace so the second word completes against something.
+    app.ns_list = vec!["<all>".into(), "social".into(), "kube-system".into()];
+    app.handle_key(press(KeyCode::Char(':'))).unwrap();
+    for c in "deployments soc".chars() {
+        app.handle_key(press(KeyCode::Char(c))).unwrap();
+    }
+    // Once the second word begins, suggestions complete the namespace argument
+    // (not the resource kind), fuzzy-matched against the cache.
+    let first = app.cmd_suggestions.first().expect("namespace suggestion");
+    assert_eq!(first.kind, SuggestKind::Namespace);
+    assert_eq!(first.label, "social");
+    // Enter applies the highlighted namespace completion, switching both.
+    app.handle_key(press(KeyCode::Enter)).unwrap();
+    assert_eq!(app.kind_plural, "deployments");
+    assert_eq!(app.namespace, "social");
+}
+
+#[tokio::test]
+async fn command_with_unlisted_namespace_is_freeform() {
+    let (mut app, _rx) = test_app();
+    // No cache match → no completion, but the typed namespace still applies
+    // verbatim (listing may be RBAC-restricted).
     app.handle_key(press(KeyCode::Char(':'))).unwrap();
     for c in "deployments social".chars() {
         app.handle_key(press(KeyCode::Char(c))).unwrap();
     }
-    // Only the first word selects the kind — the namespace argument must not
-    // perturb the fuzzy match.
-    assert_eq!(
-        app.cmd_suggestions.first().map(|s| s.label.as_str()),
-        Some("deployments")
-    );
     app.handle_key(press(KeyCode::Enter)).unwrap();
     assert_eq!(app.kind_plural, "deployments");
     assert_eq!(app.namespace, "social");
+}
+
+#[tokio::test]
+async fn command_completes_context_argument() {
+    let (mut app, _rx) = test_app();
+    app.all_contexts = vec!["prod-eu".into(), "staging".into(), "dev".into()];
+    app.handle_key(press(KeyCode::Char(':'))).unwrap();
+    for c in "ctx prod".chars() {
+        app.handle_key(press(KeyCode::Char(c))).unwrap();
+    }
+    let first = app.cmd_suggestions.first().expect("context suggestion");
+    assert_eq!(first.kind, SuggestKind::Context);
+    assert_eq!(first.label, "prod-eu");
 }
 
 #[tokio::test]
