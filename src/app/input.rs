@@ -208,6 +208,12 @@ impl App {
                 let picked = self.cmd_suggestions.get(self.cmd_sel).cloned();
                 self.mode = Mode::Table;
                 self.command.clear();
+                // `:kind namespace` switches both at once (`:deploy social`,
+                // `:cephclusters all`); only the first word selects the kind.
+                let (head, ns_arg) = match typed.split_once(char::is_whitespace) {
+                    Some((h, rest)) => (h.to_string(), rest.split_whitespace().next()),
+                    None => (typed.clone(), None),
+                };
                 // An exact typed built-in wins (stable muscle memory), then the
                 // highlighted suggestion, then the raw typed text as a resource.
                 if self.run_palette_command(&typed) {
@@ -217,10 +223,10 @@ impl App {
                         SuggestKind::Command => {
                             self.run_palette_command(&s.label);
                         }
-                        SuggestKind::Resource => self.switch_kind(&s.label),
+                        SuggestKind::Resource => self.switch_kind_ns(&s.label, ns_arg),
                     }
-                } else if !typed.is_empty() {
-                    self.switch_kind(&typed);
+                } else if !head.is_empty() {
+                    self.switch_kind_ns(&head, ns_arg);
                 }
             }
             KeyCode::Backspace => {
@@ -284,8 +290,10 @@ impl App {
     /// Recompute the command-palette suggestions: built-in commands and resource
     /// kinds, fuzzy-matched together. An empty query lists the resource catalog
     /// only (the browse default), so pressing `:`⏎ never fires a command.
+    /// Only the first word is matched — anything after it is the namespace
+    /// argument of `:kind namespace` and must not perturb the kind match.
     pub(super) fn update_suggestions(&mut self) {
-        let q = self.command.trim();
+        let q = self.command.split_whitespace().next().unwrap_or("");
         let mut scored: Vec<(i64, Suggestion)> = Vec::new();
 
         // Built-in commands: fuzzy over all names, display the canonical one.

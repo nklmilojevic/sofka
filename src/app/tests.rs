@@ -1442,3 +1442,34 @@ fn trim_plural_suffix() {
     assert_eq!(trim_s("deployments"), "deployment");
     assert_eq!(trim_s("pods"), "pod");
 }
+
+// ----- `:kind namespace` --------------------------------------------------
+
+#[tokio::test]
+async fn command_with_namespace_switches_both() {
+    let (mut app, _rx) = test_app();
+    app.handle_key(press(KeyCode::Char(':'))).unwrap();
+    for c in "deployments social".chars() {
+        app.handle_key(press(KeyCode::Char(c))).unwrap();
+    }
+    // Only the first word selects the kind — the namespace argument must not
+    // perturb the fuzzy match.
+    assert_eq!(
+        app.cmd_suggestions.first().map(|s| s.label.as_str()),
+        Some("deployments")
+    );
+    app.handle_key(press(KeyCode::Enter)).unwrap();
+    assert_eq!(app.kind_plural, "deployments");
+    assert_eq!(app.namespace, "social");
+}
+
+#[tokio::test]
+async fn command_namespace_all_means_all_namespaces() {
+    let (mut app, _rx) = test_app();
+    app.namespace = "default".into();
+    app.switch_kind_ns("pods", Some("all"));
+    assert_eq!(app.kind_plural, "pods");
+    assert!(app.all_namespaces());
+    app.switch_kind_ns("deployments", Some("*"));
+    assert!(app.all_namespaces());
+}

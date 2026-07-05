@@ -1217,6 +1217,10 @@ fn draw_help(frame: &mut Frame, area: Rect) {
             ":<resource>",
             "command palette — fuzzy over kinds + commands (tab/↑↓)",
         ),
+        bind(
+            ":<res> <ns>",
+            "switch kind and namespace at once (all/* = all namespaces)",
+        ),
         bind(":ctx · :pulse", "switch context · cluster-health dashboard"),
         bind(
             ":xray · :diff",

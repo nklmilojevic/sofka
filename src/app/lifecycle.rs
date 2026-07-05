@@ -6,24 +6,24 @@ impl App {
     /// Switch the active resource kind by user input. Pushes the current view
     /// so `esc` can return.
     pub fn switch_kind(&mut self, input: &str) {
+        self.switch_kind_ns(input, None);
+    }
+
+    /// Switch kind and (optionally) namespace in one move (`:deploy social`).
+    /// `all`/`*` as the namespace selects all namespaces.
+    pub fn switch_kind_ns(&mut self, input: &str, ns: Option<&str>) {
         match self.cluster.resolve(input) {
             Some(kind) => {
-                // A `:resource` switch is a fresh root view, not a drill-down:
-                // clear the breadcrumb so `esc` doesn't replay command history.
-                self.stack.clear();
-                self.kind_plural = kind.ar.plural.to_lowercase();
+                if let Some(ns) = ns {
+                    self.namespace = normalize_ns(ns);
+                }
                 let title = kind.title();
-                self.kind = Some(kind);
-                self.labels = None;
-                self.fields = None;
-                self.scope_label = None;
-                self.filter.clear();
-                self.reset_sort();
-                // A stale selection from the previous kind (e.g. row 5 on
-                // pods) would otherwise carry over — reset to the top so the
-                // new view always starts with its first row selected.
-                self.table_state.select(Some(0));
-                self.flash = format!("Viewing {title}");
+                self.set_root_view(kind);
+                self.flash = if ns.is_some() {
+                    format!("Viewing {title} in {}", self.namespace_label())
+                } else {
+                    format!("Viewing {title}")
+                };
                 self.flash_err = false;
                 self.start_watch();
             }
@@ -31,6 +31,31 @@ impl App {
                 self.flash = format!("No resource matches '{}'", input.trim());
                 self.flash_err = true;
             }
+        }
+    }
+
+    /// Install `kind` as a fresh root view (not a drill-down): clear the
+    /// breadcrumb so `esc` doesn't replay command history, drop drill
+    /// selectors, and reset filter/sort/cursor. A stale selection from the
+    /// previous kind (e.g. row 5 on pods) would otherwise carry over — the new
+    /// view always starts with its first row selected.
+    fn set_root_view(&mut self, kind: Kind) {
+        self.stack.clear();
+        self.kind_plural = kind.ar.plural.to_lowercase();
+        self.kind = Some(kind);
+        self.labels = None;
+        self.fields = None;
+        self.scope_label = None;
+        self.filter.clear();
+        self.reset_sort();
+        self.table_state.select(Some(0));
+    }
+
+    pub(super) fn namespace_label(&self) -> String {
+        if self.namespace.is_empty() {
+            "all namespaces".to_string()
+        } else {
+            self.namespace.clone()
         }
     }
 

@@ -208,6 +208,7 @@ sofka [RESOURCE] [-n NAMESPACE] [-A]
 | Key                       | Action                                                                                                  |
 | ------------------------- | ------------------------------------------------------------------------------------------------------- |
 | `:<resource>`             | command palette - fuzzy over kinds and built-in commands                                                |
+| `:<resource> <ns>`        | switch kind and namespace at once (`:deploy social`; `all`/`*` = all namespaces)                        |
 | `enter`                   | drill down (workload/svc → pods, node → its pods, pod → containers, ns → re-scope, CRD → its resources) |
 | `esc`                     | go back / pop the view stack / clear filter / clear marks                                               |
 | `j`/`k`, `↓`/`↑`, `g`/`G` | navigate                                                                                                |
