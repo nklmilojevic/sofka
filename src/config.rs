@@ -35,7 +35,9 @@ pub struct Config {
 /// [`crate::theme::BUILTIN_NAMES`]); leaving it unset auto-detects the
 /// terminal's dark/light mode and picks `catppuccin-mocha`/`catppuccin-latte`
 /// accordingly. `colors` overrides individual swatches by name with
-/// `#rrggbb` hex values.
+/// `#rrggbb` hex values. `contexts` maps a kubeconfig context name to a skin
+/// that overrides `name` while that context is active — e.g. a light skin on
+/// prod as a visual "careful now" cue.
 ///
 /// ```toml
 /// [skin]
@@ -44,12 +46,16 @@ pub struct Config {
 /// [skin.colors]
 /// red   = "#fb4934"
 /// mauve = "#d3869b"
+///
+/// [skin.contexts]
+/// prod = "catppuccin-latte"
 /// ```
 #[derive(Debug, Default, Clone, Deserialize)]
 #[serde(default)]
 pub struct Skin {
     pub name: Option<String>,
     pub colors: HashMap<String, String>,
+    pub contexts: HashMap<String, String>,
 }
 
 /// A shell-out plugin (k9s-style). Bound to `key` on resources matching
@@ -133,6 +139,23 @@ mod tests {
         assert_eq!(p.key, 'g');
         assert_eq!(p.args, vec!["app", "sync", "$NAME"]);
         assert_eq!(p.scopes, vec!["deployments"]);
+    }
+
+    #[test]
+    fn parses_per_context_skins() {
+        let toml = r#"
+            [skin]
+            name = "gruvbox-dark"
+
+            [skin.contexts]
+            prod = "catppuccin-latte"
+        "#;
+        let cfg: Config = toml::from_str(toml).unwrap();
+        assert_eq!(cfg.skin.name.as_deref(), Some("gruvbox-dark"));
+        assert_eq!(
+            cfg.skin.contexts.get("prod").map(String::as_str),
+            Some("catppuccin-latte")
+        );
     }
 
     #[test]
