@@ -395,7 +395,7 @@ impl App {
                 self.detail = Scrollable {
                     title,
                     lines: lines.into(),
-                    scroll: 0,
+                    ..Default::default()
                 };
                 self.mode = Mode::Detail;
                 if let Some(w) = warn {

@@ -496,11 +496,23 @@ impl App {
             }
             KeyCode::Char('j') | KeyCode::Down => target.scroll_by(1),
             KeyCode::Char('k') | KeyCode::Up => target.scroll_by(-1),
+            KeyCode::Char('h') | KeyCode::Left => target.scroll_h(-5),
+            KeyCode::Char('l') | KeyCode::Right => target.scroll_h(5),
             KeyCode::PageDown | KeyCode::Char(' ') => target.scroll_by(20),
             KeyCode::PageUp => target.scroll_by(-20),
-            KeyCode::Char('g') | KeyCode::Home => target.scroll = 0,
+            KeyCode::Char('g') | KeyCode::Home => {
+                target.scroll = 0;
+                target.hscroll = 0;
+            }
             KeyCode::Char('G') | KeyCode::End => {
                 target.scroll = target.lines.len().saturating_sub(1)
+            }
+            // k9s: `w` toggles line wrap; folding long lines is the other way to
+            // read content that runs past the right edge.
+            KeyCode::Char('w') => {
+                let on = target.toggle_wrap();
+                self.flash = format!("wrap: {}", if on { "on" } else { "off" });
+                self.flash_err = false;
             }
             _ => {}
         }

@@ -35,7 +35,7 @@ impl App {
         self.detail = Scrollable {
             title: format!("{title} — YAML"),
             lines: self.object_yaml(obj).into(),
-            scroll: 0,
+            ..Default::default()
         };
         self.mode = Mode::Detail;
     }
@@ -172,7 +172,7 @@ impl App {
         self.detail = Scrollable {
             title: format!("{name} — diff (last-applied → live)"),
             lines: lines.into(),
-            scroll: 0,
+            ..Default::default()
         };
         self.mode = Mode::Diff;
     }
@@ -218,7 +218,7 @@ impl App {
         self.detail = Scrollable {
             title: title.clone(),
             lines: vec!["loading events…".into()].into(),
-            scroll: 0,
+            ..Default::default()
         };
         self.flash = format!("events: {name}");
         self.flash_err = false;
