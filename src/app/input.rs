@@ -121,12 +121,16 @@ impl App {
             // `f`/Shift-F = port-forward.
             KeyCode::Char('f') | KeyCode::Char('F') => self.request_port_forward(),
             KeyCode::Char('n') => self.open_namespaces(),
+            // Browser-style view history: [ back, ] forward.
+            KeyCode::Char('[') => self.history_back(),
+            KeyCode::Char(']') => self.history_forward(),
             // k9s: 0 = all namespaces.
             KeyCode::Char('0') => {
                 self.namespace.clear();
                 self.flash = "namespace: all namespaces".into();
                 self.flash_err = false;
                 self.table_state.select(Some(0));
+                self.record_history();
                 self.start_watch();
             }
             // k9s: `r` = rollout restart on workloads, force-sync on external

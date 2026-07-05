@@ -1221,6 +1221,7 @@ fn draw_help(frame: &mut Frame, area: Rect) {
             ":<res> <ns>",
             "switch kind and namespace at once (all/* = all namespaces)",
         ),
+        bind("[ · ]", "view history — back · forward"),
         bind(":ctx · :pulse", "switch context · cluster-health dashboard"),
         bind(
             ":xray · :diff",

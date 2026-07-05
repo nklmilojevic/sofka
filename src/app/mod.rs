@@ -362,6 +362,18 @@ impl TableCellCache<'_> {
     }
 }
 
+/// Maximum root views kept in the `[`/`]` history.
+const HISTORY_MAX: usize = 50;
+
+/// One root view for the `[`/`]` history: which kind was listed in which
+/// namespace. Drill-down state (selectors, filter, scope) is deliberately not
+/// kept — history replays root views; the breadcrumb stack handles drills.
+#[derive(Clone, PartialEq, Eq)]
+struct ViewEntry {
+    kind_plural: String,
+    namespace: String,
+}
+
 /// A saved view, pushed onto the stack when drilling down.
 struct Frame {
     kind: Option<Kind>,
@@ -391,6 +403,12 @@ pub struct App {
     pub tasks: Vec<JoinHandle<()>>,
     pub tx: Sender<Msg>,
     stack: Vec<Frame>,
+    /// Browser-style history of root views for `[`/`]`: every root switch
+    /// (kind and/or namespace) is recorded; navigating with `[`/`]` moves the
+    /// cursor without re-recording, and a fresh switch truncates the forward
+    /// tail — exactly like browser history.
+    history: Vec<ViewEntry>,
+    history_pos: usize,
 
     pub mode: Mode,
     pub table_state: TableState,
@@ -503,6 +521,8 @@ impl App {
             tasks: Vec::new(),
             tx,
             stack: Vec::new(),
+            history: Vec::new(),
+            history_pos: 0,
             mode: Mode::Table,
             table_state: TableState::default(),
             marked: HashSet::new(),

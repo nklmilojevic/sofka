@@ -25,6 +25,7 @@ impl App {
                     format!("Viewing {title}")
                 };
                 self.flash_err = false;
+                self.record_history();
                 self.start_watch();
             }
             None => {
@@ -57,6 +58,69 @@ impl App {
         } else {
             self.namespace.clone()
         }
+    }
+
+    // ----- view history (`[` / `]`) ---------------------------------------
+
+    /// Record the current root view (kind + namespace). Called after every
+    /// root switch; navigating with `[`/`]` bypasses this so hopping through
+    /// history doesn't rewrite it. A new entry truncates the forward tail.
+    pub(super) fn record_history(&mut self) {
+        if self.kind.is_none() {
+            return;
+        }
+        let entry = ViewEntry {
+            kind_plural: self.kind_plural.clone(),
+            namespace: self.namespace.clone(),
+        };
+        if self.history.get(self.history_pos) == Some(&entry) {
+            return;
+        }
+        self.history.truncate(self.history_pos + 1);
+        self.history.push(entry);
+        if self.history.len() > HISTORY_MAX {
+            self.history.remove(0);
+        }
+        self.history_pos = self.history.len() - 1;
+    }
+
+    pub(super) fn history_back(&mut self) {
+        if self.history_pos == 0 {
+            self.flash_warn("already at oldest view");
+            return;
+        }
+        self.history_pos -= 1;
+        self.apply_history_entry();
+    }
+
+    pub(super) fn history_forward(&mut self) {
+        if self.history_pos + 1 >= self.history.len() {
+            self.flash_warn("already at newest view");
+            return;
+        }
+        self.history_pos += 1;
+        self.apply_history_entry();
+    }
+
+    fn apply_history_entry(&mut self) {
+        let Some(entry) = self.history.get(self.history_pos).cloned() else {
+            return;
+        };
+        let Some(kind) = self.cluster.resolve(&entry.kind_plural) else {
+            self.flash_warn(&format!("cannot resolve '{}' anymore", entry.kind_plural));
+            return;
+        };
+        self.namespace = entry.namespace;
+        let title = kind.title();
+        self.set_root_view(kind);
+        self.flash = format!(
+            "history {}/{}: {title} in {}",
+            self.history_pos + 1,
+            self.history.len(),
+            self.namespace_label()
+        );
+        self.flash_err = false;
+        self.start_watch();
     }
 
     pub(super) fn push_frame(&mut self) {
