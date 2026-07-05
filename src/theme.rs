@@ -242,6 +242,16 @@ fn detect_terminal_mode() -> Option<ThemeMode> {
     terminal_colorsaurus::theme_mode(QueryOptions::default()).ok()
 }
 
+/// The skin used when config names none: auto-detected from the terminal's
+/// dark/light mode (OSC 11 query — run this before entering the alternate
+/// screen).
+pub fn auto_skin_name() -> &'static str {
+    match detect_terminal_mode() {
+        Some(ThemeMode::Light) => "catppuccin-latte",
+        _ => "catppuccin-mocha",
+    }
+}
+
 /// Resolve the active palette from config: start from the named built-in, or
 /// — when no name is configured — auto-detect the terminal's dark/light mode
 /// and pick `catppuccin-latte`/`catppuccin-mocha` accordingly. Then apply
@@ -249,10 +259,7 @@ fn detect_terminal_mode() -> Option<ThemeMode> {
 /// malformed hex, and carries on.
 pub fn resolve_skin(name: Option<&str>, colors: &HashMap<String, String>) -> Palette {
     let mut p = match name {
-        None => match detect_terminal_mode() {
-            Some(ThemeMode::Light) => catppuccin_latte(),
-            _ => catppuccin_mocha(),
-        },
+        None => builtin(auto_skin_name()).expect("auto skin is a built-in"),
         Some(n) => match builtin(&n.trim().to_ascii_lowercase()) {
             Some(p) => p,
             None => {

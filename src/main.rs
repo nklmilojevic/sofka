@@ -55,14 +55,6 @@ async fn main() -> Result<()> {
     let args = Args::parse();
     let cfg = config::Config::load();
 
-    // Install the initial color skin before anything renders. Auto-detecting
-    // dark/light mode queries the terminal directly, so it belongs before
-    // ratatui switches to the alternate screen.
-    theme::init(theme::resolve_skin(
-        cfg.skin.name.as_deref(),
-        &cfg.skin.colors,
-    ));
-
     // Connect before taking over the terminal so errors are readable.
     eprintln!("Connecting to cluster…");
     let mut cluster = match Cluster::connect().await {
@@ -100,11 +92,30 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
+    // Install the initial color skin before anything renders. Auto-detecting
+    // dark/light mode queries the terminal directly, so it must run before
+    // ratatui switches to the alternate screen. A `[skin.contexts]` override
+    // for the starting context wins over the global/auto-detected skin.
+    let session_skin = cfg
+        .skin
+        .name
+        .clone()
+        .unwrap_or_else(|| theme::auto_skin_name().to_string());
+    let initial_skin = cfg
+        .skin
+        .contexts
+        .get(&cluster.context)
+        .unwrap_or(&session_skin)
+        .clone();
+    theme::init(theme::resolve_skin(Some(&initial_skin), &cfg.skin.colors));
+
     let (tx, mut rx) = mpsc::channel(EVENT_CHANNEL_CAP);
     let mut app = App::new(cluster, tx);
     app.user_aliases = cfg.aliases.clone();
     app.plugins = cfg.plugins.clone();
     app.skin_colors = cfg.skin.colors.clone();
+    app.context_skins = cfg.skin.contexts.clone();
+    app.session_skin = Some(session_skin);
     if args.all_namespaces {
         app.namespace = String::new();
     } else if let Some(ns) = args.namespace {
