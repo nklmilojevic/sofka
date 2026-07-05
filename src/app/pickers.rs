@@ -108,21 +108,13 @@ impl App {
     }
 
     pub(super) fn set_namespace(&mut self, sel: String) {
-        self.namespace = if sel == "<all>" || sel.is_empty() {
-            String::new()
-        } else {
-            sel
-        };
-        let label = if self.namespace.is_empty() {
-            "all namespaces".to_string()
-        } else {
-            self.namespace.clone()
-        };
-        self.flash = format!("namespace: {label}");
+        self.namespace = normalize_ns(&sel);
+        self.flash = format!("namespace: {}", self.namespace_label());
         self.flash_err = false;
         self.ns_filter.clear();
         self.mode = Mode::Table;
         self.table_state.select(Some(0));
+        self.record_history();
         self.start_watch();
     }
 
@@ -238,6 +230,9 @@ impl App {
         self.namespace = cluster.default_namespace.clone();
         self.cluster = *cluster;
         self.stack.clear();
+        // View history references the old cluster's kinds and namespaces.
+        self.history.clear();
+        self.history_pos = 0;
         self.kind = None;
         self.kind_plural.clear();
         self.labels = None;

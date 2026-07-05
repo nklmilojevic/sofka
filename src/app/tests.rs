@@ -1443,7 +1443,7 @@ fn trim_plural_suffix() {
     assert_eq!(trim_s("pods"), "pod");
 }
 
-// ----- `:kind namespace` --------------------------------------------------
+// ----- `:kind namespace` + view history -----------------------------------
 
 #[tokio::test]
 async fn command_with_namespace_switches_both() {
@@ -1472,4 +1472,79 @@ async fn command_namespace_all_means_all_namespaces() {
     assert!(app.all_namespaces());
     app.switch_kind_ns("deployments", Some("*"));
     assert!(app.all_namespaces());
+}
+
+#[tokio::test]
+async fn view_history_brackets_walk_back_and_forward() {
+    let (mut app, _rx) = test_app();
+    app.namespace = "default".into();
+    app.switch_kind("pods");
+    app.switch_kind_ns("deployments", Some("social"));
+    app.switch_kind_ns("kustomizations", Some("all"));
+
+    app.handle_key(press(KeyCode::Char('['))).unwrap();
+    assert_eq!(
+        (app.kind_plural.as_str(), app.namespace.as_str()),
+        ("deployments", "social")
+    );
+    app.handle_key(press(KeyCode::Char('['))).unwrap();
+    assert_eq!(
+        (app.kind_plural.as_str(), app.namespace.as_str()),
+        ("pods", "default")
+    );
+    // At the oldest entry `[` stays put and warns.
+    app.handle_key(press(KeyCode::Char('['))).unwrap();
+    assert_eq!(app.kind_plural, "pods");
+    assert!(app.flash_err);
+
+    app.handle_key(press(KeyCode::Char(']'))).unwrap();
+    app.handle_key(press(KeyCode::Char(']'))).unwrap();
+    assert_eq!(
+        (app.kind_plural.as_str(), app.namespace.as_str()),
+        ("kustomizations", "")
+    );
+    // At the newest entry `]` stays put and warns.
+    app.handle_key(press(KeyCode::Char(']'))).unwrap();
+    assert_eq!(app.kind_plural, "kustomizations");
+    assert!(app.flash_err);
+}
+
+#[tokio::test]
+async fn new_switch_after_back_truncates_forward_history() {
+    let (mut app, _rx) = test_app();
+    app.switch_kind("pods");
+    app.switch_kind("deployments");
+    app.history_back(); // -> pods
+    app.switch_kind("services"); // truncates the deployments tail
+    app.history_forward();
+    assert_eq!(app.kind_plural, "services", "forward tail must be gone");
+    app.history_back();
+    assert_eq!(app.kind_plural, "pods");
+}
+
+#[tokio::test]
+async fn history_dedupes_consecutive_identical_views() {
+    let (mut app, _rx) = test_app();
+    app.switch_kind("pods");
+    app.switch_kind("pods");
+    app.history_back();
+    assert!(app.flash_err, "one entry recorded — nothing to go back to");
+}
+
+#[tokio::test]
+async fn namespace_switch_is_recorded_in_history() {
+    let (mut app, _rx) = test_app();
+    app.namespace = "default".into();
+    app.switch_kind("pods");
+    app.set_namespace("social".into());
+    app.history_back();
+    assert_eq!(
+        (app.kind_plural.as_str(), app.namespace.as_str()),
+        ("pods", "default")
+    );
+    app.history_forward();
+    assert_eq!(
+        (app.kind_plural.as_str(), app.namespace.as_str()),
+        ("pods", "social")
+    );
 }
