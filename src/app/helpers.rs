@@ -156,6 +156,17 @@ pub(super) fn container_names(obj: &DynamicObject) -> Vec<String> {
     names
 }
 
+/// Normalize a user-typed namespace argument: `all`, `*`, and `<all>` mean
+/// "all namespaces" (the empty string internally).
+pub(super) fn normalize_ns(ns: &str) -> String {
+    let t = ns.trim();
+    if t == "all" || t == "*" || t == "<all>" {
+        String::new()
+    } else {
+        t.to_string()
+    }
+}
+
 /// Trim a trailing plural "s" for breadcrumb labels (deployments -> deployment).
 pub(super) fn trim_s(plural: &str) -> &str {
     plural.strip_suffix('s').unwrap_or(plural)
