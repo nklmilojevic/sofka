@@ -276,6 +276,21 @@ cargo test                   # unit tests (no cluster required)
 cargo clippy --all-targets   # lints (clean)
 ```
 
+## Release
+
+After merging the release-ready changes to `main`, run one of:
+
+```
+just release-patch
+just release-minor
+just release-major
+```
+
+The recipe switches to a clean, up-to-date `main`, bumps `Cargo.toml` /
+`Cargo.lock`, commits and pushes the version bump, then creates the GitHub
+Release. The release workflow runs from that published release and uploads
+platform binaries, publishes crates.io, and warms the Nix cache.
+
 ## License
 
 Dual-licensed under [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE), at

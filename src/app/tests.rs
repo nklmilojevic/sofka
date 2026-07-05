@@ -1,0 +1,1444 @@
+use super::*;
+use crate::store::row_key;
+use serde_json::json;
+use tokio::sync::mpsc::{self, Receiver};
+
+fn obj(v: serde_json::Value) -> DynamicObject {
+    serde_json::from_value(v).unwrap()
+}
+
+fn test_app() -> (App, Receiver<Msg>) {
+    let (tx, rx) = mpsc::channel(1024);
+    (App::new(Cluster::fake(), tx), rx)
+}
+
+fn press(code: KeyCode) -> KeyEvent {
+    KeyEvent::new(code, KeyModifiers::NONE)
+}
+
+/// Inject a watched object as the current generation would.
+fn apply(app: &mut App, v: serde_json::Value) {
+    let o = obj(v);
+    app.handle_msg(Msg::Applied {
+        generation: app.generation,
+        key: row_key(&o),
+        obj: Box::new(o),
+    });
+}
+
+#[tokio::test]
+async fn exact_alias_outranks_fuzzy_suggestions() {
+    let (mut app, _rx) = test_app();
+    // `hr` fuzzy-matches horizontalpodautoscalers too; the alias target
+    // must still be the first suggestion.
+    app.command = "hr".into();
+    app.update_suggestions();
+    let first = app.cmd_suggestions.first().expect("has suggestions");
+    assert_eq!(first.label, "helmreleases");
+    assert!(first.kind == SuggestKind::Resource);
+
+    // A full plural typed exactly stays on top as well.
+    app.command = "pods".into();
+    app.update_suggestions();
+    assert_eq!(app.cmd_suggestions[0].label, "pods");
+}
+
+#[test]
+fn list_step_clamps_both_ends() {
+    let mut s = ListState::default();
+    list_step(&mut s, 3, true);
+    assert_eq!(s.selected(), Some(1));
+    list_step(&mut s, 3, true);
+    list_step(&mut s, 3, true); // would be 3, clamps to 2
+    assert_eq!(s.selected(), Some(2));
+    list_step(&mut s, 3, false);
+    assert_eq!(s.selected(), Some(1));
+    list_step(&mut s, 3, false);
+    list_step(&mut s, 3, false); // clamps at 0
+    assert_eq!(s.selected(), Some(0));
+
+    let mut empty = ListState::default();
+    list_step(&mut empty, 0, true);
+    assert_eq!(empty.selected(), None); // no-op on empty list
+}
+
+#[test]
+fn scrollable_scroll_clamps() {
+    let mut s = Scrollable {
+        title: String::new(),
+        lines: vec!["a".into(), "b".into(), "c".into()].into(),
+        scroll: 0,
+    };
+    s.scroll_by(100);
+    assert_eq!(s.scroll, 2); // last line index
+    s.scroll_by(-100);
+    assert_eq!(s.scroll, 0);
+}
+
+#[tokio::test]
+async fn move_selection_from_none_lands_on_first_row_not_second() {
+    let (mut app, _rx) = test_app();
+    app.switch_kind("pods");
+    for n in ["a", "b", "c"] {
+        apply(
+            &mut app,
+            json!({"apiVersion": "v1", "kind": "Pod",
+                   "metadata": {"name": n, "namespace": "default"}}),
+        );
+    }
+    app.table_state.select(None); // simulate no selection at all
+    app.move_selection(1); // Down, with nothing selected yet
+    assert_eq!(app.table_state.selected(), Some(0), "must not skip row 0");
+}
+
+#[tokio::test]
+async fn switching_kind_resets_stale_selection_to_top() {
+    let (mut app, _rx) = test_app();
+    app.switch_kind("pods");
+    for n in ["a", "b", "c"] {
+        apply(
+            &mut app,
+            json!({"apiVersion": "v1", "kind": "Pod",
+                   "metadata": {"name": n, "namespace": "default"}}),
+        );
+    }
+    app.table_state.select(Some(2)); // simulate cursor left on row 2
+
+    app.switch_kind("deployments");
+    assert_eq!(
+        app.table_state.selected(),
+        Some(0),
+        "a fresh view must start with its first row selected, not a stale index"
+    );
+}
+
+#[tokio::test]
+async fn namespace_filter_selects_best_match_not_all() {
+    let (mut app, _rx) = test_app();
+    app.ns_list = vec![
+        "<all>".into(),
+        "default".into(),
+        "kube-system".into(),
+        "prod".into(),
+    ];
+    app.ns_filter.clear();
+    app.ns_state.select(Some(0));
+    app.mode = Mode::Namespaces;
+
+    for c in "sys".chars() {
+        app.handle_key(press(KeyCode::Char(c))).unwrap();
+    }
+    // "kube-system" is the only real match — it should be under the
+    // cursor, not the pinned "<all>" at index 0.
+    let filtered = app.filtered_namespaces();
+    let selected = app.ns_state.selected().and_then(|i| filtered.get(i));
+    assert_eq!(selected.map(String::as_str), Some("kube-system"));
+
+    // Clearing back to an empty filter returns the default to <all>.
+    app.handle_key(press(KeyCode::Backspace)).unwrap();
+    app.handle_key(press(KeyCode::Backspace)).unwrap();
+    app.handle_key(press(KeyCode::Backspace)).unwrap();
+    assert_eq!(app.ns_state.selected(), Some(0));
+}
+
+#[tokio::test]
+async fn filter_match_indices_highlight_matched_chars() {
+    let (mut app, _rx) = test_app();
+    assert_eq!(app.filter_match_indices("kube-httpcache-0"), None); // no filter
+
+    app.filter = "khc".into();
+    let idx = app.filter_match_indices("kube-httpcache-0").unwrap();
+    // "k", "h", "c" fuzzy-match in order somewhere in the name.
+    assert_eq!(idx.len(), 3);
+    assert!(idx.is_sorted());
+
+    app.filter = "zzz".into();
+    assert_eq!(app.filter_match_indices("kube-httpcache-0"), None); // no match
+}
+
+#[tokio::test]
+async fn table_cell_cache_invalidates_on_apply() {
+    let (mut app, _rx) = test_app();
+    app.kind_plural = "pods".into();
+    apply(
+        &mut app,
+        json!({
+            "apiVersion": "v1",
+            "kind": "Pod",
+            "metadata": {
+                "name": "web",
+                "namespace": "default",
+                "resourceVersion": "1"
+            },
+            "status": {"phase": "Pending"}
+        }),
+    );
+    {
+        let rows = app.rows();
+        app.ensure_table_cell_cache(&rows);
+        let key = row_key(rows[0]);
+        let cache = app.table_cell_cache();
+        let (cells, _) = cache.get(&key).unwrap();
+        assert_eq!(cells[2], "Pending");
+    }
+
+    apply(
+        &mut app,
+        json!({
+            "apiVersion": "v1",
+            "kind": "Pod",
+            "metadata": {
+                "name": "web",
+                "namespace": "default",
+                "resourceVersion": "2"
+            },
+            "status": {"phase": "Running"}
+        }),
+    );
+    let rows = app.rows();
+    app.ensure_table_cell_cache(&rows);
+    let key = row_key(rows[0]);
+    let cache = app.table_cell_cache();
+    let (cells, _) = cache.get(&key).unwrap();
+    assert_eq!(cells[2], "Running");
+}
+
+#[tokio::test]
+async fn palette_merges_commands_with_resources() {
+    let (mut app, _rx) = test_app();
+
+    // Empty query lists resources only, so `:`⏎ never fires a command.
+    app.command.clear();
+    app.update_suggestions();
+    assert!(
+        app.cmd_suggestions
+            .iter()
+            .all(|s| s.kind == SuggestKind::Resource)
+    );
+
+    // Typing a command name surfaces it (this was the reported bug: `ctx`
+    // used to show nothing).
+    app.command = "ctx".into();
+    app.update_suggestions();
+    assert!(
+        app.cmd_suggestions
+            .iter()
+            .any(|s| s.kind == SuggestKind::Command && s.label == "ctx")
+    );
+
+    // Aliases fuzzy-match too, but the canonical label is shown.
+    app.command = "dash".into();
+    app.update_suggestions();
+    assert!(
+        app.cmd_suggestions
+            .iter()
+            .any(|s| s.kind == SuggestKind::Command && s.label == "pulse")
+    );
+}
+
+#[tokio::test]
+async fn palette_command_dispatch() {
+    let (mut app, _rx) = test_app();
+    assert!(app.run_palette_command("q")); // alias for quit
+    assert!(app.should_quit);
+
+    let (mut app, _rx) = test_app();
+    assert!(app.run_palette_command("contexts")); // alias resolves
+    assert!(!app.run_palette_command("pods")); // resource kind, not a command
+    assert!(!app.run_palette_command("")); // empty is never a command
+}
+
+#[tokio::test]
+async fn skin_palette_command_opens_picker() {
+    let (mut app, _rx) = test_app();
+    assert!(app.run_palette_command("skin"));
+    assert_eq!(app.mode, Mode::Skins);
+    assert_eq!(
+        app.skin_list.first().map(String::as_str),
+        Some("catppuccin-mocha")
+    );
+
+    app.mode = Mode::Table;
+    assert!(app.run_palette_command("skin no-such-skin"));
+    assert_eq!(app.mode, Mode::Table);
+    assert!(app.flash_err);
+    assert!(app.flash.contains("unknown skin"), "{}", app.flash);
+}
+
+#[tokio::test]
+async fn logs_pause_freezes_and_survives_new_lines() {
+    let (mut app, _rx) = test_app();
+    app.mode = Mode::Logs;
+    app.return_mode = Mode::Table;
+    // Simulate a drawn frame: 100 display rows, 40-high viewport → the
+    // follow anchor (and deepest offset) is row 60.
+    app.logs.follow = true;
+    app.logs.view.scroll = 60;
+    app.logs.viewport_rows = 100;
+    app.logs.viewport_h = 40;
+
+    // Scroll up → autoscroll stops and the offset steps back by one row.
+    app.handle_key(press(KeyCode::Char('k'))).unwrap();
+    assert!(!app.logs.follow);
+    assert_eq!(app.logs.view.scroll, 59);
+
+    // Lines keep streaming while paused; the frozen offset must not drift.
+    for i in 0..500 {
+        app.handle_msg(Msg::LogLines {
+            generation: app.log_gen,
+            lines: vec![format!("line {i}")],
+        });
+    }
+    assert!(!app.logs.follow);
+    assert_eq!(app.logs.view.scroll, 59);
+
+    // `g` goes to the top and stays there (no snap-back to the bottom).
+    app.handle_key(press(KeyCode::Char('g'))).unwrap();
+    assert!(!app.logs.follow);
+    assert_eq!(app.logs.view.scroll, 0);
+
+    // `G` re-arms autoscroll (the next draw will re-anchor to the bottom).
+    app.handle_key(press(KeyCode::Char('G'))).unwrap();
+    assert!(app.logs.follow);
+
+    // Down-scroll is clamped to the deepest offset (rows - height = 60), so
+    // it can't overshoot past the bottom-pinned last page.
+    app.logs.view.scroll = 60;
+    app.handle_key(press(KeyCode::Char('j'))).unwrap();
+    assert!(!app.logs.follow);
+    assert_eq!(app.logs.view.scroll, 60);
+}
+
+#[tokio::test]
+async fn drill_into_workload_then_esc_restores() {
+    let (mut app, _rx) = test_app();
+    app.switch_kind("deployments");
+    assert_eq!(app.kind_plural, "deployments");
+    assert!(app.stack.is_empty(), "a `:resource` switch is a fresh root");
+
+    apply(
+        &mut app,
+        json!({
+            "apiVersion": "apps/v1", "kind": "Deployment",
+            "metadata": {"name": "web", "namespace": "default"},
+            "spec": {"selector": {"matchLabels": {"app": "web"}}}
+        }),
+    );
+    app.table_state.select(Some(0));
+    assert_eq!(app.rows().len(), 1);
+
+    app.handle_key(press(KeyCode::Enter)).unwrap();
+    assert_eq!(app.kind_plural, "pods");
+    assert_eq!(app.labels.as_deref(), Some("app=web"));
+    assert_eq!(app.scope_label.as_deref(), Some("deployment/web"));
+    assert_eq!(app.stack.len(), 1);
+
+    app.handle_key(press(KeyCode::Esc)).unwrap();
+    assert_eq!(app.kind_plural, "deployments");
+    assert_eq!(app.labels, None);
+    assert!(app.stack.is_empty());
+}
+
+#[tokio::test]
+async fn root_switch_clears_drill_stack() {
+    let (mut app, _rx) = test_app();
+    app.switch_kind("pods");
+    apply(
+        &mut app,
+        json!({"apiVersion": "v1", "kind": "Pod",
+               "metadata": {"name": "p", "namespace": "default"},
+               "spec": {}}),
+    );
+    // Manually push a frame to simulate having drilled in.
+    app.push_frame();
+    assert_eq!(app.stack.len(), 1);
+    // A fresh `:resource` switch must reset the breadcrumb.
+    app.switch_kind("services");
+    assert_eq!(app.kind_plural, "services");
+    assert!(app.stack.is_empty());
+}
+
+#[tokio::test]
+async fn filter_narrows_rows_via_cache() {
+    let (mut app, _rx) = test_app();
+    app.switch_kind("pods");
+    for n in ["alpha", "beta", "gamma"] {
+        apply(
+            &mut app,
+            json!({"apiVersion": "v1", "kind": "Pod",
+                   "metadata": {"name": n, "namespace": "default"}}),
+        );
+    }
+    assert_eq!(app.rows().len(), 3);
+
+    app.handle_key(press(KeyCode::Char('/'))).unwrap();
+    for c in ['a', 'l', 'p'] {
+        app.handle_key(press(KeyCode::Char(c))).unwrap();
+    }
+    let rows = app.rows();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].metadata.name.as_deref(), Some("alpha"));
+
+    // Clearing the filter restores all rows (cache re-derived).
+    app.handle_key(press(KeyCode::Esc)).unwrap();
+    assert_eq!(app.rows().len(), 3);
+}
+
+#[tokio::test]
+async fn delete_message_updates_rows() {
+    let (mut app, _rx) = test_app();
+    app.switch_kind("pods");
+    apply(
+        &mut app,
+        json!({"apiVersion": "v1", "kind": "Pod",
+               "metadata": {"name": "keep", "namespace": "default"}}),
+    );
+    apply(
+        &mut app,
+        json!({"apiVersion": "v1", "kind": "Pod",
+               "metadata": {"name": "gone", "namespace": "default"}}),
+    );
+    assert_eq!(app.rows().len(), 2);
+    app.handle_msg(Msg::Deleted {
+        generation: app.generation,
+        key: "default/gone".into(),
+    });
+    let rows = app.rows();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].metadata.name.as_deref(), Some("keep"));
+}
+
+#[tokio::test]
+async fn space_marks_rows_for_bulk_delete() {
+    let (mut app, _rx) = test_app();
+    app.switch_kind("pods");
+    for n in ["a", "b", "c"] {
+        apply(
+            &mut app,
+            json!({"apiVersion": "v1", "kind": "Pod",
+                   "metadata": {"name": n, "namespace": "default"}}),
+        );
+    }
+    assert_eq!(app.rows().len(), 3);
+    assert_eq!(app.table_state.selected(), Some(0));
+
+    // Mark the first two rows; each SPACE also advances the cursor.
+    app.handle_key(press(KeyCode::Char(' '))).unwrap();
+    app.handle_key(press(KeyCode::Char(' '))).unwrap();
+    assert_eq!(app.marked.len(), 2);
+    assert_eq!(app.table_state.selected(), Some(2));
+
+    // A bulk action targets exactly the marked rows.
+    let mut targets = app.action_targets();
+    targets.sort();
+    assert_eq!(
+        targets,
+        vec![
+            ("a".to_string(), "default".to_string()),
+            ("b".to_string(), "default".to_string()),
+        ]
+    );
+
+    // ctrl-d opens a confirm for the marked set…
+    app.handle_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL))
+        .unwrap();
+    assert_eq!(app.mode, Mode::Confirm);
+    assert!(
+        app.confirm_label.contains("Delete 2 pods"),
+        "{}",
+        app.confirm_label
+    );
+
+    // …and confirming clears the marks.
+    app.handle_key(press(KeyCode::Char('y'))).unwrap();
+    assert!(app.marked.is_empty());
+    assert_eq!(app.mode, Mode::Table);
+}
+
+#[tokio::test]
+async fn delete_confirm_force_can_toggle() {
+    let (mut app, _rx) = test_app();
+    app.switch_kind("pods");
+    apply(
+        &mut app,
+        json!({"apiVersion": "v1", "kind": "Pod",
+               "metadata": {"name": "web", "namespace": "default"}}),
+    );
+
+    app.handle_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL))
+        .unwrap();
+    assert_eq!(app.mode, Mode::Confirm);
+    assert!(app.confirm_allows_force_toggle());
+    assert!(app.confirm_label.starts_with("Delete pod web"));
+    assert!(matches!(
+        app.confirm_action,
+        Some(ConfirmAction::Delete { force: false, .. })
+    ));
+
+    app.handle_key(press(KeyCode::Char('f'))).unwrap();
+    assert!(app.confirm_label.starts_with("Force delete pod web"));
+    assert!(matches!(
+        app.confirm_action,
+        Some(ConfirmAction::Delete { force: true, .. })
+    ));
+
+    app.handle_key(press(KeyCode::Char('f'))).unwrap();
+    assert!(app.confirm_label.starts_with("Delete pod web"));
+    assert!(matches!(
+        app.confirm_action,
+        Some(ConfirmAction::Delete { force: false, .. })
+    ));
+}
+
+#[tokio::test]
+async fn node_drain_key_opens_confirm_for_marked_nodes() {
+    let (mut app, _rx) = test_app();
+    app.switch_kind("nodes");
+    for n in ["node-a", "node-b"] {
+        apply(
+            &mut app,
+            json!({"apiVersion": "v1", "kind": "Node",
+                   "metadata": {"name": n}}),
+        );
+    }
+    app.handle_key(press(KeyCode::Char(' '))).unwrap();
+    app.handle_key(press(KeyCode::Char(' '))).unwrap();
+
+    app.handle_key(press(KeyCode::Char('D'))).unwrap();
+    assert_eq!(app.mode, Mode::Confirm);
+    assert_eq!(
+        app.confirm_label,
+        "Drain 2 nodes? Cordon and evict eligible pods."
+    );
+    assert!(!app.confirm_allows_force_toggle());
+    let Some(ConfirmAction::Drain { mut targets }) = app.confirm_action.take() else {
+        panic!("expected drain confirm action");
+    };
+    targets.sort();
+    assert_eq!(targets, vec!["node-a".to_string(), "node-b".to_string()]);
+}
+
+#[tokio::test]
+async fn esc_clears_marks_before_popping() {
+    let (mut app, _rx) = test_app();
+    app.switch_kind("pods");
+    apply(
+        &mut app,
+        json!({"apiVersion": "v1", "kind": "Pod",
+               "metadata": {"name": "a", "namespace": "default"}}),
+    );
+    app.handle_key(press(KeyCode::Char(' '))).unwrap();
+    assert_eq!(app.marked.len(), 1);
+    app.handle_key(press(KeyCode::Esc)).unwrap();
+    assert!(app.marked.is_empty());
+    assert_eq!(app.mode, Mode::Table);
+}
+
+#[tokio::test]
+async fn switching_kind_clears_marks() {
+    let (mut app, _rx) = test_app();
+    app.switch_kind("pods");
+    apply(
+        &mut app,
+        json!({"apiVersion": "v1", "kind": "Pod",
+               "metadata": {"name": "a", "namespace": "default"}}),
+    );
+    app.handle_key(press(KeyCode::Char(' '))).unwrap();
+    assert_eq!(app.marked.len(), 1);
+    app.switch_kind("deployments");
+    assert!(app.marked.is_empty());
+}
+
+#[tokio::test]
+async fn flux_menu_rejects_non_flux_kinds() {
+    let (mut app, _rx) = test_app();
+    app.switch_kind("pods");
+    apply(
+        &mut app,
+        json!({"apiVersion": "v1", "kind": "Pod",
+               "metadata": {"name": "a", "namespace": "default"}}),
+    );
+    app.request_flux_menu();
+    assert!(app.flash_err);
+    assert!(app.flash.contains("Flux"), "{}", app.flash);
+    assert_eq!(app.mode, Mode::Table); // never opens the menu
+}
+
+#[tokio::test]
+async fn flux_menu_requires_explicit_choice_not_a_single_key() {
+    let (mut app, _rx) = test_app();
+    app.switch_kind("kustomizations");
+    apply(
+        &mut app,
+        json!({
+            "apiVersion": "kustomize.toolkit.fluxcd.io/v1", "kind": "Kustomization",
+            "metadata": {"name": "infra", "namespace": "default"},
+            "spec": {"suspend": false}
+        }),
+    );
+
+    // `t` opens the menu — nothing is patched yet.
+    app.handle_key(press(KeyCode::Char('t'))).unwrap();
+    assert_eq!(app.mode, Mode::FluxMenu);
+    assert_eq!(app.flux_menu_state.selected(), Some(0)); // "Suspend"
+
+    // Esc backs out without doing anything.
+    app.handle_key(press(KeyCode::Esc)).unwrap();
+    assert_eq!(app.mode, Mode::Table);
+    assert!(!app.flash.contains("suspending"));
+
+    // Re-open, navigate to "Resume", confirm.
+    app.handle_key(press(KeyCode::Char('t'))).unwrap();
+    app.handle_key(press(KeyCode::Char('j'))).unwrap();
+    assert_eq!(app.flux_menu_state.selected(), Some(1)); // "Resume"
+    app.handle_key(press(KeyCode::Enter)).unwrap();
+    assert_eq!(app.mode, Mode::Table);
+    assert!(app.flash.contains("resuming"), "{}", app.flash);
+}
+
+#[tokio::test]
+async fn flux_menu_cancel_item_does_nothing() {
+    let (mut app, _rx) = test_app();
+    app.switch_kind("kustomizations");
+    apply(
+        &mut app,
+        json!({
+            "apiVersion": "kustomize.toolkit.fluxcd.io/v1", "kind": "Kustomization",
+            "metadata": {"name": "infra", "namespace": "default"},
+            "spec": {"suspend": false}
+        }),
+    );
+    let flash_before = app.flash.clone();
+    app.request_flux_menu();
+    let cancel = FLUX_MENU_ITEMS.iter().position(|s| *s == "Cancel").unwrap();
+    app.flux_menu_state.select(Some(cancel));
+    app.handle_key(press(KeyCode::Enter)).unwrap();
+    assert_eq!(app.mode, Mode::Table);
+    assert_eq!(app.flash, flash_before); // no suspend/resume side effect
+}
+
+#[tokio::test]
+async fn flux_menu_suspend_acts_on_marked_rows() {
+    let (mut app, _rx) = test_app();
+    app.switch_kind("kustomizations");
+    let ks = |name: &str| {
+        json!({
+            "apiVersion": "kustomize.toolkit.fluxcd.io/v1", "kind": "Kustomization",
+            "metadata": {"name": name, "namespace": "default"},
+            "spec": {"suspend": false}
+        })
+    };
+    apply(&mut app, ks("infra"));
+    apply(&mut app, ks("apps"));
+    app.marked.insert("default/infra".into());
+    app.marked.insert("default/apps".into());
+
+    app.request_flux_menu();
+    app.handle_key(press(KeyCode::Enter)).unwrap(); // "Suspend" (default selection)
+    assert!(
+        app.flash.contains("suspending 2 kustomizations"),
+        "{}",
+        app.flash
+    );
+    assert!(app.marked.is_empty()); // cleared after the bulk action
+}
+
+#[tokio::test]
+async fn flux_menu_reconcile_now() {
+    let (mut app, _rx) = test_app();
+    app.switch_kind("kustomizations");
+    apply(
+        &mut app,
+        json!({
+            "apiVersion": "kustomize.toolkit.fluxcd.io/v1", "kind": "Kustomization",
+            "metadata": {"name": "infra", "namespace": "default"},
+            "spec": {"suspend": false}
+        }),
+    );
+    app.request_flux_menu();
+    let idx = FLUX_MENU_ITEMS
+        .iter()
+        .position(|s| *s == "Reconcile now")
+        .unwrap();
+    app.flux_menu_state.select(Some(idx));
+    app.handle_key(press(KeyCode::Enter)).unwrap();
+    assert_eq!(app.mode, Mode::Table);
+    assert!(app.flash.contains("reconciling infra"), "{}", app.flash);
+}
+
+#[tokio::test]
+async fn r_force_syncs_external_secrets() {
+    let (mut app, _rx) = test_app();
+    app.switch_kind("externalsecrets");
+    apply(
+        &mut app,
+        json!({
+            "apiVersion": "external-secrets.io/v1", "kind": "ExternalSecret",
+            "metadata": {"name": "creds", "namespace": "default"}
+        }),
+    );
+    app.table_state.select(Some(0));
+    app.handle_key(press(KeyCode::Char('r'))).unwrap();
+    assert_eq!(app.mode, Mode::Table);
+    assert!(app.flash.contains("refreshing creds"), "{}", app.flash);
+    assert!(!app.flash_err);
+}
+
+#[tokio::test]
+async fn refresh_es_rejects_non_es_kinds() {
+    let (mut app, _rx) = test_app();
+    app.switch_kind("pods");
+    app.request_refresh_es();
+    assert!(app.flash_err);
+    assert!(app.flash.contains("external secrets"), "{}", app.flash);
+}
+
+#[tokio::test]
+async fn pf_palette_command_opens_the_view() {
+    let (mut app, _rx) = test_app();
+    assert!(app.run_palette_command("pf"));
+    assert_eq!(app.mode, Mode::PortForwards);
+}
+
+#[tokio::test]
+async fn events_palette_command_dispatches() {
+    let (mut app, _rx) = test_app();
+    assert!(app.run_palette_command("events"));
+    assert_eq!(app.mode, Mode::Table);
+    assert!(app.flash_err);
+    assert!(app.flash.contains("events"), "{}", app.flash);
+}
+
+#[test]
+fn event_lines_show_core_event_fields() {
+    let event = obj(json!({
+        "apiVersion": "v1",
+        "kind": "Event",
+        "metadata": {"name": "web.123", "namespace": "default"},
+        "type": "Warning",
+        "reason": "FailedScheduling",
+        "message": "0/3 nodes are available",
+        "count": 4,
+        "lastTimestamp": "2026-07-04T12:34:56Z"
+    }));
+    let lines = format_event_lines([&event], false);
+    assert!(lines[0].contains("LAST SEEN"));
+    assert!(lines[1].contains("Warning"));
+    assert!(lines[1].contains("FailedScheduling"));
+    assert!(lines[1].contains("0/3 nodes are available"));
+    assert!(lines[1].contains("4"));
+}
+
+fn spawn_test_child(argv0: &str, arg: &str) -> tokio::process::Child {
+    tokio::process::Command::new(argv0)
+        .arg(arg)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap_or_else(|e| panic!("spawn `{argv0} {arg}` for test: {e}"))
+}
+
+#[tokio::test]
+async fn stopping_a_forward_kills_only_that_one() {
+    let (mut app, _rx) = test_app();
+    app.port_forwards.push(PortForward {
+        ns: "default".into(),
+        target: "pod/a".into(),
+        ports: "8080:80".into(),
+        child: spawn_test_child("sleep", "30"),
+    });
+    app.port_forwards.push(PortForward {
+        ns: "default".into(),
+        target: "pod/b".into(),
+        ports: "8081:81".into(),
+        child: spawn_test_child("sleep", "30"),
+    });
+    app.pf_state.select(Some(0));
+    app.mode = Mode::PortForwards;
+
+    app.handle_key(press(KeyCode::Char('x'))).unwrap();
+    assert_eq!(app.port_forwards.len(), 1);
+    assert_eq!(app.port_forwards[0].target, "pod/b");
+    assert_eq!(app.pf_state.selected(), Some(0)); // cursor stays in range
+
+    // Esc closes the view without touching the remaining forward.
+    app.handle_key(press(KeyCode::Esc)).unwrap();
+    assert_eq!(app.mode, Mode::Table);
+    assert_eq!(app.port_forwards.len(), 1);
+}
+
+#[tokio::test]
+async fn reap_drops_exited_forwards_and_flashes() {
+    let (mut app, _rx) = test_app();
+    let mut child = spawn_test_child("true", "");
+    child.wait().await.unwrap(); // let it exit before reaping
+    app.port_forwards.push(PortForward {
+        ns: "default".into(),
+        target: "pod/a".into(),
+        ports: "8080:80".into(),
+        child,
+    });
+    app.reap_port_forwards();
+    assert!(app.port_forwards.is_empty());
+    assert!(app.flash.contains("exited"), "{}", app.flash);
+}
+
+#[test]
+fn crd_served_version_prefers_storage_then_served() {
+    let d = json!({"spec": {"versions": [
+        {"name": "v1beta1", "served": true, "storage": false},
+        {"name": "v1", "served": true, "storage": true}
+    ]}});
+    assert_eq!(crd_served_version(&d).as_deref(), Some("v1"));
+
+    let d2 = json!({"spec": {"versions": [
+        {"name": "v2", "served": false},
+        {"name": "v1", "served": true}
+    ]}});
+    assert_eq!(crd_served_version(&d2).as_deref(), Some("v1"));
+}
+
+#[test]
+fn mutating_action_patch_payloads_are_stable() {
+    assert_eq!(
+        restart_patch("2026-07-04T12:00:00Z"),
+        json!({
+            "spec": { "template": { "metadata": { "annotations": {
+                "kubectl.kubernetes.io/restartedAt": "2026-07-04T12:00:00Z"
+            }}}}
+        })
+    );
+    assert_eq!(
+        set_image_patch("pods", "app", "nginx:1.27"),
+        json!({ "spec": { "containers": [{ "name": "app", "image": "nginx:1.27" }] } })
+    );
+    assert_eq!(
+        set_image_patch("deployments", "app", "nginx:1.27"),
+        json!({
+            "spec": { "template": { "spec": {
+                "containers": [{ "name": "app", "image": "nginx:1.27" }]
+            }}}
+        })
+    );
+    assert_eq!(scale_patch(3), json!({ "spec": { "replicas": 3 } }));
+    assert_eq!(suspend_patch(true), json!({ "spec": { "suspend": true } }));
+    assert_eq!(
+        reconcile_patch("2026-07-04T12:00:00Z"),
+        json!({
+            "metadata": { "annotations": {
+                "reconcile.fluxcd.io/requestedAt": "2026-07-04T12:00:00Z"
+            }}
+        })
+    );
+    assert_eq!(
+        external_secret_refresh_patch("1783166400"),
+        json!({ "metadata": { "annotations": { "force-sync": "1783166400" } } })
+    );
+    assert_eq!(
+        node_unschedulable_patch(true),
+        json!({ "spec": { "unschedulable": true } })
+    );
+    assert_eq!(
+        node_unschedulable_patch(false),
+        json!({ "spec": { "unschedulable": false } })
+    );
+}
+
+#[tokio::test]
+async fn crd_drill_builds_kind_from_spec() {
+    let (mut app, _rx) = test_app();
+    let crd = obj(json!({
+        "apiVersion": "apiextensions.k8s.io/v1",
+        "kind": "CustomResourceDefinition",
+        "metadata": {"name": "widgets.example.com"},
+        "spec": {
+            "group": "example.com",
+            "names": {"plural": "widgets", "kind": "Widget"},
+            "scope": "Namespaced",
+            "versions": [
+                {"name": "v1beta1", "served": true, "storage": false},
+                {"name": "v1", "served": true, "storage": true}
+            ]
+        }
+    }));
+    app.kind_plural = "customresourcedefinitions".into();
+    // Not in the (fake) discovery registry → built straight from the spec.
+    app.drill_into_crd(&crd);
+    assert_eq!(app.kind_plural, "widgets");
+    let k = app.kind.as_ref().unwrap();
+    assert_eq!(k.ar.kind, "Widget");
+    assert_eq!(k.ar.group, "example.com");
+    assert_eq!(k.ar.version, "v1"); // storage version preferred
+    assert_eq!(k.ar.api_version, "example.com/v1");
+    assert!(k.namespaced);
+    assert!(
+        app.scope_label
+            .as_deref()
+            .unwrap()
+            .contains("widgets.example.com")
+    );
+}
+
+#[tokio::test]
+async fn log_lines_expand_tabs_and_strip_cr() {
+    let (mut app, _rx) = test_app();
+    // Caddy-style tab-separated line (level would be color-wrapped too).
+    app.handle_msg(Msg::LogLines {
+        generation: app.log_gen,
+        lines: vec!["2026/07/01 09:21:14.062\tINFO\tProvisioning WAF\r".into()],
+    });
+    assert_eq!(
+        app.logs.view.lines.back().unwrap(),
+        "2026/07/01 09:21:14.062 INFO Provisioning WAF"
+    );
+}
+
+#[tokio::test]
+async fn log_buffer_is_capped() {
+    let (mut app, _rx) = test_app();
+    for i in 0..(MAX_LOG_LINES + 50) {
+        app.handle_msg(Msg::LogLines {
+            generation: app.log_gen,
+            lines: vec![format!("line {i}")],
+        });
+    }
+    assert_eq!(app.logs.view.lines.len(), MAX_LOG_LINES);
+    // Oldest lines dropped; newest retained.
+    assert_eq!(
+        app.logs.view.lines.back().unwrap(),
+        &format!("line {}", MAX_LOG_LINES + 49)
+    );
+}
+
+#[tokio::test]
+async fn filtered_log_text_respects_active_filter() {
+    let (mut app, _rx) = test_app();
+    app.handle_msg(Msg::LogLines {
+        generation: app.log_gen,
+        lines: vec![
+            "api request started".into(),
+            "worker finished".into(),
+            "api request finished".into(),
+        ],
+    });
+
+    assert_eq!(
+        app.filtered_log_text(),
+        "api request started\nworker finished\napi request finished"
+    );
+    app.logs.filter = "api".into();
+    assert_eq!(
+        app.filtered_log_text(),
+        "api request started\napi request finished"
+    );
+}
+
+#[tokio::test]
+async fn stale_log_save_result_is_dropped() {
+    let (mut app, _rx) = test_app();
+    let stale = app.log_gen;
+    app.log_gen += 1;
+
+    app.handle_msg(Msg::LogsSaved {
+        generation: stale,
+        result: Err("old write failed".into()),
+    });
+    assert!(!app.flash.contains("old write failed"));
+
+    app.handle_msg(Msg::LogsSaved {
+        generation: app.log_gen,
+        result: Ok(std::env::temp_dir().join("sofka-test.log")),
+    });
+    assert!(app.flash.contains("sofka-test.log"));
+    assert!(!app.flash_err);
+}
+
+#[tokio::test]
+async fn stale_clipboard_result_is_dropped() {
+    let (mut app, _rx) = test_app();
+    let stale = app.generation;
+    app.bump_generation();
+
+    app.handle_msg(Msg::ClipboardCopied {
+        generation: stale,
+        copied: false,
+        success: "copied stale".into(),
+        failure: "stale failed".into(),
+    });
+    assert!(!app.flash.contains("stale failed"));
+
+    app.handle_msg(Msg::ClipboardCopied {
+        generation: app.generation,
+        copied: true,
+        success: "copied current".into(),
+        failure: "current failed".into(),
+    });
+    assert_eq!(app.flash, "copied current");
+    assert!(!app.flash_err);
+}
+
+#[test]
+fn osc52_sequence_base64_encodes_clipboard_text() {
+    assert_eq!(osc52_sequence("sofka"), "\x1b]52;c;c29ma2E=\x07");
+}
+
+#[tokio::test]
+async fn sort_by_numeric_column_and_invert() {
+    let (mut app, _rx) = test_app();
+    app.switch_kind("pods");
+    let pod = |name: &str, restarts: i64| {
+        json!({
+            "apiVersion": "v1", "kind": "Pod",
+            "metadata": {"name": name, "namespace": "default"},
+            "status": {
+                "phase": "Running",
+                "containerStatuses": [
+                    {"ready": true, "restartCount": restarts, "state": {"running": {}}}
+                ]
+            }
+        })
+    };
+    apply(&mut app, pod("a", 5));
+    apply(&mut app, pod("b", 1));
+    apply(&mut app, pod("c", 9));
+
+    // RESTARTS is the 4th pod column; sort by it numerically (not "1,5,9"
+    // as strings, which happens to agree here, but parsing is what matters).
+    assert_eq!(app.display_headers()[3], "RESTARTS");
+    app.sort_column = Some(3);
+    app.invalidate_rows();
+    let names: Vec<String> = app
+        .rows()
+        .iter()
+        .map(|o| o.metadata.name.clone().unwrap())
+        .collect();
+    assert_eq!(names, ["b", "a", "c"]); // 1, 5, 9 ascending
+
+    app.sort_desc = true;
+    app.invalidate_rows();
+    let names: Vec<String> = app
+        .rows()
+        .iter()
+        .map(|o| o.metadata.name.clone().unwrap())
+        .collect();
+    assert_eq!(names, ["c", "a", "b"]); // descending
+
+    // Switching kinds resets the sort (columns differ).
+    app.switch_kind("services");
+    assert_eq!(app.sort_column, None);
+    assert!(!app.sort_desc);
+}
+
+#[tokio::test]
+async fn metrics_update_invalidates_metric_sorted_rows() {
+    let (mut app, _rx) = test_app();
+    app.switch_kind("pods");
+    for name in ["a", "b"] {
+        apply(
+            &mut app,
+            json!({"apiVersion": "v1", "kind": "Pod",
+                   "metadata": {"name": name, "namespace": "default"}}),
+        );
+    }
+
+    let cpu_idx = app
+        .display_headers()
+        .iter()
+        .position(|h| *h == "CPU")
+        .unwrap();
+    app.sort_column = Some(cpu_idx);
+    app.sort_desc = true;
+    app.invalidate_rows();
+    let names: Vec<String> = app
+        .rows()
+        .iter()
+        .map(|o| o.metadata.name.clone().unwrap())
+        .collect();
+    assert_eq!(names, ["a", "b"]); // cached before metrics arrive
+
+    app.handle_msg(Msg::Metrics {
+        generation: app.generation,
+        data: HashMap::from([
+            ("default/a".to_string(), (10, 0)),
+            ("default/b".to_string(), (100, 0)),
+        ]),
+    });
+    let names: Vec<String> = app
+        .rows()
+        .iter()
+        .map(|o| o.metadata.name.clone().unwrap())
+        .collect();
+    assert_eq!(names, ["b", "a"]);
+}
+
+#[tokio::test]
+async fn logs_keep_view_and_restore_selection() {
+    let (mut app, _rx) = test_app();
+    app.switch_kind("pods");
+    for n in ["a", "b", "c"] {
+        apply(
+            &mut app,
+            json!({"apiVersion": "v1", "kind": "Pod",
+                   "metadata": {"name": n, "namespace": "default"}}),
+        );
+    }
+    app.table_state.select(Some(1)); // "b"
+    assert_eq!(app.selected().unwrap().metadata.name.as_deref(), Some("b"));
+    let gen_before = app.generation;
+
+    app.handle_key(press(KeyCode::Char('l'))).unwrap(); // open logs
+    assert_eq!(app.mode, Mode::Logs);
+    assert_eq!(app.rows().len(), 3, "underlying view stays populated");
+
+    app.handle_key(press(KeyCode::Esc)).unwrap(); // back to table
+    assert_eq!(app.mode, Mode::Table);
+    assert_eq!(
+        app.generation, gen_before,
+        "view watch was not torn down/restarted"
+    );
+    assert_eq!(app.rows().len(), 3, "rows were not blanked + reloaded");
+    assert_eq!(
+        app.selected().unwrap().metadata.name.as_deref(),
+        Some("b"),
+        "cursor returned to the same pod"
+    );
+}
+
+#[tokio::test]
+async fn namespace_switcher_pins_all_and_fuzzy_filters() {
+    let (mut app, _rx) = test_app();
+    app.ns_list = vec![
+        "<all>".into(),
+        "default".into(),
+        "kube-system".into(),
+        "prod".into(),
+    ];
+    // No filter: <all> first, then the rest.
+    assert_eq!(app.filtered_namespaces()[0], "<all>");
+    assert_eq!(app.filtered_namespaces().len(), 4);
+
+    // Fuzzy filter (subsequence) keeps <all> pinned on top.
+    app.ns_filter = "sys".into();
+    let f = app.filtered_namespaces();
+    assert_eq!(f[0], "<all>");
+    assert!(f.contains(&"kube-system".to_string()));
+    assert!(!f.contains(&"default".to_string()));
+
+    // Typing a name that matches nothing real → Enter takes it verbatim.
+    app.ns_filter = "team-x".into();
+    app.mode = Mode::Namespaces;
+    app.handle_key(press(KeyCode::Enter)).unwrap();
+    assert_eq!(app.namespace, "team-x");
+}
+
+#[tokio::test]
+async fn shellouts_pin_to_active_context() {
+    let (mut app, _rx) = test_app();
+    app.switch_kind("pods");
+    apply(
+        &mut app,
+        json!({"apiVersion": "v1", "kind": "Pod",
+               "metadata": {"name": "p", "namespace": "default"}}),
+    );
+    app.table_state.select(Some(0));
+    app.request_edit();
+    let Some(Suspend::Shell(argv)) = app.pending.take() else {
+        panic!("expected a pending shell command");
+    };
+    // Pinned to the context sofka connected with, not kubectl's default.
+    assert_eq!(&argv[..3], ["kubectl", "--context", "test"]);
+    assert!(argv.contains(&"edit".to_string()));
+    assert_eq!(argv.last().unwrap(), "default"); // -n <ns>
+}
+
+#[tokio::test]
+async fn paused_logs_do_not_trim_below_paused_cap() {
+    let (mut app, _rx) = test_app();
+    app.logs.follow = false; // autoscroll OFF
+    let lg = app.log_gen;
+    let line = |i: usize| Msg::LogLines {
+        generation: lg,
+        lines: vec![format!("line {i}")],
+    };
+    // Well past the *following* cap, but under the paused cap: nothing is
+    // dropped, so a frozen view never appears to resume scrolling.
+    for i in 0..(MAX_LOG_LINES + 500) {
+        app.handle_msg(line(i));
+    }
+    assert_eq!(app.logs.view.lines.len(), MAX_LOG_LINES + 500);
+
+    // Resuming follow trims the backlog back to the tight cap.
+    app.mode = Mode::Logs;
+    app.handle_key(press(KeyCode::Char('s'))).unwrap(); // follow on
+    assert!(app.logs.follow);
+    assert_eq!(app.logs.view.lines.len(), MAX_LOG_LINES);
+}
+
+#[tokio::test]
+async fn paused_trim_shifts_scroll_in_display_rows() {
+    let (mut app, _rx) = test_app();
+    app.logs.follow = false;
+    app.logs.last_wrap_width = 10; // as if the last draw wrapped at 10 cols
+    app.logs.view.scroll = 500;
+    let lg = app.log_gen;
+    // The first line is the one trimmed later: 25 chars → 3 rows at width 10.
+    app.handle_msg(Msg::LogLines {
+        generation: lg,
+        lines: vec!["a".repeat(25)],
+    });
+    for i in 1..MAX_LOG_LINES_PAUSED {
+        app.handle_msg(Msg::LogLines {
+            generation: lg,
+            lines: vec![format!("l{i}")],
+        });
+    }
+    assert_eq!(app.logs.view.lines.len(), MAX_LOG_LINES_PAUSED);
+    assert_eq!(app.logs.view.scroll, 500); // nothing trimmed yet
+    // One more line overflows the paused cap: the wrapped first line drains
+    // and the frozen anchor shifts by its 3 display rows, not by 1 line.
+    app.handle_msg(Msg::LogLines {
+        generation: lg,
+        lines: vec!["x".into()],
+    });
+    assert_eq!(app.logs.view.lines.len(), MAX_LOG_LINES_PAUSED);
+    assert_eq!(app.logs.view.scroll, 497);
+}
+
+#[tokio::test]
+async fn rbac_for_other_namespace_is_dropped() {
+    let (mut app, _rx) = test_app();
+    // App starts in the "default" namespace.
+    let mut other = HashSet::new();
+    other.insert("secrets".to_string());
+    app.handle_msg(Msg::Rbac {
+        generation: app.generation,
+        ns: "kube-system".into(),
+        allowed: other,
+    });
+    assert!(app.rbac_allowed.is_none(), "stale-namespace result dropped");
+
+    let mut here = HashSet::new();
+    here.insert("pods".to_string());
+    app.handle_msg(Msg::Rbac {
+        generation: app.generation,
+        ns: "default".into(),
+        allowed: here,
+    });
+    assert!(app.rbac_allowed.is_some());
+    assert!(app.rbac_visible("pods"));
+    assert!(!app.rbac_visible("secrets"));
+}
+
+#[tokio::test]
+async fn stale_async_picker_results_are_dropped() {
+    let (mut app, _rx) = test_app();
+    let stale = app.generation;
+    app.bump_generation();
+
+    app.ns_list = vec!["<all>".into()];
+    app.handle_msg(Msg::Namespaces {
+        generation: stale,
+        list: vec!["<all>".into(), "stale".into()],
+    });
+    assert_eq!(app.ns_list, vec!["<all>".to_string()]);
+
+    app.ctx_list = vec!["test".into()];
+    app.handle_msg(Msg::Contexts {
+        generation: stale,
+        list: vec!["stale-context".into()],
+    });
+    assert_eq!(app.ctx_list, vec!["test".to_string()]);
+
+    let flash = app.flash.clone();
+    app.handle_msg(Msg::ContextSwitched {
+        generation: stale,
+        name: "old-context".into(),
+        result: Err("old failure".into()),
+    });
+    assert_eq!(app.flash, flash);
+}
+
+#[tokio::test]
+async fn context_list_result_selects_current_context() {
+    let (mut app, _rx) = test_app();
+    app.handle_msg(Msg::Contexts {
+        generation: app.generation,
+        list: vec!["prod".into(), "test".into()],
+    });
+    assert_eq!(app.ctx_list, vec!["prod".to_string(), "test".to_string()]);
+    assert_eq!(app.ctx_state.selected(), Some(1));
+}
+
+#[tokio::test]
+async fn rbac_for_old_generation_is_dropped() {
+    let (mut app, _rx) = test_app();
+    let stale = app.generation;
+    app.bump_generation();
+
+    let mut allowed = HashSet::new();
+    allowed.insert("secrets".to_string());
+    app.handle_msg(Msg::Rbac {
+        generation: stale,
+        ns: "default".into(),
+        allowed,
+    });
+    assert!(app.rbac_allowed.is_none());
+}
+
+#[test]
+fn workload_selector_from_match_labels() {
+    let d = obj(json!({
+        "apiVersion": "apps/v1", "kind": "Deployment",
+        "metadata": {"name": "web", "namespace": "shop"},
+        "spec": {"selector": {"matchLabels": {"app": "web", "tier": "fe"}}}
+    }));
+    assert_eq!(
+        label_selector(&d, "matchLabels").as_deref(),
+        Some("app=web,tier=fe")
+    );
+}
+
+#[test]
+fn service_selector_from_plain_map() {
+    let s = obj(json!({
+        "apiVersion": "v1", "kind": "Service",
+        "metadata": {"name": "svc"},
+        "spec": {"selector": {"app": "api"}}
+    }));
+    assert_eq!(label_selector(&s, "selector").as_deref(), Some("app=api"));
+}
+
+#[test]
+fn no_selector_returns_none() {
+    let s = obj(json!({
+        "apiVersion": "v1", "kind": "Service",
+        "metadata": {"name": "headless"}, "spec": {}
+    }));
+    assert_eq!(label_selector(&s, "selector"), None);
+}
+
+#[test]
+fn containers_include_init_and_main() {
+    let p = obj(json!({
+        "apiVersion": "v1", "kind": "Pod",
+        "metadata": {"name": "p"},
+        "spec": {
+            "containers": [{"name": "app"}, {"name": "sidecar"}],
+            "initContainers": [{"name": "init"}]
+        }
+    }));
+    let names = container_names(&p);
+    assert!(names.contains(&"app".to_string()));
+    assert!(names.contains(&"sidecar".to_string()));
+    assert!(names.contains(&"init".to_string()));
+}
+
+#[test]
+fn drainable_pod_skips_daemonset_mirror_and_completed_pods() {
+    let pod = |v| serde_json::from_value::<Pod>(v).unwrap();
+    assert!(drainable_pod(&pod(json!({
+        "metadata": {"name": "web", "namespace": "default"},
+        "status": {"phase": "Running"}
+    }))));
+    assert!(!drainable_pod(&pod(json!({
+        "metadata": {
+            "name": "ds",
+            "ownerReferences": [{"kind": "DaemonSet", "name": "agent", "uid": "ds"}]
+        },
+        "status": {"phase": "Running"}
+    }))));
+    assert!(!drainable_pod(&pod(json!({
+        "metadata": {
+            "name": "static",
+            "annotations": {"kubernetes.io/config.mirror": "mirror"}
+        },
+        "status": {"phase": "Running"}
+    }))));
+    assert!(!drainable_pod(&pod(json!({
+        "metadata": {"name": "done"},
+        "status": {"phase": "Succeeded"}
+    }))));
+}
+
+#[test]
+fn xray_pool_plurals_include_cronjob_chain() {
+    assert_eq!(xray_pool_plurals("cronjob"), &["jobs", "pods"]);
+    assert_eq!(xray_pool_plurals("job"), &["pods"]);
+    assert_eq!(xray_pool_plurals("pod"), &[] as &[&str]);
+    assert_eq!(xray_pool_plurals("deployment"), &["replicasets", "pods"]);
+}
+
+#[test]
+fn xray_emits_cronjob_job_pod_container_chain() {
+    let cron = obj(json!({
+        "apiVersion": "batch/v1",
+        "kind": "CronJob",
+        "metadata": {"name": "backup", "namespace": "default", "uid": "cron-uid"},
+        "status": {"active": [{"name": "backup-1"}]}
+    }));
+    let job = obj(json!({
+        "apiVersion": "batch/v1",
+        "kind": "Job",
+        "metadata": {
+            "name": "backup-1",
+            "namespace": "default",
+            "uid": "job-uid",
+            "ownerReferences": [{
+                "apiVersion": "batch/v1",
+                "kind": "CronJob",
+                "name": "backup",
+                "uid": "cron-uid"
+            }]
+        },
+        "spec": {"completions": 1},
+        "status": {"succeeded": 1}
+    }));
+    let pod = obj(json!({
+        "apiVersion": "v1",
+        "kind": "Pod",
+        "metadata": {
+            "name": "backup-1-pod",
+            "namespace": "default",
+            "uid": "pod-uid",
+            "ownerReferences": [{
+                "apiVersion": "batch/v1",
+                "kind": "Job",
+                "name": "backup-1",
+                "uid": "job-uid"
+            }]
+        },
+        "spec": {"containers": [{"name": "worker"}]},
+        "status": {"phase": "Running"}
+    }));
+    let mut children = std::collections::HashMap::new();
+    children.insert("cron-uid".to_string(), vec![("job".to_string(), job)]);
+    children.insert("job-uid".to_string(), vec![("pod".to_string(), pod)]);
+
+    let mut items = Vec::new();
+    emit_xray("cronjob", &cron, 0, &children, &mut items);
+
+    assert_eq!(items.len(), 4);
+    assert_eq!(items[0].kind, "cronjob");
+    assert_eq!(items[0].name, "backup");
+    assert_eq!(items[0].depth, 0);
+    assert_eq!(items[0].status, "active 1");
+    assert_eq!(items[1].kind, "job");
+    assert_eq!(items[1].name, "backup-1");
+    assert_eq!(items[1].depth, 1);
+    assert_eq!(items[1].status, "1/1");
+    assert_eq!(items[2].kind, "pod");
+    assert_eq!(items[2].name, "backup-1-pod");
+    assert_eq!(items[2].depth, 2);
+    assert_eq!(items[2].status, "Running");
+    assert_eq!(items[3].kind, "container");
+    assert_eq!(items[3].name, "backup-1-pod");
+    assert_eq!(items[3].depth, 3);
+    assert_eq!(items[3].container.as_deref(), Some("worker"));
+}
+
+#[test]
+fn trim_plural_suffix() {
+    assert_eq!(trim_s("deployments"), "deployment");
+    assert_eq!(trim_s("pods"), "pod");
+}

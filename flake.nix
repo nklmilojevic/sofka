@@ -57,6 +57,7 @@
               kind
               fluxcd
               cachix
+              just
               nixpkgs-fmt
               lefthook
               zizmor
