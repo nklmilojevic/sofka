@@ -67,12 +67,41 @@ fn scrollable_scroll_clamps() {
     let mut s = Scrollable {
         title: String::new(),
         lines: vec!["a".into(), "b".into(), "c".into()].into(),
-        scroll: 0,
+        ..Default::default()
     };
     s.scroll_by(100);
     assert_eq!(s.scroll, 2); // last line index
     s.scroll_by(-100);
     assert_eq!(s.scroll, 0);
+}
+
+#[test]
+fn scrollable_hscroll_clamps_to_widest_line() {
+    let mut s = Scrollable {
+        title: String::new(),
+        lines: vec!["short".into(), "a much longer line".into()].into(),
+        ..Default::default()
+    };
+    s.scroll_h(100);
+    assert_eq!(s.hscroll, "a much longer line".len() - 1); // widest line - 1
+    s.scroll_h(-100);
+    assert_eq!(s.hscroll, 0);
+}
+
+#[test]
+fn scrollable_wrap_disables_hscroll_and_resets_offset() {
+    let mut s = Scrollable {
+        title: String::new(),
+        lines: vec!["a much longer line".into()].into(),
+        ..Default::default()
+    };
+    s.scroll_h(5);
+    assert_eq!(s.hscroll, 5);
+    assert!(s.toggle_wrap()); // wrap on
+    assert_eq!(s.hscroll, 0); // snapped back to the left margin
+    s.scroll_h(5); // no-op while wrapping
+    assert_eq!(s.hscroll, 0);
+    assert!(!s.toggle_wrap()); // wrap off again
 }
 
 #[tokio::test]

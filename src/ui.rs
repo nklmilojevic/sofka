@@ -6,7 +6,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{
     Block, BorderType, Borders, Cell, Clear, Gauge, HighlightSpacing, List, ListItem, ListState,
-    Paragraph, Row, Table,
+    Paragraph, Row, Table, Wrap,
 };
 use unicode_width::UnicodeWidthChar;
 
@@ -485,13 +485,19 @@ fn draw_scrollable(
         .range(start..end)
         .map(|l| Line::from(highlight_yaml(l)))
         .collect();
-    let p = Paragraph::new(text).block(
-        Block::default()
-            .borders(Borders::ALL)
-            .border_type(BorderType::Rounded)
-            .border_style(Style::default().fg(accent))
-            .title(Span::styled(format!(" {} ", view.title), theme::title())),
-    );
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(accent))
+        .title(Span::styled(format!(" {} ", view.title), theme::title()));
+    let p = Paragraph::new(text).block(block);
+    // Wrap folds long lines; otherwise honor the horizontal offset so content
+    // past the right edge can be scrolled into view.
+    let p = if view.wrap {
+        p.wrap(Wrap { trim: false })
+    } else {
+        p.scroll((0, view.hscroll.min(u16::MAX as usize) as u16))
+    };
     frame.render_widget(p, area);
 }
 
@@ -1119,13 +1125,17 @@ fn draw_diff(frame: &mut Frame, view: &crate::app::Scrollable, area: Rect) {
             Line::from(Span::styled(l.clone(), Style::default().fg(color)))
         })
         .collect();
-    let p = Paragraph::new(lines).block(
-        Block::default()
-            .borders(Borders::ALL)
-            .border_type(BorderType::Rounded)
-            .border_style(Style::default().fg(theme::peach()))
-            .title(Span::styled(format!(" {} ", view.title), theme::title())),
-    );
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(theme::peach()))
+        .title(Span::styled(format!(" {} ", view.title), theme::title()));
+    let p = Paragraph::new(lines).block(block);
+    let p = if view.wrap {
+        p.wrap(Wrap { trim: false })
+    } else {
+        p.scroll((0, view.hscroll.min(u16::MAX as usize) as u16))
+    };
     frame.render_widget(p, area);
 }
 
@@ -1794,6 +1804,10 @@ fn draw_prompt(frame: &mut Frame, app: &App, area: Rect) {
         )),
         Mode::Logs => {
             let hint = "  /search  s:autoscroll  w:wrap  t:timestamps  x:stop/resume  c:copy  ^s:save  esc:back";
+            Line::from(Span::styled(hint, theme::dim()))
+        }
+        Mode::Detail | Mode::Events | Mode::Diff => {
+            let hint = "  j/k:scroll  h/l:← →  g/G:top/bottom  w:wrap  esc:back";
             Line::from(Span::styled(hint, theme::dim()))
         }
         Mode::FluxMenu => Line::from(Span::styled(

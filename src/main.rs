@@ -212,7 +212,7 @@ async fn snapshot(app: &mut App, rx: &mut mpsc::Receiver<store::Msg>) -> Result<
                         "+  - containerPort: 9090".into(),
                     ]
                     .into(),
-                    scroll: 0,
+                    ..Default::default()
                 };
                 app.mode = app::Mode::Diff;
             }

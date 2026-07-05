@@ -178,6 +178,7 @@ enum PromptKind {
     },
 }
 
+#[derive(Default)]
 pub struct Scrollable {
     pub title: String,
     pub lines: VecDeque<String>,
@@ -185,6 +186,12 @@ pub struct Scrollable {
     /// (100k lines, wrapped) far exceeds `u16`; views that hand this to a
     /// ratatui `Paragraph` clamp at the edge instead.
     pub scroll: usize,
+    /// Horizontal scroll offset in columns, for views (`describe`, events) whose
+    /// lines run past the right edge. Ignored while `wrap` is on.
+    pub hscroll: usize,
+    /// Word-wrap toggle. When on, long lines fold instead of being clipped, and
+    /// horizontal scrolling is disabled.
+    pub wrap: bool,
 }
 
 /// One command-palette suggestion — a built-in command (`:ctx`, `:pulse`), a
@@ -264,15 +271,35 @@ const PALETTE_COMMANDS: &[PaletteCommand] = &[
 
 impl Scrollable {
     fn empty() -> Self {
-        Self {
-            title: String::new(),
-            lines: VecDeque::new(),
-            scroll: 0,
-        }
+        Self::default()
     }
     pub fn scroll_by(&mut self, delta: i32) {
         let max = self.lines.len().saturating_sub(1) as i64;
         self.scroll = (self.scroll as i64 + delta as i64).clamp(0, max) as usize;
+    }
+    /// Scroll horizontally by `delta` columns, clamped to the widest line. A
+    /// no-op while wrapping, since wrapped lines have no off-screen right edge.
+    pub fn scroll_h(&mut self, delta: i32) {
+        if self.wrap {
+            return;
+        }
+        let widest = self
+            .lines
+            .iter()
+            .map(|l| l.chars().count())
+            .max()
+            .unwrap_or(0);
+        let max = widest.saturating_sub(1) as i64;
+        self.hscroll = (self.hscroll as i64 + delta as i64).clamp(0, max) as usize;
+    }
+    /// Toggle word wrap. Turning it on resets the horizontal offset so the view
+    /// snaps back to the left margin. Returns the new state.
+    pub fn toggle_wrap(&mut self) -> bool {
+        self.wrap = !self.wrap;
+        if self.wrap {
+            self.hscroll = 0;
+        }
+        self.wrap
     }
 }
 

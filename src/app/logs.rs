@@ -119,7 +119,7 @@ impl App {
         self.logs.view = Scrollable {
             title,
             lines: VecDeque::new(),
-            scroll: 0,
+            ..Default::default()
         };
         self.logs.follow = true;
         self.logs.filter.clear();
