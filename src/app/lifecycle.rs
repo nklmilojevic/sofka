@@ -1,0 +1,377 @@
+use super::*;
+
+impl App {
+    // ----- navigation ----------------------------------------------------
+
+    /// Switch the active resource kind by user input. Pushes the current view
+    /// so `esc` can return.
+    pub fn switch_kind(&mut self, input: &str) {
+        match self.cluster.resolve(input) {
+            Some(kind) => {
+                // A `:resource` switch is a fresh root view, not a drill-down:
+                // clear the breadcrumb so `esc` doesn't replay command history.
+                self.stack.clear();
+                self.kind_plural = kind.ar.plural.to_lowercase();
+                let title = kind.title();
+                self.kind = Some(kind);
+                self.labels = None;
+                self.fields = None;
+                self.scope_label = None;
+                self.filter.clear();
+                self.reset_sort();
+                // A stale selection from the previous kind (e.g. row 5 on
+                // pods) would otherwise carry over — reset to the top so the
+                // new view always starts with its first row selected.
+                self.table_state.select(Some(0));
+                self.flash = format!("Viewing {title}");
+                self.flash_err = false;
+                self.start_watch();
+            }
+            None => {
+                self.flash = format!("No resource matches '{}'", input.trim());
+                self.flash_err = true;
+            }
+        }
+    }
+
+    pub(super) fn push_frame(&mut self) {
+        if self.kind.is_none() {
+            return;
+        }
+        self.stack.push(Frame {
+            kind: self.kind.clone(),
+            kind_plural: self.kind_plural.clone(),
+            namespace: self.namespace.clone(),
+            labels: self.labels.clone(),
+            fields: self.fields.clone(),
+            filter: self.filter.clone(),
+            scope_label: self.scope_label.clone(),
+            selected: self.table_state.selected(),
+        });
+    }
+
+    pub(super) fn restore(&mut self, f: Frame) {
+        self.kind = f.kind;
+        self.kind_plural = f.kind_plural;
+        self.namespace = f.namespace;
+        self.labels = f.labels;
+        self.fields = f.fields;
+        self.filter = f.filter;
+        self.scope_label = f.scope_label;
+        self.reset_sort();
+        self.table_state.select(f.selected.or(Some(0)));
+    }
+
+    pub(super) fn pop_frame(&mut self) -> bool {
+        if let Some(f) = self.stack.pop() {
+            self.restore(f);
+            self.start_watch();
+            true
+        } else {
+            false
+        }
+    }
+
+    /// (Re)start the watch for the current kind/namespace/selectors.
+    pub fn start_watch(&mut self) {
+        let Some(kind) = self.kind.clone() else {
+            return;
+        };
+        self.generation += 1;
+        self.gen_flag.store(self.generation, Ordering::SeqCst);
+        for t in self.tasks.drain(..) {
+            t.abort();
+        }
+        self.store.clear();
+        self.metrics.clear();
+        self.marked.clear();
+        self.invalidate_rows();
+        if self.table_state.selected().is_none() {
+            self.table_state.select(Some(0));
+        }
+        let handle = self.cluster.spawn_watch(
+            &kind,
+            &self.namespace,
+            self.labels.clone(),
+            self.fields.clone(),
+            self.generation,
+            self.tx.clone(),
+        );
+        self.tasks.push(handle);
+
+        if matches!(self.kind_plural.as_str(), "pods" | "nodes") {
+            self.spawn_metrics_poll();
+        }
+
+        // Refresh RBAC allow-list when the namespace changes.
+        if self.last_rbac_ns.as_deref() != Some(self.namespace.as_str()) {
+            self.last_rbac_ns = Some(self.namespace.clone());
+            self.refresh_rbac();
+        }
+    }
+
+    /// Query SelfSubjectRulesReview for the active namespace to learn which
+    /// resources the user can list, so the palette can hide the rest.
+    pub(super) fn refresh_rbac(&self) {
+        use k8s_openapi::api::authorization::v1::{
+            SelfSubjectRulesReview, SelfSubjectRulesReviewSpec,
+        };
+        let client = self.cluster.client.clone();
+        let tx = self.tx.clone();
+        let genr = self.generation;
+        // Namespace this review is computed for (echoed back so a stale result
+        // from a previous namespace/context is dropped). SelfSubjectRulesReview
+        // needs a concrete namespace, so "" falls back to "default".
+        let current_ns = self.namespace.clone();
+        let review_ns = if current_ns.is_empty() {
+            "default".to_string()
+        } else {
+            current_ns.clone()
+        };
+        tokio::spawn(async move {
+            let review = SelfSubjectRulesReview {
+                spec: SelfSubjectRulesReviewSpec {
+                    namespace: Some(review_ns),
+                },
+                ..Default::default()
+            };
+            let api: Api<SelfSubjectRulesReview> = Api::all(client);
+            let Ok(resp) = api.create(&kube::api::PostParams::default(), &review).await else {
+                return; // can't review → leave palette unfiltered
+            };
+            let Some(status) = resp.status else { return };
+            // On clusters that delegate authorization (e.g. GKE → Google IAM),
+            // the review comes back `incomplete` and can't enumerate what we can
+            // actually access. Filtering on a partial list would wrongly hide
+            // everything, so leave the palette unfiltered in that case.
+            if status.incomplete {
+                return;
+            }
+            let mut allowed = HashSet::new();
+            for rule in status.resource_rules {
+                let can_list = rule.verbs.iter().any(|v| v == "list" || v == "*");
+                if !can_list {
+                    continue;
+                }
+                for res in rule.resources.unwrap_or_default() {
+                    if res == "*" {
+                        allowed.insert("*".to_string());
+                    } else {
+                        // strip subresources like "pods/log"
+                        allowed.insert(res.split('/').next().unwrap_or(&res).to_string());
+                    }
+                }
+            }
+            // Parsed nothing usable → don't hide the whole palette.
+            if allowed.is_empty() {
+                return;
+            }
+            let _ = tx
+                .send(Msg::Rbac {
+                    generation: genr,
+                    ns: current_ns,
+                    allowed,
+                })
+                .await;
+        });
+    }
+
+    /// Whether a resource plural is visible under the current RBAC allow-list.
+    pub(super) fn rbac_visible(&self, plural: &str) -> bool {
+        match &self.rbac_allowed {
+            None => true,
+            Some(set) => set.contains("*") || set.contains(plural),
+        }
+    }
+
+    /// Poll the metrics API every few seconds for the current pods/nodes view.
+    pub(super) fn spawn_metrics_poll(&mut self) {
+        let base = self.kind_plural.clone();
+        let Some(mkind) = self.cluster.resolve(&format!("{base}.metrics.k8s.io")) else {
+            return; // metrics-server not installed
+        };
+        let client = self.cluster.client.clone();
+        let tx = self.tx.clone();
+        let genr = self.generation;
+        let flag = self.gen_flag.clone();
+        let ns = self.namespace.clone();
+        let ar = mkind.ar.clone();
+        let namespaced = mkind.namespaced;
+        let is_node = base == "nodes";
+
+        let handle = tokio::spawn(async move {
+            loop {
+                if flag.load(Ordering::SeqCst) != genr {
+                    break;
+                }
+                let api: Api<DynamicObject> = if namespaced && !ns.is_empty() {
+                    Api::namespaced_with(client.clone(), &ns, &ar)
+                } else {
+                    Api::all_with(client.clone(), &ar)
+                };
+                if let Ok(list) = api.list(&ListParams::default()).await {
+                    let mut data = HashMap::new();
+                    for item in list {
+                        let name = item.metadata.name.clone().unwrap_or_default();
+                        let key = match &item.metadata.namespace {
+                            Some(n) => format!("{n}/{name}"),
+                            None => name,
+                        };
+                        data.insert(key, usage_of(&item, is_node));
+                    }
+                    if tx
+                        .send(Msg::Metrics {
+                            generation: genr,
+                            data,
+                        })
+                        .await
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+                tokio::time::sleep(Duration::from_secs(5)).await;
+            }
+        });
+        self.tasks.push(handle);
+    }
+
+    pub(super) fn bump_generation(&mut self) {
+        self.stop_event_stream();
+        self.generation += 1;
+        self.gen_flag.store(self.generation, Ordering::SeqCst);
+        for t in self.tasks.drain(..) {
+            t.abort();
+        }
+    }
+
+    pub fn handle_msg(&mut self, msg: Msg) {
+        match msg {
+            Msg::Reset { generation } if generation == self.generation => {
+                self.store.clear();
+                self.clear_rows_cache();
+            }
+            Msg::Applied {
+                generation,
+                key,
+                obj,
+            } if generation == self.generation => {
+                self.store.apply(key.clone(), *obj);
+                self.invalidate_row(&key);
+            }
+            Msg::Deleted { generation, key } if generation == self.generation => {
+                self.store.remove(&key);
+                self.invalidate_row(&key);
+            }
+            Msg::Synced { generation } if generation == self.generation => self.store.synced = true,
+            Msg::Error { generation, error } if generation == self.generation => {
+                self.flash = format!("error: {error}");
+                self.flash_err = true;
+            }
+            Msg::LogLines { generation, lines } if generation == self.log_gen => {
+                self.push_log_lines(lines);
+            }
+            Msg::Metrics { generation, data } if generation == self.generation => {
+                let sort_uses_metrics = self
+                    .sort_column
+                    .and_then(|i| self.display_headers().get(i).copied())
+                    .is_some_and(|h| matches!(h, "CPU" | "MEM"));
+                self.metrics = data;
+                if sort_uses_metrics {
+                    self.invalidate_rows();
+                }
+            }
+            Msg::PulseData { generation, data } if generation == self.generation => {
+                self.pulse = data;
+            }
+            Msg::Rbac {
+                generation,
+                ns,
+                allowed,
+            } if generation == self.generation && ns == self.namespace => {
+                self.rbac_allowed = Some(allowed);
+            }
+            Msg::XrayData { generation, items } if generation == self.generation => {
+                let keep = self.xray_state.selected().unwrap_or(0);
+                self.xray_items = items;
+                self.xray_state
+                    .select(Some(keep.min(self.xray_items.len().saturating_sub(1))));
+            }
+            Msg::Detail {
+                generation,
+                title,
+                lines,
+                warn,
+            } if generation == self.generation => {
+                self.detail = Scrollable {
+                    title,
+                    lines: lines.into(),
+                    scroll: 0,
+                };
+                self.mode = Mode::Detail;
+                if let Some(w) = warn {
+                    self.flash_warn(&w);
+                }
+            }
+            Msg::Events {
+                generation,
+                title,
+                lines,
+            } if generation == self.event_gen => {
+                self.detail.title = title;
+                self.detail.lines = lines.into();
+                self.detail.scroll = self
+                    .detail
+                    .scroll
+                    .min(self.detail.lines.len().saturating_sub(1));
+            }
+            Msg::LogsSaved { generation, result } if generation == self.log_gen => match result {
+                Ok(path) => {
+                    self.flash = format!("saved logs → {}", path.display());
+                    self.flash_err = false;
+                }
+                Err(e) => self.flash_warn(&format!("save failed: {e}")),
+            },
+            Msg::ClipboardCopied {
+                generation,
+                copied,
+                success,
+                failure,
+            } if generation == self.generation => {
+                if copied {
+                    self.flash = success;
+                    self.flash_err = false;
+                } else {
+                    self.flash_warn(&failure);
+                }
+            }
+            Msg::Namespaces { generation, list } if generation == self.generation => {
+                // Keep the picker open and preserve the selection if possible.
+                let keep = self.ns_state.selected().unwrap_or(0);
+                self.ns_list = list;
+                self.ns_state
+                    .select(Some(keep.min(self.ns_list.len().saturating_sub(1))));
+            }
+            Msg::Contexts { generation, list } if generation == self.generation => {
+                if list.is_empty() {
+                    self.mode = Mode::Table;
+                    self.flash_warn("no contexts found in kubeconfig");
+                } else {
+                    let cur = self.cluster.context.clone();
+                    let idx = list.iter().position(|c| *c == cur).unwrap_or(0);
+                    self.ctx_list = list;
+                    self.ctx_state.select(Some(idx));
+                }
+            }
+            Msg::ContextSwitched {
+                generation,
+                name,
+                result,
+            } if generation == self.generation => match result {
+                Ok(cluster) => self.apply_context_switch(name, cluster),
+                Err(e) => self.flash_warn(&format!("context switch failed: {e}")),
+            },
+            _ => {} // stale generation, drop
+        }
+    }
+}
