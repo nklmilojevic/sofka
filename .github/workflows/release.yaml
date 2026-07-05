@@ -1,74 +1,47 @@
 name: Release
 
 on:
-  workflow_dispatch:
-    inputs:
-      version:
-        description: "Version to release, e.g. 0.2.0 (no leading v)"
-        required: true
+  release:
+    types: [published]
 
 permissions:
   contents: read
 
+concurrency:
+  group: release-${{ github.event.release.tag_name }}
+  cancel-in-progress: false
+
 jobs:
-  # Bump Cargo.toml/Cargo.lock, commit, and tag. Everything downstream
-  # checks out the resulting tag, so the version bump is what "bumps the
-  # flake" too — flake.nix reads its version straight from Cargo.toml.
-  bump:
+  validate:
     runs-on: ubuntu-latest
-    permissions:
-      contents: write # pushes the bump commit + tag below
     env:
-      VERSION: ${{ inputs.version }}
+      RELEASE_TAG: ${{ github.event.release.tag_name }}
     steps:
-      - name: Validate version
+      - name: Checkout release tag
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+          persist-credentials: false
+
+      - name: Validate tag and Cargo version
         run: |
-          if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
-            echo "::error::'$VERSION' is not a valid semver (e.g. 0.2.0)"
+          version="${RELEASE_TAG#v}"
+          if ! [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::'$RELEASE_TAG' is not a release tag like v0.2.0"
             exit 1
           fi
 
-      - name: Checkout
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-        # persist-credentials stays default (true) — this job pushes below.
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
-
-      - name: Bump Cargo.toml version
-        run: |
-          sed -i "0,/^version = \".*\"/{s/^version = \".*\"/version = \"$VERSION\"/}" Cargo.toml
-          cargo check --quiet # refreshes Cargo.lock's own version entry
-
-      - name: Commit and tag
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add Cargo.toml Cargo.lock
-
-          # Cargo.toml may already be at the requested version (e.g. the
-          # very first release) — that's not an error, just nothing to bump.
-          if git diff --cached --quiet; then
-            echo "Cargo.toml is already at v$VERSION — nothing to bump."
-          else
-            git commit -m "chore(release): v$VERSION"
-            git push origin HEAD:main
-          fi
-
-          # Re-running after a later job failed shouldn't choke on a tag
-          # that's already there from the earlier attempt.
-          if git ls-remote --exit-code --tags origin "refs/tags/v$VERSION" > /dev/null; then
-            echo "Tag v$VERSION already exists on origin — reusing it."
-          else
-            git tag "v$VERSION"
-            git push origin "v$VERSION"
+          cargo_version="$(awk -F'"' '/^version = "/ { print $2; exit }' Cargo.toml)"
+          if [[ "$cargo_version" != "$version" ]]; then
+            echo "::error::Cargo.toml version '$cargo_version' does not match '$RELEASE_TAG'"
+            exit 1
           fi
 
   # Cross-platform release binaries, one native build per target — every
   # target below is the runner's own host, so no cross-compilation toolchain
   # is needed.
   build:
-    needs: bump
+    needs: validate
     strategy:
       fail-fast: false
       matrix:
@@ -83,12 +56,12 @@ jobs:
             target: x86_64-apple-darwin
     runs-on: ${{ matrix.os }}
     env:
-      VERSION: ${{ inputs.version }}
+      RELEASE_TAG: ${{ github.event.release.tag_name }}
     steps:
       - name: Checkout release tag
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
-          ref: v${{ inputs.version }}
+          ref: ${{ env.RELEASE_TAG }}
           persist-credentials: false
 
       - name: Install Rust
@@ -102,13 +75,13 @@ jobs:
           key: ${{ matrix.target }}
 
       - name: Build
-        run: cargo build --release --target ${{ matrix.target }}
+        run: cargo build --release --locked --target ${{ matrix.target }}
 
       - name: Package
         run: |
           bin="target/${{ matrix.target }}/release/sofka"
           strip "$bin"
-          out="sofka-v$VERSION-${{ matrix.target }}.tar.gz"
+          out="sofka-${RELEASE_TAG}-${{ matrix.target }}.tar.gz"
           tar -czf "$out" -C "$(dirname "$bin")" sofka
           echo "ASSET=$out" >> "$GITHUB_ENV"
 
@@ -118,45 +91,33 @@ jobs:
           name: ${{ matrix.target }}
           path: ${{ env.ASSET }}
 
-  # Attach every platform's tarball to one GitHub release.
-  github-release:
-    needs: [bump, build]
+  upload-assets:
+    needs: build
     runs-on: ubuntu-latest
     permissions:
-      contents: write # gh release create
+      contents: write # gh release upload
     env:
-      VERSION: ${{ inputs.version }}
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      RELEASE_TAG: ${{ github.event.release.tag_name }}
     steps:
-      - name: Checkout release tag
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-        with:
-          ref: v${{ inputs.version }}
-          persist-credentials: false
-
       - name: Download all artifacts
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           path: dist
           merge-multiple: true
 
-      - name: Create release
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          gh release create "v$VERSION" dist/*.tar.gz \
-            --title "v$VERSION" \
-            --generate-notes
+      - name: Upload release assets
+        run: gh release upload "$RELEASE_TAG" dist/*.tar.gz --clobber
 
-  # crates.io needs its own license/description polish before this can
-  # actually succeed on a fresh crate — see the README caveat.
   crates-publish:
-    needs: bump
+    needs: upload-assets
     runs-on: ubuntu-latest
     steps:
       - name: Checkout release tag
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
-          ref: v${{ inputs.version }}
+          ref: ${{ github.event.release.tag_name }}
           persist-credentials: false
 
       - name: Install Rust
@@ -165,14 +126,15 @@ jobs:
       - name: Publish to crates.io
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-        run: cargo publish
+        run: cargo publish --locked
 
   # Warms the nkl-sofka Cachix cache for the tagged rev, so `nix build
-  # github:nklmilojevic/sofka?ref=v${{ inputs.version }}` is instant for
-  # anyone (or any flake) consuming this tag afterward.
+  # github:nklmilojevic/sofka?ref=vX.Y.Z` is instant for anyone consuming
+  # this tag afterward.
   nix-cache:
-    needs: bump
+    needs: validate
     strategy:
+      fail-fast: false
       matrix:
         include:
           - os: ubuntu-latest
@@ -186,7 +148,7 @@ jobs:
       - name: Checkout release tag
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
-          ref: v${{ inputs.version }}
+          ref: ${{ github.event.release.tag_name }}
           persist-credentials: false
 
       - name: Setup Nix
