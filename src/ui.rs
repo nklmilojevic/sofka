@@ -98,11 +98,7 @@ fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
     } else {
         app.namespace.clone()
     };
-    let mut kind = app
-        .kind
-        .as_ref()
-        .map(|k| k.title())
-        .unwrap_or_else(|| "—".into());
+    let mut kind = app.resource_title();
     if let Some(scope) = &app.scope_label {
         kind = format!("{kind}  ‹ {scope}");
     }
@@ -382,11 +378,7 @@ fn draw_table(frame: &mut Frame, app: &mut App, area: Rect) {
         })
         .collect();
 
-    let kind_label = app
-        .kind
-        .as_ref()
-        .map(|k| k.ar.plural.clone())
-        .unwrap_or_else(|| "resources".into());
+    let kind_label = app.list_title();
     // k9s title: resource name (teal, bold) then a yellow [count].
     let mut title = vec![
         Span::styled(format!(" {kind_label} "), theme::title()),

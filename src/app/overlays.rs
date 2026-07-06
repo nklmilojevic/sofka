@@ -64,6 +64,13 @@ impl App {
                             self.do_drain_nodes(targets);
                             self.marked.clear();
                         }
+                        ConfirmAction::HelmRollback { ns, name, revision } => {
+                            self.do_helm_rollback(ns, name, revision);
+                        }
+                        ConfirmAction::HelmUninstall { targets } => {
+                            self.do_helm_uninstall(targets);
+                            self.marked.clear();
+                        }
                     }
                 }
                 self.mode = Mode::Table;

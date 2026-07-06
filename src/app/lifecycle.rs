@@ -52,11 +52,79 @@ impl App {
         self.table_state.select(Some(0));
     }
 
+    /// Open the Helm release list (`:helm`): one row per release at its
+    /// latest revision, like `helm list`. Backed by the `secrets` kind
+    /// scoped to Helm's own storage labels/type — see `crate::helm` and the
+    /// `"helm"` dedup case in `rows::ensure_rows_cache`.
+    pub(super) fn open_helm_releases(&mut self) {
+        let Some(secrets) = self.cluster.resolve("secrets") else {
+            self.flash_warn("secrets kind unavailable");
+            return;
+        };
+        self.stack.clear();
+        self.kind = Some(secrets);
+        self.kind_plural = "helm".into();
+        self.labels = Some("owner=helm".into());
+        self.fields = Some("type=helm.sh/release.v1".into());
+        self.scope_label = None;
+        self.filter.clear();
+        self.reset_sort();
+        self.table_state.select(Some(0));
+        self.flash = "Viewing Helm releases".into();
+        self.flash_err = false;
+        // Deliberately not recorded in the `[`/`]` root-view history: that
+        // history replays entries via `cluster.resolve(kind_plural)` +
+        // `set_root_view`, neither of which know about the synthetic "helm"
+        // plural (resolve would fail, and set_root_view would reset it back
+        // to "secrets" even if it didn't) — recording it would produce a
+        // history entry that can't be replayed correctly.
+        self.start_watch();
+    }
+
     pub(super) fn namespace_label(&self) -> String {
         if self.namespace.is_empty() {
             "all namespaces".to_string()
         } else {
             self.namespace.clone()
+        }
+    }
+
+    /// Display name for synthetic views (Helm releases/history), which are
+    /// backed by a real kind (`secrets`) that has nothing to do with what's
+    /// on screen. `None` for ordinary kind-backed views.
+    fn synthetic_title(&self) -> Option<&'static str> {
+        match self.kind_plural.as_str() {
+            "helm" => Some("helm"),
+            "helmhistory" => Some("helm history"),
+            _ => None,
+        }
+    }
+
+    /// The "Resource:" label shown in the header. Usually just `self.kind`'s
+    /// title, but naming synthetic views after `kind_plural` instead keeps
+    /// the header honest about what's actually being browsed.
+    pub fn resource_title(&self) -> String {
+        match self.synthetic_title() {
+            Some(t) => t.to_string(),
+            None => self
+                .kind
+                .as_ref()
+                .map(|k| k.title())
+                .unwrap_or_else(|| "—".into()),
+        }
+    }
+
+    /// The list panel's border title (k9s-style bare plural), with the same
+    /// synthetic-view exception as `resource_title` so the Helm views don't
+    /// leak their backing `secrets` kind.
+    pub fn list_title(&self) -> String {
+        match self.synthetic_title() {
+            Some(t) => t.to_string(),
+            None => self
+                .kind
+                .as_ref()
+                .map(|k| k.ar.plural.clone())
+                .unwrap_or_else(|| "resources".into()),
         }
     }
 

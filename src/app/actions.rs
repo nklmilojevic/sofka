@@ -4,6 +4,13 @@ impl App {
     // ----- actions -------------------------------------------------------
 
     pub(super) fn request_delete(&mut self, force: bool) {
+        // A Helm release row's underlying object is its storage Secret —
+        // deleting that secret directly would corrupt Helm's own bookkeeping.
+        // The actual semantic action is `helm uninstall`.
+        if matches!(self.kind_plural.as_str(), "helm" | "helmhistory") {
+            self.request_helm_uninstall();
+            return;
+        }
         let targets = self.action_targets();
         if targets.is_empty() {
             return;
@@ -949,5 +956,143 @@ impl App {
             argv.push(ctx.to_string());
         }
         argv
+    }
+
+    /// Base argv for a `helm` shell-out, pinned to the active context exactly
+    /// like [`Self::kubectl_base`]. Rollback and uninstall are the only two
+    /// Helm actions sofka can't do natively (see `crate::helm`) — Helm's own
+    /// three-way-merge apply/delete logic is delegated to the real `helm`
+    /// binary rather than reimplemented.
+    pub(super) fn helm_base(&self) -> Vec<String> {
+        let mut argv = vec!["helm".to_string()];
+        if let Some(ctx) = self.cluster.kubectl_context() {
+            argv.push("--kube-context".to_string());
+            argv.push(ctx.to_string());
+        }
+        argv
+    }
+
+    /// Roll back the selected revision's release to it (k9s: `r` in the
+    /// History view). Only ever acts on the single selected row — rolling
+    /// back is not a bulk action.
+    pub(super) fn request_helm_rollback(&mut self) {
+        if self.kind_plural != "helmhistory" {
+            self.flash_warn("rollback applies to a Helm release's revision history");
+            return;
+        }
+        let Some(obj) = self.selected_ref() else {
+            return;
+        };
+        let Some(name) = crate::helm::release_name(obj).map(str::to_string) else {
+            self.flash_warn("not a Helm release secret");
+            return;
+        };
+        let Some(revision) = crate::helm::revision(obj) else {
+            self.flash_warn("could not determine this revision's number");
+            return;
+        };
+        let ns = obj.metadata.namespace.clone().unwrap_or_default();
+        self.confirm_label = format!("Roll back {name} in {ns} to revision {revision}?");
+        self.confirm_action = Some(ConfirmAction::HelmRollback {
+            ns,
+            name,
+            revision: revision.to_string(),
+        });
+        self.mode = Mode::Confirm;
+    }
+
+    pub(super) fn do_helm_rollback(&mut self, ns: String, name: String, revision: String) {
+        let mut argv = self.helm_base();
+        argv.extend([
+            "rollback".to_string(),
+            name.clone(),
+            revision.clone(),
+            "-n".to_string(),
+            ns,
+        ]);
+        self.flash = format!("rolling back {name} to revision {revision}…");
+        self.flash_err = false;
+        let tx = self.tx.clone();
+        let genr = self.generation;
+        // No manual re-watch on success: the live `secrets` watch backing the
+        // helm/helmhistory view picks up the new revision Secret on its own.
+        tokio::spawn(async move {
+            if let Err(e) = run_helm(&argv).await {
+                let _ = tx
+                    .send(Msg::Error {
+                        generation: genr,
+                        error: format!("helm rollback {name} failed: {e}"),
+                    })
+                    .await;
+            }
+        });
+    }
+
+    /// Uninstall the selected (or marked) Helm release(s) (k9s: `ctrl-d` /
+    /// Delete on the release list or its history).
+    pub(super) fn request_helm_uninstall(&mut self) {
+        let targets = self.helm_action_targets();
+        if targets.is_empty() {
+            return;
+        }
+        self.confirm_label = if targets.len() == 1 {
+            format!(
+                "Uninstall Helm release {} in {}? This deletes all its resources.",
+                targets[0].0, targets[0].1
+            )
+        } else {
+            format!(
+                "Uninstall {} Helm releases? This deletes all their resources.",
+                targets.len()
+            )
+        };
+        self.confirm_action = Some(ConfirmAction::HelmUninstall { targets });
+        self.mode = Mode::Confirm;
+    }
+
+    pub(super) fn do_helm_uninstall(&mut self, targets: Vec<(String, String)>) {
+        self.flash = if targets.len() == 1 {
+            format!("uninstalling {}…", targets[0].0)
+        } else {
+            format!("uninstalling {} Helm releases…", targets.len())
+        };
+        self.flash_err = false;
+        let helm_base = self.helm_base();
+        let tx = self.tx.clone();
+        let genr = self.generation;
+        tokio::spawn(async move {
+            for (name, ns) in targets {
+                let mut argv = helm_base.clone();
+                argv.extend(["uninstall".to_string(), name.clone(), "-n".to_string(), ns]);
+                if let Err(e) = run_helm(&argv).await {
+                    let _ = tx
+                        .send(Msg::Error {
+                            generation: genr,
+                            error: format!("helm uninstall {name} failed: {e}"),
+                        })
+                        .await;
+                }
+            }
+        });
+    }
+}
+
+/// Run a `helm` subprocess to completion, following the same
+/// missing-binary/non-zero-exit handling as `describe()`'s `kubectl` shell-out.
+async fn run_helm(argv: &[String]) -> std::result::Result<(), String> {
+    match tokio::process::Command::new(&argv[0])
+        .args(&argv[1..])
+        .output()
+        .await
+    {
+        Ok(out) if out.status.success() => Ok(()),
+        Ok(out) => {
+            let err = String::from_utf8_lossy(&out.stderr);
+            Err(err.lines().next().unwrap_or("error").to_string())
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            Err("helm not found on PATH".to_string())
+        }
+        Err(e) => Err(e.to_string()),
     }
 }

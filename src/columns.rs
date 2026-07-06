@@ -218,6 +218,28 @@ const FLUX_SOURCE_COLUMNS: &[Column] = &[
 
 const DEFAULT_COLUMNS: &[Column] = &[column("NAME", col_name), column("AGE", col_age)];
 
+/// One row per release, at its latest revision — like `helm list`. Backed by
+/// the release storage `Secret`s (see `crate::helm`), not a real discovered
+/// resource kind.
+const HELM_COLUMNS: &[Column] = &[
+    column("NAME", col_helm_name),
+    column("REVISION", col_helm_revision),
+    status_column("STATUS", col_helm_status),
+    column("CHART", col_helm_chart),
+    column("APP VERSION", col_helm_app_version),
+    column("UPDATED", col_helm_updated),
+];
+
+/// Every revision of one release — like `helm history <release>`.
+const HELM_HISTORY_COLUMNS: &[Column] = &[
+    column("REVISION", col_helm_revision),
+    status_column("STATUS", col_helm_status),
+    column("CHART", col_helm_chart),
+    column("APP VERSION", col_helm_app_version),
+    column("DESCRIPTION", col_helm_description),
+    column("UPDATED", col_helm_updated),
+];
+
 fn columns_for(plural: &str) -> &'static [Column] {
     match plural {
         "pods" => POD_COLUMNS,
@@ -244,6 +266,8 @@ fn columns_for(plural: &str) -> &'static [Column] {
         "gitrepositories" | "helmrepositories" | "ocirepositories" | "buckets" => {
             FLUX_SOURCE_COLUMNS
         }
+        "helm" => HELM_COLUMNS,
+        "helmhistory" => HELM_HISTORY_COLUMNS,
         _ => DEFAULT_COLUMNS,
     }
 }
@@ -567,6 +591,55 @@ fn col_flux_source_url(ctx: &CellContext<'_>) -> String {
 
 fn col_flux_suspended(ctx: &CellContext<'_>) -> String {
     bget(ctx.data, &["spec", "suspend"]).to_string()
+}
+
+// A Helm release row's underlying object is the raw storage `Secret`
+// (`ctx.name`/`ctx.obj` are the ugly `sh.helm.release.v1.<release>.v<n>`
+// name), never the release itself — every cell here goes through
+// `crate::helm` instead of `ctx.name`/`ctx.data`.
+
+fn col_helm_name(ctx: &CellContext<'_>) -> String {
+    crate::helm::release_name(ctx.obj)
+        .unwrap_or(ctx.name)
+        .to_string()
+}
+
+fn col_helm_revision(ctx: &CellContext<'_>) -> String {
+    crate::helm::revision(ctx.obj)
+        .map(|v| v.to_string())
+        .unwrap_or_else(|| "-".into())
+}
+
+fn col_helm_status(ctx: &CellContext<'_>) -> String {
+    crate::helm::decode(ctx.obj)
+        .map(|r| r.status)
+        .unwrap_or_else(|| "<invalid>".into())
+}
+
+fn col_helm_chart(ctx: &CellContext<'_>) -> String {
+    match crate::helm::decode(ctx.obj) {
+        Some(r) if !r.chart_name.is_empty() => format!("{}-{}", r.chart_name, r.chart_version),
+        _ => "<unknown>".into(),
+    }
+}
+
+fn col_helm_app_version(ctx: &CellContext<'_>) -> String {
+    crate::helm::decode(ctx.obj)
+        .map(|r| r.app_version)
+        .unwrap_or_default()
+}
+
+fn col_helm_description(ctx: &CellContext<'_>) -> String {
+    crate::helm::decode(ctx.obj)
+        .map(|r| r.description)
+        .unwrap_or_default()
+}
+
+fn col_helm_updated(ctx: &CellContext<'_>) -> String {
+    match crate::helm::decode(ctx.obj).and_then(|r| r.last_deployed_secs) {
+        Some(secs) => humanize((Timestamp::now().as_second() - secs).max(0)),
+        None => "<unknown>".into(),
+    }
 }
 
 // ----- helpers ------------------------------------------------------------

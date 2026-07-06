@@ -138,6 +138,17 @@ enum ConfirmAction {
     },
     /// One or more node names to cordon and drain.
     Drain { targets: Vec<String> },
+    /// Roll a Helm release back to an earlier revision (`helm rollback`) —
+    /// always a single revision, never bulk (mirrors k9s: rollback acts on
+    /// the one selected history row).
+    HelmRollback {
+        ns: String,
+        name: String,
+        revision: String,
+    },
+    /// Uninstall one or more Helm releases (`helm uninstall`), `(name, ns)`
+    /// per release — bulk when marked, like [`ConfirmAction::Delete`].
+    HelmUninstall { targets: Vec<(String, String)> },
 }
 
 /// What the logs view is currently streaming, so it can be re-streamed when
@@ -232,12 +243,17 @@ enum PaletteAction {
     Events,
     PortForwards,
     Skin,
+    Helm,
 }
 
 const PALETTE_COMMANDS: &[PaletteCommand] = &[
     PaletteCommand {
         action: PaletteAction::Ctx,
         names: &["ctx", "context", "contexts"],
+    },
+    PaletteCommand {
+        action: PaletteAction::Helm,
+        names: &["helm", "hm"],
     },
     PaletteCommand {
         action: PaletteAction::Pulse,

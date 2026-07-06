@@ -34,8 +34,53 @@ impl App {
             "pods" => self.open_containers(&obj),
             // enter on a CRD lists its custom resources, not its YAML.
             "customresourcedefinitions" => self.drill_into_crd(&obj),
+            // Helm: release -> every revision, revision -> its values.
+            "helm" => self.drill_into_helm_history(&obj),
+            "helmhistory" => self.open_helm_values(&obj),
             _ => self.open_detail(),
         }
+    }
+
+    /// Drill from an aggregated Helm release row into every revision of that
+    /// release (`helm history`) — re-scopes the same underlying `secrets`
+    /// watch with an added `name=<release>` label filter, narrowed to the
+    /// release's own namespace.
+    pub(super) fn drill_into_helm_history(&mut self, obj: &DynamicObject) {
+        let Some(release) = crate::helm::release_name(obj) else {
+            self.flash_warn("not a Helm release secret");
+            return;
+        };
+        let release = release.to_string();
+        let ns = obj.metadata.namespace.clone().unwrap_or_default();
+        self.push_frame();
+        self.kind_plural = "helmhistory".into();
+        self.namespace = ns;
+        self.labels = Some(format!("owner=helm,name={release}"));
+        self.fields = Some("type=helm.sh/release.v1".into());
+        self.scope_label = Some(format!("helm/{release}"));
+        self.filter.clear();
+        self.reset_sort();
+        self.table_state.select(Some(0));
+        self.flash = format!("↳ {release} history");
+        self.flash_err = false;
+        self.start_watch();
+    }
+
+    /// Enter on a single revision (k9s: History view Enter -> Values): show
+    /// the user-supplied value overrides for that revision.
+    pub(super) fn open_helm_values(&mut self, obj: &DynamicObject) {
+        self.set_return_mode();
+        let Some(rel) = crate::helm::decode(obj) else {
+            self.flash_warn("could not decode this Helm release revision");
+            return;
+        };
+        let yaml = serde_yaml::to_string(&rel.config).unwrap_or_else(|e| format!("# error: {e}"));
+        self.detail = Scrollable {
+            title: format!("{} v{} — values", rel.name, rel.revision),
+            lines: yaml.lines().map(String::from).collect(),
+            ..Default::default()
+        };
+        self.mode = Mode::Detail;
     }
 
     /// Drill from a CustomResourceDefinition row into a listing of that CRD's

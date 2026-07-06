@@ -24,11 +24,15 @@ impl App {
         if self.filter.is_empty() {
             return true;
         }
-        let hay = format!(
-            "{} {}",
-            o.metadata.namespace.as_deref().unwrap_or(""),
+        // Helm rows are backed by the storage Secret, whose own name
+        // (`sh.helm.release.v1.<release>.v<n>`) isn't what a user typing a
+        // filter means — match the release name instead.
+        let name = if matches!(self.kind_plural.as_str(), "helm" | "helmhistory") {
+            crate::helm::release_name(o).unwrap_or_default()
+        } else {
             o.metadata.name.as_deref().unwrap_or("")
-        );
+        };
+        let hay = format!("{} {}", o.metadata.namespace.as_deref().unwrap_or(""), name);
         self.matcher.fuzzy_match(&hay, &self.filter).is_some()
     }
 
@@ -53,11 +57,19 @@ impl App {
 
         let headers = self.display_headers();
         let sort_header = self.sort_column.and_then(|i| headers.get(i).copied());
+        // The aggregated Helm release list (`helm list` semantics) shows only
+        // the latest revision per release; `helmhistory` (one release's full
+        // history) shows every revision, so it skips this.
+        let helm_latest = (self.kind_plural == "helm").then(|| self.helm_latest_revision_keys());
         // (primary sort key, (ns, name) tiebreak, store key)
         let mut entries: Vec<(SortKey, (String, String), String)> = self
             .store
             .iter()
             .filter(|(_, o)| self.matches_filter(o))
+            .filter(|(k, _)| match &helm_latest {
+                Some(keep) => keep.contains(*k),
+                None => true,
+            })
             .map(|(k, o)| {
                 let primary = match sort_header {
                     Some(h) => self.column_sort_key(o, h),
@@ -81,6 +93,26 @@ impl App {
         });
         cache.keys = entries.into_iter().map(|(_, _, k)| k).collect();
         cache.dirty = false;
+    }
+
+    /// Store keys of the highest-revision secret per (namespace, release) —
+    /// label-based (no gunzip/decode needed), used to dedup the aggregated
+    /// Helm release list down to one row per release, like `helm list`.
+    fn helm_latest_revision_keys(&self) -> HashSet<String> {
+        let mut latest: HashMap<(String, String), (i64, String)> = HashMap::new();
+        for (k, o) in self.store.iter() {
+            let Some(name) = crate::helm::release_name(o) else {
+                continue;
+            };
+            let ns = o.metadata.namespace.clone().unwrap_or_default();
+            let ver = crate::helm::revision(o).unwrap_or(0);
+            let key = (ns, name.to_string());
+            let better = latest.get(&key).is_none_or(|(v, _)| ver > *v);
+            if better {
+                latest.insert(key, (ver, k.clone()));
+            }
+        }
+        latest.into_values().map(|(_, k)| k).collect()
     }
 
     /// Display-ordered, filtered row count, backed by the same cache as
@@ -183,6 +215,20 @@ impl App {
             "AGE" => SortKey::Num(crate::columns::age_secs(o).unwrap_or(i64::MAX) as f64),
             "CPU" => SortKey::Num(self.metrics_for(o).0 as f64),
             "MEM" => SortKey::Num(self.metrics_for(o).1 as f64),
+            // Humanized time cells ("5d23h") must sort by the underlying
+            // timestamp, never the rendered string. Negated epoch seconds so
+            // ascending = most recent first, matching AGE; unknowns last.
+            "UPDATED" => SortKey::Num(
+                crate::helm::decode(o)
+                    .and_then(|r| r.last_deployed_secs)
+                    .map(|s| -(s as f64))
+                    .unwrap_or(f64::INFINITY),
+            ),
+            // Helm revisions are plain integers; flux REVISION cells (shas,
+            // `main@sha1:…`) stay text.
+            "REVISION" if matches!(self.kind_plural.as_str(), "helm" | "helmhistory") => {
+                SortKey::Num(crate::helm::revision(o).unwrap_or(0) as f64)
+            }
             _ => {
                 let base = crate::columns::headers(&self.kind_plural);
                 match base.iter().position(|h| *h == header) {
@@ -295,6 +341,27 @@ impl App {
         let to_pair = |o: &DynamicObject| {
             (
                 o.metadata.name.clone().unwrap_or_default(),
+                o.metadata.namespace.clone().unwrap_or_default(),
+            )
+        };
+        if self.marked.is_empty() {
+            return self.selected_ref().map(to_pair).into_iter().collect();
+        }
+        self.rows()
+            .iter()
+            .filter(|o| self.marked.contains(&row_key(o)))
+            .map(|o| to_pair(o))
+            .collect()
+    }
+
+    /// Same as [`Self::action_targets`], but resolves each Helm storage
+    /// `Secret` to its release name via label instead of the raw
+    /// `sh.helm.release.v1.<release>.v<n>` secret name — `helm`/
+    /// `helmhistory` rows only.
+    pub(super) fn helm_action_targets(&self) -> Vec<(String, String)> {
+        let to_pair = |o: &DynamicObject| {
+            (
+                crate::helm::release_name(o).unwrap_or_default().to_string(),
                 o.metadata.namespace.clone().unwrap_or_default(),
             )
         };
