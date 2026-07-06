@@ -1466,7 +1466,10 @@ fn draw_containers(frame: &mut Frame, app: &mut App, area: Rect) {
         50,
         60,
         items,
-        Span::styled(" Containers (⏎ logs · p previous) ", theme::title()),
+        Span::styled(
+            " Containers (⏎ logs · p previous · s shell) ",
+            theme::title(),
+        ),
         &mut app.container_state,
     );
 }
