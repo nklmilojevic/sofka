@@ -245,11 +245,20 @@ impl App {
         });
     }
 
-    /// Install a freshly-connected cluster from a context switch.
+    /// Install a freshly-connected cluster from a context switch. Config is
+    /// re-resolved so per-cluster/per-context overrides (aliases, plugins,
+    /// skin, defaults) follow the new context.
     pub(super) fn apply_context_switch(&mut self, name: String, mut cluster: Box<Cluster>) {
+        let resolved = self.config.resolve(&name, &cluster.cluster_name);
+        self.user_aliases = resolved.config.aliases;
+        self.plugins = resolved.config.plugins;
+        self.skin_colors = resolved.config.skin.colors;
         cluster.add_aliases(&self.user_aliases);
         self.bump_generation();
-        self.namespace = cluster.default_namespace.clone();
+        self.namespace = resolved
+            .config
+            .default_namespace
+            .unwrap_or_else(|| cluster.default_namespace.clone());
         self.cluster = *cluster;
         self.stack.clear();
         // View history references the old cluster's kinds and namespaces.
@@ -267,9 +276,17 @@ impl App {
         // Permissions differ per cluster — drop the old allow-list.
         self.rbac_allowed = None;
         self.last_rbac_ns = None;
-        self.apply_context_skin(&name);
+        crate::theme::set_background(resolved.config.skin.background);
+        self.apply_context_skin(resolved.skin_override);
         self.flash = format!("context: {name}");
         self.flash_err = false;
-        self.switch_kind("pods");
+        if let Some(w) = resolved.warnings.first() {
+            self.flash_warn(w);
+        }
+        let kind = resolved
+            .config
+            .default_resource
+            .unwrap_or_else(|| "pods".into());
+        self.switch_kind(&kind);
     }
 }

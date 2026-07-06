@@ -54,7 +54,7 @@ struct Args {
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
-    let cfg = config::Config::load();
+    let loader = config::ConfigLoader::load();
 
     // Connect before taking over the terminal so errors are readable.
     eprintln!("Connecting to cluster…");
@@ -65,12 +65,19 @@ async fn main() -> Result<()> {
             std::process::exit(1);
         }
     };
+    // Per-cluster/per-context override files merge over the base config.
+    let resolved = loader.resolve(&cluster.context, &cluster.cluster_name);
+    for w in &resolved.warnings {
+        eprintln!("warning: {w}");
+    }
+    let cfg = resolved.config;
     cluster.add_aliases(&cfg.aliases);
 
     if args.check {
         println!("✓ connected");
         println!("  context:    {}", cluster.context);
-        println!("  cluster:    {}", cluster.cluster_url);
+        println!("  cluster:    {}", cluster.cluster_name);
+        println!("  server:     {}", cluster.cluster_url);
         println!("  namespace:  {}", cluster.default_namespace);
         println!(
             "  kinds:      {} resource types discovered",
@@ -95,19 +102,20 @@ async fn main() -> Result<()> {
 
     // Install the initial color skin before anything renders. Auto-detecting
     // dark/light mode queries the terminal directly, so it must run before
-    // ratatui switches to the alternate screen. A `[skin.contexts]` override
-    // for the starting context wins over the global/auto-detected skin.
-    let session_skin = cfg
+    // ratatui switches to the alternate screen. A skin named by an override
+    // file for the starting context wins over the base/auto-detected skin,
+    // but only the base skin becomes the session skin, so switching away
+    // from an overridden context falls back correctly.
+    let session_skin = loader
+        .resolve("", "")
+        .config
         .skin
         .name
-        .clone()
         .unwrap_or_else(|| theme::auto_skin_name().to_string());
-    let initial_skin = cfg
-        .skin
-        .contexts
-        .get(&cluster.context)
-        .unwrap_or(&session_skin)
-        .clone();
+    let initial_skin = resolved
+        .skin_override
+        .clone()
+        .unwrap_or_else(|| session_skin.clone());
     theme::init(theme::resolve_skin(Some(&initial_skin), &cfg.skin.colors));
     theme::set_background(cfg.skin.background);
 
@@ -119,7 +127,7 @@ async fn main() -> Result<()> {
     app.user_aliases = cfg.aliases.clone();
     app.plugins = cfg.plugins.clone();
     app.skin_colors = cfg.skin.colors.clone();
-    app.context_skins = cfg.skin.contexts.clone();
+    app.config = loader;
     app.session_skin = Some(session_skin);
     if args.all_namespaces {
         app.namespace = String::new();
