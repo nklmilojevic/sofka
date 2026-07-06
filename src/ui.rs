@@ -1287,7 +1287,7 @@ fn draw_help(frame: &mut Frame, area: Rect) {
         bind("space", "mark/unmark row for bulk actions (esc clears)"),
         bind(
             "ctrl-d · ctrl-k",
-            "delete · force-delete (f toggles in confirm)",
+            "delete · force-delete (in confirm: f force, c cascade)",
         ),
         Line::from(""),
         Line::from(Span::styled("  Logs view", theme::title())),
@@ -1870,9 +1870,13 @@ enum ConfirmHintStyle {
 
 fn confirm_action_hint(allows_force: bool, style: ConfirmHintStyle) -> &'static str {
     match (allows_force, style) {
-        (true, ConfirmHintStyle::Popup) => "  [y] confirm    [f] toggle force    [n] cancel",
+        (true, ConfirmHintStyle::Popup) => {
+            "  [y] confirm    [f] toggle force    [c] cascade    [n] cancel"
+        }
         (false, ConfirmHintStyle::Popup) => "  [y] confirm    [n] cancel",
-        (true, ConfirmHintStyle::Prompt) => "  y/enter: confirm   f: toggle force   n/esc: cancel",
+        (true, ConfirmHintStyle::Prompt) => {
+            "  y/enter: confirm   f: toggle force   c: cascade   n/esc: cancel"
+        }
         (false, ConfirmHintStyle::Prompt) => "  y/enter: confirm   n/esc: cancel",
     }
 }
@@ -2089,6 +2093,10 @@ mod tests {
         assert!(confirm_action_hint(true, ConfirmHintStyle::Prompt).contains("toggle force"));
         assert!(!confirm_action_hint(false, ConfirmHintStyle::Popup).contains("toggle force"));
         assert!(!confirm_action_hint(false, ConfirmHintStyle::Prompt).contains("toggle force"));
+        assert!(confirm_action_hint(true, ConfirmHintStyle::Popup).contains("cascade"));
+        assert!(confirm_action_hint(true, ConfirmHintStyle::Prompt).contains("cascade"));
+        assert!(!confirm_action_hint(false, ConfirmHintStyle::Popup).contains("cascade"));
+        assert!(!confirm_action_hint(false, ConfirmHintStyle::Prompt).contains("cascade"));
     }
 
     #[test]

@@ -56,8 +56,12 @@ impl App {
             KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
                 if let Some(action) = self.confirm_action.take() {
                     match action {
-                        ConfirmAction::Delete { targets, force } => {
-                            self.do_delete(targets, force);
+                        ConfirmAction::Delete {
+                            targets,
+                            force,
+                            cascade,
+                        } => {
+                            self.do_delete(targets, force, cascade);
                             self.marked.clear();
                         }
                         ConfirmAction::Drain { targets } => {
@@ -77,14 +81,36 @@ impl App {
             }
             KeyCode::Char('f') | KeyCode::Char('F') => {
                 let update = match self.confirm_action.as_mut() {
-                    Some(ConfirmAction::Delete { targets, force }) => {
+                    Some(ConfirmAction::Delete {
+                        targets,
+                        force,
+                        cascade,
+                    }) => {
                         *force = !*force;
-                        Some((targets.clone(), *force))
+                        Some((targets.clone(), *force, *cascade))
                     }
                     _ => None,
                 };
-                if let Some((targets, force)) = update {
-                    self.confirm_label = delete_confirm_label(&self.kind_plural, &targets, force);
+                if let Some((targets, force, cascade)) = update {
+                    self.confirm_label =
+                        delete_confirm_label(&self.kind_plural, &targets, force, cascade);
+                }
+            }
+            KeyCode::Char('c') | KeyCode::Char('C') => {
+                let update = match self.confirm_action.as_mut() {
+                    Some(ConfirmAction::Delete {
+                        targets,
+                        force,
+                        cascade,
+                    }) => {
+                        *cascade = cascade.next();
+                        Some((targets.clone(), *force, *cascade))
+                    }
+                    _ => None,
+                };
+                if let Some((targets, force, cascade)) = update {
+                    self.confirm_label =
+                        delete_confirm_label(&self.kind_plural, &targets, force, cascade);
                 }
             }
             _ => {
