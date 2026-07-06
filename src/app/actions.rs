@@ -4,6 +4,9 @@ impl App {
     // ----- actions -------------------------------------------------------
 
     pub(super) fn request_delete(&mut self, force: bool) {
+        if self.deny_readonly() {
+            return;
+        }
         // A Helm release row's underlying object is its storage Secret —
         // deleting that secret directly would corrupt Helm's own bookkeeping.
         // The actual semantic action is `helm uninstall`.
@@ -88,6 +91,9 @@ impl App {
     }
 
     pub(super) fn request_cordon(&mut self, unschedulable: bool) {
+        if self.deny_readonly() {
+            return;
+        }
         if self.kind_plural != "nodes" {
             self.flash_warn("cordon/uncordon applies to nodes");
             return;
@@ -127,6 +133,9 @@ impl App {
     }
 
     pub(super) fn request_drain(&mut self) {
+        if self.deny_readonly() {
+            return;
+        }
         if self.kind_plural != "nodes" {
             self.flash_warn("drain applies to nodes");
             return;
@@ -235,6 +244,9 @@ impl App {
     }
 
     pub(super) fn request_attach(&mut self) {
+        if self.deny_readonly() {
+            return;
+        }
         if self.kind_plural != "pods" {
             self.flash_warn("attach is only available for pods");
             return;
@@ -432,6 +444,9 @@ impl App {
 
     /// Rollout-restart a workload by stamping the template annotation (k9s `r`).
     pub(super) fn request_restart(&mut self) {
+        if self.deny_readonly() {
+            return;
+        }
         let Some(obj) = self.selected_ref() else {
             return;
         };
@@ -453,6 +468,9 @@ impl App {
 
     /// Open the Set-Image picker for the selected workload/pod (k9s `i`).
     pub(super) fn request_set_image(&mut self) {
+        if self.deny_readonly() {
+            return;
+        }
         let is_pod = self.kind_plural == "pods";
         let workload = matches!(
             self.kind_plural.as_str(),
@@ -558,6 +576,9 @@ impl App {
     }
 
     pub(super) fn request_edit(&mut self) {
+        if self.deny_readonly() {
+            return;
+        }
         let Some(obj) = self.selected_ref() else {
             return;
         };
@@ -572,6 +593,9 @@ impl App {
     }
 
     pub(super) fn request_exec(&mut self) {
+        if self.deny_readonly() {
+            return;
+        }
         if self.kind_plural != "pods" {
             self.flash_warn("shell is only available for pods");
             return;
@@ -587,6 +611,9 @@ impl App {
     /// Shell into `pod`, optionally pinned to `container` (k9s-style `-c`).
     /// Shared by the plain pod-row shell (`s`) and the per-container picker.
     pub(super) fn exec_into(&mut self, ns: String, pod: String, container: Option<String>) {
+        if self.deny_readonly() {
+            return;
+        }
         let mut argv = self.kubectl_base();
         argv.extend(["exec".into(), "-it".into(), "-n".into(), ns, pod]);
         if let Some(c) = container {
@@ -603,6 +630,9 @@ impl App {
     }
 
     pub(super) fn request_scale(&mut self) {
+        if self.deny_readonly() {
+            return;
+        }
         if !matches!(
             self.kind_plural.as_str(),
             "deployments" | "statefulsets" | "replicasets"
@@ -811,6 +841,9 @@ impl App {
     /// toggle — suspending something always takes an explicit, visible
     /// choice (`j`/`k` + Enter) rather than one accidental keystroke.
     pub(super) fn request_flux_menu(&mut self) {
+        if self.deny_readonly() {
+            return;
+        }
         if !FLUX_SUSPENDABLE_KINDS.contains(&self.kind_plural.as_str()) {
             self.flash_warn("suspend/resume only applies to Flux resources (ks/hr/git-, helm-, oci-repos, buckets, image automation, alerts, receivers)");
             return;
@@ -901,6 +934,9 @@ impl App {
     /// Force an immediate External Secrets Operator refresh on the marked rows
     /// (or the current selection), matching the k9s external-secrets plugin.
     pub(super) fn request_refresh_es(&mut self) {
+        if self.deny_readonly() {
+            return;
+        }
         if !EXTERNAL_SECRET_KINDS.contains(&self.kind_plural.as_str()) {
             self.flash_warn(
                 "refresh only applies to external secrets (externalsecrets, pushsecrets)",
@@ -937,6 +973,15 @@ impl App {
         );
     }
 
+    /// Refuse a mutating action in read-only mode: flashes a warning and
+    /// returns true when the caller must bail out.
+    pub(super) fn deny_readonly(&mut self) -> bool {
+        if self.readonly {
+            self.flash_warn("read-only mode — action disabled");
+        }
+        self.readonly
+    }
+
     pub(super) fn flash_warn(&mut self, msg: &str) {
         self.flash = msg.to_string();
         self.flash_err = true;
@@ -971,6 +1016,9 @@ impl App {
     /// History view). Only ever acts on the single selected row — rolling
     /// back is not a bulk action.
     pub(super) fn request_helm_rollback(&mut self) {
+        if self.deny_readonly() {
+            return;
+        }
         if self.kind_plural != "helmhistory" {
             self.flash_warn("rollback applies to a Helm release's revision history");
             return;
@@ -1026,6 +1074,9 @@ impl App {
     /// Uninstall the selected (or marked) Helm release(s) (k9s: `ctrl-d` /
     /// Delete on the release list or its history).
     pub(super) fn request_helm_uninstall(&mut self) {
+        if self.deny_readonly() {
+            return;
+        }
         let targets = self.helm_action_targets();
         if targets.is_empty() {
             return;

@@ -43,6 +43,12 @@ pub struct Config {
     pub default_namespace: Option<String>,
     /// Resource to open on launch when none is given on the CLI.
     pub default_resource: Option<String>,
+    /// Disable every action that could modify the cluster (or run arbitrary
+    /// commands): delete, edit, scale, restart, set-image, cordon/drain,
+    /// Flux suspend/resume/reconcile, Helm rollback/uninstall, shell/attach,
+    /// and plugins. Overridden by the `--readonly`/`--write` CLI flags. Set
+    /// it in a per-cluster/per-context override file to lock down just prod.
+    pub readonly: bool,
     /// Custom alias -> canonical resource (plural/kind) mappings.
     pub aliases: HashMap<String, String>,
     /// User-defined shell-out plugins bound to keys.
@@ -147,7 +153,7 @@ impl ConfigLoader {
         loader
     }
 
-    fn from_dir(dir: Option<PathBuf>) -> Self {
+    pub(crate) fn from_dir(dir: Option<PathBuf>) -> Self {
         let base = dir.as_ref().and_then(|d| {
             let text = std::fs::read_to_string(d.join("config.toml")).ok()?;
             parse_doc(&text).ok()
@@ -390,7 +396,7 @@ mod tests {
             dir.join("clusters")
                 .join("prod-cluster")
                 .join("config.toml"),
-            "[skin]\nname = \"catppuccin-latte\"\nbackground = true\n",
+            "readonly = true\n[skin]\nname = \"catppuccin-latte\"\nbackground = true\n",
         )
         .unwrap();
         std::fs::write(
@@ -407,6 +413,7 @@ mod tests {
         assert_eq!(plain.config.default_namespace.as_deref(), Some("default"));
         assert_eq!(plain.config.skin.name.as_deref(), Some("gruvbox-dark"));
         assert_eq!(plain.skin_override, None);
+        assert!(!plain.config.readonly);
 
         // Cluster + context overrides stack over the base.
         let prod = loader.resolve("prod-ctx", "prod-cluster");
@@ -415,6 +422,7 @@ mod tests {
         assert!(prod.config.skin.background);
         assert_eq!(prod.config.aliases.len(), 2);
         assert_eq!(prod.skin_override.as_deref(), Some("catppuccin-latte"));
+        assert!(prod.config.readonly);
 
         // Empty cluster name (in-cluster): overrides skipped entirely.
         let bare = loader.resolve("prod-ctx", "");

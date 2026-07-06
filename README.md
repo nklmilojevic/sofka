@@ -180,6 +180,8 @@ which point this step won't be necessary.
 ```toml
 default_namespace = "kube-system"
 default_resource  = "deployments"
+readonly          = false  # true disables every mutating action (delete, edit,
+                           # scale, shell, plugins, …); --readonly/--write win
 
 [aliases]
 dep = "deployments"
@@ -228,7 +230,9 @@ than letters, digits, `.`, `_`, `-` replaced by `-`, so an EKS context
 `arn-aws-eks-eu-west-1-123456789-cluster-prod`.
 
 ```toml
-# clusters/prod-cluster/config.toml — make prod unmistakable
+# clusters/prod-cluster/config.toml — make prod unmistakable and hands-off
+readonly = true
+
 [skin]
 name = "catppuccin-latte"
 background = true
@@ -252,12 +256,20 @@ These double as CI smoke tests.
 ## Usage
 
 ```
-sofka [RESOURCE] [-n NAMESPACE] [-A]
+sofka [RESOURCE] [-n NAMESPACE] [-A] [--readonly | --write]
 
   RESOURCE          resource to open (alias/plural/kind), default: pods
   -n, --namespace   namespace to start in
   -A, --all-namespaces
+  --readonly        disable every mutating action for the session
+  --write           force write mode, overriding any config `readonly`
 ```
+
+`--readonly`/`--write` pin the mode for the whole session, winning over the
+config `readonly` option — including per-cluster/per-context overrides — on
+every `:ctx` switch. Without a flag, switching into a context whose config
+sets `readonly = true` enables read-only mode (shown as `[read-only]` in the
+header) and switching away restores write mode.
 
 ### Keys
 

@@ -160,7 +160,9 @@ impl App {
         }
     }
 
-    /// Run a config-defined plugin bound to `c` if it applies to the current kind.
+    /// Run a config-defined plugin bound to `c` if it applies to the current
+    /// kind. Blocked in read-only mode: plugins shell out to arbitrary
+    /// commands, so we can't know they won't mutate the cluster.
     pub(super) fn try_plugin(&mut self, c: char) {
         let Some(plugin) = self
             .plugins
@@ -173,6 +175,9 @@ impl App {
         else {
             return;
         };
+        if self.deny_readonly() {
+            return;
+        }
         let Some(obj) = self.selected_ref() else {
             self.flash_warn("no selection for plugin");
             return;

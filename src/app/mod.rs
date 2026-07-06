@@ -522,6 +522,11 @@ pub struct App {
     /// Skin for contexts without an override: config `skin.name` (or the
     /// auto-detected default), replaced by a manual `:skin` choice.
     pub session_skin: Option<String>,
+    /// Effective read-only mode: mutating actions are refused with a flash.
+    pub readonly: bool,
+    /// Session-wide pin from `--readonly`/`--write`; wins over any config
+    /// `readonly` value on every context switch. `None` = config decides.
+    pub readonly_override: Option<bool>,
 
     /// Current images aligned with `container_list`, for the Set-Image picker.
     pub image_values: Vec<String>,
@@ -619,6 +624,8 @@ impl App {
             skin_colors: HashMap::new(),
             config: crate::config::ConfigLoader::default(),
             session_skin: None,
+            readonly: false,
+            readonly_override: None,
             image_values: Vec::new(),
             image_target: None,
             metrics: HashMap::new(),
