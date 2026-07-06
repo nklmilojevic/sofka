@@ -196,9 +196,6 @@ background = true        # fill views with the skin's own background swatch
 [skin.colors]            # optional per-swatch overrides
 red = "#fb4934"
 
-[skin.contexts]          # per-context skin overrides — e.g. prod goes light
-prod = "catppuccin-latte"
-
 [[plugins]]
 key = "g"
 name = "argocd-sync"
@@ -206,6 +203,41 @@ command = "argocd"
 args = ["app", "sync", "$NAME"]
 scopes = ["deployments"]   # omit for all resources
 ```
+
+### Per-cluster / per-context overrides
+
+Any option can be overridden for a specific cluster or kubeconfig context,
+k9s-style. Drop partial config files under `clusters/`:
+
+```
+~/.config/sofka/
+├── config.toml                # base, applies everywhere
+└── clusters/
+    └── prod-cluster/          # kubeconfig *cluster* name
+        ├── config.toml        # every context on prod-cluster
+        └── prod-admin/        # kubeconfig *context* name
+            └── config.toml    # that context only
+```
+
+Overrides merge over the base config (cluster level first, then context
+level): tables like `[aliases]` and `[skin.colors]` merge key-by-key,
+everything else — strings, booleans, arrays like `[[plugins]]` — replaces the
+base value. Directory names are the kubeconfig names with any character other
+than letters, digits, `.`, `_`, `-` replaced by `-`, so an EKS context
+`arn:aws:eks:eu-west-1:123456789:cluster/prod` becomes the directory
+`arn-aws-eks-eu-west-1-123456789-cluster-prod`.
+
+```toml
+# clusters/prod-cluster/config.toml — make prod unmistakable
+[skin]
+name = "catppuccin-latte"
+background = true
+```
+
+A skin named in an override pins that context's colors; contexts without one
+keep the session skin (config `skin.name`, the auto-detected default, or your
+last `:skin` choice). Overrides are re-read on every `:ctx` switch, so edits
+apply without restarting.
 
 ### Headless modes (no TTY required)
 

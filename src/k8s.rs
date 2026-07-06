@@ -37,6 +37,9 @@ impl Kind {
 pub struct Cluster {
     pub client: Client,
     pub context: String,
+    /// Kubeconfig cluster name referenced by `context` (empty when unknown,
+    /// e.g. in-cluster). Keys per-cluster config overrides.
+    pub cluster_name: String,
     pub cluster_url: String,
     pub default_namespace: String,
     /// Context name to pass to `kubectl` shell-outs (`--context`). `None` when
@@ -84,9 +87,11 @@ impl Cluster {
         let default_namespace = config.default_namespace.clone();
         let client = Client::try_from(config).context("building kube client")?;
 
+        let cluster_name = cluster_name_for(&context).unwrap_or_default();
         let mut cluster = Self {
             client,
             context,
+            cluster_name,
             cluster_url,
             default_namespace,
             cli_context,
@@ -279,6 +284,18 @@ fn current_context_name() -> Option<String> {
     kubeconfig.current_context
 }
 
+/// Kubeconfig cluster name a context points at, when the kubeconfig knows it.
+fn cluster_name_for(context: &str) -> Option<String> {
+    let kubeconfig = kube::config::Kubeconfig::read().ok()?;
+    kubeconfig
+        .contexts
+        .iter()
+        .find(|c| c.name == context)?
+        .context
+        .as_ref()
+        .map(|c| c.cluster.clone())
+}
+
 /// Built-in short aliases -> canonical plural. Mirrors common k9s/kubectl ones.
 pub const ALIASES: &[(&str, &str)] = &[
     ("po", "pods"),
@@ -395,6 +412,7 @@ impl Cluster {
         Self {
             client,
             context: "test".into(),
+            cluster_name: "test-cluster".into(),
             cluster_url: "https://127.0.0.1:6443".into(),
             default_namespace: "default".into(),
             cli_context: Some("test".into()),

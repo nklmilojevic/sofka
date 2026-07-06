@@ -516,9 +516,9 @@ pub struct App {
     pub skin_state: ListState,
     /// Per-swatch color overrides from config, re-applied when switching skins.
     pub skin_colors: HashMap<String, String>,
-    /// Per-context skin overrides from config (`[skin.contexts]`), so e.g. the
-    /// prod context can render light while everything else stays dark.
-    pub context_skins: HashMap<String, String>,
+    /// Config loader kept for the session so `:ctx` switches can re-resolve
+    /// per-cluster/per-context override files against the new context.
+    pub config: crate::config::ConfigLoader,
     /// Skin for contexts without an override: config `skin.name` (or the
     /// auto-detected default), replaced by a manual `:skin` choice.
     pub session_skin: Option<String>,
@@ -617,7 +617,7 @@ impl App {
                 .collect(),
             skin_state: ListState::default(),
             skin_colors: HashMap::new(),
-            context_skins: HashMap::new(),
+            config: crate::config::ConfigLoader::default(),
             session_skin: None,
             image_values: Vec::new(),
             image_target: None,

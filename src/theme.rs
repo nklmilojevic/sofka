@@ -334,8 +334,8 @@ static BACKGROUND: AtomicBool = AtomicBool::new(false);
 /// Enable (or disable) painting the palette's `base` swatch as the app
 /// background. Off by default, so sofka inherits the terminal's — possibly
 /// transparent — background. On, every view is filled with the skin's own
-/// background color: pair it with `[skin.contexts]` to make e.g. a light prod
-/// skin visibly glow.
+/// background color: pair it with a per-context skin override to make e.g. a
+/// light prod skin visibly glow.
 pub fn set_background(on: bool) {
     BACKGROUND.store(on, Ordering::Relaxed);
 }
