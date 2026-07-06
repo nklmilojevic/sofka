@@ -5,6 +5,8 @@
 A Kubernetes TUI, reimagined in Rust - built on [`kube-rs`](https://kube.rs) and
 [`ratatui`](https://ratatui.rs), async-first from the ground up.
 
+<br clear="right">
+
 ## Screenshots
 
 | Pod list + command palette                                                | Namespace switcher                                                          | Flux suspend/resume/reconcile menu                                                      |
