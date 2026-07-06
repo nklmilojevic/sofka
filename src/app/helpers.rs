@@ -189,6 +189,19 @@ pub(super) fn xray_pool_plurals(root_kind: &str) -> &'static [&'static str] {
     }
 }
 
+impl App {
+    /// Whether the current kind supports the Flux suspend/resume menu (`t`).
+    pub fn flux_suspendable(&self) -> bool {
+        FLUX_SUSPENDABLE_KINDS.contains(&self.kind_plural.as_str())
+    }
+
+    /// Whether the current kind is an External Secrets resource that honours
+    /// the force-sync annotation (`r`).
+    pub fn external_secret_kind(&self) -> bool {
+        EXTERNAL_SECRET_KINDS.contains(&self.kind_plural.as_str())
+    }
+}
+
 /// Columns whose cell is a count/number and should sort numerically.
 pub(super) fn is_numeric_header(header: &str) -> bool {
     matches!(

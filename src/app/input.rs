@@ -143,7 +143,7 @@ impl App {
                     "deployments" | "statefulsets" | "daemonsets"
                 ) {
                     self.request_restart();
-                } else if EXTERNAL_SECRET_KINDS.contains(&self.kind_plural.as_str()) {
+                } else if self.external_secret_kind() {
                     self.request_refresh_es();
                 } else if self.kind_plural == "helmhistory" {
                     self.request_helm_rollback();
