@@ -816,7 +816,7 @@ impl App {
     /// toggle — suspending something always takes an explicit, visible
     /// choice (`j`/`k` + Enter) rather than one accidental keystroke.
     pub(super) fn request_flux_menu(&mut self) {
-        if !FLUX_SUSPENDABLE_KINDS.contains(&self.kind_plural.as_str()) {
+        if !self.flux_suspendable() {
             self.flash_warn("suspend/resume only applies to Flux resources (ks/hr/git-, helm-, oci-repos, buckets, image automation, alerts, receivers)");
             return;
         }

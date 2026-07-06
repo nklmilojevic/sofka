@@ -87,6 +87,12 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     draw_status(frame, app, chunks[3]);
 }
 
+/// Width reserved for the per-kind key-hint column inside the header box:
+/// three 13-wide cells (2-char key + space + 10-char label) with 2-space gaps.
+const HEADER_HINTS_WIDTH: u16 = 44;
+/// Minimum width the info cluster keeps before the hint column may appear.
+const HEADER_INFO_MIN: u16 = 44;
+
 fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
     let cols = Layout::default()
         .direction(Direction::Horizontal)
@@ -121,16 +127,32 @@ fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
         field("Resource:", kind, theme::peach()),
         field("Count:", app.store.len().to_string(), theme::text()),
     ];
-    frame.render_widget(
-        Paragraph::new(info).block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_type(BorderType::Rounded)
-                .border_style(theme::border())
-                .title(Span::styled(" sofka ", theme::title())),
-        ),
-        cols[0],
-    );
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(theme::border())
+        .title(Span::styled(" sofka ", theme::title()));
+    let inner = block.inner(cols[0]);
+    frame.render_widget(block, cols[0]);
+
+    // Per-kind key hints share the box with the info cluster (k9s-style);
+    // narrow terminals collapse back to info-only and keep the full hint
+    // line at the bottom instead.
+    let hints = header_hints(app);
+    if !hints.is_empty() && header_hints_fit(area.width) {
+        let sub = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([
+                Constraint::Min(HEADER_INFO_MIN),
+                Constraint::Length(HEADER_HINTS_WIDTH),
+            ])
+            .split(inner);
+        frame.render_widget(Paragraph::new(info), sub[0]);
+        frame.render_widget(Paragraph::new(hints), sub[1]);
+    } else {
+        frame.render_widget(Paragraph::new(info), inner);
+    }
 
     // Sophie the Russian Blue: tall pointed ears, a narrow watchful stare
     // (not round cutesy eyes), cool grey-blue coat. Lines are equal width so
@@ -163,6 +185,116 @@ fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
         Line::from(Span::styled(format!("   sofka v{VERSION}"), theme::dim())),
     ];
     frame.render_widget(Paragraph::new(logo).alignment(Alignment::Right), cols[1]);
+}
+
+/// Whether the frame is wide enough for the header's key-hint column:
+/// logo (26) + box borders (2) + info cluster + hints.
+fn header_hints_fit(frame_width: u16) -> bool {
+    frame_width.saturating_sub(26 + 2) >= HEADER_INFO_MIN + HEADER_HINTS_WIDTH
+}
+
+/// One hint row of fixed-width cells (right-aligned key, padded label) so
+/// consecutive rows line up into a table. Labels must stay ≤ 10 chars.
+fn hint_line(pairs: &[(&str, &str)]) -> Line<'static> {
+    let key_style = Style::default()
+        .fg(theme::sky())
+        .add_modifier(Modifier::BOLD);
+    let mut spans = Vec::with_capacity(pairs.len() * 3);
+    for (i, (key, label)) in pairs.iter().enumerate() {
+        if i > 0 {
+            spans.push(Span::raw("  "));
+        }
+        spans.push(Span::styled(format!("{key:>2}"), key_style));
+        spans.push(Span::styled(format!(" {label:<10}"), theme::dim()));
+    }
+    Line::from(spans)
+}
+
+/// Per-kind action hints for the header (k9s-style): only the verbs that
+/// actually do something for the current kind — the full reference stays in
+/// `?` help, and mode-specific keys stay on the bottom line. Empty when a
+/// full-screen view (logs, detail, help, …) replaces the table.
+fn header_hints(app: &App) -> Vec<Line<'static>> {
+    if matches!(
+        app.mode,
+        Mode::Detail
+            | Mode::Diff
+            | Mode::Events
+            | Mode::Logs
+            | Mode::LogFilter
+            | Mode::Help
+            | Mode::Pulse
+            | Mode::Xray
+            | Mode::PortForwards
+    ) {
+        return Vec::new();
+    }
+    let mut lines = match app.kind_plural.as_str() {
+        "pods" => vec![
+            hint_line(&[("⏎", "containers"), ("l", "logs"), ("p", "prev logs")]),
+            hint_line(&[("s", "shell"), ("a", "attach"), ("f", "port-fwd")]),
+            hint_line(&[("y", "yaml"), ("d", "describe"), ("E", "events")]),
+            hint_line(&[("e", "edit"), ("o", "node"), ("J", "owner")]),
+            hint_line(&[("^d", "delete"), ("^k", "kill")]),
+        ],
+        "deployments" | "statefulsets" => vec![
+            hint_line(&[("⏎", "pods"), ("l", "logs"), ("E", "events")]),
+            hint_line(&[("s", "scale"), ("r", "restart"), ("i", "image")]),
+            hint_line(&[("y", "yaml"), ("d", "describe"), ("e", "edit")]),
+            hint_line(&[("f", "port-fwd"), ("^d", "delete")]),
+        ],
+        "daemonsets" => vec![
+            hint_line(&[("⏎", "pods"), ("l", "logs"), ("E", "events")]),
+            hint_line(&[("r", "restart"), ("i", "image")]),
+            hint_line(&[("y", "yaml"), ("d", "describe"), ("e", "edit")]),
+            hint_line(&[("^d", "delete")]),
+        ],
+        "replicasets" | "jobs" => vec![
+            hint_line(&[("⏎", "pods"), ("l", "logs"), ("E", "events")]),
+            hint_line(&[("y", "yaml"), ("d", "describe"), ("e", "edit")]),
+            hint_line(&[("J", "owner"), ("^d", "delete")]),
+        ],
+        "services" => vec![
+            hint_line(&[("⏎", "pods"), ("f", "port-fwd")]),
+            hint_line(&[("y", "yaml"), ("d", "describe"), ("e", "edit")]),
+            hint_line(&[("^d", "delete")]),
+        ],
+        "nodes" => vec![
+            hint_line(&[("⏎", "pods"), ("y", "yaml"), ("d", "describe")]),
+            hint_line(&[("C", "cordon"), ("U", "uncordon"), ("D", "drain")]),
+        ],
+        "namespaces" => vec![
+            hint_line(&[("⏎", "switch to"), ("y", "yaml"), ("d", "describe")]),
+            hint_line(&[("e", "edit"), ("^d", "delete")]),
+        ],
+        "helm" => vec![
+            hint_line(&[("⏎", "history")]),
+            hint_line(&[("y", "yaml"), ("d", "describe")]),
+            hint_line(&[("^d", "uninstall")]),
+        ],
+        "helmhistory" => vec![
+            hint_line(&[("⏎", "values"), ("r", "rollback")]),
+            hint_line(&[("^d", "uninstall")]),
+        ],
+        "customresourcedefinitions" => vec![
+            hint_line(&[("⏎", "resources"), ("y", "yaml"), ("d", "describe")]),
+            hint_line(&[("e", "edit"), ("^d", "delete")]),
+        ],
+        _ => vec![
+            hint_line(&[("⏎", "yaml"), ("d", "describe"), ("E", "events")]),
+            hint_line(&[("e", "edit"), ("c", "copy name")]),
+            hint_line(&[("^d", "delete")]),
+        ],
+    };
+    if app.flux_suspendable() {
+        lines.push(hint_line(&[("t", "flux menu")]));
+    }
+    if app.external_secret_kind() {
+        lines.push(hint_line(&[("r", "force-sync")]));
+    }
+    // The header box has 5 inner rows.
+    lines.truncate(5);
+    lines
 }
 
 fn draw_table(frame: &mut Frame, app: &mut App, area: Rect) {
@@ -1814,7 +1946,13 @@ fn draw_prompt(frame: &mut Frame, app: &App, area: Rect) {
             theme::dim(),
         )),
         _ => {
-            let hint = "  :resource  /filter  S:sort I:invert  ⏎drill  y:yaml d:describe l:logs e:edit s:shell/scale i:image r:restart f:fwd ^d:del  ?:help";
+            // Per-resource verbs live in the header hint column when it
+            // fits; only repeat the full line when the header dropped it.
+            let hint = if header_hints_fit(frame.area().width) {
+                "  :resource  /filter  S:sort I:invert  space:mark  [ ]:history  0:all-ns  ?:help"
+            } else {
+                "  :resource  /filter  S:sort I:invert  ⏎drill  y:yaml d:describe l:logs e:edit s:shell/scale i:image r:restart f:fwd ^d:del  ?:help"
+            };
             Line::from(Span::styled(hint, theme::dim()))
         }
     };
