@@ -5,6 +5,12 @@
 A Kubernetes TUI, reimagined in Rust - built on [`kube-rs`](https://kube.rs) and
 [`ratatui`](https://ratatui.rs), async-first from the ground up.
 
+## Screenshots
+
+| Pod list + command palette                                                | Namespace switcher                                                          | Flux suspend/resume/reconcile menu                                                      |
+| ------------------------------------------------------------------------- | --------------------------------------------------------------------------- | --------------------------------------------------------------------------------------- |
+| ![Pod list with the fuzzy command palette open](docs/screenshot-pods.png) | ![Namespace switcher popup over a pod list](docs/screenshot-namespaces.png) | ![Flux Kustomizations with the suspend/resume/reconcile menu](docs/screenshot-flux.png) |
+
 ### Why "sofka"
 
 That's Sophie. She sits behind the monitor and watches it - not occasionally,
