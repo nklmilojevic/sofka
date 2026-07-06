@@ -857,7 +857,7 @@ impl App {
         if self.deny_readonly() {
             return;
         }
-        if !FLUX_SUSPENDABLE_KINDS.contains(&self.kind_plural.as_str()) {
+        if !self.flux_suspendable() {
             self.flash_warn("suspend/resume only applies to Flux resources (ks/hr/git-, helm-, oci-repos, buckets, image automation, alerts, receivers)");
             return;
         }
