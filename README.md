@@ -1,11 +1,7 @@
 # sofka
 
-<img src="docs/sophie.png" alt="Sophie, a Russian Blue, watching the screen with visible suspicion" align="right" width="220">
-
 A Kubernetes TUI, reimagined in Rust - built on [`kube-rs`](https://kube.rs) and
 [`ratatui`](https://ratatui.rs), async-first from the ground up.
-
-<br clear="right">
 
 ## Screenshots
 
@@ -14,6 +10,8 @@ A Kubernetes TUI, reimagined in Rust - built on [`kube-rs`](https://kube.rs) and
 | ![Pod list with the fuzzy command palette open](docs/screenshot-pods.png) | ![Namespace switcher popup over a pod list](docs/screenshot-namespaces.png) | ![Flux Kustomizations with the suspend/resume/reconcile menu](docs/screenshot-flux.png) |
 
 ### Why "sofka"
+
+<img src="docs/sophie.png" alt="Sophie, a Russian Blue, watching the screen with visible suspicion" align="right" width="220">
 
 That's Sophie. She sits behind the monitor and watches it - not occasionally,
 _constantly_, with the specific narrowed-eye expression of someone who has
