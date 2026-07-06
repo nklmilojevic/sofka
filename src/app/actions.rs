@@ -574,13 +574,19 @@ impl App {
         };
         let name = obj.metadata.name.clone().unwrap_or_default();
         let ns = obj.metadata.namespace.clone().unwrap_or_default();
+        self.exec_into(ns, name, None);
+    }
+
+    /// Shell into `pod`, optionally pinned to `container` (k9s-style `-c`).
+    /// Shared by the plain pod-row shell (`s`) and the per-container picker.
+    pub(super) fn exec_into(&mut self, ns: String, pod: String, container: Option<String>) {
         let mut argv = self.kubectl_base();
+        argv.extend(["exec".into(), "-it".into(), "-n".into(), ns, pod]);
+        if let Some(c) = container {
+            argv.push("-c".into());
+            argv.push(c);
+        }
         argv.extend([
-            "exec".into(),
-            "-it".into(),
-            "-n".into(),
-            ns,
-            name,
             "--".into(),
             "sh".into(),
             "-c".into(),

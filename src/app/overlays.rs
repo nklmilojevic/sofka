@@ -39,6 +39,14 @@ impl App {
                     );
                 }
             }
+            KeyCode::Char('s') => {
+                if let Some(i) = self.container_state.selected()
+                    && let Some(c) = self.container_list.get(i).cloned()
+                    && let Some((ns, name)) = self.container_pod.clone()
+                {
+                    self.exec_into(ns, name, Some(c));
+                }
+            }
             _ => {}
         }
     }

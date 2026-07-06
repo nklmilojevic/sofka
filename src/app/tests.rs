@@ -1182,6 +1182,31 @@ async fn shellouts_pin_to_active_context() {
 }
 
 #[tokio::test]
+async fn container_picker_shell_targets_selected_container() {
+    let (mut app, _rx) = test_app();
+    app.switch_kind("pods");
+    apply(
+        &mut app,
+        json!({"apiVersion": "v1", "kind": "Pod",
+               "metadata": {"name": "p", "namespace": "default"},
+               "spec": {"containers": [{"name": "app"}, {"name": "sidecar"}]}}),
+    );
+    app.table_state.select(Some(0));
+    let obj = app.selected_ref().unwrap().clone();
+    app.open_containers(&obj);
+    assert_eq!(app.mode, Mode::Containers);
+    app.container_state.select(Some(1)); // "sidecar"
+    app.handle_key(press(KeyCode::Char('s'))).unwrap();
+    let Some(Suspend::Shell(argv)) = app.pending.take() else {
+        panic!("expected a pending shell command");
+    };
+    assert!(argv.contains(&"-c".to_string()));
+    let c_idx = argv.iter().position(|a| a == "-c").unwrap();
+    assert_eq!(argv[c_idx + 1], "sidecar");
+    assert!(argv.contains(&"p".to_string()));
+}
+
+#[tokio::test]
 async fn paused_logs_do_not_trim_below_paused_cap() {
     let (mut app, _rx) = test_app();
     app.logs.follow = false; // autoscroll OFF
