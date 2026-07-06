@@ -18,8 +18,13 @@ impl App {
         if targets.is_empty() {
             return;
         }
-        self.confirm_label = delete_confirm_label(&self.kind_plural, &targets, force);
-        self.confirm_action = Some(ConfirmAction::Delete { targets, force });
+        let cascade = Cascade::Background;
+        self.confirm_label = delete_confirm_label(&self.kind_plural, &targets, force, cascade);
+        self.confirm_action = Some(ConfirmAction::Delete {
+            targets,
+            force,
+            cascade,
+        });
         self.mode = Mode::Confirm;
     }
 
@@ -54,7 +59,12 @@ impl App {
         });
     }
 
-    pub(super) fn do_delete(&mut self, targets: Vec<(String, String)>, force: bool) {
+    pub(super) fn do_delete(
+        &mut self,
+        targets: Vec<(String, String)>,
+        force: bool,
+        cascade: Cascade,
+    ) {
         let Some(kind) = self.kind.clone() else {
             return;
         };
@@ -68,7 +78,10 @@ impl App {
         };
         self.flash_err = false;
         tokio::spawn(async move {
-            let mut dp = DeleteParams::default();
+            let mut dp = DeleteParams {
+                propagation_policy: Some(cascade.policy()),
+                ..DeleteParams::default()
+            };
             if force {
                 dp = dp.grace_period(0);
             }

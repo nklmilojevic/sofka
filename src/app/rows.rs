@@ -314,13 +314,7 @@ impl App {
     }
 
     pub fn confirm_allows_force_toggle(&self) -> bool {
-        matches!(
-            self.confirm_action,
-            Some(ConfirmAction::Delete {
-                targets: _,
-                force: _
-            })
-        )
+        matches!(self.confirm_action, Some(ConfirmAction::Delete { .. }))
     }
 
     /// Toggle the mark on the current row (SPACE).

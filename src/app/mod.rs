@@ -17,7 +17,9 @@ use fuzzy_matcher::FuzzyMatcher;
 use fuzzy_matcher::skim::SkimMatcherV2;
 use k8s_openapi::api::core::v1::Pod;
 use kube::Client;
-use kube::api::{Api, DeleteParams, EvictParams, ListParams, LogParams, Patch, PatchParams};
+use kube::api::{
+    Api, DeleteParams, EvictParams, ListParams, LogParams, Patch, PatchParams, PropagationPolicy,
+};
 use kube::core::{DynamicObject, TypeMeta};
 use kube::discovery::ApiResource;
 use kube::runtime::watcher;
@@ -130,11 +132,39 @@ impl Drop for PortForward {
     }
 }
 
+/// How dependents are handled on delete (kubectl `--cascade`, k9s propagation
+/// picker). Cycled with `c` in the delete confirm dialog.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Cascade {
+    Background,
+    Foreground,
+    Orphan,
+}
+
+impl Cascade {
+    fn next(self) -> Self {
+        match self {
+            Cascade::Background => Cascade::Foreground,
+            Cascade::Foreground => Cascade::Orphan,
+            Cascade::Orphan => Cascade::Background,
+        }
+    }
+
+    fn policy(self) -> PropagationPolicy {
+        match self {
+            Cascade::Background => PropagationPolicy::Background,
+            Cascade::Foreground => PropagationPolicy::Foreground,
+            Cascade::Orphan => PropagationPolicy::Orphan,
+        }
+    }
+}
+
 enum ConfirmAction {
     /// One or more `(name, ns)` targets to delete (bulk when marked).
     Delete {
         targets: Vec<(String, String)>,
         force: bool,
+        cascade: Cascade,
     },
     /// One or more node names to cordon and drain.
     Drain { targets: Vec<String> },

@@ -273,37 +273,37 @@ header) and switching away restores write mode.
 
 ### Keys
 
-| Key                       | Action                                                                                                        |
-| ------------------------- | ------------------------------------------------------------------------------------------------------------- |
-| `:<resource>`             | command palette - fuzzy over kinds and built-in commands                                                      |
-| `:<resource> <ns>`        | switch kind and namespace at once (`:deploy social`; `all`/`*` = all namespaces; the namespace tab-completes) |
-| `[` / `]`                 | view history - back / forward through visited kind+namespace views                                            |
-| `enter`                   | drill down (workload/svc → pods, node → its pods, pod → containers, ns → re-scope, CRD → its resources)       |
-| `esc`                     | go back / pop the view stack / clear filter / clear marks                                                     |
-| `j`/`k`, `↓`/`↑`, `g`/`G` | navigate                                                                                                      |
-| `S` / `I`                 | cycle sort column / invert sort direction                                                                     |
-| `space`                   | mark/unmark row for bulk actions                                                                              |
-| `/`                       | fuzzy filter                                                                                                  |
-| `n` / `0`                 | namespace switcher / all namespaces                                                                           |
-| `shift-j`                 | jump to owner/controller                                                                                      |
-| `o`                       | show the node hosting the selected pod                                                                        |
-| `ctrl-r`                  | refresh the watch                                                                                             |
-| `y` / `d` / `E`           | view YAML / describe (`kubectl`) / live events                                                                |
-| `:ctx` / `:ctx <name>`    | context switcher popup / switch directly (the name tab-completes)                                             |
-| `:skin`                   | switch the color skin live (`:skin gruvbox-dark` applies directly)                                            |
-| `l` / `p`                 | logs (workload = all matching pods) / previous-container logs                                                 |
-| `c`                       | copy resource name to clipboard                                                                               |
-| `e`                       | edit in `$EDITOR` (`kubectl edit`)                                                                            |
-| `s`                       | shell into pod / scale a workload (context-dependent)                                                         |
-| `a`                       | attach to pod                                                                                                 |
-| `i`                       | set container image                                                                                           |
-| `r`                       | rollout restart (workloads) / refresh (elsewhere)                                                             |
-| `f` / `shift-f`           | port-forward (pods/services) - runs in the background                                                         |
-| `t`                       | Flux: suspend/resume/reconcile menu                                                                           |
-| `C` / `U` / `D`           | nodes: cordon / uncordon / drain                                                                              |
-| `ctrl-d` / `ctrl-k`       | delete / force-delete (marked rows, or current); `f` toggles force in confirm                                 |
-| `:q`, `ctrl-c`            | quit                                                                                                          |
-| `?`                       | help                                                                                                          |
+| Key                       | Action                                                                                                                                |
+| ------------------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
+| `:<resource>`             | command palette - fuzzy over kinds and built-in commands                                                                              |
+| `:<resource> <ns>`        | switch kind and namespace at once (`:deploy social`; `all`/`*` = all namespaces; the namespace tab-completes)                         |
+| `[` / `]`                 | view history - back / forward through visited kind+namespace views                                                                    |
+| `enter`                   | drill down (workload/svc → pods, node → its pods, pod → containers, ns → re-scope, CRD → its resources)                               |
+| `esc`                     | go back / pop the view stack / clear filter / clear marks                                                                             |
+| `j`/`k`, `↓`/`↑`, `g`/`G` | navigate                                                                                                                              |
+| `S` / `I`                 | cycle sort column / invert sort direction                                                                                             |
+| `space`                   | mark/unmark row for bulk actions                                                                                                      |
+| `/`                       | fuzzy filter                                                                                                                          |
+| `n` / `0`                 | namespace switcher / all namespaces                                                                                                   |
+| `shift-j`                 | jump to owner/controller                                                                                                              |
+| `o`                       | show the node hosting the selected pod                                                                                                |
+| `ctrl-r`                  | refresh the watch                                                                                                                     |
+| `y` / `d` / `E`           | view YAML / describe (`kubectl`) / live events                                                                                        |
+| `:ctx` / `:ctx <name>`    | context switcher popup / switch directly (the name tab-completes)                                                                     |
+| `:skin`                   | switch the color skin live (`:skin gruvbox-dark` applies directly)                                                                    |
+| `l` / `p`                 | logs (workload = all matching pods) / previous-container logs                                                                         |
+| `c`                       | copy resource name to clipboard                                                                                                       |
+| `e`                       | edit in `$EDITOR` (`kubectl edit`)                                                                                                    |
+| `s`                       | shell into pod / scale a workload (context-dependent)                                                                                 |
+| `a`                       | attach to pod                                                                                                                         |
+| `i`                       | set container image                                                                                                                   |
+| `r`                       | rollout restart (workloads) / refresh (elsewhere)                                                                                     |
+| `f` / `shift-f`           | port-forward (pods/services) - runs in the background                                                                                 |
+| `t`                       | Flux: suspend/resume/reconcile menu                                                                                                   |
+| `C` / `U` / `D`           | nodes: cordon / uncordon / drain                                                                                                      |
+| `ctrl-d` / `ctrl-k`       | delete / force-delete (marked rows, or current); in confirm: `f` toggles force, `c` cycles cascade (background → foreground → orphan) |
+| `:q`, `ctrl-c`            | quit                                                                                                                                  |
+| `?`                       | help                                                                                                                                  |
 
 **Logs view:** `/` search+highlight · `s` autoscroll · `w` wrap · `t`
 timestamps · `x` stop/resume stream · `c` copy buffer · `ctrl-s` save to file

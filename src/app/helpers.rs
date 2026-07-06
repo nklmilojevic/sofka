@@ -47,8 +47,15 @@ pub(super) fn delete_confirm_label(
     kind_plural: &str,
     targets: &[(String, String)],
     force: bool,
+    cascade: Cascade,
 ) -> String {
     let verb = if force { "Force delete" } else { "Delete" };
+    // Background is the kubectl default, so only surface the unusual modes.
+    let suffix = match cascade {
+        Cascade::Background => "",
+        Cascade::Foreground => " (cascade: foreground)",
+        Cascade::Orphan => " (orphan dependents)",
+    };
     if targets.len() == 1 {
         let (name, ns) = &targets[0];
         let where_ns = if ns.is_empty() {
@@ -56,9 +63,9 @@ pub(super) fn delete_confirm_label(
         } else {
             format!(" in {ns}")
         };
-        format!("{verb} {} {name}{where_ns}?", trim_s(kind_plural))
+        format!("{verb} {} {name}{where_ns}{suffix}?", trim_s(kind_plural))
     } else {
-        format!("{verb} {} {}?", targets.len(), kind_plural)
+        format!("{verb} {} {}{suffix}?", targets.len(), kind_plural)
     }
 }
 

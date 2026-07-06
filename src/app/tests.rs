@@ -581,6 +581,70 @@ async fn delete_confirm_force_can_toggle() {
 }
 
 #[tokio::test]
+async fn delete_confirm_cascade_can_cycle() {
+    let (mut app, _rx) = test_app();
+    app.switch_kind("pods");
+    apply(
+        &mut app,
+        json!({"apiVersion": "v1", "kind": "Pod",
+               "metadata": {"name": "web", "namespace": "default"}}),
+    );
+
+    app.handle_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL))
+        .unwrap();
+    assert_eq!(app.mode, Mode::Confirm);
+    // Background is the default and doesn't clutter the label.
+    assert!(!app.confirm_label.contains("cascade"));
+    assert!(matches!(
+        app.confirm_action,
+        Some(ConfirmAction::Delete {
+            cascade: Cascade::Background,
+            ..
+        })
+    ));
+
+    app.handle_key(press(KeyCode::Char('c'))).unwrap();
+    assert_eq!(app.mode, Mode::Confirm, "c must cycle, not cancel");
+    assert!(app.confirm_label.contains("(cascade: foreground)"));
+    assert!(matches!(
+        app.confirm_action,
+        Some(ConfirmAction::Delete {
+            cascade: Cascade::Foreground,
+            ..
+        })
+    ));
+
+    app.handle_key(press(KeyCode::Char('c'))).unwrap();
+    assert!(app.confirm_label.contains("(orphan dependents)"));
+    assert!(matches!(
+        app.confirm_action,
+        Some(ConfirmAction::Delete {
+            cascade: Cascade::Orphan,
+            ..
+        })
+    ));
+
+    // Cascade and force compose in the label.
+    app.handle_key(press(KeyCode::Char('f'))).unwrap();
+    assert!(
+        app.confirm_label
+            .starts_with("Force delete pod web in default (orphan dependents)"),
+        "{}",
+        app.confirm_label
+    );
+
+    // Full circle back to background.
+    app.handle_key(press(KeyCode::Char('c'))).unwrap();
+    assert!(matches!(
+        app.confirm_action,
+        Some(ConfirmAction::Delete {
+            cascade: Cascade::Background,
+            ..
+        })
+    ));
+}
+
+#[tokio::test]
 async fn node_drain_key_opens_confirm_for_marked_nodes() {
     let (mut app, _rx) = test_app();
     app.switch_kind("nodes");
