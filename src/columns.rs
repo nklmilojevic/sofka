@@ -811,6 +811,21 @@ fn timestamp_secs(d: &Value, path: &[&str]) -> Option<i64> {
         .map(|ts| ts.as_second())
 }
 
+/// Epoch seconds of a CronJob's `status.lastScheduleTime` — the sortable
+/// value behind the humanized LAST-SCHEDULE cell.
+pub fn last_schedule_secs(obj: &DynamicObject) -> Option<i64> {
+    timestamp_secs(&obj.data, &["status", "lastScheduleTime"])
+}
+
+/// Elapsed seconds behind a Job's humanized DURATION cell (running jobs
+/// measure against now).
+pub fn job_duration_secs(obj: &DynamicObject) -> Option<i64> {
+    let start = timestamp_secs(&obj.data, &["status", "startTime"])?;
+    let end = timestamp_secs(&obj.data, &["status", "completionTime"])
+        .unwrap_or_else(|| Timestamp::now().as_second());
+    Some((end - start).max(0))
+}
+
 fn time_since(d: &Value, path: &[&str]) -> String {
     timestamp_secs(d, path)
         .map(|secs| humanize((Timestamp::now().as_second() - secs).max(0)))
