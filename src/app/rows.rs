@@ -224,6 +224,14 @@ impl App {
                     .map(|s| -(s as f64))
                     .unwrap_or(f64::INFINITY),
             ),
+            "LAST-SCHEDULE" => SortKey::Num(
+                crate::columns::last_schedule_secs(o)
+                    .map(|s| -(s as f64))
+                    .unwrap_or(f64::INFINITY),
+            ),
+            "DURATION" if self.kind_plural == "jobs" => {
+                SortKey::Num(crate::columns::job_duration_secs(o).unwrap_or(i64::MAX) as f64)
+            }
             // Helm revisions are plain integers; flux REVISION cells (shas,
             // `main@sha1:…`) stay text.
             "REVISION" if matches!(self.kind_plural.as_str(), "helm" | "helmhistory") => {
