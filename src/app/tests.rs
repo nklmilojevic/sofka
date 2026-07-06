@@ -1964,3 +1964,69 @@ async fn helm_resource_title_names_the_view_not_the_backing_secret() {
     assert_eq!(app.resource_title(), "helm history");
     assert_eq!(app.list_title(), "helm history");
 }
+
+#[tokio::test]
+async fn readonly_blocks_mutating_actions() {
+    let (mut app, _rx) = test_app();
+    app.switch_kind("pods");
+    apply(
+        &mut app,
+        json!({"apiVersion": "v1", "kind": "Pod",
+            "metadata": {"name": "web", "namespace": "default"}}),
+    );
+    app.table_state.select(Some(0));
+    app.readonly = true;
+
+    app.request_delete(false);
+    assert_eq!(app.mode, Mode::Table, "delete confirm must not open");
+    assert!(app.flash.contains("read-only"));
+
+    app.flash.clear();
+    app.request_edit();
+    assert!(app.pending.is_none(), "edit must not shell out");
+    assert!(app.flash.contains("read-only"));
+
+    app.flash.clear();
+    app.request_exec();
+    assert!(app.pending.is_none(), "shell must not open");
+    assert!(app.flash.contains("read-only"));
+
+    app.plugins = vec![crate::config::Plugin {
+        key: 'g',
+        name: "argocd-sync".into(),
+        command: "argocd".into(),
+        args: vec![],
+        scopes: vec![],
+    }];
+    app.flash.clear();
+    app.try_plugin('g');
+    assert!(app.pending.is_none(), "plugin must not run");
+    assert!(app.flash.contains("read-only"));
+
+    // Read paths stay open: describe still works.
+    app.flash.clear();
+    app.handle_key(press(KeyCode::Char('d'))).unwrap();
+    assert!(!app.flash.contains("read-only"));
+}
+
+#[tokio::test]
+async fn context_switch_resolves_readonly_and_cli_pin_wins() {
+    let dir = std::env::temp_dir().join(format!("sofka-readonly-test-{}", std::process::id()));
+    let cluster_dir = dir.join("clusters").join("test-cluster");
+    std::fs::create_dir_all(&cluster_dir).unwrap();
+    std::fs::write(cluster_dir.join("config.toml"), "readonly = true\n").unwrap();
+
+    let (mut app, _rx) = test_app();
+    app.config = crate::config::ConfigLoader::from_dir(Some(dir.clone()));
+
+    // No CLI pin: the per-cluster override flips read-only on.
+    app.apply_context_switch("prod".into(), Box::new(Cluster::fake()));
+    assert!(app.readonly);
+
+    // A `--write` pin survives switching into the read-only cluster.
+    app.readonly_override = Some(false);
+    app.apply_context_switch("prod-again".into(), Box::new(Cluster::fake()));
+    assert!(!app.readonly);
+
+    std::fs::remove_dir_all(&dir).unwrap();
+}

@@ -40,6 +40,17 @@ struct Args {
     #[arg(short = 'A', long)]
     all_namespaces: bool,
 
+    /// Disable every action that could modify the cluster (delete, edit,
+    /// scale, shell, plugins, …). Overrides the config `readonly` option,
+    /// including per-cluster/per-context overrides, for the whole session.
+    #[arg(long, conflicts_with = "write")]
+    readonly: bool,
+
+    /// Force write mode, overriding any config `readonly` option for the
+    /// whole session.
+    #[arg(long)]
+    write: bool,
+
     /// Connect, run discovery, print a summary, and exit (no TUI). Useful for
     /// verifying cluster connectivity in CI or a headless shell.
     #[arg(long)]
@@ -129,6 +140,14 @@ async fn main() -> Result<()> {
     app.skin_colors = cfg.skin.colors.clone();
     app.config = loader;
     app.session_skin = Some(session_skin);
+    // CLI flags pin the mode for the whole session; otherwise config decides,
+    // re-resolved per context on every `:ctx` switch.
+    app.readonly_override = match (args.readonly, args.write) {
+        (true, _) => Some(true),
+        (_, true) => Some(false),
+        _ => None,
+    };
+    app.readonly = app.readonly_override.unwrap_or(cfg.readonly);
     if args.all_namespaces {
         app.namespace = String::new();
     } else if let Some(ns) = args.namespace {

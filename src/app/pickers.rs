@@ -253,6 +253,7 @@ impl App {
         self.user_aliases = resolved.config.aliases;
         self.plugins = resolved.config.plugins;
         self.skin_colors = resolved.config.skin.colors;
+        self.readonly = self.readonly_override.unwrap_or(resolved.config.readonly);
         cluster.add_aliases(&self.user_aliases);
         self.bump_generation();
         self.namespace = resolved

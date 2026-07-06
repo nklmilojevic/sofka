@@ -110,8 +110,15 @@ fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
         ])
     };
 
+    let mut context_line = field("Context:", app.cluster.context.clone(), theme::mauve());
+    if app.readonly {
+        context_line.push_span(Span::styled(
+            "  [read-only]",
+            Style::default().fg(theme::red()),
+        ));
+    }
     let info = vec![
-        field("Context:", app.cluster.context.clone(), theme::mauve()),
+        context_line,
         field(
             "Cluster:",
             app.cluster.cluster_url.clone(),
