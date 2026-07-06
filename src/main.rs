@@ -5,6 +5,7 @@
 mod app;
 mod columns;
 mod config;
+mod helm;
 mod k8s;
 mod store;
 mod theme;

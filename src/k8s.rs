@@ -348,6 +348,7 @@ impl Cluster {
             mk("apps", "Deployment", "deployments", true),
         );
         registry.insert("services".to_string(), mk("", "Service", "services", true));
+        registry.insert("secrets".to_string(), mk("", "Secret", "secrets", true));
         registry.insert("nodes".to_string(), mk("", "Node", "nodes", false));
         registry.insert(
             "namespaces".to_string(),

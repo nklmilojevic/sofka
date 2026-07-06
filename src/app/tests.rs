@@ -26,6 +26,67 @@ fn apply(app: &mut App, v: serde_json::Value) {
     });
 }
 
+/// A Helm release storage Secret, encoded exactly like the real thing
+/// (base64 -> base64 -> gzip -> JSON — see `crate::helm`), for exercising the
+/// helm/helmhistory views without a live cluster.
+fn helm_release_secret(release: &str, ns: &str, revision: i64, status: &str) -> serde_json::Value {
+    helm_release_secret_deployed_at(release, ns, revision, status, "2024-01-15T10:30:00Z")
+}
+
+fn helm_release_secret_deployed_at(
+    release: &str,
+    ns: &str,
+    revision: i64,
+    status: &str,
+    last_deployed: &str,
+) -> serde_json::Value {
+    use base64::Engine;
+    use base64::engine::general_purpose::STANDARD as BASE64;
+    use flate2::Compression;
+    use flate2::write::GzEncoder;
+    use std::io::Write;
+
+    let release_json = json!({
+        "name": release,
+        "namespace": ns,
+        "version": revision,
+        "info": {
+            "status": status,
+            "description": format!("revision {revision}"),
+            "last_deployed": last_deployed,
+            "notes": "thanks for installing",
+        },
+        "chart": {
+            "metadata": { "name": "mychart", "version": "1.0.0", "appVersion": "2.0.0" },
+        },
+        "config": { "replicaCount": revision },
+        "manifest": "apiVersion: v1\nkind: ConfigMap\n",
+    })
+    .to_string();
+
+    let mut gz = GzEncoder::new(Vec::new(), Compression::default());
+    gz.write_all(release_json.as_bytes()).unwrap();
+    let helm_b64 = BASE64.encode(gz.finish().unwrap());
+    let wire_b64 = BASE64.encode(helm_b64);
+
+    json!({
+        "apiVersion": "v1",
+        "kind": "Secret",
+        "type": "helm.sh/release.v1",
+        "metadata": {
+            "name": format!("sh.helm.release.v1.{release}.v{revision}"),
+            "namespace": ns,
+            "labels": {
+                "owner": "helm",
+                "name": release,
+                "version": revision.to_string(),
+                "status": status,
+            },
+        },
+        "data": { "release": wire_b64 },
+    })
+}
+
 #[tokio::test]
 async fn exact_alias_outranks_fuzzy_suggestions() {
     let (mut app, _rx) = test_app();
@@ -1630,4 +1691,276 @@ async fn namespace_switch_is_recorded_in_history() {
         (app.kind_plural.as_str(), app.namespace.as_str()),
         ("pods", "social")
     );
+}
+
+// ----- Helm ---------------------------------------------------------------
+
+#[tokio::test]
+async fn helm_list_shows_only_latest_revision_per_release() {
+    let (mut app, _rx) = test_app();
+    app.open_helm_releases();
+    apply(
+        &mut app,
+        helm_release_secret("myapp", "default", 1, "superseded"),
+    );
+    apply(
+        &mut app,
+        helm_release_secret("myapp", "default", 2, "deployed"),
+    );
+    // A second, unrelated release must not affect the first's dedup.
+    apply(
+        &mut app,
+        helm_release_secret("other", "default", 1, "deployed"),
+    );
+
+    let rows = app.rows();
+    assert_eq!(rows.len(), 2, "one row per release, not per revision");
+    let myapp_row = rows
+        .iter()
+        .find(|o| crate::helm::release_name(o) == Some("myapp"))
+        .expect("myapp row present");
+    assert_eq!(crate::helm::revision(myapp_row), Some(2));
+
+    let (cells, _) = crate::columns::cells(myapp_row, "helm");
+    assert_eq!(
+        cells[0], "myapp",
+        "NAME cell shows the release, not the secret"
+    );
+    assert_eq!(cells[1], "2");
+    assert_eq!(cells[2], "deployed");
+    assert_eq!(cells[3], "mychart-1.0.0");
+}
+
+#[tokio::test]
+async fn helm_filter_matches_release_name_not_secret_name() {
+    let (mut app, _rx) = test_app();
+    app.open_helm_releases();
+    apply(
+        &mut app,
+        helm_release_secret("myapp", "default", 1, "deployed"),
+    );
+
+    app.filter = "myapp".into();
+    app.invalidate_rows();
+    assert_eq!(app.rows().len(), 1, "filter matches the release name");
+
+    // The raw secret name would never be typed by a user filtering releases.
+    app.filter = "sh.helm.release".into();
+    app.invalidate_rows();
+    assert_eq!(
+        app.rows().len(),
+        0,
+        "filter must not fall back to the ugly secret name"
+    );
+}
+
+#[tokio::test]
+async fn helm_enter_drills_into_release_history() {
+    let (mut app, _rx) = test_app();
+    app.open_helm_releases();
+    apply(
+        &mut app,
+        helm_release_secret("myapp", "default", 2, "deployed"),
+    );
+    app.table_state.select(Some(0));
+
+    app.handle_key(press(KeyCode::Enter)).unwrap();
+    assert_eq!(app.kind_plural, "helmhistory");
+    assert_eq!(app.labels.as_deref(), Some("owner=helm,name=myapp"));
+    assert_eq!(app.scope_label.as_deref(), Some("helm/myapp"));
+    assert_eq!(app.stack.len(), 1);
+
+    app.handle_key(press(KeyCode::Esc)).unwrap();
+    assert_eq!(app.kind_plural, "helm");
+    assert!(app.stack.is_empty());
+}
+
+#[tokio::test]
+async fn helm_history_shows_every_revision_and_enter_shows_values() {
+    let (mut app, _rx) = test_app();
+    app.open_helm_releases();
+    apply(
+        &mut app,
+        helm_release_secret("myapp", "default", 2, "deployed"),
+    );
+    app.table_state.select(Some(0));
+    app.handle_key(press(KeyCode::Enter)).unwrap(); // -> helmhistory, fresh watch
+
+    apply(
+        &mut app,
+        helm_release_secret("myapp", "default", 1, "superseded"),
+    );
+    apply(
+        &mut app,
+        helm_release_secret("myapp", "default", 2, "deployed"),
+    );
+    assert_eq!(
+        app.rows().len(),
+        2,
+        "history shows every revision, no dedup"
+    );
+
+    app.table_state.select(Some(0));
+    app.handle_key(press(KeyCode::Enter)).unwrap();
+    assert_eq!(app.mode, Mode::Detail);
+    assert!(app.detail.title.contains("values"), "{}", app.detail.title);
+    assert!(app.detail.lines.iter().any(|l| l.contains("replicaCount")));
+}
+
+#[tokio::test]
+async fn helm_describe_shows_notes_and_yaml_key_shows_manifest() {
+    let (mut app, _rx) = test_app();
+    app.open_helm_releases();
+    apply(
+        &mut app,
+        helm_release_secret("myapp", "default", 1, "deployed"),
+    );
+    app.table_state.select(Some(0));
+
+    app.handle_key(press(KeyCode::Char('d'))).unwrap();
+    assert_eq!(app.mode, Mode::Detail);
+    assert!(app.detail.title.contains("notes"), "{}", app.detail.title);
+    assert!(
+        app.detail
+            .lines
+            .iter()
+            .any(|l| l.contains("thanks for installing"))
+    );
+
+    app.mode = Mode::Table;
+    app.handle_key(press(KeyCode::Char('y'))).unwrap();
+    assert_eq!(app.mode, Mode::Detail);
+    assert!(
+        app.detail.title.contains("manifest"),
+        "{}",
+        app.detail.title
+    );
+    assert!(app.detail.lines.iter().any(|l| l.contains("ConfigMap")));
+}
+
+#[tokio::test]
+async fn helm_ctrl_d_opens_uninstall_confirm_not_generic_delete() {
+    let (mut app, _rx) = test_app();
+    app.open_helm_releases();
+    apply(
+        &mut app,
+        helm_release_secret("myapp", "default", 1, "deployed"),
+    );
+    app.table_state.select(Some(0));
+
+    app.handle_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL))
+        .unwrap();
+    assert_eq!(app.mode, Mode::Confirm);
+    assert!(
+        app.confirm_label.contains("Uninstall"),
+        "{}",
+        app.confirm_label
+    );
+    assert!(matches!(
+        app.confirm_action,
+        Some(ConfirmAction::HelmUninstall { .. })
+    ));
+
+    // Confirming runs the (off-thread) `helm uninstall` and returns to Table
+    // — it must not touch the k8s delete API for the release's own Secret.
+    app.handle_key(press(KeyCode::Char('y'))).unwrap();
+    assert_eq!(app.mode, Mode::Table);
+    assert!(app.flash.contains("uninstalling"), "{}", app.flash);
+}
+
+#[tokio::test]
+async fn helm_r_key_opens_rollback_confirm_with_selected_revision() {
+    let (mut app, _rx) = test_app();
+    app.open_helm_releases();
+    apply(
+        &mut app,
+        helm_release_secret("myapp", "default", 2, "deployed"),
+    );
+    app.table_state.select(Some(0));
+    app.handle_key(press(KeyCode::Enter)).unwrap(); // -> helmhistory
+
+    apply(
+        &mut app,
+        helm_release_secret("myapp", "default", 1, "superseded"),
+    );
+    apply(
+        &mut app,
+        helm_release_secret("myapp", "default", 2, "deployed"),
+    );
+    let old_idx = app
+        .rows()
+        .iter()
+        .position(|o| crate::helm::revision(o) == Some(1))
+        .unwrap();
+    app.table_state.select(Some(old_idx));
+
+    app.handle_key(press(KeyCode::Char('r'))).unwrap();
+    assert_eq!(app.mode, Mode::Confirm);
+    assert!(
+        app.confirm_label.contains("revision 1"),
+        "{}",
+        app.confirm_label
+    );
+    assert!(matches!(
+        app.confirm_action,
+        Some(ConfirmAction::HelmRollback { ref revision, .. }) if revision == "1"
+    ));
+}
+
+#[tokio::test]
+async fn helm_base_pins_to_active_context() {
+    let (app, _rx) = test_app();
+    assert_eq!(app.helm_base(), vec!["helm", "--kube-context", "test"]);
+}
+
+#[tokio::test]
+async fn helm_sorts_updated_and_revision_by_value_not_text() {
+    let (mut app, _rx) = test_app();
+    app.open_helm_releases();
+    let rel = |name, rev, at| helm_release_secret_deployed_at(name, "default", rev, "deployed", at);
+    apply(&mut app, rel("alpha", 4, "2024-03-01T00:00:00Z"));
+    apply(&mut app, rel("beta", 61, "2024-01-01T00:00:00Z"));
+    apply(&mut app, rel("gamma", 11951, "2024-02-01T00:00:00Z"));
+    let headers = app.display_headers();
+
+    // UPDATED sorts by the deploy timestamp (ascending = most recent first,
+    // like AGE), never the humanized "5d23h" cell text.
+    app.sort_column = headers.iter().position(|h| *h == "UPDATED");
+    app.invalidate_rows();
+    let names: Vec<&str> = app
+        .rows()
+        .into_iter()
+        .map(|o| crate::helm::release_name(o).unwrap())
+        .collect();
+    assert_eq!(names, ["alpha", "gamma", "beta"]);
+
+    // REVISION sorts numerically ("11951" would sort before "4" as text).
+    app.sort_column = headers.iter().position(|h| *h == "REVISION");
+    app.invalidate_rows();
+    let revs: Vec<i64> = app
+        .rows()
+        .into_iter()
+        .map(|o| crate::helm::revision(o).unwrap())
+        .collect();
+    assert_eq!(revs, [4, 61, 11951]);
+}
+
+#[tokio::test]
+async fn helm_resource_title_names_the_view_not_the_backing_secret() {
+    let (mut app, _rx) = test_app();
+    app.open_helm_releases();
+    // The view is backed by the real `secrets` kind, but neither the header
+    // nor the list-panel title may say "secrets" — that's meaningless to
+    // someone browsing Helm releases.
+    assert_eq!(app.resource_title(), "helm");
+    assert_eq!(app.list_title(), "helm");
+
+    apply(
+        &mut app,
+        helm_release_secret("myapp", "default", 1, "deployed"),
+    );
+    app.table_state.select(Some(0));
+    app.handle_key(press(KeyCode::Enter)).unwrap();
+    assert_eq!(app.resource_title(), "helm history");
+    assert_eq!(app.list_title(), "helm history");
 }

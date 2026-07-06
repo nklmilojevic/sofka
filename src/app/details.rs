@@ -31,6 +31,22 @@ impl App {
         let Some(obj) = self.selected_ref() else {
             return;
         };
+        // Helm rows are backed by the raw storage Secret — `y` should show
+        // the rendered chart manifest, not that Secret's own YAML.
+        if matches!(self.kind_plural.as_str(), "helm" | "helmhistory") {
+            match crate::helm::decode(obj) {
+                Some(rel) => {
+                    self.detail = Scrollable {
+                        title: format!("{} v{} — manifest", rel.name, rel.revision),
+                        lines: rel.manifest.lines().map(String::from).collect(),
+                        ..Default::default()
+                    };
+                    self.mode = Mode::Detail;
+                }
+                None => self.flash_warn("could not decode this Helm release revision"),
+            }
+            return;
+        }
         let title = obj.metadata.name.clone().unwrap_or_else(|| "object".into());
         self.detail = Scrollable {
             title: format!("{title} — YAML"),
@@ -48,6 +64,28 @@ impl App {
         let Some(obj) = self.selected_ref() else {
             return;
         };
+        // No `kubectl describe` for a Helm release's storage Secret — show
+        // the rendered NOTES.txt instead, decoded synchronously (cheap, no
+        // subprocess needed).
+        if matches!(self.kind_plural.as_str(), "helm" | "helmhistory") {
+            match crate::helm::decode(obj) {
+                Some(rel) => {
+                    let lines = if rel.notes.is_empty() {
+                        vec!["<no notes>".to_string()]
+                    } else {
+                        rel.notes.lines().map(String::from).collect()
+                    };
+                    self.detail = Scrollable {
+                        title: format!("{} v{} — notes", rel.name, rel.revision),
+                        lines: lines.into(),
+                        ..Default::default()
+                    };
+                    self.mode = Mode::Detail;
+                }
+                None => self.flash_warn("could not decode this Helm release revision"),
+            }
+            return;
+        }
         let name = obj.metadata.name.clone().unwrap_or_default();
         let plural = self.kind_plural.clone();
         let ns = obj.metadata.namespace.clone();

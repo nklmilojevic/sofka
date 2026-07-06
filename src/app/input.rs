@@ -135,7 +135,8 @@ impl App {
                 self.start_watch();
             }
             // k9s: `r` = rollout restart on workloads, force-sync on external
-            // secrets, else refresh the watch.
+            // secrets, rollback on a Helm release's revision history, else
+            // refresh the watch.
             KeyCode::Char('r') => {
                 if matches!(
                     self.kind_plural.as_str(),
@@ -144,6 +145,8 @@ impl App {
                     self.request_restart();
                 } else if EXTERNAL_SECRET_KINDS.contains(&self.kind_plural.as_str()) {
                     self.request_refresh_es();
+                } else if self.kind_plural == "helmhistory" {
+                    self.request_helm_rollback();
                 } else {
                     self.start_watch();
                 }
@@ -275,6 +278,7 @@ impl App {
             PaletteAction::Events => self.open_events(),
             PaletteAction::PortForwards => self.open_port_forwards(),
             PaletteAction::Skin => self.open_skins(),
+            PaletteAction::Helm => self.open_helm_releases(),
         }
     }
 

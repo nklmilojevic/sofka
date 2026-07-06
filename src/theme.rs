@@ -414,16 +414,17 @@ pub fn accent() -> Style {
 /// against the row tint.
 pub fn status_color(s: &str) -> Color {
     match s {
-        "Running" | "Ready" | "Active" | "Bound" | "True" => green(),
+        "Running" | "Ready" | "Active" | "Bound" | "True" | "deployed" => green(),
         // Faded, not "healthy green" — a finished pod isn't running.
-        "Succeeded" | "Completed" => overlay0(),
-        "Pending" | "ContainerCreating" | "PodInitializing" | "Progressing" => yellow(),
+        "Succeeded" | "Completed" | "superseded" | "uninstalled" => overlay0(),
+        "Pending" | "ContainerCreating" | "PodInitializing" | "Progressing" | "pending-install"
+        | "pending-upgrade" | "pending-rollback" => yellow(),
         // Matches row_color's killColor — a distinct "on its way out" hue,
         // not the same bucket as Pending.
-        "Terminating" => mauve(),
+        "Terminating" | "uninstalling" => mauve(),
         "Failed" | "Error" | "CrashLoopBackOff" | "ImagePullBackOff" | "ErrImagePull"
-        | "Evicted" | "OOMKilled" | "NotReady" | "False" => red(),
-        "Unknown" | "" => overlay1(),
+        | "Evicted" | "OOMKilled" | "NotReady" | "False" | "failed" => red(),
+        "Unknown" | "" | "unknown" => overlay1(),
         _ => text(),
     }
 }
@@ -441,11 +442,12 @@ pub fn status_color(s: &str) -> Color {
 pub fn row_color(s: &str) -> Color {
     match s {
         "Failed" | "Error" | "CrashLoopBackOff" | "ImagePullBackOff" | "ErrImagePull"
-        | "Evicted" | "OOMKilled" | "NotReady" | "Unhealthy" | "False" => red(),
-        "Pending" | "ContainerCreating" | "PodInitializing" | "Progressing" => peach(),
-        "Completed" | "Succeeded" => overlay0(),
+        | "Evicted" | "OOMKilled" | "NotReady" | "Unhealthy" | "False" | "failed" => red(),
+        "Pending" | "ContainerCreating" | "PodInitializing" | "Progressing" | "pending-install"
+        | "pending-upgrade" | "pending-rollback" => peach(),
+        "Completed" | "Succeeded" | "superseded" | "uninstalled" => overlay0(),
         // k9s killColor — terminating/deleting rows.
-        "Terminating" => mauve(),
+        "Terminating" | "uninstalling" => mauve(),
         _ => blue(),
     }
 }
@@ -552,6 +554,18 @@ mod tests {
         // Pending pops distinct from the row's peach.
         assert_eq!(status_color("Pending"), yellow());
         assert_ne!(status_color("Pending"), row_color("Pending"));
+    }
+
+    #[test]
+    fn helm_release_statuses_are_colored() {
+        // Helm's own Status.String() values are lowercase, unlike k8s phases.
+        assert_eq!(row_color("deployed"), blue());
+        assert_eq!(status_color("deployed"), green());
+        assert_eq!(row_color("failed"), red());
+        assert_eq!(status_color("failed"), red());
+        assert_eq!(row_color("superseded"), overlay0());
+        assert_eq!(row_color("pending-upgrade"), peach());
+        assert_eq!(status_color("pending-upgrade"), yellow());
     }
 
     #[test]
