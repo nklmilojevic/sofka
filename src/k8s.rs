@@ -465,6 +465,11 @@ impl Cluster {
                 true,
             ),
         );
+        // A CR without curated columns, for custom-view tests.
+        registry.insert(
+            "certificates".to_string(),
+            mk("cert-manager.io", "Certificate", "certificates", true),
+        );
         Self {
             client,
             context: "test".into(),
@@ -475,6 +480,7 @@ impl Cluster {
             connected: true,
             registry,
             catalog: vec![
+                "certificates".to_string(),
                 "deployments".to_string(),
                 "helmreleases".to_string(),
                 "horizontalpodautoscalers".to_string(),

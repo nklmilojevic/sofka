@@ -267,6 +267,10 @@ impl App {
         let resolved = self.config.resolve(&name, &cluster.cluster_name);
         self.user_aliases = resolved.config.aliases;
         self.plugins = resolved.config.plugins;
+        let (views, view_warnings) = crate::views::compile(&resolved.config.views);
+        self.user_views = views;
+        // Printer-column fallbacks came from the old cluster's CRDs.
+        self.crd_views.clear();
         self.skin_colors = resolved.config.skin.colors;
         self.readonly = self.readonly_override.unwrap_or(resolved.config.readonly);
         cluster.add_aliases(&self.user_aliases);
@@ -296,7 +300,7 @@ impl App {
         self.apply_context_skin(resolved.skin_override);
         self.flash = format!("context: {name}");
         self.flash_err = false;
-        if let Some(w) = resolved.warnings.first() {
+        if let Some(w) = resolved.warnings.first().or(view_warnings.first()) {
             self.flash_warn(w);
         }
         let kind = resolved

@@ -250,6 +250,7 @@ async fn filter_match_indices_highlight_matched_chars() {
 async fn table_cell_cache_invalidates_on_apply() {
     let (mut app, _rx) = test_app();
     app.kind_plural = "pods".into();
+    app.refresh_view_spec();
     apply(
         &mut app,
         json!({
@@ -2351,4 +2352,249 @@ async fn x_outside_secrets_is_left_to_plugins() {
         Mode::Table,
         "x must not open a decode view for pods"
     );
+}
+
+// ----- custom views, printer columns, wide mode ---------------------------
+
+fn install_views(app: &mut App, toml_text: &str) {
+    let cfg: crate::config::Config = toml::from_str(toml_text).unwrap();
+    let (views, warnings) = crate::views::compile(&cfg.views);
+    assert!(warnings.is_empty(), "{warnings:?}");
+    app.user_views = views;
+}
+
+fn certificate(name: &str, ready: &str, not_after: &str, cpu: &str) -> serde_json::Value {
+    json!({
+        "apiVersion": "cert-manager.io/v1",
+        "kind": "Certificate",
+        "metadata": {"name": name, "namespace": "default"},
+        "spec": {"cpu": cpu},
+        "status": {
+            "conditions": [{"type": "Ready", "status": ready}],
+            "notAfter": not_after
+        }
+    })
+}
+
+#[tokio::test]
+async fn user_view_overlays_columns_and_applies_initial_sort() {
+    let (mut app, _rx) = test_app();
+    install_views(
+        &mut app,
+        r#"
+        [views."cert-manager.io/v1/certificates"]
+        sort = "EXPIRES:desc"
+
+        [[views."cert-manager.io/v1/certificates".columns]]
+        name = "READY"
+        path = "/status/conditions/0/status"
+        type = "status"
+
+        [[views."cert-manager.io/v1/certificates".columns]]
+        name = "EXPIRES"
+        path = "/status/notAfter"
+        type = "time"
+        "#,
+    );
+    app.switch_kind("certificates");
+
+    // Overlay: custom columns slot in before the trailing AGE.
+    assert_eq!(app.display_headers(), ["NAME", "READY", "EXPIRES", "AGE"]);
+    // The configured initial sort is active (EXPIRES, descending).
+    assert_eq!(app.sort_column, Some(2));
+    assert!(app.sort_desc);
+
+    apply(
+        &mut app,
+        certificate("old", "True", "2020-01-01T00:00:00Z", "1"),
+    );
+    apply(
+        &mut app,
+        certificate("new", "False", "2099-01-01T00:00:00Z", "1"),
+    );
+
+    // Descending time = oldest (largest elapsed) first.
+    let rows = app.rows();
+    assert_eq!(rows[0].metadata.name.as_deref(), Some("old"));
+
+    // Cells come from the JSON Pointers; the status column drives coloring.
+    let rows = app.rows();
+    app.ensure_table_cell_cache(&rows);
+    let key = row_key(rows[1]);
+    let cache = app.table_cell_cache();
+    let (cells, status_idx) = cache.get(&key).unwrap();
+    assert_eq!(cells[0], "new");
+    assert_eq!(cells[1], "False");
+    // Humanized future timestamp ("in 27000d"-ish, drifting with wall time).
+    assert!(cells[2].starts_with("in "), "{}", cells[2]);
+    assert_eq!(status_idx, Some(1));
+}
+
+#[tokio::test]
+async fn user_view_replace_swaps_out_curated_columns() {
+    let (mut app, _rx) = test_app();
+    install_views(
+        &mut app,
+        r#"
+        [views.certificates]
+        replace = true
+
+        [[views.certificates.columns]]
+        name = "NAME"
+        path = "/metadata/name"
+
+        [[views.certificates.columns]]
+        name = "CPU"
+        path = "/spec/cpu"
+        type = "quantity"
+        "#,
+    );
+    app.switch_kind("certificates");
+    assert_eq!(app.display_headers(), ["NAME", "CPU"]);
+
+    // Quantities sort by value: 500m < 2 despite "2" < "500m" lexically.
+    apply(&mut app, certificate("big", "True", "", "2"));
+    apply(&mut app, certificate("small", "True", "", "500m"));
+    app.sort_column = Some(1);
+    app.invalidate_rows();
+    let rows = app.rows();
+    assert_eq!(rows[0].metadata.name.as_deref(), Some("small"));
+    assert_eq!(rows[1].metadata.name.as_deref(), Some("big"));
+}
+
+#[tokio::test]
+async fn printer_columns_msg_upgrades_name_age_fallback() {
+    let (mut app, _rx) = test_app();
+    app.switch_kind("certificates");
+    assert_eq!(app.display_headers(), ["NAME", "AGE"]);
+
+    let crd = json!({
+        "spec": {
+            "versions": [{
+                "name": "v1", "served": true, "storage": true,
+                "additionalPrinterColumns": [
+                    {"name": "Ready", "type": "string", "jsonPath": ".status.ready"},
+                    {"name": "Detail", "type": "string", "priority": 1,
+                     "jsonPath": ".status.message"}
+                ]
+            }]
+        }
+    });
+    let view = crate::views::printer_columns_view(&crd, "v1");
+    app.handle_msg(Msg::PrinterColumns {
+        generation: app.generation,
+        plural: "certificates".into(),
+        view: Box::new(view),
+    });
+    // Narrow mode hides the priority>0 column; wide shows it.
+    assert_eq!(app.display_headers(), ["NAME", "READY", "AGE"]);
+    app.handle_key(press(KeyCode::Char('w'))).unwrap();
+    assert_eq!(app.display_headers(), ["NAME", "READY", "DETAIL", "AGE"]);
+
+    // A stale-generation message must be dropped.
+    app.switch_kind("pods");
+    app.handle_msg(Msg::PrinterColumns {
+        generation: app.generation - 1,
+        plural: "widgets".into(),
+        view: Box::new(None),
+    });
+    assert!(!app.crd_views.contains_key("widgets"));
+}
+
+#[tokio::test]
+async fn user_view_wins_over_printer_columns() {
+    let (mut app, _rx) = test_app();
+    install_views(
+        &mut app,
+        r#"
+        [[views.certificates.columns]]
+        name = "MINE"
+        path = "/status/mine"
+        "#,
+    );
+    app.switch_kind("certificates");
+    app.handle_msg(Msg::PrinterColumns {
+        generation: app.generation,
+        plural: "certificates".into(),
+        view: Box::new(Some(crate::views::View {
+            columns: vec![crate::views::UserColumn {
+                header: "THEIRS".into(),
+                pointer: "/status/theirs".into(),
+                kind: crate::views::ColumnKind::Text,
+                wide: false,
+                width: None,
+                align: None,
+            }],
+            sort: None,
+            replace: false,
+        })),
+    });
+    assert_eq!(app.display_headers(), ["NAME", "MINE", "AGE"]);
+}
+
+#[tokio::test]
+async fn wide_toggle_reveals_pod_columns_and_keeps_sort() {
+    let (mut app, _rx) = test_app();
+    app.switch_kind("pods");
+    assert_eq!(
+        app.display_headers(),
+        ["NAME", "READY", "STATUS", "RESTARTS", "AGE", "CPU", "MEM"]
+    );
+
+    // Sort by AGE, then widen: the sort must follow the column's new index.
+    app.sort_column = Some(4);
+    app.handle_key(press(KeyCode::Char('w'))).unwrap();
+    assert_eq!(
+        app.display_headers(),
+        [
+            "NAME", "READY", "STATUS", "RESTARTS", "IP", "NODE", "AGE", "CPU", "MEM"
+        ]
+    );
+    assert_eq!(app.sort_column, Some(6));
+
+    // Narrow again while sorted on a wide-only column: sort resets.
+    app.sort_column = Some(4); // IP
+    app.handle_key(press(KeyCode::Char('w'))).unwrap();
+    assert_eq!(app.sort_column, None);
+}
+
+#[tokio::test]
+async fn crd_drill_seeds_printer_columns_from_the_crd() {
+    let (mut app, _rx) = test_app();
+    app.switch_kind("pods");
+    let crd = obj(json!({
+        "apiVersion": "apiextensions.k8s.io/v1",
+        "kind": "CustomResourceDefinition",
+        "metadata": {"name": "widgets.example.com"},
+        "spec": {
+            "group": "example.com",
+            "names": {"plural": "widgets", "kind": "Widget"},
+            "scope": "Namespaced",
+            "versions": [{
+                "name": "v1", "served": true, "storage": true,
+                "additionalPrinterColumns": [
+                    {"name": "Phase", "type": "string", "jsonPath": ".status.phase"}
+                ]
+            }]
+        }
+    }));
+    app.drill_into_crd(&crd);
+    assert_eq!(app.kind_plural, "widgets");
+    assert_eq!(app.display_headers(), ["NAMESPACE", "NAME", "PHASE", "AGE"]);
+}
+
+#[tokio::test]
+async fn invalid_view_sort_column_warns_instead_of_crashing() {
+    let (mut app, _rx) = test_app();
+    install_views(
+        &mut app,
+        r#"
+        [views.certificates]
+        sort = "NOPE"
+        "#,
+    );
+    app.switch_kind("certificates");
+    assert_eq!(app.sort_column, None);
+    assert!(app.flash.contains("NOPE"), "{}", app.flash);
+    assert!(app.flash_err);
 }

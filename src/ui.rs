@@ -3,7 +3,7 @@
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
-use ratatui::text::{Line, Span};
+use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{
     Block, BorderType, Borders, Cell, Clear, Gauge, HighlightSpacing, List, ListItem, ListState,
     Paragraph, Row, Table, Wrap,
@@ -33,6 +33,26 @@ impl<'a> TableCellText<'a> {
             TableCellText::Borrowed(value) => Cell::from(value),
             TableCellText::Owned(value) => Cell::from(value),
         }
+    }
+
+    /// Like [`Self::into_cell`], honoring a custom column's alignment.
+    fn into_cell_aligned(self, align: Option<Alignment>) -> Cell<'a> {
+        let Some(align) = align else {
+            return self.into_cell();
+        };
+        match self {
+            TableCellText::Borrowed(value) => Cell::from(Text::from(value).alignment(align)),
+            TableCellText::Owned(value) => Cell::from(Text::from(value).alignment(align)),
+        }
+    }
+}
+
+/// Map a view column's configured alignment onto ratatui's.
+fn cell_alignment(align: crate::views::Align) -> Alignment {
+    match align {
+        crate::views::Align::Left => Alignment::Left,
+        crate::views::Align::Center => Alignment::Center,
+        crate::views::Align::Right => Alignment::Right,
     }
 }
 
@@ -321,10 +341,22 @@ fn header_hints(app: &App) -> Vec<Line<'static>> {
 fn draw_table(frame: &mut Frame, app: &mut App, area: Rect) {
     let show_ns = app.show_namespace_column();
     let metrics_cols = app.metrics_columns();
-    let headers: Vec<&str> = app.display_headers();
+    let headers: Vec<String> = app.display_headers();
     let pods_view = app.kind_plural == "pods";
     let sort_col = app.sort_column;
     let sort_arrow = if app.sort_desc { " ↓" } else { " ↑" };
+    // Offset from a displayed column index back to the view spec's (the spec
+    // doesn't know about the prepended NAMESPACE or appended CPU/MEM).
+    let ns_off = usize::from(show_ns);
+    // Per-column custom alignment, precomputed so cells don't re-borrow app.
+    let aligns: Vec<Option<Alignment>> = (0..headers.len())
+        .map(|i| {
+            i.checked_sub(ns_off)
+                .and_then(|si| app.view_spec().align_at(si))
+                .map(cell_alignment)
+        })
+        .collect();
+    let align_of = |i: usize| aligns.get(i).copied().flatten();
 
     let header_row = Row::new(
         headers
@@ -334,17 +366,24 @@ fn draw_table(frame: &mut Frame, app: &mut App, area: Rect) {
                 // Active sort column gets a direction arrow in the sorter color
                 // (sky, bold), matching k9s; the label inherits the header color.
                 if Some(i) == sort_col {
-                    Cell::from(Line::from(vec![
-                        Span::raw(h.to_string()),
+                    let mut line = Line::from(vec![
+                        Span::raw(h.clone()),
                         Span::styled(
                             sort_arrow,
                             Style::default()
                                 .fg(theme::sorter())
                                 .add_modifier(Modifier::BOLD),
                         ),
-                    ]))
+                    ]);
+                    if let Some(a) = align_of(i) {
+                        line = line.alignment(a);
+                    }
+                    Cell::from(line)
                 } else {
-                    Cell::from(h.to_string())
+                    match align_of(i) {
+                        Some(a) => Cell::from(Text::from(h.clone()).alignment(a)),
+                        None => Cell::from(h.clone()),
+                    }
                 }
             })
             .collect::<Vec<_>>(),
@@ -355,11 +394,11 @@ fn draw_table(frame: &mut Frame, app: &mut App, area: Rect) {
     // their own visibility treatment below, computed once rather than
     // string-compared per cell.
     let name_col = if show_ns { 1 } else { 0 };
-    let age_idx = headers.iter().position(|h| *h == "AGE");
-    let ready_idx = headers.iter().position(|h| *h == "READY");
-    let restarts_idx = headers.iter().position(|h| *h == "RESTARTS");
-    let cpu_idx = headers.iter().position(|h| *h == "CPU");
-    let mem_idx = headers.iter().position(|h| *h == "MEM");
+    let age_idx = headers.iter().position(|h| h == "AGE");
+    let ready_idx = headers.iter().position(|h| h == "READY");
+    let restarts_idx = headers.iter().position(|h| h == "RESTARTS");
+    let cpu_idx = headers.iter().position(|h| h == "CPU");
+    let mem_idx = headers.iter().position(|h| h == "MEM");
 
     let count = app.row_count();
     let visible_rows = area.height.saturating_sub(3).max(1) as usize;
@@ -391,7 +430,7 @@ fn draw_table(frame: &mut Frame, app: &mut App, area: Rect) {
         .collect();
     app.ensure_table_cell_cache(&visible_objects);
     let cell_cache = app.table_cell_cache();
-    let base_headers = columns::headers(&app.kind_plural);
+    let spec = app.view_spec();
 
     let rows: Vec<Row> = visible_objects
         .iter()
@@ -410,8 +449,7 @@ fn draw_table(frame: &mut Frame, app: &mut App, area: Rect) {
                 style_idx = status_idx.map(|i| i + 1);
             }
             for (i, cell) in base_cells.iter().enumerate() {
-                let header = base_headers.get(i).copied().unwrap_or_default();
-                if let Some(value) = columns::volatile_cell(obj, &app.kind_plural, header) {
+                if let Some(value) = spec.volatile(obj, &app.kind_plural, i) {
                     cells.push(TableCellText::Owned(value));
                 } else {
                     cells.push(TableCellText::Borrowed(cell));
@@ -462,36 +500,39 @@ fn draw_table(frame: &mut Frame, app: &mut App, area: Rect) {
                 .into_iter()
                 .enumerate()
                 .map(|(i, c)| {
+                    let align = align_of(i);
                     if marked_row {
                         // Marked rows override everything so a bulk selection
                         // stands out.
-                        c.into_cell().style(
+                        c.into_cell_aligned(align).style(
                             Style::default()
                                 .fg(theme::mark())
                                 .add_modifier(Modifier::BOLD),
                         )
                     } else if Some(i) == style_idx {
-                        c.into_cell().style(Style::default().fg(status_badge))
+                        c.into_cell_aligned(align)
+                            .style(Style::default().fg(status_badge))
                     } else if i == name_col {
                         render_name_cell(app, c.as_str(), row_color)
                     } else if Some(i) == age_idx {
-                        c.into_cell().style(theme::dim())
+                        c.into_cell_aligned(align).style(theme::dim())
                     } else if Some(i) == restarts_idx {
                         let n: i64 = c.as_str().trim().parse().unwrap_or(0);
                         let color = theme::restarts_severity(n).unwrap_or(row_color);
-                        c.into_cell().style(Style::default().fg(color))
+                        c.into_cell_aligned(align).style(Style::default().fg(color))
                     } else if Some(i) == cpu_idx {
                         let color = metrics_raw
                             .and_then(|(cpu, _)| theme::cpu_severity(cpu))
                             .unwrap_or(row_color);
-                        c.into_cell().style(Style::default().fg(color))
+                        c.into_cell_aligned(align).style(Style::default().fg(color))
                     } else if Some(i) == mem_idx {
                         let color = metrics_raw
                             .and_then(|(_, mem)| theme::mem_severity(mem))
                             .unwrap_or(row_color);
-                        c.into_cell().style(Style::default().fg(color))
+                        c.into_cell_aligned(align).style(Style::default().fg(color))
                     } else {
-                        c.into_cell().style(Style::default().fg(row_color))
+                        c.into_cell_aligned(align)
+                            .style(Style::default().fg(row_color))
                     }
                 })
                 .collect();
@@ -501,33 +542,43 @@ fn draw_table(frame: &mut Frame, app: &mut App, area: Rect) {
 
     let widths: Vec<Constraint> = headers
         .iter()
-        .map(|h| match *h {
-            // NAME is the column you actually read — give it most of the
-            // remaining space so long pod/deployment names don't truncate
-            // while NODE (a full GKE node name) crowds it out.
-            "NAME" => Constraint::Fill(6),
-            "NAMESPACE" => Constraint::Fill(2),
-            "NODE" | "CLAIM" | "VOLUME" | "HOSTS" => Constraint::Fill(1),
-            "AGE" => Constraint::Length(7),
-            "CPU" | "MEM" => Constraint::Length(8),
-            // Wide enough for the long pod reasons (ContainerCreating,
-            // CrashLoopBackOff, ImagePullBackOff…) so status is never clipped.
-            "STATUS" => Constraint::Length(19),
-            "READY" | "RESTARTS" => Constraint::Length(10),
-            // CRD view: group domains run long (e.g.
-            // "kustomize.toolkit.fluxcd.io"), so give GROUP/KIND/VERSIONS a
-            // fixed floor wide enough that real-world values don't clip —
-            // Fill(1) alongside NAME's Fill(6) would crush them.
-            "GROUP" => Constraint::Length(30),
-            "KIND" => Constraint::Length(20),
-            "VERSIONS" => Constraint::Length(20),
-            "SCOPE" => Constraint::Length(12),
-            // Flux views: the Ready condition message and git/chart revision
-            // are the columns you read — split the leftover space with NAME.
-            "MESSAGE" => Constraint::Fill(4),
-            "REVISION" => Constraint::Fill(2),
-            "SUSPENDED" => Constraint::Length(9),
-            _ => Constraint::Fill(1),
+        .enumerate()
+        .map(|(i, h)| {
+            // A custom column's configured width wins over the curated rules.
+            if let Some(w) = i
+                .checked_sub(ns_off)
+                .and_then(|si| app.view_spec().width_at(si))
+            {
+                return Constraint::Length(w);
+            }
+            match h.as_str() {
+                // NAME is the column you actually read — give it most of the
+                // remaining space so long pod/deployment names don't truncate
+                // while NODE (a full GKE node name) crowds it out.
+                "NAME" => Constraint::Fill(6),
+                "NAMESPACE" => Constraint::Fill(2),
+                "NODE" | "CLAIM" | "VOLUME" | "HOSTS" => Constraint::Fill(1),
+                "AGE" => Constraint::Length(7),
+                "CPU" | "MEM" => Constraint::Length(8),
+                // Wide enough for the long pod reasons (ContainerCreating,
+                // CrashLoopBackOff, ImagePullBackOff…) so status is never clipped.
+                "STATUS" => Constraint::Length(19),
+                "READY" | "RESTARTS" => Constraint::Length(10),
+                // CRD view: group domains run long (e.g.
+                // "kustomize.toolkit.fluxcd.io"), so give GROUP/KIND/VERSIONS a
+                // fixed floor wide enough that real-world values don't clip —
+                // Fill(1) alongside NAME's Fill(6) would crush them.
+                "GROUP" => Constraint::Length(30),
+                "KIND" => Constraint::Length(20),
+                "VERSIONS" => Constraint::Length(20),
+                "SCOPE" => Constraint::Length(12),
+                // Flux views: the Ready condition message and git/chart revision
+                // are the columns you read — split the leftover space with NAME.
+                "MESSAGE" => Constraint::Fill(4),
+                "REVISION" => Constraint::Fill(2),
+                "SUSPENDED" => Constraint::Length(9),
+                _ => Constraint::Fill(1),
+            }
         })
         .collect();
 
@@ -1449,6 +1500,7 @@ fn draw_help(frame: &mut Frame, app: &App, area: Rect) {
         bind("esc", "go back / pop view / clear filter"),
         bind("j/k g/G", "move · top/bottom"),
         bind("S · I", "sort by column (cycle) · invert direction"),
+        bind("w", "toggle wide columns (kubectl -o wide)"),
         bind("/", "fuzzy filter"),
         bind("n · 0-9", "namespace switcher · 0 = all namespaces"),
         bind("ctrl-r", "refresh watch"),
@@ -2050,9 +2102,9 @@ fn draw_prompt(frame: &mut Frame, app: &App, area: Rect) {
             // Per-resource verbs live in the header hint column when it
             // fits; only repeat the full line when the header dropped it.
             let hint = if header_hints_fit(frame.area().width) {
-                "  :resource  /filter  S:sort I:invert  space:mark  [ ]:history  0:all-ns  ?:help"
+                "  :resource  /filter  S:sort I:invert  w:wide  space:mark  [ ]:history  0:all-ns  ?:help"
             } else {
-                "  :resource  /filter  S:sort I:invert  ⏎drill  y:yaml d:describe l:logs e:edit s:shell/scale i:image r:restart f:fwd ^d:del  ?:help"
+                "  :resource  /filter  S:sort I:invert  w:wide  ⏎drill  y:yaml d:describe l:logs e:edit s:shell/scale i:image r:restart f:fwd ^d:del  ?:help"
             };
             Line::from(Span::styled(hint, theme::dim()))
         }

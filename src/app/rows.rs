@@ -56,7 +56,9 @@ impl App {
         }
 
         let headers = self.display_headers();
-        let sort_header = self.sort_column.and_then(|i| headers.get(i).copied());
+        let sort_header = self
+            .sort_column
+            .and_then(|i| headers.get(i).map(String::as_str));
         // The aggregated Helm release list (`helm list` semantics) shows only
         // the latest revision per release; `helmhistory` (one release's full
         // history) shows every revision, so it skips this.
@@ -144,7 +146,7 @@ impl App {
                 entry.plural != self.kind_plural || entry.resource_version != resource_version
             });
             if stale {
-                let (cells, status_idx) = crate::columns::cells(obj, &self.kind_plural);
+                let (cells, status_idx) = self.spec.cells(obj);
                 cache.cells.insert(
                     key,
                     CellCacheEntry {
@@ -164,19 +166,89 @@ impl App {
         }
     }
 
-    /// The headers as displayed: kind columns, with NAMESPACE prepended when
-    /// listing across namespaces and CPU/MEM appended for pods/nodes. Kept in
-    /// one place so sorting and rendering agree on the column layout.
-    pub fn display_headers(&self) -> Vec<&'static str> {
-        let mut h = crate::columns::headers(&self.kind_plural);
+    /// The headers as displayed: the active view spec's columns, with
+    /// NAMESPACE prepended when listing across namespaces and CPU/MEM appended
+    /// for pods/nodes. Kept in one place so sorting and rendering agree on the
+    /// column layout.
+    pub fn display_headers(&self) -> Vec<String> {
+        let mut h = self.spec.headers();
         if self.show_namespace_column() {
-            h.insert(0, "NAMESPACE");
+            h.insert(0, "NAMESPACE".into());
         }
         if self.metrics_columns() {
-            h.push("CPU");
-            h.push("MEM");
+            h.push("CPU".into());
+            h.push("MEM".into());
         }
         h
+    }
+
+    pub(crate) fn view_spec(&self) -> &crate::columns::ViewSpec {
+        &self.spec
+    }
+
+    /// Rebuild the active column layout from the current kind, user views,
+    /// printer-column fallback, and wide mode. An active sort stays pinned to
+    /// its column *header* — indices shift when columns appear/disappear (wide
+    /// toggle, printer columns arriving) — and resets if the column is gone.
+    /// Cached cells are laid out for the old spec, so they're always dropped.
+    pub(super) fn refresh_view_spec(&mut self) {
+        let sort_header = self
+            .sort_column
+            .and_then(|i| self.display_headers().get(i).cloned());
+        let spec = crate::columns::build_spec(
+            &self.kind_plural,
+            self.active_user_view(),
+            self.crd_views
+                .get(&self.kind_plural)
+                .and_then(Option::as_ref),
+            self.wide,
+        );
+        self.spec = spec;
+        if let Some(h) = sort_header {
+            self.sort_column = self.display_headers().iter().position(|x| *x == h);
+            if self.sort_column.is_none() {
+                self.sort_desc = false;
+            }
+        }
+        self.clear_rows_cache();
+    }
+
+    /// The user-configured view matching the current kind, if any. Synthetic
+    /// views (helm/helmhistory) are backed by an unrelated kind (`secrets`),
+    /// so they never match.
+    pub(super) fn active_user_view(&self) -> Option<&crate::views::View> {
+        let kind = self.kind.as_ref()?;
+        if kind.ar.plural.to_lowercase() != self.kind_plural {
+            return None;
+        }
+        crate::views::lookup(&self.user_views, &kind.ar)
+    }
+
+    /// Apply a view's configured initial sort, unless a sort is already
+    /// active (a refresh must not clobber the user's choice).
+    pub(super) fn apply_view_sort(&mut self) {
+        if self.sort_column.is_some() {
+            return;
+        }
+        let Some((header, desc)) = self.active_user_view().and_then(|v| v.sort.clone()) else {
+            return;
+        };
+        match self.display_headers().iter().position(|h| *h == header) {
+            Some(i) => {
+                self.sort_column = Some(i);
+                self.sort_desc = desc;
+                self.invalidate_rows();
+            }
+            None => self.flash_warn(&format!("view sort column '{header}' not found")),
+        }
+    }
+
+    /// Toggle wide mode (`w`): show/hide wide-only columns.
+    pub(super) fn toggle_wide(&mut self) {
+        self.wide = !self.wide;
+        self.refresh_view_spec();
+        self.flash = format!("wide columns: {}", if self.wide { "on" } else { "off" });
+        self.flash_err = false;
     }
 
     pub fn show_namespace_column(&self) -> bool {
@@ -203,6 +275,14 @@ impl App {
 
     /// Comparable value of `header`'s cell for object `o`.
     pub(super) fn column_sort_key(&self, o: &DynamicObject, header: &str) -> SortKey {
+        // User/printer columns sort by their declared type (quantity, number,
+        // time…), and win over the curated special cases so an overlay that
+        // redefines a header sorts by its own values.
+        if self.spec.is_user_column(header)
+            && let Some(v) = self.spec.sort_value(o, header)
+        {
+            return SortKey::from(v);
+        }
         match header {
             "NAMESPACE" => SortKey::Text(
                 o.metadata
@@ -237,21 +317,10 @@ impl App {
             "REVISION" if matches!(self.kind_plural.as_str(), "helm" | "helmhistory") => {
                 SortKey::Num(crate::helm::revision(o).unwrap_or(0) as f64)
             }
-            _ => {
-                let base = crate::columns::headers(&self.kind_plural);
-                match base.iter().position(|h| *h == header) {
-                    Some(i) => {
-                        let (cells, _) = crate::columns::cells(o, &self.kind_plural);
-                        let v = cells.get(i).cloned().unwrap_or_default();
-                        if is_numeric_header(header) {
-                            SortKey::Num(parse_leading_num(&v))
-                        } else {
-                            SortKey::Text(v.to_lowercase())
-                        }
-                    }
-                    None => SortKey::Text(String::new()),
-                }
-            }
+            _ => match self.spec.sort_value(o, header) {
+                Some(v) => SortKey::from(v),
+                None => SortKey::Text(String::new()),
+            },
         }
     }
 
@@ -274,12 +343,7 @@ impl App {
         self.sort_desc = false;
         self.invalidate_rows();
         let label = match self.sort_column {
-            Some(i) => self
-                .display_headers()
-                .get(i)
-                .copied()
-                .unwrap_or("")
-                .to_string(),
+            Some(i) => self.display_headers().get(i).cloned().unwrap_or_default(),
             None => "default (ns/name)".to_string(),
         };
         self.flash = format!("sort by {label}");
@@ -294,12 +358,7 @@ impl App {
         };
         self.sort_desc = !self.sort_desc;
         self.invalidate_rows();
-        let label = self
-            .display_headers()
-            .get(i)
-            .copied()
-            .unwrap_or("")
-            .to_string();
+        let label = self.display_headers().get(i).cloned().unwrap_or_default();
         self.flash = format!(
             "sort by {label} {}",
             if self.sort_desc {

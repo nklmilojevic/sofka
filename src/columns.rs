@@ -14,6 +14,8 @@ struct Column {
     header: &'static str,
     extract: CellFn,
     is_status: bool,
+    /// Only shown in wide mode (`w`), like kubectl's `-o wide` extras.
+    wide: bool,
 }
 
 struct CellContext<'a> {
@@ -28,6 +30,7 @@ const fn column(header: &'static str, extract: CellFn) -> Column {
         header,
         extract,
         is_status: false,
+        wide: false,
     }
 }
 
@@ -36,6 +39,16 @@ const fn status_column(header: &'static str, extract: CellFn) -> Column {
         header,
         extract,
         is_status: true,
+        wide: false,
+    }
+}
+
+const fn wide_column(header: &'static str, extract: CellFn) -> Column {
+    Column {
+        header,
+        extract,
+        is_status: false,
+        wide: true,
     }
 }
 
@@ -44,8 +57,8 @@ const POD_COLUMNS: &[Column] = &[
     column("READY", col_pod_ready),
     status_column("STATUS", col_pod_status),
     column("RESTARTS", col_pod_restarts),
-    column("IP", col_pod_ip),
-    column("NODE", col_pod_node),
+    wide_column("IP", col_pod_ip),
+    wide_column("NODE", col_pod_node),
     column("AGE", col_age),
 ];
 
@@ -272,14 +285,25 @@ fn columns_for(plural: &str) -> &'static [Column] {
     }
 }
 
-/// Headers for a kind, excluding the leading NAMESPACE column (the table view
-/// prepends that when listing across namespaces).
+/// Whether `plural` has curated columns (anything beyond the NAME/AGE
+/// fallback). Kinds without them are candidates for the CRD printer-column
+/// fallback.
+pub fn has_curated(plural: &str) -> bool {
+    columns_for(plural).as_ptr() != DEFAULT_COLUMNS.as_ptr()
+}
+
+/// The full curated headers for a kind (wide columns included), excluding the
+/// leading NAMESPACE column (the table view prepends that when listing across
+/// namespaces). Live views go through [`ViewSpec`] instead, which folds in
+/// user views, printer columns, and wide-mode filtering.
+#[cfg(test)]
 pub fn headers(plural: &str) -> Vec<&'static str> {
     columns_for(plural).iter().map(|c| c.header).collect()
 }
 
 /// Cells for one object, aligned with [`headers`]. The 2nd return value is the
 /// index of the column that should be colorized as a status (or None).
+#[cfg(test)]
 pub fn cells(obj: &DynamicObject, plural: &str) -> (Vec<String>, Option<usize>) {
     let name = obj.metadata.name.clone().unwrap_or_default();
     let age = age(obj);
@@ -293,6 +317,215 @@ pub fn cells(obj: &DynamicObject, plural: &str) -> (Vec<String>, Option<usize>) 
     let values = columns.iter().map(|c| (c.extract)(&ctx)).collect();
     let status_idx = columns.iter().position(|c| c.is_status);
     (values, status_idx)
+}
+
+/// The resolved column layout for one table view: the kind's curated columns,
+/// overlaid with (or replaced by) a user-configured view — or CRD printer
+/// columns when the kind is unknown — then filtered by wide mode. Built once
+/// per view change, never per row.
+pub struct ViewSpec {
+    columns: Vec<SpecColumn>,
+    status_idx: Option<usize>,
+}
+
+struct SpecColumn {
+    header: String,
+    source: SpecSource,
+    is_status: bool,
+    wide: bool,
+}
+
+enum SpecSource {
+    Curated(CellFn),
+    User(crate::views::UserColumn),
+}
+
+fn spec_curated(c: &Column) -> SpecColumn {
+    SpecColumn {
+        header: c.header.to_string(),
+        source: SpecSource::Curated(c.extract),
+        is_status: c.is_status,
+        wide: c.wide,
+    }
+}
+
+fn spec_user(uc: &crate::views::UserColumn) -> SpecColumn {
+    SpecColumn {
+        header: uc.header.clone(),
+        is_status: uc.kind == crate::views::ColumnKind::Status,
+        wide: uc.wide,
+        source: SpecSource::User(uc.clone()),
+    }
+}
+
+/// Resolve the columns for a view. `user` is the explicit view configured for
+/// the kind; `crd` is the printer-column fallback, consulted only when the
+/// user view defines no columns and `plural` has no curated ones.
+pub fn build_spec(
+    plural: &str,
+    user: Option<&crate::views::View>,
+    crd: Option<&crate::views::View>,
+    wide: bool,
+) -> ViewSpec {
+    let mut cols: Vec<SpecColumn> = columns_for(plural).iter().map(spec_curated).collect();
+    // A user view only counts as explicit column config when it has columns —
+    // a sort-only view (or one whose columns all failed validation) still
+    // benefits from the printer-column fallback.
+    let view = match user {
+        Some(v) if !v.columns.is_empty() => Some(v),
+        _ => {
+            if has_curated(plural) {
+                None
+            } else {
+                crd
+            }
+        }
+    };
+    if let Some(v) = view {
+        if v.replace && !v.columns.is_empty() {
+            cols = v.columns.iter().map(spec_user).collect();
+        } else {
+            for uc in &v.columns {
+                let sc = spec_user(uc);
+                match cols.iter().position(|c| c.header == sc.header) {
+                    // A matching header replaces the curated column in place.
+                    Some(i) => cols[i] = sc,
+                    // New columns land before a trailing AGE so it stays last.
+                    None => {
+                        let at = if cols.last().is_some_and(|c| c.header == "AGE") {
+                            cols.len() - 1
+                        } else {
+                            cols.len()
+                        };
+                        cols.insert(at, sc);
+                    }
+                }
+            }
+        }
+    }
+    cols.retain(|c| wide || !c.wide);
+    let status_idx = cols.iter().position(|c| c.is_status);
+    ViewSpec {
+        columns: cols,
+        status_idx,
+    }
+}
+
+impl ViewSpec {
+    pub fn headers(&self) -> Vec<String> {
+        self.columns.iter().map(|c| c.header.clone()).collect()
+    }
+
+    /// Cells for one object, aligned with [`Self::headers`], plus the index
+    /// of the status column (if any).
+    pub fn cells(&self, obj: &DynamicObject) -> (Vec<String>, Option<usize>) {
+        let name = obj.metadata.name.clone().unwrap_or_default();
+        let age = age(obj);
+        let ctx = CellContext {
+            obj,
+            data: &obj.data,
+            name: &name,
+            age: &age,
+        };
+        let values = self
+            .columns
+            .iter()
+            .map(|c| match &c.source {
+                SpecSource::Curated(extract) => extract(&ctx),
+                SpecSource::User(uc) => crate::views::render_cell(obj, uc),
+            })
+            .collect();
+        (values, self.status_idx)
+    }
+
+    /// See [`volatile_cell`]. User `time` columns re-render every frame too:
+    /// their humanized elapsed value drifts with wall time.
+    pub fn volatile(&self, obj: &DynamicObject, plural: &str, idx: usize) -> Option<String> {
+        let col = self.columns.get(idx)?;
+        match &col.source {
+            SpecSource::User(uc) if uc.kind == crate::views::ColumnKind::Time => {
+                Some(crate::views::render_cell(obj, uc))
+            }
+            SpecSource::User(_) => None,
+            SpecSource::Curated(_) => volatile_cell(obj, plural, &col.header),
+        }
+    }
+
+    /// Whether `header` is a user/printer column (typed sorting applies) as
+    /// opposed to a curated one.
+    pub fn is_user_column(&self, header: &str) -> bool {
+        self.columns
+            .iter()
+            .any(|c| c.header == header && matches!(c.source, SpecSource::User(_)))
+    }
+
+    /// Comparable value of `header`'s cell for `obj`, or `None` when the
+    /// header isn't in this spec.
+    pub fn sort_value(&self, obj: &DynamicObject, header: &str) -> Option<crate::views::SortValue> {
+        let col = self.columns.iter().find(|c| c.header == header)?;
+        Some(match &col.source {
+            SpecSource::User(uc) => crate::views::sort_value(obj, uc),
+            SpecSource::Curated(extract) => {
+                let name = obj.metadata.name.clone().unwrap_or_default();
+                let age = age(obj);
+                let ctx = CellContext {
+                    obj,
+                    data: &obj.data,
+                    name: &name,
+                    age: &age,
+                };
+                let v = extract(&ctx);
+                if is_numeric_header(header) {
+                    crate::views::SortValue::Num(parse_leading_num(&v))
+                } else {
+                    crate::views::SortValue::Text(v.to_lowercase())
+                }
+            }
+        })
+    }
+
+    /// Configured fixed width for the column at `idx`, when it's a user
+    /// column that set one.
+    pub fn width_at(&self, idx: usize) -> Option<u16> {
+        match &self.columns.get(idx)?.source {
+            SpecSource::User(uc) => uc.width,
+            SpecSource::Curated(_) => None,
+        }
+    }
+
+    /// Configured alignment for the column at `idx`.
+    pub fn align_at(&self, idx: usize) -> Option<crate::views::Align> {
+        match &self.columns.get(idx)?.source {
+            SpecSource::User(uc) => uc.align,
+            SpecSource::Curated(_) => None,
+        }
+    }
+}
+
+/// Columns whose curated cell is a count/number and should sort numerically.
+fn is_numeric_header(header: &str) -> bool {
+    matches!(
+        header,
+        "READY"
+            | "RESTARTS"
+            | "DATA"
+            | "ACTIVE"
+            | "DESIRED"
+            | "CURRENT"
+            | "AVAILABLE"
+            | "UP-TO-DATE"
+            | "COMPLETIONS"
+            | "ENDPOINTS"
+    )
+}
+
+/// Parse the leading number of a cell (`"3"`, `"1/2"` → 1, `"<none>"` → 0).
+fn parse_leading_num(s: &str) -> f64 {
+    let t = s.trim_start_matches(|c: char| !c.is_ascii_digit() && c != '-');
+    let end = t
+        .find(|c: char| !c.is_ascii_digit() && c != '-')
+        .unwrap_or(t.len());
+    t[..end].parse::<f64>().unwrap_or(0.0)
 }
 
 /// Cells whose display value changes with wall time even when the Kubernetes
@@ -841,7 +1074,8 @@ fn job_duration(d: &Value) -> String {
     humanize((end - start).max(0))
 }
 
-fn humanize(secs: i64) -> String {
+/// Compact duration, e.g. `3d4h`, `12m`, `45s`.
+pub(crate) fn humanize(secs: i64) -> String {
     let d = secs / 86_400;
     let h = (secs % 86_400) / 3600;
     let m = (secs % 3600) / 60;
@@ -1709,5 +1943,141 @@ mod tests {
                 assert!(idx < cells.len(), "{kind} status index");
             }
         }
+    }
+
+    // ----- view specs (curated + user/printer columns + wide) --------------
+
+    fn user_col(
+        header: &str,
+        pointer: &str,
+        kind: crate::views::ColumnKind,
+    ) -> crate::views::UserColumn {
+        crate::views::UserColumn {
+            header: header.into(),
+            pointer: pointer.into(),
+            kind,
+            wide: false,
+            width: None,
+            align: None,
+        }
+    }
+
+    fn view(columns: Vec<crate::views::UserColumn>, replace: bool) -> crate::views::View {
+        crate::views::View {
+            columns,
+            sort: None,
+            replace,
+        }
+    }
+
+    #[test]
+    fn spec_overlay_replaces_matching_headers_and_inserts_before_age() {
+        use crate::views::ColumnKind;
+        let v = view(
+            vec![
+                // Collides with the curated STATUS header: replaces in place.
+                user_col("STATUS", "/status/phase", ColumnKind::Status),
+                // New column: lands before the trailing AGE.
+                user_col("NODE-IP", "/status/hostIP", ColumnKind::Text),
+            ],
+            false,
+        );
+        let spec = build_spec("pods", Some(&v), None, false);
+        assert_eq!(
+            spec.headers(),
+            vec!["NAME", "READY", "STATUS", "RESTARTS", "NODE-IP", "AGE"]
+        );
+        let o = obj(json!({
+            "apiVersion": "v1", "kind": "Pod",
+            "metadata": {"name": "web"},
+            "status": {"phase": "Running", "hostIP": "10.0.0.9"}
+        }));
+        let (cells, status_idx) = spec.cells(&o);
+        assert_eq!(cells[2], "Running");
+        assert_eq!(cells[4], "10.0.0.9");
+        assert_eq!(status_idx, Some(2));
+    }
+
+    #[test]
+    fn spec_replace_swaps_out_curated_columns_entirely() {
+        use crate::views::ColumnKind;
+        let v = view(
+            vec![
+                user_col("NAME", "/metadata/name", ColumnKind::Text),
+                user_col("PHASE", "/status/phase", ColumnKind::Text),
+            ],
+            true,
+        );
+        let spec = build_spec("pods", Some(&v), None, true);
+        assert_eq!(spec.headers(), vec!["NAME", "PHASE"]);
+    }
+
+    #[test]
+    fn spec_wide_mode_gates_wide_only_columns() {
+        let narrow = build_spec("pods", None, None, false);
+        assert_eq!(
+            narrow.headers(),
+            vec!["NAME", "READY", "STATUS", "RESTARTS", "AGE"]
+        );
+        let wide = build_spec("pods", None, None, true);
+        assert_eq!(
+            wide.headers(),
+            vec!["NAME", "READY", "STATUS", "RESTARTS", "IP", "NODE", "AGE"]
+        );
+    }
+
+    #[test]
+    fn spec_crd_fallback_applies_only_without_curated_or_user_view() {
+        use crate::views::ColumnKind;
+        let crd = view(
+            vec![user_col("PHASE", "/status/phase", ColumnKind::Text)],
+            false,
+        );
+        // Unknown kind: printer columns upgrade the NAME/AGE fallback.
+        let spec = build_spec("widgets", None, Some(&crd), false);
+        assert_eq!(spec.headers(), vec!["NAME", "PHASE", "AGE"]);
+        // Curated kind: printer columns never apply.
+        let spec = build_spec("pods", None, Some(&crd), false);
+        assert_eq!(
+            spec.headers(),
+            vec!["NAME", "READY", "STATUS", "RESTARTS", "AGE"]
+        );
+        // Explicit user view outranks printer columns.
+        let user = view(
+            vec![user_col("MINE", "/status/mine", ColumnKind::Text)],
+            false,
+        );
+        let spec = build_spec("widgets", Some(&user), Some(&crd), false);
+        assert_eq!(spec.headers(), vec!["NAME", "MINE", "AGE"]);
+        // A sort-only user view (no columns) still gets printer columns.
+        let sort_only = crate::views::View {
+            columns: vec![],
+            sort: Some(("PHASE".into(), false)),
+            replace: false,
+        };
+        let spec = build_spec("widgets", Some(&sort_only), Some(&crd), false);
+        assert_eq!(spec.headers(), vec!["NAME", "PHASE", "AGE"]);
+    }
+
+    #[test]
+    fn spec_sort_value_is_typed_for_user_columns() {
+        use crate::views::{ColumnKind, SortValue};
+        let v = view(
+            vec![user_col("CPU", "/spec/cpu", ColumnKind::Quantity)],
+            false,
+        );
+        let spec = build_spec("widgets", Some(&v), None, false);
+        let o = obj(json!({
+            "apiVersion": "example.com/v1", "kind": "Widget",
+            "metadata": {"name": "w"},
+            "spec": {"cpu": "500m"}
+        }));
+        assert!(spec.is_user_column("CPU"));
+        assert!(!spec.is_user_column("NAME"));
+        match spec.sort_value(&o, "CPU").unwrap() {
+            SortValue::Num(n) => assert_eq!(n, 0.5),
+            SortValue::Text(t) => panic!("expected numeric sort, got '{t}'"),
+        }
+        assert!(spec.sort_value(&o, "MISSING").is_none());
     }
 }
