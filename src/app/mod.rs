@@ -86,6 +86,9 @@ pub enum Mode {
     Detail,
     Logs,
     LogFilter,
+    /// Typing a search query for a single-document view (YAML/describe, diff,
+    /// events, help) — the doc-view counterpart of [`Mode::LogFilter`].
+    DocFilter,
     Help,
     Namespaces,
     Contexts,
@@ -233,6 +236,10 @@ pub struct Scrollable {
     /// Word-wrap toggle. When on, long lines fold instead of being clipped, and
     /// horizontal scrolling is disabled.
     pub wrap: bool,
+    /// Case-insensitive substring search (`/`): only matching lines are shown,
+    /// with matches highlighted — same behavior as the logs filter. Reset
+    /// whenever a fresh document replaces the view.
+    pub filter: String,
 }
 
 /// One command-palette suggestion — a built-in command (`:ctx`, `:pulse`), a
@@ -506,6 +513,13 @@ pub struct App {
     pub flash_err: bool,
 
     pub detail: Scrollable,
+    /// Search query for the help view (`?`), which has no backing
+    /// [`Scrollable`] — its lines are built at render time.
+    pub help_filter: String,
+    /// Which doc view (`Detail`/`Diff`/`Events`/`Help`) the `/` search prompt
+    /// was opened from, so the renderer keeps drawing it underneath and
+    /// enter/esc return to it.
+    pub doc_filter_return: Mode,
     pub logs: LogsView,
 
     pub ns_list: Vec<String>,
@@ -628,6 +642,8 @@ impl App {
                 .into(),
             flash_err: false,
             detail: Scrollable::empty(),
+            help_filter: String::new(),
+            doc_filter_return: Mode::Detail,
             logs: LogsView::default(),
             ns_list: Vec::new(),
             ns_state: ListState::default(),
