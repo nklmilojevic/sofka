@@ -620,6 +620,8 @@ pub struct App {
 
     /// Latest metrics snapshot: "ns/name" (pods) or "name" (nodes) -> (cpu_m, mem_bytes).
     pub metrics: HashMap<String, (i64, i64)>,
+    /// Latest pod-container metrics: "ns/pod/container" -> (cpu_m, mem_bytes).
+    pub container_metrics: HashMap<String, (i64, i64)>,
 
     pub pulse: Pulse,
     pub xray_items: Vec<XrayItem>,
@@ -735,6 +737,7 @@ impl App {
             image_values: Vec::new(),
             image_target: None,
             metrics: HashMap::new(),
+            container_metrics: HashMap::new(),
             pulse: Pulse::default(),
             xray_items: Vec::new(),
             xray_state: ListState::default(),

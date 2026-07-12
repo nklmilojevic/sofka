@@ -667,3 +667,30 @@ pub(super) fn usage_of(obj: &DynamicObject, is_node: bool) -> (i64, i64) {
         (cpu, mem)
     }
 }
+
+/// Extract each container's (CPU millicores, memory bytes) from a PodMetrics
+/// object. Malformed or missing quantities degrade to zero through the shared
+/// quantity parsers, matching the existing pod-total behavior.
+pub(super) fn container_usage_of(obj: &DynamicObject) -> Vec<(String, (i64, i64))> {
+    use crate::columns::{parse_cpu_milli, parse_mem_bytes};
+    obj.data
+        .pointer("/containers")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|container| {
+            let name = container.get("name")?.as_str()?.to_string();
+            let cpu = container
+                .pointer("/usage/cpu")
+                .and_then(Value::as_str)
+                .map(parse_cpu_milli)
+                .unwrap_or(0);
+            let memory = container
+                .pointer("/usage/memory")
+                .and_then(Value::as_str)
+                .map(parse_mem_bytes)
+                .unwrap_or(0);
+            Some((name, (cpu, memory)))
+        })
+        .collect()
+}

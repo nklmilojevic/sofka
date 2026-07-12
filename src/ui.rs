@@ -1740,19 +1740,47 @@ fn draw_skins(frame: &mut Frame, app: &mut App, area: Rect) {
 }
 
 fn draw_containers(frame: &mut Frame, app: &mut App, area: Rect) {
+    let name_width = app
+        .container_list
+        .iter()
+        .map(|name| name.chars().count())
+        .max()
+        .unwrap_or(4)
+        .max(4);
     let items: Vec<ListItem> = app
         .container_list
         .iter()
-        .map(|c| ListItem::new(Span::styled(c.clone(), Style::default().fg(theme::text()))))
+        .map(|container| {
+            let (cpu, memory) = app
+                .selected_pod_container_metrics(container)
+                .map(|(cpu, memory)| {
+                    (
+                        crate::columns::fmt_cpu(cpu),
+                        crate::columns::fmt_mem(memory),
+                    )
+                })
+                .unwrap_or_else(|| ("-".into(), "-".into()));
+            ListItem::new(Line::from(vec![
+                Span::styled(
+                    format!("{container:<name_width$}"),
+                    Style::default().fg(theme::text()),
+                ),
+                Span::styled(format!("  {cpu:>8}"), Style::default().fg(theme::yellow())),
+                Span::styled(
+                    format!("  {memory:>10}"),
+                    Style::default().fg(theme::teal()),
+                ),
+            ]))
+        })
         .collect();
     render_popup_list(
         frame,
         area,
-        50,
+        64,
         60,
         items,
         Span::styled(
-            " Containers (⏎ logs · p previous · s shell) ",
+            " Containers · CPU · MEMORY (⏎ logs · p previous · s shell) ",
             theme::title(),
         ),
         &mut app.container_state,

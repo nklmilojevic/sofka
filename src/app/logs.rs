@@ -68,6 +68,16 @@ impl App {
         self.mode = Mode::Containers;
     }
 
+    /// Latest metrics for a container in the pod currently shown by the
+    /// container picker. `None` distinguishes unavailable Metrics Server data
+    /// from a measured zero value.
+    pub fn selected_pod_container_metrics(&self, container: &str) -> Option<(i64, i64)> {
+        let (namespace, pod) = self.container_pod.as_ref()?;
+        self.container_metrics
+            .get(&format!("{namespace}/{pod}/{container}"))
+            .copied()
+    }
+
     /// Logs for the current selection. For pods: stream every container. For
     /// workloads/services: list matching pods and aggregate all their logs.
     pub(super) fn open_logs(&mut self) {
