@@ -19,34 +19,126 @@ impl App {
         cache.cells.remove(key);
     }
 
-    /// Does this object pass the current fuzzy filter?
+    /// The parsed form of the active filter, reparsed only when the string
+    /// has changed (never per frame — see [`FilterCache`]).
+    pub(super) fn parsed_filter(&self) -> Ref<'_, crate::filter::ParsedFilter> {
+        if self.filter_cache.borrow().raw != self.filter {
+            let mut cache = self.filter_cache.borrow_mut();
+            cache.raw = self.filter.clone();
+            cache.parsed = crate::filter::parse(&self.filter);
+        }
+        Ref::map(self.filter_cache.borrow(), |c| &c.parsed)
+    }
+
+    /// Does this object pass the current filter — the legacy fuzzy pattern,
+    /// or every local term of a structured expression? `-l`/`-f` selectors
+    /// are not evaluated here: the Kubernetes API already applied them to
+    /// the watch (see [`Self::sync_filter_selectors`]).
     pub(super) fn matches_filter(&self, o: &DynamicObject) -> bool {
+        use crate::filter::{ParsedFilter, Term};
         if self.filter.is_empty() {
             return true;
         }
-        // Helm rows are backed by the storage Secret, whose own name
-        // (`sh.helm.release.v1.<release>.v<n>`) isn't what a user typing a
-        // filter means — match the release name instead.
+        let parsed = self.parsed_filter();
+        match &*parsed {
+            ParsedFilter::Fuzzy(pat) => {
+                pat.is_empty() || self.matcher.fuzzy_match(&self.fuzzy_hay(o), pat).is_some()
+            }
+            ParsedFilter::Structured(s) => s.terms.iter().all(|t| match t {
+                Term::Fuzzy(pat) => self.matcher.fuzzy_match(&self.fuzzy_hay(o), pat).is_some(),
+                Term::NotFuzzy(pat) => self.matcher.fuzzy_match(&self.fuzzy_hay(o), pat).is_none(),
+                Term::Cmp(cmp) => self.eval_cmp(o, cmp),
+            }),
+        }
+    }
+
+    /// What fuzzy terms match against: "namespace name". Helm rows are backed
+    /// by the storage Secret, whose own name (`sh.helm.release.v1.<release>.
+    /// v<n>`) isn't what a user typing a filter means — match the release
+    /// name instead.
+    fn fuzzy_hay(&self, o: &DynamicObject) -> String {
         let name = if matches!(self.kind_plural.as_str(), "helm" | "helmhistory") {
             crate::helm::release_name(o).unwrap_or_default()
         } else {
             o.metadata.name.as_deref().unwrap_or("")
         };
-        let hay = format!("{} {}", o.metadata.namespace.as_deref().unwrap_or(""), name);
-        self.matcher.fuzzy_match(&hay, &self.filter).is_some()
+        format!("{} {}", o.metadata.namespace.as_deref().unwrap_or(""), name)
     }
 
-    /// Char indices in `name` that matched the active row filter, for
-    /// highlighting them in the table. `None` when there's no active filter
-    /// (every visible row already passed [`matches_filter`], so this is
-    /// purely a rendering aid, not a second filter decision).
+    /// Evaluate one typed column comparison against an object. `cpu`/`mem`
+    /// read the live metrics snapshot, `age` the creation timestamp; any
+    /// other key names a displayed column (numeric values compare by the
+    /// cell's leading number, text case-insensitively).
+    fn eval_cmp(&self, o: &DynamicObject, cmp: &crate::filter::Cmp) -> bool {
+        use crate::filter::CmpValue;
+        match &cmp.value {
+            CmpValue::Cpu(want) => cmp.op.eval(self.metrics_for(o).0.cmp(want)),
+            CmpValue::Mem(want) => cmp.op.eval(self.metrics_for(o).1.cmp(want)),
+            CmpValue::Duration(want) => match crate::columns::age_secs(o) {
+                Some(age) => cmp.op.eval(age.cmp(want)),
+                None => false,
+            },
+            CmpValue::Num(want) => match self.column_cell(o, &cmp.key) {
+                Some(cell) => cmp.op.eval(parse_leading_num(&cell).total_cmp(want)),
+                None => false,
+            },
+            CmpValue::Str(want) => match self.column_cell(o, &cmp.key) {
+                Some(cell) => cmp.op.eval(cell.to_lowercase().cmp(&want.to_lowercase())),
+                None => false,
+            },
+        }
+    }
+
+    /// The displayed cell a comparison key names (case-insensitive column
+    /// header), plus NAMESPACE and a `/status/phase` fallback for kinds
+    /// without a STATUS column.
+    fn column_cell(&self, o: &DynamicObject, key: &str) -> Option<String> {
+        if key.eq_ignore_ascii_case("namespace") || key.eq_ignore_ascii_case("ns") {
+            return Some(o.metadata.namespace.clone().unwrap_or_default());
+        }
+        let base = crate::columns::headers(&self.kind_plural);
+        if let Some(i) = base.iter().position(|h| h.eq_ignore_ascii_case(key)) {
+            let (cells, _) = crate::columns::cells(o, &self.kind_plural);
+            return cells.get(i).cloned();
+        }
+        if key.eq_ignore_ascii_case("status") {
+            let phase = phase(o);
+            return (!phase.is_empty()).then_some(phase);
+        }
+        None
+    }
+
+    /// Whether the running watch is scoped by `-l`/`-f` selectors from the
+    /// filter — i.e. the active filter is (partly) server-side.
+    pub fn filter_server_side(&self) -> bool {
+        self.applied_filter_labels.is_some() || self.applied_filter_fields.is_some()
+    }
+
+    /// Parse error of the current filter input, if any.
+    pub fn filter_error(&self) -> Option<String> {
+        self.parsed_filter().error().map(str::to_string)
+    }
+
+    /// True when the filter's `-l`/`-f` selectors differ from what the watch
+    /// was started with — ⏎ in the filter prompt applies them server-side.
+    pub fn filter_selectors_pending(&self) -> bool {
+        let parsed = self.parsed_filter();
+        parsed.labels() != self.applied_filter_labels.as_deref()
+            || parsed.fields() != self.applied_filter_fields.as_deref()
+    }
+
+    /// Char indices in `name` that matched the active row filter's fuzzy
+    /// pattern, for highlighting them in the table. `None` when there's no
+    /// active filter or no fuzzy term (every visible row already passed
+    /// [`matches_filter`], so this is purely a rendering aid, not a second
+    /// filter decision).
     pub fn filter_match_indices(&self, name: &str) -> Option<Vec<usize>> {
         if self.filter.is_empty() {
             return None;
         }
-        self.matcher
-            .fuzzy_indices(name, &self.filter)
-            .map(|(_, idx)| idx)
+        let parsed = self.parsed_filter();
+        let needle = parsed.fuzzy_needle()?;
+        self.matcher.fuzzy_indices(name, needle).map(|(_, idx)| idx)
     }
 
     pub(super) fn ensure_rows_cache(&self) {

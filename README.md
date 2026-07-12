@@ -110,7 +110,11 @@ Not a marketing number - these are specific, checkable design choices:
   custom resources. `esc` pops back.
 - **Command palette** (`:`) - fuzzy over the full resource catalog _and_
   built-in commands (`ctx`, `pulse`, `xray`, `diff`, `events`, `pf`) together, plus
-  fuzzy row **filtering** (`/`) with matched-character highlighting.
+  row **filtering** (`/`) with matched-character highlighting: fuzzy text,
+  `!text` inverse match, `-l`/`-f` label & field selectors (evaluated by the
+  API server on ⏎), and typed column comparisons (`status=CrashLoopBackOff`,
+  `cpu>500m`, `memory>1Gi`, `restarts>=5`, `age<2h`) — space-separated terms
+  AND together.
 - **Multiselect** (`space`) for bulk delete/kill/suspend/resume/reconcile.
 - **Pulse dashboard** (`:pulse`) - cluster-health tiles, refreshed every 5s.
 - **Xray tree** (`:xray`) - hierarchical view from the current kind down
@@ -283,7 +287,7 @@ header) and switching away restores write mode.
 | `j`/`k`, `↓`/`↑`, `g`/`G` | navigate                                                                                                                              |
 | `S` / `I`                 | cycle sort column / invert sort direction                                                                                             |
 | `space`                   | mark/unmark row for bulk actions                                                                                                      |
-| `/`                       | fuzzy filter                                                                                                                          |
+| `/`                       | filter: fuzzy text · `!inverse` · `-l`/`-f` selectors (server-side on ⏎) · `status=X` `cpu>500m` `age<2h`                             |
 | `n` / `0`                 | namespace switcher / all namespaces                                                                                                   |
 | `shift-j`                 | jump to owner/controller                                                                                                              |
 | `o`                       | show the node hosting the selected pod                                                                                                |
