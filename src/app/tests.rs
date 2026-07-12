@@ -2180,3 +2180,43 @@ async fn help_search_uses_own_buffer() {
     app.handle_key(press(KeyCode::Char('?'))).unwrap();
     assert!(app.help_filter.is_empty());
 }
+
+#[tokio::test]
+async fn copy_doc_respects_active_search() {
+    let (mut app, _rx) = test_app();
+    app.detail = Scrollable {
+        title: "web — YAML".into(),
+        lines: vec![
+            "apiVersion: v1".to_string(),
+            "kind: Pod".to_string(),
+            "metadata:".to_string(),
+            "  name: web".to_string(),
+        ]
+        .into(),
+        ..Default::default()
+    };
+
+    // No search: the whole document.
+    assert_eq!(
+        app.filtered_doc_text(),
+        "apiVersion: v1\nkind: Pod\nmetadata:\n  name: web"
+    );
+
+    // Active search: only the matching lines (case-insensitive).
+    app.detail.filter = "KIND".into();
+    assert_eq!(app.filtered_doc_text(), "kind: Pod");
+}
+
+#[tokio::test]
+async fn copy_doc_on_empty_view_warns() {
+    let (mut app, _rx) = test_app();
+    app.detail = Scrollable {
+        title: "empty".into(),
+        ..Default::default()
+    };
+    app.mode = Mode::Detail;
+    app.handle_key(press(KeyCode::Char('c'))).unwrap();
+    assert!(app.flash_err);
+    assert!(app.flash.contains("nothing to copy"));
+    assert_eq!(app.mode, Mode::Detail, "copy must not leave the view");
+}

@@ -510,6 +510,11 @@ impl App {
                 self.doc_filter_return = self.mode;
                 self.mode = Mode::DocFilter;
             }
+            // Copy the document to the clipboard (k9s `c`), same as the logs
+            // view: an active search copies only the matching lines.
+            KeyCode::Char('c') if detail => {
+                self.copy_doc();
+            }
             KeyCode::Char('j') | KeyCode::Down => target.scroll_by(1),
             KeyCode::Char('k') | KeyCode::Up => target.scroll_by(-1),
             KeyCode::Char('h') | KeyCode::Left => target.scroll_h(-5),
