@@ -90,6 +90,9 @@ impl App {
             KeyCode::Enter => self.drill(),
             KeyCode::Char('y') => self.open_detail(),
             KeyCode::Char('d') => self.describe(),
+            // k9s: `x` shows a secret's data base64-decoded. Elsewhere `x`
+            // stays free for user plugins (the fallthrough arm below).
+            KeyCode::Char('x') if self.kind_plural == "secrets" => self.open_decoded_secret(),
             KeyCode::Char('E') => self.open_events(),
             KeyCode::Char('l') => self.open_logs(),
             KeyCode::Char('p') => self.open_previous_logs(),
