@@ -1441,6 +1441,10 @@ fn draw_help(frame: &mut Frame, app: &App, area: Rect) {
         bind(":pf", "view/stop background port-forwards"),
         bind(":skin", "switch color skin live"),
         bind(
+            ":reload · :config",
+            "reload config from disk · config sources + warnings",
+        ),
+        bind(
             "enter",
             "drill down (deploy→pods, pod→containers, ns→re-scope)",
         ),

@@ -299,6 +299,8 @@ impl App {
         if let Some(w) = resolved.warnings.first() {
             self.flash_warn(w);
         }
+        // Keep `:config` in sync with the layers just resolved for this context.
+        self.config_warnings = resolved.warnings;
         let kind = resolved
             .config
             .default_resource

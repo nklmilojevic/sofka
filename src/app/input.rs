@@ -284,6 +284,8 @@ impl App {
             PaletteAction::PortForwards => self.open_port_forwards(),
             PaletteAction::Skin => self.open_skins(),
             PaletteAction::Helm => self.open_helm_releases(),
+            PaletteAction::Reload => self.reload_config(),
+            PaletteAction::ConfigInfo => self.open_config_info(),
         }
     }
 
