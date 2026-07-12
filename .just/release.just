@@ -70,7 +70,7 @@ _ensure-release-ready:
       gh() { command gh "$@"; }
     fi
     gh auth status >/dev/null
-    test -z "$(git status --porcelain)" || { echo "working tree must be clean"; exit 1; }
+    test -z "$(git status --porcelain --untracked-files=no)" || { echo "tracked files must be clean"; exit 1; }
     git fetch origin main --tags
     if test "$(git branch --show-current)" != "main"; then
       git switch main
