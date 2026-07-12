@@ -110,7 +110,9 @@ Not a marketing number - these are specific, checkable design choices:
   columns (kubectl `-o wide`).
 - **Live CPU/MEM columns** for pods and nodes from the metrics API, with
   outlier coloring. The pod container picker also shows per-container CPU and
-  memory; both views degrade gracefully when metrics-server is absent.
+  memory, each container's usage as a percentage of its request and limit
+  (`-` marks an unset request/limit), and the pod's QoS class; all of it
+  degrades gracefully when metrics-server is absent.
 - **Drill-down navigation** with a breadcrumb stack: workload/service →
   pods, node → its pods, pod → containers, namespace → re-scope, CRD → its
   custom resources. `esc` pops back.
@@ -414,6 +416,70 @@ The recipe switches to a clean, up-to-date `main`, bumps `Cargo.toml` /
 `Cargo.lock`, commits and pushes the version bump, then creates the GitHub
 Release. The release workflow runs from that published release and uploads
 platform binaries, publishes crates.io, and warms the Nix cache.
+
+## Future roadmap
+
+### Milestone 1: power-user foundation
+
+- [x] Custom columns and view overlays.
+- [x] CRD `additionalPrinterColumns` support.
+- [x] Structured filter parser.
+- [x] Server-side label and field selectors.
+- [x] Config reload and validation view.
+- [x] Wide/narrow column visibility.
+
+### Milestone 2: actionable health
+
+- [x] Container metrics.
+- [x] Request/limit percentages and QoS.
+- [ ] Configurable thresholds.
+- [ ] Explain-unhealthy view.
+- [ ] Direct evidence navigation.
+- [ ] Initial session-local timeline.
+
+### Milestone 3: extensibility and repeatable workflows
+
+- [ ] Modifier-aware hotkeys.
+- [ ] Rich plugin execution and output modes.
+- [ ] Bulk plugins.
+- [ ] Bookmarks and saved queries.
+- [ ] Operational workspaces.
+- [ ] Namespace favourites and recents.
+
+### Milestone 4: GitOps and safety
+
+- [ ] Flux ownership and dependency navigation.
+- [ ] Revision and reconciliation-chain visibility.
+- [ ] Managed-resource mutation warnings.
+- [ ] Action-aware authorization checks.
+- [ ] Declarative guardrails.
+- [ ] Local action journal.
+
+### Milestone 5: debugging and collaboration
+
+- [ ] Ephemeral container workflow.
+- [ ] Node debug pod workflow.
+- [ ] Redacted diagnostic bundles.
+- [ ] Screen dumps and structured snapshots.
+- [ ] Runtime diagnostics and structured logs.
+- [ ] Richer log controls.
+
+### Milestone 6: fleet and integrations
+
+- [ ] Opt-in cross-context health dashboard.
+- [ ] Historical metrics provider interface.
+- [ ] Log and trace provider interfaces.
+- [ ] Extended relationship graph.
+- [ ] Vulnerability scanner integration.
+- [ ] Historical right-sizing recommendations.
+
+### Milestone 7: distribution polish
+
+- [ ] Signed and notarized macOS releases.
+- [ ] Homebrew distribution.
+- [ ] Checksums, attestations, and SBOM.
+- [ ] Evaluate Windows support.
+- [ ] Document a Kubernetes compatibility matrix.
 
 ## License
 

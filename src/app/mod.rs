@@ -581,6 +581,11 @@ pub struct App {
     pub container_list: Vec<String>,
     pub container_state: ListState,
     container_pod: Option<(String, String)>, // (ns, name)
+    /// Declared requests/limits for the pod shown by the container picker,
+    /// keyed by container name. Drives the request/limit percentage columns.
+    pub container_resources: HashMap<String, crate::columns::ContainerResources>,
+    /// QoS class of the pod shown by the container picker (empty if unknown).
+    pub container_qos: String,
 
     /// Cursor into [`FLUX_MENU_ITEMS`] for the Flux suspend/resume menu.
     pub flux_menu_state: ListState,
@@ -719,6 +724,8 @@ impl App {
             container_list: Vec::new(),
             container_state: ListState::default(),
             container_pod: None,
+            container_resources: HashMap::new(),
+            container_qos: String::new(),
             flux_menu_state: ListState::default(),
             port_forwards: Vec::new(),
             pf_state: ListState::default(),

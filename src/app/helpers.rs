@@ -694,3 +694,103 @@ pub(super) fn container_usage_of(obj: &DynamicObject) -> Vec<(String, (i64, i64)
         })
         .collect()
 }
+
+/// Extract each container's declared CPU/memory requests and limits from a Pod
+/// spec, covering regular, init, and ephemeral containers so the map matches
+/// [`container_names`]. Missing quantities stay `None` to keep "unset" distinct
+/// from a real zero.
+pub(super) fn container_resources_of(
+    obj: &DynamicObject,
+) -> Vec<(String, crate::columns::ContainerResources)> {
+    let mut out = Vec::new();
+    for key in ["containers", "initContainers", "ephemeralContainers"] {
+        let Some(arr) = obj
+            .data
+            .pointer(&format!("/spec/{key}"))
+            .and_then(Value::as_array)
+        else {
+            continue;
+        };
+        for c in arr {
+            if let Some(name) = c.get("name").and_then(Value::as_str) {
+                out.push((name.to_string(), single_container_resources(c)));
+            }
+        }
+    }
+    out
+}
+
+/// Kubernetes QoS class for a pod. Prefers the authoritative
+/// `status.qosClass` set by the API server; when absent (e.g. a not-yet-
+/// scheduled pod), derives it from regular-container requests and limits.
+/// Returns an empty string only when there is no pod spec to reason about.
+pub(super) fn qos_class(obj: &DynamicObject) -> String {
+    if let Some(q) = obj
+        .data
+        .pointer("/status/qosClass")
+        .and_then(Value::as_str)
+        .filter(|q| !q.is_empty())
+    {
+        return q.to_string();
+    }
+
+    let Some(containers) = obj
+        .data
+        .pointer("/spec/containers")
+        .and_then(Value::as_array)
+    else {
+        return String::new();
+    };
+    if containers.is_empty() {
+        return String::new();
+    }
+
+    let mut any_set = false;
+    let mut guaranteed = true;
+    for c in containers {
+        use crate::columns::ContainerResources;
+        let ContainerResources {
+            cpu_request,
+            cpu_limit,
+            mem_request,
+            mem_limit,
+        } = single_container_resources(c);
+        if cpu_request.is_some()
+            || cpu_limit.is_some()
+            || mem_request.is_some()
+            || mem_limit.is_some()
+        {
+            any_set = true;
+        }
+        // Guaranteed requires every resource to have request == limit > 0.
+        let matched = |req: Option<i64>, lim: Option<i64>| matches!((req, lim), (Some(r), Some(l)) if r == l && r > 0);
+        if !(matched(cpu_request, cpu_limit) && matched(mem_request, mem_limit)) {
+            guaranteed = false;
+        }
+    }
+
+    if !any_set {
+        "BestEffort".into()
+    } else if guaranteed {
+        "Guaranteed".into()
+    } else {
+        "Burstable".into()
+    }
+}
+
+/// Parse one container's `resources` block. Shared by [`qos_class`]'s fallback
+/// computation.
+fn single_container_resources(c: &Value) -> crate::columns::ContainerResources {
+    use crate::columns::{ContainerResources, parse_cpu_milli, parse_mem_bytes};
+    let q = |section: &str, resource: &str, parse: fn(&str) -> i64| {
+        c.pointer(&format!("/resources/{section}/{resource}"))
+            .and_then(Value::as_str)
+            .map(parse)
+    };
+    ContainerResources {
+        cpu_request: q("requests", "cpu", parse_cpu_milli),
+        cpu_limit: q("limits", "cpu", parse_cpu_milli),
+        mem_request: q("requests", "memory", parse_mem_bytes),
+        mem_limit: q("limits", "memory", parse_mem_bytes),
+    }
+}

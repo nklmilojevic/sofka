@@ -64,6 +64,8 @@ impl App {
         let name = obj.metadata.name.clone().unwrap_or_default();
         self.container_pod = Some((ns, name));
         self.container_list = names;
+        self.container_resources = container_resources_of(obj).into_iter().collect();
+        self.container_qos = qos_class(obj);
         self.container_state.select(Some(0));
         self.mode = Mode::Containers;
     }

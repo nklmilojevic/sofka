@@ -1482,6 +1482,36 @@ pub fn fmt_mem(bytes: i64) -> String {
     }
 }
 
+/// A container's declared CPU/memory requests and limits, in millicores and
+/// bytes. `None` marks an unset request or limit so callers can tell a missing
+/// declaration apart from an explicit zero.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct ContainerResources {
+    pub cpu_request: Option<i64>,
+    pub cpu_limit: Option<i64>,
+    pub mem_request: Option<i64>,
+    pub mem_limit: Option<i64>,
+}
+
+/// Usage as an integer percentage of `base` (a request or limit). `None` when
+/// the base is unset or non-positive, so the UI distinguishes a missing
+/// request/limit from a real 0%.
+pub fn usage_pct(usage: i64, base: Option<i64>) -> Option<i64> {
+    match base {
+        Some(b) if b > 0 => Some(((usage as f64 / b as f64) * 100.0).round() as i64),
+        _ => None,
+    }
+}
+
+/// Render a percentage from [`usage_pct`]; `None` (missing request/limit) shows
+/// as `-`.
+pub fn fmt_pct(pct: Option<i64>) -> String {
+    match pct {
+        Some(p) => format!("{p}%"),
+        None => "-".into(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1501,6 +1531,19 @@ mod tests {
         assert_eq!(parse_mem_bytes("1Mi"), 1024 * 1024);
         assert_eq!(parse_mem_bytes("1Gi"), 1024 * 1024 * 1024);
         assert_eq!(fmt_mem(parse_mem_bytes("512Mi")), "512Mi");
+    }
+
+    #[test]
+    fn usage_percent_distinguishes_missing_base_from_zero() {
+        // Half of a 250m request rounds to 50%.
+        assert_eq!(usage_pct(125, Some(250)), Some(50));
+        // A measured zero against a real request is 0%, not "missing".
+        assert_eq!(usage_pct(0, Some(250)), Some(0));
+        // No request/limit declared -> None, so the UI shows "-".
+        assert_eq!(usage_pct(125, None), None);
+        assert_eq!(usage_pct(125, Some(0)), None);
+        assert_eq!(fmt_pct(usage_pct(125, Some(250))), "50%");
+        assert_eq!(fmt_pct(usage_pct(125, None)), "-");
     }
 
     #[test]
