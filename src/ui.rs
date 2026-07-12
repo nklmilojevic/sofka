@@ -1765,14 +1765,54 @@ fn util_cell(usage: Option<i64>, request: Option<i64>, limit: Option<i64>) -> (S
     (text, util_color(lim_pct.or(req_pct)))
 }
 
+// Numeric column widths for the container table, shared by the header and the
+// data rows so they line up exactly. `CPU%`/`MEM%` hold a `%req/%lim` pair.
+const C_CPU: usize = 7;
+const C_CPU_PCT: usize = 9;
+const C_MEM: usize = 8;
+const C_MEM_PCT: usize = 9;
+const C_GAP: usize = 2;
+
+/// Truncate to `max` display columns with a trailing ellipsis (character-based;
+/// container names are ASCII in practice).
+fn truncate_cols(s: &str, max: usize) -> String {
+    let n = s.chars().count();
+    if n <= max {
+        return s.to_string();
+    }
+    match max {
+        0 => String::new(),
+        _ => {
+            let mut t: String = s.chars().take(max - 1).collect();
+            t.push('…');
+            t
+        }
+    }
+}
+
 fn draw_containers(frame: &mut Frame, app: &mut App, area: Rect) {
+    let gap = " ".repeat(C_GAP);
+    // Keep the name column readable but bounded so long names can't push the
+    // numeric columns off the right edge; anything longer is ellipsized.
+    let name_cap = (area.width as usize).saturating_sub(40).max(8);
     let name_width = app
         .container_list
         .iter()
         .map(|name| name.chars().count())
         .max()
         .unwrap_or(4)
-        .max(4);
+        .clamp(4, name_cap);
+
+    let header = Line::from(format!(
+        "{name:<name_width$}{gap}{cpu:>C_CPU$}{gap}{cpu_pct:>C_CPU_PCT$}{gap}{mem:>C_MEM$}{gap}{mem_pct:>C_MEM_PCT$}",
+        name = "NAME",
+        cpu = "CPU",
+        cpu_pct = "%R/L",
+        mem = "MEM",
+        mem_pct = "%R/L",
+    ))
+    .style(theme::dim());
+
     let items: Vec<ListItem> = app
         .container_list
         .iter()
@@ -1795,44 +1835,85 @@ fn draw_containers(frame: &mut Frame, app: &mut App, area: Rect) {
                 util_cell(usage.map(|(c, _)| c), res.cpu_request, res.cpu_limit);
             let (mem_pct, mem_pct_color) =
                 util_cell(usage.map(|(_, m)| m), res.mem_request, res.mem_limit);
+            let name = truncate_cols(container, name_width);
             ListItem::new(Line::from(vec![
                 Span::styled(
-                    format!("{container:<name_width$}"),
+                    format!("{name:<name_width$}"),
                     Style::default().fg(theme::text()),
                 ),
-                Span::styled(format!("  {cpu:>8}"), Style::default().fg(theme::yellow())),
                 Span::styled(
-                    format!("  {cpu_pct:>9}"),
+                    format!("{gap}{cpu:>C_CPU$}"),
+                    Style::default().fg(theme::yellow()),
+                ),
+                Span::styled(
+                    format!("{gap}{cpu_pct:>C_CPU_PCT$}"),
                     Style::default().fg(cpu_pct_color),
                 ),
                 Span::styled(
-                    format!("  {memory:>10}"),
+                    format!("{gap}{memory:>C_MEM$}"),
                     Style::default().fg(theme::teal()),
                 ),
                 Span::styled(
-                    format!("  {mem_pct:>9}"),
+                    format!("{gap}{mem_pct:>C_MEM_PCT$}"),
                     Style::default().fg(mem_pct_color),
                 ),
             ]))
         })
         .collect();
+
     let qos = if app.container_qos.is_empty() {
         String::new()
     } else {
         format!(" · {}", app.container_qos)
     };
-    render_popup_list(
-        frame,
-        area,
-        72,
-        60,
-        items,
-        Span::styled(
-            format!(" Containers{qos} · CPU %R/L · MEM %R/L (⏎ logs · p previous · s shell) "),
-            theme::title(),
-        ),
-        &mut app.container_state,
+    let title = format!(" Containers{qos} ");
+    let footer = " ⏎ logs · p previous · s shell ";
+
+    // Size the box to its contents: header + rows + borders, and wide enough
+    // for the columns, the title, or the footer — whichever needs the most.
+    let content_w = 2 // list highlight symbol ("▌ ")
+        + name_width
+        + C_GAP + C_CPU
+        + C_GAP + C_CPU_PCT
+        + C_GAP + C_MEM
+        + C_GAP + C_MEM_PCT;
+    let inner_w = content_w
+        .max(title.chars().count())
+        .max(footer.chars().count());
+    // +2 borders, +1 so the last column doesn't touch the right border.
+    let popup_w = (inner_w as u16 + 3).min(area.width);
+    let rows = app.container_list.len() as u16;
+    let popup_h = (rows + 3).clamp(5, area.height); // header + rows + 2 borders
+
+    let popup = centered_rect_exact(popup_w, popup_h, area);
+    clear_region(frame, popup);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(theme::border_focused())
+        .title(Span::styled(title, theme::title()))
+        .title_bottom(Line::from(Span::styled(footer, theme::dim())).right_aligned());
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
+
+    let [header_area, list_area] =
+        Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(inner);
+    // Indent the header past the 2-column highlight gutter so it lines up with
+    // the rows underneath it.
+    frame.render_widget(
+        Paragraph::new(header),
+        Rect {
+            x: header_area.x + 2,
+            width: header_area.width.saturating_sub(2),
+            ..header_area
+        },
     );
+    let list = List::new(items)
+        .highlight_style(theme::selected_row())
+        .highlight_symbol("▌ ")
+        .highlight_spacing(HighlightSpacing::Always);
+    frame.render_stateful_widget(list, list_area, &mut app.container_state);
 }
 
 fn draw_prompt_popup(frame: &mut Frame, app: &App, area: Rect) {
@@ -2333,6 +2414,19 @@ fn render_framed_list<'a, T>(
                 .title(title.into()),
         );
     frame.render_stateful_widget(list, area, state);
+}
+
+/// Center a fixed-size rectangle within `r`, clamped to `r`'s bounds. Used by
+/// popups that size themselves to their content rather than a percentage.
+fn centered_rect_exact(width: u16, height: u16, r: Rect) -> Rect {
+    let width = width.min(r.width);
+    let height = height.min(r.height);
+    Rect {
+        x: r.x + (r.width - width) / 2,
+        y: r.y + (r.height - height) / 2,
+        width,
+        height,
+    }
 }
 
 fn centered_rect_with_min(

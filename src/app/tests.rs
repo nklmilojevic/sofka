@@ -1397,18 +1397,29 @@ async fn container_picker_renders_qos_and_utilization() {
         &mut app,
         json!({
             "apiVersion": "v1", "kind": "Pod",
-            "metadata": {"name": "api", "namespace": "default"},
-            "spec": {"containers": [{"name": "app", "resources": {
-                "requests": {"cpu": "250m", "memory": "128Mi"},
-                "limits": {"cpu": "500m", "memory": "256Mi"}
-            }}]},
+            "metadata": {"name": "mailerlite-app-horizon-mail-7dbdf476f8", "namespace": "default"},
+            "spec": {"containers": [
+                {"name": "mailerlite-mailerlite-app-horizon-mail", "resources": {
+                    "requests": {"cpu": "250m", "memory": "128Mi"},
+                    "limits": {"cpu": "500m", "memory": "256Mi"}
+                }},
+                // istio-proxy declares a request but no memory limit -> "-".
+                {"name": "istio-proxy", "resources": {"requests": {"cpu": "100m", "memory": "128Mi"}}}
+            ]},
             "status": {"qosClass": "Burstable"}
         }),
     );
+    let key = "default/mailerlite-app-horizon-mail-7dbdf476f8";
     app.handle_msg(Msg::Metrics {
         generation: app.generation,
-        data: HashMap::from([("default/api".into(), (125, 64 * 1024 * 1024))]),
-        containers: HashMap::from([("default/api/app".into(), (125, 64 * 1024 * 1024))]),
+        data: HashMap::from([(key.into(), (175, 80 * 1024 * 1024))]),
+        containers: HashMap::from([
+            (
+                format!("{key}/mailerlite-mailerlite-app-horizon-mail"),
+                (125, 64 * 1024 * 1024),
+            ),
+            (format!("{key}/istio-proxy"), (50, 16 * 1024 * 1024)),
+        ]),
     });
 
     let pod = app.selected().unwrap();
@@ -1426,12 +1437,22 @@ async fn container_picker_renders_qos_and_utilization() {
         .collect::<Vec<_>>()
         .join("\n");
 
-    // QoS is surfaced in the popup title.
+    // QoS is surfaced in the popup title, and the table has a labeled header.
     assert!(screen.contains("Burstable"), "missing QoS in:\n{screen}");
+    assert!(
+        screen.contains("NAME") && screen.contains("CPU") && screen.contains("MEM"),
+        "missing column header in:\n{screen}"
+    );
     // 125m of a 250m request / 500m limit, and 64Mi of 128Mi / 256Mi.
     assert!(
         screen.contains("50%/25%"),
         "missing utilization percentages in:\n{screen}"
+    );
+    // The istio-proxy's unset memory limit renders as a "-" in its pair
+    // (16Mi of a 128Mi request, no limit).
+    assert!(
+        screen.contains("13%/-"),
+        "missing missing-limit indicator in:\n{screen}"
     );
 }
 
