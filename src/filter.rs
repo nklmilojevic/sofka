@@ -254,10 +254,8 @@ fn split_cmp(tok: &str) -> Option<(&str, Op, &str)> {
         (Op::Eq, v)
     } else if let Some(v) = rest.strip_prefix('>') {
         (Op::Gt, v)
-    } else if let Some(v) = rest.strip_prefix('<') {
-        (Op::Lt, v)
     } else {
-        return None;
+        (Op::Lt, rest.strip_prefix('<')?)
     };
     Some((key, op, value))
 }
