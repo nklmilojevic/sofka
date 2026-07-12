@@ -1280,6 +1280,161 @@ async fn container_picker_reads_latest_metrics_snapshot() {
     assert_eq!(app.selected_pod_container_metrics("missing"), None);
 }
 
+#[test]
+fn container_resources_extracted_per_container() {
+    use crate::columns::ContainerResources;
+    let pod = obj(json!({
+        "apiVersion": "v1", "kind": "Pod",
+        "metadata": {"name": "api", "namespace": "default"},
+        "spec": {"containers": [
+            {"name": "app", "resources": {
+                "requests": {"cpu": "250m", "memory": "64Mi"},
+                "limits": {"cpu": "500m", "memory": "128Mi"}
+            }},
+            // sidecar declares only a request, no limits -> those stay None.
+            {"name": "sidecar", "resources": {"requests": {"cpu": "50m"}}}
+        ]}
+    }));
+
+    let res: std::collections::HashMap<_, _> = container_resources_of(&pod).into_iter().collect();
+    assert_eq!(
+        res["app"],
+        ContainerResources {
+            cpu_request: Some(250),
+            cpu_limit: Some(500),
+            mem_request: Some(64 * 1024 * 1024),
+            mem_limit: Some(128 * 1024 * 1024),
+        }
+    );
+    assert_eq!(
+        res["sidecar"],
+        ContainerResources {
+            cpu_request: Some(50),
+            cpu_limit: None,
+            mem_request: None,
+            mem_limit: None,
+        }
+    );
+}
+
+#[test]
+fn qos_class_prefers_status_then_computes() {
+    // The API server's status.qosClass is authoritative when present.
+    let with_status = obj(json!({
+        "apiVersion": "v1", "kind": "Pod",
+        "metadata": {"name": "api"},
+        "spec": {"containers": [{"name": "app"}]},
+        "status": {"qosClass": "Burstable"}
+    }));
+    assert_eq!(qos_class(&with_status), "Burstable");
+
+    // No status: derive Guaranteed when every resource has request == limit.
+    let guaranteed = obj(json!({
+        "apiVersion": "v1", "kind": "Pod",
+        "metadata": {"name": "api"},
+        "spec": {"containers": [{"name": "app", "resources": {
+            "requests": {"cpu": "500m", "memory": "128Mi"},
+            "limits": {"cpu": "500m", "memory": "128Mi"}
+        }}]}
+    }));
+    assert_eq!(qos_class(&guaranteed), "Guaranteed");
+
+    // Requests below limits -> Burstable.
+    let burstable = obj(json!({
+        "apiVersion": "v1", "kind": "Pod",
+        "metadata": {"name": "api"},
+        "spec": {"containers": [{"name": "app", "resources": {
+            "requests": {"cpu": "250m"},
+            "limits": {"cpu": "500m"}
+        }}]}
+    }));
+    assert_eq!(qos_class(&burstable), "Burstable");
+
+    // No requests or limits at all -> BestEffort.
+    let besteffort = obj(json!({
+        "apiVersion": "v1", "kind": "Pod",
+        "metadata": {"name": "api"},
+        "spec": {"containers": [{"name": "app"}]}
+    }));
+    assert_eq!(qos_class(&besteffort), "BestEffort");
+}
+
+#[tokio::test]
+async fn container_picker_populates_resources_and_qos() {
+    let (mut app, _rx) = test_app();
+    app.switch_kind("pods");
+    apply(
+        &mut app,
+        json!({
+            "apiVersion": "v1", "kind": "Pod",
+            "metadata": {"name": "api", "namespace": "default"},
+            "spec": {"containers": [{"name": "app", "resources": {
+                "requests": {"cpu": "250m", "memory": "64Mi"},
+                "limits": {"cpu": "500m", "memory": "128Mi"}
+            }}]},
+            "status": {"qosClass": "Burstable"}
+        }),
+    );
+
+    let pod = app.selected().unwrap();
+    app.open_containers(&pod);
+    assert_eq!(app.container_qos, "Burstable");
+    assert_eq!(app.container_resources["app"].cpu_request, Some(250));
+    assert_eq!(
+        app.container_resources["app"].mem_limit,
+        Some(128 * 1024 * 1024)
+    );
+}
+
+#[tokio::test]
+async fn container_picker_renders_qos_and_utilization() {
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    let (mut app, _rx) = test_app();
+    app.switch_kind("pods");
+    apply(
+        &mut app,
+        json!({
+            "apiVersion": "v1", "kind": "Pod",
+            "metadata": {"name": "api", "namespace": "default"},
+            "spec": {"containers": [{"name": "app", "resources": {
+                "requests": {"cpu": "250m", "memory": "128Mi"},
+                "limits": {"cpu": "500m", "memory": "256Mi"}
+            }}]},
+            "status": {"qosClass": "Burstable"}
+        }),
+    );
+    app.handle_msg(Msg::Metrics {
+        generation: app.generation,
+        data: HashMap::from([("default/api".into(), (125, 64 * 1024 * 1024))]),
+        containers: HashMap::from([("default/api/app".into(), (125, 64 * 1024 * 1024))]),
+    });
+
+    let pod = app.selected().unwrap();
+    app.open_containers(&pod);
+
+    let mut term = Terminal::new(TestBackend::new(120, 32)).unwrap();
+    term.draw(|f| crate::ui::draw(f, &mut app)).unwrap();
+    let buffer = term.backend().buffer().clone();
+    let screen: String = (0..buffer.area.height)
+        .map(|y| {
+            (0..buffer.area.width)
+                .map(|x| buffer[(x, y)].symbol())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    // QoS is surfaced in the popup title.
+    assert!(screen.contains("Burstable"), "missing QoS in:\n{screen}");
+    // 125m of a 250m request / 500m limit, and 64Mi of 128Mi / 256Mi.
+    assert!(
+        screen.contains("50%/25%"),
+        "missing utilization percentages in:\n{screen}"
+    );
+}
+
 #[tokio::test]
 async fn logs_keep_view_and_restore_selection() {
     let (mut app, _rx) = test_app();

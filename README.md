@@ -110,7 +110,9 @@ Not a marketing number - these are specific, checkable design choices:
   columns (kubectl `-o wide`).
 - **Live CPU/MEM columns** for pods and nodes from the metrics API, with
   outlier coloring. The pod container picker also shows per-container CPU and
-  memory; both views degrade gracefully when metrics-server is absent.
+  memory, each container's usage as a percentage of its request and limit
+  (`-` marks an unset request/limit), and the pod's QoS class; all of it
+  degrades gracefully when metrics-server is absent.
 - **Drill-down navigation** with a breadcrumb stack: workload/service →
   pods, node → its pods, pod → containers, namespace → re-scope, CRD → its
   custom resources. `esc` pops back.

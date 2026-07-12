@@ -1739,6 +1739,32 @@ fn draw_skins(frame: &mut Frame, app: &mut App, area: Rect) {
     );
 }
 
+/// Color a resource utilization percentage: close to the base (a request or,
+/// more importantly, a limit) is dangerous. A missing base dims to a muted
+/// tone so it reads as "not set" rather than "healthy".
+fn util_color(pct: Option<i64>) -> Color {
+    match pct {
+        Some(p) if p >= 90 => theme::red(),
+        Some(p) if p >= 75 => theme::yellow(),
+        Some(_) => theme::green(),
+        None => theme::overlay1(),
+    }
+}
+
+/// Build the `%req/%lim` utilization cell for one resource, plus the color that
+/// reflects the worse (limit-first) utilization. `usage` is `None` when Metrics
+/// Server data is unavailable, in which case percentages cannot be computed.
+fn util_cell(usage: Option<i64>, request: Option<i64>, limit: Option<i64>) -> (String, Color) {
+    use crate::columns::{fmt_pct, usage_pct};
+    let Some(usage) = usage else {
+        return ("-/-".into(), theme::overlay1());
+    };
+    let req_pct = usage_pct(usage, request);
+    let lim_pct = usage_pct(usage, limit);
+    let text = format!("{}/{}", fmt_pct(req_pct), fmt_pct(lim_pct));
+    (text, util_color(lim_pct.or(req_pct)))
+}
+
 fn draw_containers(frame: &mut Frame, app: &mut App, area: Rect) {
     let name_width = app
         .container_list
@@ -1751,8 +1777,8 @@ fn draw_containers(frame: &mut Frame, app: &mut App, area: Rect) {
         .container_list
         .iter()
         .map(|container| {
-            let (cpu, memory) = app
-                .selected_pod_container_metrics(container)
+            let usage = app.selected_pod_container_metrics(container);
+            let (cpu, memory) = usage
                 .map(|(cpu, memory)| {
                     (
                         crate::columns::fmt_cpu(cpu),
@@ -1760,6 +1786,15 @@ fn draw_containers(frame: &mut Frame, app: &mut App, area: Rect) {
                     )
                 })
                 .unwrap_or_else(|| ("-".into(), "-".into()));
+            let res = app
+                .container_resources
+                .get(container)
+                .cloned()
+                .unwrap_or_default();
+            let (cpu_pct, cpu_pct_color) =
+                util_cell(usage.map(|(c, _)| c), res.cpu_request, res.cpu_limit);
+            let (mem_pct, mem_pct_color) =
+                util_cell(usage.map(|(_, m)| m), res.mem_request, res.mem_limit);
             ListItem::new(Line::from(vec![
                 Span::styled(
                     format!("{container:<name_width$}"),
@@ -1767,20 +1802,33 @@ fn draw_containers(frame: &mut Frame, app: &mut App, area: Rect) {
                 ),
                 Span::styled(format!("  {cpu:>8}"), Style::default().fg(theme::yellow())),
                 Span::styled(
+                    format!("  {cpu_pct:>9}"),
+                    Style::default().fg(cpu_pct_color),
+                ),
+                Span::styled(
                     format!("  {memory:>10}"),
                     Style::default().fg(theme::teal()),
+                ),
+                Span::styled(
+                    format!("  {mem_pct:>9}"),
+                    Style::default().fg(mem_pct_color),
                 ),
             ]))
         })
         .collect();
+    let qos = if app.container_qos.is_empty() {
+        String::new()
+    } else {
+        format!(" · {}", app.container_qos)
+    };
     render_popup_list(
         frame,
         area,
-        64,
+        72,
         60,
         items,
         Span::styled(
-            " Containers · CPU · MEMORY (⏎ logs · p previous · s shell) ",
+            format!(" Containers{qos} · CPU %R/L · MEM %R/L (⏎ logs · p previous · s shell) "),
             theme::title(),
         ),
         &mut app.container_state,
