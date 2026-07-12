@@ -67,13 +67,20 @@ async fn main() -> Result<()> {
     let args = Args::parse();
     let loader = config::ConfigLoader::load();
 
-    // Connect before taking over the terminal so errors are readable.
+    // Connect before taking over the terminal so errors are readable. An
+    // unreachable current context isn't fatal for the interactive TUI: start
+    // in the context picker instead (k9s behavior). Headless modes still exit
+    // with the error, since there is no picker to fall back to.
     eprintln!("Connecting to cluster…");
-    let mut cluster = match Cluster::connect().await {
-        Ok(c) => c,
-        Err(e) => {
+    let (mut cluster, connect_error) = match Cluster::connect().await {
+        Ok(c) => (c, None),
+        Err(e) if args.check || args.snapshot => {
             eprintln!("\x1b[31merror:\x1b[0m {e:#}");
             std::process::exit(1);
+        }
+        Err(e) => {
+            eprintln!("\x1b[33mwarning:\x1b[0m {e:#}");
+            (Cluster::disconnected(), Some(format!("{e:#}")))
         }
     };
     // Per-cluster/per-context override files merge over the base config.
@@ -159,7 +166,12 @@ async fn main() -> Result<()> {
         .resource
         .or(cfg.default_resource)
         .unwrap_or_else(|| "pods".into());
-    app.switch_kind(&resource);
+    match &connect_error {
+        // No cluster to watch — open the context picker over the empty table;
+        // a successful pick connects and lands on the default resource.
+        Some(err) => app.start_disconnected(err),
+        None => app.switch_kind(&resource),
+    }
 
     if args.snapshot {
         return snapshot(&mut app, &mut rx).await;

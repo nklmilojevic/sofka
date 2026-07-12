@@ -2094,3 +2094,61 @@ async fn context_switch_resolves_readonly_and_cli_pin_wins() {
 
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+#[tokio::test]
+async fn disconnected_start_opens_context_picker() {
+    let (tx, _rx) = mpsc::channel(1024);
+    let mut cluster = Cluster::fake();
+    cluster.connected = false;
+    let mut app = App::new(cluster, tx);
+
+    app.start_disconnected("tcp connect error: Connection refused");
+    assert_eq!(app.mode, Mode::Contexts);
+    assert!(app.flash_err);
+    assert!(
+        app.flash.contains("cannot connect to 'test'"),
+        "{}",
+        app.flash
+    );
+    assert!(app.flash.contains("Connection refused"), "{}", app.flash);
+}
+
+#[tokio::test]
+async fn reselecting_never_connected_context_retries() {
+    let (mut app, _rx) = test_app();
+
+    // Connected: picking the current context again is a no-op.
+    app.flash.clear();
+    app.switch_context("test".into());
+    assert!(app.flash.is_empty());
+
+    // Never connected: picking the same context retries the connection.
+    app.cluster.connected = false;
+    app.switch_context("test".into());
+    assert!(app.flash.contains("switching to test"), "{}", app.flash);
+}
+
+#[tokio::test]
+async fn failed_switch_while_disconnected_reopens_picker() {
+    let (mut app, _rx) = test_app();
+    app.cluster.connected = false;
+    app.mode = Mode::Table;
+
+    app.handle_msg(Msg::ContextSwitched {
+        generation: app.generation,
+        name: "prod".into(),
+        result: Err("connection refused".into()),
+    });
+    assert!(app.flash.contains("context switch failed"), "{}", app.flash);
+    assert_eq!(app.mode, Mode::Contexts, "picker must come back up");
+
+    // Once connected, a failed switch just flashes — no picker takeover.
+    app.cluster.connected = true;
+    app.mode = Mode::Table;
+    app.handle_msg(Msg::ContextSwitched {
+        generation: app.generation,
+        name: "prod".into(),
+        result: Err("connection refused".into()),
+    });
+    assert_eq!(app.mode, Mode::Table);
+}

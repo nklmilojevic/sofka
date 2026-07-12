@@ -526,7 +526,14 @@ impl App {
                 result,
             } if generation == self.generation => match result {
                 Ok(cluster) => self.apply_context_switch(name, cluster),
-                Err(e) => self.flash_warn(&format!("context switch failed: {e}")),
+                Err(e) => {
+                    self.flash_warn(&format!("context switch failed: {e}"));
+                    // Never connected anywhere yet — put the picker back up
+                    // instead of stranding the user on an empty table.
+                    if !self.cluster.connected {
+                        self.open_contexts();
+                    }
+                }
             },
             _ => {} // stale generation, drop
         }
