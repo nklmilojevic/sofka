@@ -140,6 +140,19 @@ impl App {
         self.start_watch();
     }
 
+    /// Start the session in the context picker because the current context's
+    /// API server was unreachable at launch (k9s behavior). The connect error
+    /// stays visible in the status line while picking.
+    pub fn start_disconnected(&mut self, error: &str) {
+        let label = if self.cluster.context.is_empty() {
+            "cannot connect".to_string()
+        } else {
+            format!("cannot connect to '{}'", self.cluster.context)
+        };
+        self.open_contexts();
+        self.flash_warn(&format!("{label}: {error} — pick another context"));
+    }
+
     pub(super) fn open_contexts(&mut self) {
         self.ctx_filter.clear();
         self.ctx_list.clear();
@@ -218,7 +231,9 @@ impl App {
     /// Reconnecting re-runs API discovery, which can take seconds, so it runs
     /// off-thread; the new cluster (or error) arrives as `Msg::ContextSwitched`.
     pub(super) fn switch_context(&mut self, name: String) {
-        if name == self.cluster.context {
+        // Re-selecting the current context is a no-op — unless we never
+        // connected to it, in which case picking it again is a retry.
+        if name == self.cluster.context && self.cluster.connected {
             return;
         }
         self.flash = format!("switching to {name}…");

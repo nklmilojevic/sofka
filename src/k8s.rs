@@ -50,6 +50,10 @@ pub struct Cluster {
     registry: HashMap<String, Kind>,
     /// stable, de-duplicated list of plural names for completion
     pub catalog: Vec<String>,
+    /// False for the placeholder built by [`Cluster::disconnected`] when the
+    /// current context is unreachable at launch — the app then starts in the
+    /// context picker instead of a resource view.
+    pub connected: bool,
 }
 
 impl Cluster {
@@ -97,9 +101,61 @@ impl Cluster {
             cli_context,
             registry: HashMap::new(),
             catalog: Vec::new(),
+            connected: true,
         };
         cluster.discover().await?;
         Ok(cluster)
+    }
+
+    /// A placeholder for launching when the current context's API server is
+    /// unreachable (k9s drops you into the context picker in this situation
+    /// instead of exiting). Identity fields come straight from the kubeconfig
+    /// so the header still names the broken context; the client points at the
+    /// configured server but nothing uses it until a real context connects.
+    pub fn disconnected() -> Self {
+        let kubeconfig = Kubeconfig::read().ok();
+        let context = kubeconfig
+            .as_ref()
+            .and_then(|k| k.current_context.clone())
+            .unwrap_or_default();
+        let cluster_name = kubeconfig
+            .as_ref()
+            .and_then(|k| {
+                k.contexts
+                    .iter()
+                    .find(|c| c.name == context)?
+                    .context
+                    .as_ref()
+                    .map(|c| c.cluster.clone())
+            })
+            .unwrap_or_default();
+        let cluster_url = kubeconfig
+            .as_ref()
+            .and_then(|k| {
+                k.clusters
+                    .iter()
+                    .find(|c| c.name == cluster_name)?
+                    .cluster
+                    .as_ref()?
+                    .server
+                    .clone()
+            })
+            .unwrap_or_default();
+        let url = cluster_url
+            .parse()
+            .unwrap_or_else(|_| "http://127.0.0.1:8080".parse().expect("static url"));
+        let client = Client::try_from(Config::new(url)).expect("building offline client");
+        Self {
+            client,
+            cli_context: (!context.is_empty()).then(|| context.clone()),
+            context,
+            cluster_name,
+            cluster_url,
+            default_namespace: "default".into(),
+            registry: HashMap::new(),
+            catalog: Vec::new(),
+            connected: false,
+        }
     }
 
     /// Context name to pass to `kubectl` (`--context`), when known. Keeps
@@ -416,6 +472,7 @@ impl Cluster {
             cluster_url: "https://127.0.0.1:6443".into(),
             default_namespace: "default".into(),
             cli_context: Some("test".into()),
+            connected: true,
             registry,
             catalog: vec![
                 "deployments".to_string(),
