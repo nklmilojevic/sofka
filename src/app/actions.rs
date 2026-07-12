@@ -826,6 +826,7 @@ impl App {
         // A manual choice becomes the session skin, so it survives context
         // switches into contexts without a config skin override.
         self.session_skin = Some(name.to_string());
+        self.active_skin = Some(name.to_string());
         self.flash = format!("skin: {name}");
         self.flash_err = false;
     }
@@ -843,6 +844,120 @@ impl App {
         }
         let palette = crate::theme::resolve_skin(Some(&name), &self.skin_colors);
         crate::theme::set(palette);
+        self.active_skin = Some(name);
+    }
+
+    /// `:reload` — re-read the configuration from disk and apply it live:
+    /// aliases, plugins, skin (+ per-swatch overrides), background fill, and
+    /// read-only mode. Launch defaults (`default_namespace`/`default_resource`)
+    /// are deliberately not re-applied — a reload must never yank the current
+    /// view. A reload that fails validation keeps the last known-good config
+    /// active and reports the precise error (file, key, what's wrong) instead.
+    pub(super) fn reload_config(&mut self) {
+        let loader = match self.config.reload() {
+            Ok(l) => l,
+            Err(e) => {
+                self.config_warnings = vec![e];
+                self.flash_warn(
+                    "config reload failed — previous config kept (:config for details)",
+                );
+                return;
+            }
+        };
+        self.config = loader;
+        let resolved = self
+            .config
+            .resolve(&self.cluster.context, &self.cluster.cluster_name);
+        let mut warnings = resolved.warnings;
+        self.user_aliases = resolved.config.aliases;
+        self.plugins = resolved.config.plugins;
+        self.skin_colors = resolved.config.skin.colors;
+        self.readonly = self.readonly_override.unwrap_or(resolved.config.readonly);
+        self.cluster.add_aliases(&self.user_aliases);
+        crate::theme::set_background(resolved.config.skin.background);
+        // The skin named by the base config (if any) becomes the session skin
+        // again — a reload is an explicit "use what the files say now". With
+        // none configured, the current session skin (auto-detected or the last
+        // `:skin` choice) stays put.
+        if let Some(name) = self.config.resolve("", "").config.skin.name {
+            self.session_skin = Some(name);
+        }
+        warnings.extend(crate::theme::validate_skin(
+            resolved
+                .skin_override
+                .as_deref()
+                .or(self.session_skin.as_deref()),
+            &self.skin_colors,
+        ));
+        self.apply_context_skin(resolved.skin_override);
+        self.config_warnings = warnings;
+        if self.config_warnings.is_empty() {
+            self.flash = "config reloaded".into();
+            self.flash_err = false;
+        } else {
+            self.flash_warn(&format!(
+                "config reloaded with {} warning(s) — :config for details",
+                self.config_warnings.len()
+            ));
+        }
+    }
+
+    /// `:config` — a document view of the configuration currently in effect:
+    /// every source path (and whether it loaded), the active skin and mode,
+    /// and any validation errors/warnings from the last (re)load.
+    pub(super) fn open_config_info(&mut self) {
+        self.set_return_mode();
+        let mut lines: Vec<String> = vec!["Sources".into()];
+        match self.config.base_path() {
+            Some(path) => {
+                let state = if self.config.has_base() {
+                    "loaded"
+                } else if path.exists() {
+                    "invalid — using defaults"
+                } else {
+                    "absent — using defaults"
+                };
+                lines.push(format!("  {} ({state})", path.display()));
+            }
+            None => lines.push("  no config directory — using defaults".into()),
+        }
+        for path in self
+            .config
+            .override_paths(&self.cluster.context, &self.cluster.cluster_name)
+        {
+            lines.push(format!(
+                "  {} ({})",
+                path.display(),
+                crate::config::file_state(&path)
+            ));
+        }
+        lines.push(String::new());
+        lines.push("Active".into());
+        lines.push(format!(
+            "  skin: {}",
+            self.active_skin.as_deref().unwrap_or("auto")
+        ));
+        lines.push(format!("  readonly: {}", self.readonly));
+        lines.push(format!("  aliases: {}", self.user_aliases.len()));
+        lines.push(format!("  plugins: {}", self.plugins.len()));
+        lines.push(String::new());
+        if self.config_warnings.is_empty() {
+            lines.push("No validation warnings.".into());
+        } else {
+            lines.push(format!("Warnings [{}]", self.config_warnings.len()));
+            for w in &self.config_warnings {
+                for (i, l) in w.lines().enumerate() {
+                    let bullet = if i == 0 { "• " } else { "  " };
+                    lines.push(format!("  {bullet}{l}"));
+                }
+            }
+        }
+        self.detail = Scrollable {
+            title: "config — :reload to re-read".into(),
+            lines: lines.into(),
+            ..Default::default()
+        };
+        self.mode = Mode::Detail;
     }
 
     /// Stop (kill) the selected forward. Others keep running.
