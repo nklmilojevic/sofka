@@ -66,6 +66,9 @@ impl App {
                 } else if !self.filter.is_empty() {
                     self.filter.clear();
                     self.invalidate_rows();
+                    // Dropping the filter also drops its server-side
+                    // selectors, so the watch must widen back out.
+                    self.sync_filter_selectors();
                 } else if !self.pop_frame() {
                     // at root, nothing to pop
                 }
@@ -467,13 +470,24 @@ impl App {
         self.cmd_sel = 0;
     }
 
+    /// Type the row filter. Local terms (fuzzy/inverse/column comparisons)
+    /// apply live per keystroke; `-l`/`-f` selectors are sent to the API on
+    /// ⏎, since that restarts the watch (see `sync_filter_selectors`).
     pub(super) fn key_filter(&mut self, key: KeyEvent) {
         match key.code {
             KeyCode::Esc => {
                 self.filter.clear();
                 self.mode = Mode::Table;
+                self.sync_filter_selectors();
             }
-            KeyCode::Enter => self.mode = Mode::Table,
+            KeyCode::Enter => {
+                self.mode = Mode::Table;
+                if let Some(err) = self.filter_error() {
+                    self.flash_warn(&format!("filter: {err}"));
+                } else {
+                    self.sync_filter_selectors();
+                }
+            }
             KeyCode::Backspace => {
                 self.filter.pop();
             }

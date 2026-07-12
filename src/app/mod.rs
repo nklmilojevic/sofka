@@ -427,6 +427,13 @@ impl SortKey {
     }
 }
 
+/// The active filter string alongside its parsed form, so the grammar is
+/// reparsed only when the string actually changes — never per frame or row.
+struct FilterCache {
+    raw: String,
+    parsed: crate::filter::ParsedFilter,
+}
+
 /// Lazily-rebuilt cache of the display-ordered, filtered row keys. Recomputing
 /// the sort + fuzzy filter on every `rows()` call (per frame, per keystroke) is
 /// wasteful on large clusters; we rebuild only when the store or filter changes.
@@ -516,6 +523,14 @@ pub struct App {
     pub sort_column: Option<usize>,
     pub sort_desc: bool,
     pub filter: String,
+    /// Parsed form of `filter`, refreshed lazily when the string changes so
+    /// neither row matching nor rendering reparses it per frame.
+    filter_cache: RefCell<FilterCache>,
+    /// Server-side selectors (`-l`/`-f` filter terms) the running watch was
+    /// started with. Compared against the parsed filter to know when a
+    /// restart is needed and to mark the filter as server-side in the UI.
+    applied_filter_labels: Option<String>,
+    applied_filter_fields: Option<String>,
     pub command: String,
     pub cmd_suggestions: Vec<Suggestion>,
     pub cmd_sel: usize,
@@ -652,6 +667,12 @@ impl App {
             sort_column: None,
             sort_desc: false,
             filter: String::new(),
+            filter_cache: RefCell::new(FilterCache {
+                raw: String::new(),
+                parsed: crate::filter::parse(""),
+            }),
+            applied_filter_labels: None,
+            applied_filter_fields: None,
             command: String::new(),
             cmd_suggestions: Vec::new(),
             cmd_sel: 0,

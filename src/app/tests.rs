@@ -2353,6 +2353,326 @@ async fn x_outside_secrets_is_left_to_plugins() {
     );
 }
 
+/// Type `/`, the filter text, then ⏎ — the way a user applies a filter.
+fn type_filter(app: &mut App, text: &str) {
+    app.handle_key(press(KeyCode::Char('/'))).unwrap();
+    for c in text.chars() {
+        app.handle_key(press(KeyCode::Char(c))).unwrap();
+    }
+    app.handle_key(press(KeyCode::Enter)).unwrap();
+}
+
+fn row_names(app: &App) -> Vec<String> {
+    app.rows()
+        .iter()
+        .map(|o| o.metadata.name.clone().unwrap_or_default())
+        .collect()
+}
+
+#[tokio::test]
+async fn legacy_fuzzy_filter_with_spaces_is_one_pattern() {
+    let (mut app, _rx) = test_app();
+    app.switch_kind("pods");
+    for n in ["alpha", "beta"] {
+        apply(
+            &mut app,
+            json!({"apiVersion": "v1", "kind": "Pod",
+                   "metadata": {"name": n, "namespace": "default"}}),
+        );
+    }
+    // "default alp" fuzzy-matches across the "namespace name" haystack —
+    // exactly the pre-grammar behavior (spaces are pattern chars, not ANDs).
+    type_filter(&mut app, "default alp");
+    assert_eq!(row_names(&app), ["alpha"]);
+    assert!(!app.filter_server_side());
+}
+
+#[tokio::test]
+async fn inverse_filter_hides_fuzzy_matches() {
+    let (mut app, _rx) = test_app();
+    app.switch_kind("pods");
+    for n in ["api-1", "api-1-canary", "worker"] {
+        apply(
+            &mut app,
+            json!({"apiVersion": "v1", "kind": "Pod",
+                   "metadata": {"name": n, "namespace": "default"}}),
+        );
+    }
+    type_filter(&mut app, "!canary");
+    assert_eq!(row_names(&app), ["api-1", "worker"]);
+
+    // Terms AND together: positive fuzzy + inverse.
+    app.filter = "api !canary".into();
+    app.invalidate_rows();
+    assert_eq!(row_names(&app), ["api-1"]);
+}
+
+#[tokio::test]
+async fn status_filter_matches_status_column() {
+    let (mut app, _rx) = test_app();
+    app.switch_kind("pods");
+    apply(
+        &mut app,
+        json!({"apiVersion": "v1", "kind": "Pod",
+        "metadata": {"name": "crashy", "namespace": "default"},
+        "status": {"phase": "Running", "containerStatuses": [
+            {"ready": false, "restartCount": 3,
+             "state": {"waiting": {"reason": "CrashLoopBackOff"}}}
+        ]}}),
+    );
+    apply(
+        &mut app,
+        json!({"apiVersion": "v1", "kind": "Pod",
+        "metadata": {"name": "healthy", "namespace": "default"},
+        "status": {"phase": "Running", "containerStatuses": [
+            {"ready": true, "restartCount": 0, "state": {"running": {}}}
+        ]}}),
+    );
+
+    // Equality is case-insensitive so nobody has to remember CamelCase.
+    type_filter(&mut app, "status=crashloopbackoff");
+    assert_eq!(row_names(&app), ["crashy"]);
+
+    app.filter = "status!=CrashLoopBackOff".into();
+    app.invalidate_rows();
+    assert_eq!(row_names(&app), ["healthy"]);
+}
+
+#[tokio::test]
+async fn restarts_filter_compares_numerically() {
+    let (mut app, _rx) = test_app();
+    app.switch_kind("pods");
+    for (name, restarts) in [("calm", 0), ("flappy", 7)] {
+        apply(
+            &mut app,
+            json!({"apiVersion": "v1", "kind": "Pod",
+            "metadata": {"name": name, "namespace": "default"},
+            "status": {"phase": "Running", "containerStatuses": [
+                {"ready": true, "restartCount": restarts, "state": {"running": {}}}
+            ]}}),
+        );
+    }
+    type_filter(&mut app, "restarts>=5");
+    assert_eq!(row_names(&app), ["flappy"]);
+
+    app.filter = "restarts<5".into();
+    app.invalidate_rows();
+    assert_eq!(row_names(&app), ["calm"]);
+}
+
+#[tokio::test]
+async fn age_filter_compares_creation_timestamp() {
+    use k8s_openapi::jiff::Timestamp;
+    let (mut app, _rx) = test_app();
+    app.switch_kind("pods");
+    let now = Timestamp::now().as_second();
+    for (name, age_secs) in [("old", 3 * 3600), ("fresh", 600)] {
+        let created = Timestamp::from_second(now - age_secs).unwrap().to_string();
+        apply(
+            &mut app,
+            json!({"apiVersion": "v1", "kind": "Pod",
+                   "metadata": {"name": name, "namespace": "default",
+                                "creationTimestamp": created}}),
+        );
+    }
+    type_filter(&mut app, "age<2h");
+    assert_eq!(row_names(&app), ["fresh"]);
+
+    app.filter = "age>2h".into();
+    app.invalidate_rows();
+    assert_eq!(row_names(&app), ["old"]);
+}
+
+#[tokio::test]
+async fn cpu_and_memory_filters_use_metrics_snapshot() {
+    let (mut app, _rx) = test_app();
+    app.switch_kind("pods");
+    for n in ["hungry", "light"] {
+        apply(
+            &mut app,
+            json!({"apiVersion": "v1", "kind": "Pod",
+                   "metadata": {"name": n, "namespace": "default"}}),
+        );
+    }
+    let mut data = HashMap::new();
+    data.insert("default/hungry".to_string(), (600, 2 * 1024 * 1024 * 1024));
+    data.insert("default/light".to_string(), (100, 64 * 1024 * 1024));
+    app.handle_msg(Msg::Metrics {
+        generation: app.generation,
+        data,
+    });
+
+    type_filter(&mut app, "cpu>500m");
+    assert_eq!(row_names(&app), ["hungry"]);
+
+    app.filter = "memory>1Gi".into();
+    app.invalidate_rows();
+    assert_eq!(row_names(&app), ["hungry"]);
+
+    app.filter = "mem<=512Mi".into();
+    app.invalidate_rows();
+    assert_eq!(row_names(&app), ["light"]);
+}
+
+#[tokio::test]
+async fn label_selector_goes_server_side_on_enter_and_survives_navigation() {
+    let (mut app, _rx) = test_app();
+    app.switch_kind("pods");
+    let before = app.generation;
+
+    type_filter(&mut app, "-l app=api,env=prod");
+    assert_eq!(
+        app.applied_filter_labels.as_deref(),
+        Some("app=api,env=prod")
+    );
+    assert!(app.filter_server_side());
+    assert_eq!(
+        app.generation,
+        before + 1,
+        "⏎ must restart the watch with the selector"
+    );
+    assert!(app.flash.contains("server-side"), "{}", app.flash);
+
+    // A refresh (ctrl-r) keeps the selector: it derives from the filter.
+    app.handle_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL))
+        .unwrap();
+    assert_eq!(
+        app.applied_filter_labels.as_deref(),
+        Some("app=api,env=prod")
+    );
+
+    // Switching namespace with `0` keeps the filter — and the selector.
+    app.handle_key(press(KeyCode::Char('0'))).unwrap();
+    assert!(app.all_namespaces());
+    assert_eq!(
+        app.applied_filter_labels.as_deref(),
+        Some("app=api,env=prod")
+    );
+
+    // Esc clears the filter and widens the watch back out.
+    let gen_before_clear = app.generation;
+    app.handle_key(press(KeyCode::Esc)).unwrap();
+    assert!(app.filter.is_empty());
+    assert_eq!(app.applied_filter_labels, None);
+    assert!(!app.filter_server_side());
+    assert_eq!(app.generation, gen_before_clear + 1);
+}
+
+#[tokio::test]
+async fn field_selector_goes_server_side_on_enter() {
+    let (mut app, _rx) = test_app();
+    app.switch_kind("pods");
+    type_filter(&mut app, "-f spec.nodeName=node-3");
+    assert_eq!(
+        app.applied_filter_fields.as_deref(),
+        Some("spec.nodeName=node-3")
+    );
+    assert_eq!(app.applied_filter_labels, None);
+    assert!(app.filter_server_side());
+}
+
+#[tokio::test]
+async fn local_filter_edits_never_restart_the_watch() {
+    let (mut app, _rx) = test_app();
+    app.switch_kind("pods");
+    let before = app.generation;
+    type_filter(&mut app, "api");
+    app.handle_key(press(KeyCode::Char('/'))).unwrap();
+    app.handle_key(press(KeyCode::Backspace)).unwrap();
+    app.handle_key(press(KeyCode::Enter)).unwrap();
+    assert_eq!(app.generation, before, "no `-l`/`-f` → no rewatch");
+    assert!(!app.filter_server_side());
+}
+
+#[tokio::test]
+async fn drill_clears_server_selector_and_pop_restores_it() {
+    let (mut app, _rx) = test_app();
+    app.switch_kind("deployments");
+    type_filter(&mut app, "-l env=prod");
+    assert_eq!(app.applied_filter_labels.as_deref(), Some("env=prod"));
+
+    apply(
+        &mut app,
+        json!({
+            "apiVersion": "apps/v1", "kind": "Deployment",
+            "metadata": {"name": "web", "namespace": "default"},
+            "spec": {"selector": {"matchLabels": {"app": "web"}}}
+        }),
+    );
+    app.table_state.select(Some(0));
+
+    // Drill: like the fuzzy filter, the filter (and with it the server-side
+    // selector) is cleared for the child view; the drill's own selector takes
+    // over.
+    app.handle_key(press(KeyCode::Enter)).unwrap();
+    assert_eq!(app.kind_plural, "pods");
+    assert!(app.filter.is_empty());
+    assert_eq!(app.applied_filter_labels, None);
+    assert_eq!(app.labels.as_deref(), Some("app=web"));
+
+    // Pop: the saved frame restores the filter, and the rewatch re-applies
+    // its selector server-side.
+    app.handle_key(press(KeyCode::Esc)).unwrap();
+    assert_eq!(app.kind_plural, "deployments");
+    assert_eq!(app.filter, "-l env=prod");
+    assert_eq!(app.applied_filter_labels.as_deref(), Some("env=prod"));
+    assert_eq!(app.labels, None);
+}
+
+#[tokio::test]
+async fn root_switch_and_history_clear_server_selector_like_fuzzy() {
+    let (mut app, _rx) = test_app();
+    app.switch_kind("pods");
+    type_filter(&mut app, "-l app=api");
+    assert!(app.filter_server_side());
+
+    // A fresh root view clears the filter (fuzzy always worked this way) —
+    // and therefore the selector.
+    app.switch_kind("deployments");
+    assert!(app.filter.is_empty());
+    assert_eq!(app.applied_filter_labels, None);
+
+    // History replay lands on the root view without the old filter.
+    app.handle_key(press(KeyCode::Char('['))).unwrap();
+    assert_eq!(app.kind_plural, "pods");
+    assert!(app.filter.is_empty());
+    assert_eq!(app.applied_filter_labels, None);
+}
+
+#[tokio::test]
+async fn malformed_filter_enter_warns_and_stays_local() {
+    let (mut app, _rx) = test_app();
+    app.switch_kind("pods");
+    let before = app.generation;
+    type_filter(&mut app, "-l");
+    assert!(app.flash_err);
+    assert!(app.flash.contains("-l"), "{}", app.flash);
+    assert_eq!(app.generation, before, "broken selector must not rewatch");
+    assert!(!app.filter_server_side());
+    assert!(app.filter_error().is_some());
+}
+
+#[tokio::test]
+async fn structured_filter_highlights_first_fuzzy_term() {
+    let (mut app, _rx) = test_app();
+    app.filter = "!zzz khc status=Running".into();
+    let idx = app.filter_match_indices("kube-httpcache-0").unwrap();
+    assert_eq!(idx.len(), 3);
+
+    // No positive fuzzy term → nothing to highlight.
+    app.filter = "-l app=api".into();
+    assert_eq!(app.filter_match_indices("kube-httpcache-0"), None);
+}
+
+#[test]
+fn join_selectors_merges_drill_and_filter() {
+    let some = |s: &str| Some(s.to_string());
+    assert_eq!(join_selectors(&None, &None), None);
+    assert_eq!(join_selectors(&some("a=b"), &None), some("a=b"));
+    assert_eq!(join_selectors(&None, &some("c=d")), some("c=d"));
+    assert_eq!(join_selectors(&some("a=b"), &some("c=d")), some("a=b,c=d"));
+}
+
 // ----- config reload (`:reload`) and validation (`:config`) ---------------
 
 fn write_config(dir: &std::path::Path, text: &str) {

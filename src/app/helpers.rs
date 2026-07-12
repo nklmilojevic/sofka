@@ -163,6 +163,17 @@ pub(super) fn container_names(obj: &DynamicObject) -> Vec<String> {
     names
 }
 
+/// Merge a drill-down selector with a filter selector into one comma-joined
+/// Kubernetes selector (`None` when neither is set).
+pub(super) fn join_selectors(a: &Option<String>, b: &Option<String>) -> Option<String> {
+    match (a, b) {
+        (Some(a), Some(b)) => Some(format!("{a},{b}")),
+        (Some(a), None) => Some(a.clone()),
+        (None, Some(b)) => Some(b.clone()),
+        (None, None) => None,
+    }
+}
+
 /// Normalize a user-typed namespace argument: `all`, `*`, and `<all>` mean
 /// "all namespaces" (the empty string internally).
 pub(super) fn normalize_ns(ns: &str) -> String {

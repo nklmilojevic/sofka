@@ -229,11 +229,23 @@ impl App {
         }
     }
 
-    /// (Re)start the watch for the current kind/namespace/selectors.
+    /// (Re)start the watch for the current kind/namespace/selectors. `-l`/
+    /// `-f` selectors from the filter are merged with any drill-down
+    /// selectors and sent to the API, so those filter terms are evaluated
+    /// server-side; the generation bump drops the superseded stream.
     pub fn start_watch(&mut self) {
         let Some(kind) = self.kind.clone() else {
             return;
         };
+        let (filter_labels, filter_fields) = {
+            let parsed = self.parsed_filter();
+            (
+                parsed.labels().map(str::to_string),
+                parsed.fields().map(str::to_string),
+            )
+        };
+        self.applied_filter_labels = filter_labels;
+        self.applied_filter_fields = filter_fields;
         self.generation += 1;
         self.gen_flag.store(self.generation, Ordering::SeqCst);
         for t in self.tasks.drain(..) {
@@ -249,8 +261,8 @@ impl App {
         let handle = self.cluster.spawn_watch(
             &kind,
             &self.namespace,
-            self.labels.clone(),
-            self.fields.clone(),
+            join_selectors(&self.labels, &self.applied_filter_labels),
+            join_selectors(&self.fields, &self.applied_filter_fields),
             self.generation,
             self.tx.clone(),
         );
@@ -265,6 +277,30 @@ impl App {
             self.last_rbac_ns = Some(self.namespace.clone());
             self.refresh_rbac();
         }
+    }
+
+    /// Restart the watch when the filter's `-l`/`-f` selectors no longer
+    /// match what it was started with — applying them server-side, or
+    /// dropping them once cleared. No-op otherwise, so local-only filter
+    /// edits never cost a rewatch.
+    pub(super) fn sync_filter_selectors(&mut self) {
+        if !self.filter_selectors_pending() {
+            return;
+        }
+        self.start_watch();
+        if self.filter_server_side() {
+            let mut parts = Vec::new();
+            if let Some(l) = &self.applied_filter_labels {
+                parts.push(format!("-l {l}"));
+            }
+            if let Some(f) = &self.applied_filter_fields {
+                parts.push(format!("-f {f}"));
+            }
+            self.flash = format!("server-side filter: {}", parts.join(" "));
+        } else {
+            self.flash = "server-side filter cleared".into();
+        }
+        self.flash_err = false;
     }
 
     /// Query SelfSubjectRulesReview for the active namespace to learn which
