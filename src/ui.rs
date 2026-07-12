@@ -1451,7 +1451,7 @@ fn draw_help(frame: &mut Frame, app: &App, area: Rect) {
         Line::from(Span::styled("  Inspect", theme::title())),
         bind("y · d", "view YAML · describe (kubectl)"),
         bind("l · p", "logs (workload = all pods) · previous logs"),
-        bind("c", "copy resource name to clipboard"),
+        bind("c", "copy resource name · in doc views: copy the document"),
         bind("/", "search within YAML/describe/diff/events/help"),
         Line::from(""),
         Line::from(Span::styled("  Act", theme::title())),
@@ -2028,7 +2028,7 @@ fn draw_prompt(frame: &mut Frame, app: &App, area: Rect) {
             Line::from(Span::styled(hint, theme::dim()))
         }
         Mode::Detail | Mode::Events | Mode::Diff => {
-            let hint = "  j/k:scroll  h/l:← →  g/G:top/bottom  /:search  w:wrap  esc:back";
+            let hint = "  j/k:scroll  h/l:← →  g/G:top/bottom  /:search  w:wrap  c:copy  esc:back";
             Line::from(Span::styled(hint, theme::dim()))
         }
         Mode::Help => Line::from(Span::styled("  /:search  ?/esc:back", theme::dim())),

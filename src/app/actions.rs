@@ -399,6 +399,34 @@ impl App {
             .join("\n")
     }
 
+    /// Copy the current single-document view (YAML/describe/diff/events) to
+    /// the clipboard (k9s `c` in those views). Mirrors [`Self::copy_logs`]:
+    /// with a `/` search active, only the matching lines are copied.
+    pub(super) fn copy_doc(&mut self) {
+        let text = self.filtered_doc_text();
+        if text.is_empty() {
+            self.flash_warn("nothing to copy");
+            return;
+        }
+        let n = text.lines().count();
+        self.copy_to_clipboard_async(
+            text,
+            format!("copied {n} lines"),
+            "no clipboard target found (pbcopy/xclip/wl-copy/OSC 52)",
+        );
+    }
+
+    pub(super) fn filtered_doc_text(&self) -> String {
+        let f = self.detail.filter.to_lowercase();
+        self.detail
+            .lines
+            .iter()
+            .filter(|l| f.is_empty() || l.to_lowercase().contains(&f))
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
     /// Copy the selected resource's name to the system clipboard (k9s `c`).
     pub(super) fn copy_name(&mut self) {
         let Some(obj) = self.selected_ref() else {
