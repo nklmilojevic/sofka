@@ -2094,3 +2094,89 @@ async fn context_switch_resolves_readonly_and_cli_pin_wins() {
 
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+#[tokio::test]
+async fn doc_search_filters_detail_view() {
+    let (mut app, _rx) = test_app();
+    apply(
+        &mut app,
+        json!({"apiVersion": "v1", "kind": "Pod",
+            "metadata": {"name": "web", "namespace": "default"}}),
+    );
+    app.table_state.select(Some(0));
+    app.handle_key(press(KeyCode::Char('y'))).unwrap();
+    assert_eq!(app.mode, Mode::Detail);
+
+    // `/` opens the search prompt for the detail view; typing builds the query.
+    app.handle_key(press(KeyCode::Char('/'))).unwrap();
+    assert_eq!(app.mode, Mode::DocFilter);
+    assert_eq!(app.doc_filter_return, Mode::Detail);
+    for c in "kind".chars() {
+        app.handle_key(press(KeyCode::Char(c))).unwrap();
+    }
+    assert_eq!(app.detail.filter, "kind");
+
+    // Enter keeps the query and returns to the view.
+    app.handle_key(press(KeyCode::Enter)).unwrap();
+    assert_eq!(app.mode, Mode::Detail);
+    assert_eq!(app.detail.filter, "kind");
+
+    // First esc clears the search (stays), second esc leaves the view.
+    app.handle_key(press(KeyCode::Esc)).unwrap();
+    assert_eq!(app.mode, Mode::Detail);
+    assert!(app.detail.filter.is_empty());
+    app.handle_key(press(KeyCode::Esc)).unwrap();
+    assert_eq!(app.mode, Mode::Table);
+}
+
+#[tokio::test]
+async fn doc_search_esc_clears_and_scroll_resets() {
+    let (mut app, _rx) = test_app();
+    app.detail = Scrollable {
+        title: "x — YAML".into(),
+        lines: (0..100).map(|i| format!("line {i}")).collect(),
+        scroll: 50,
+        ..Default::default()
+    };
+    app.mode = Mode::Detail;
+
+    app.handle_key(press(KeyCode::Char('/'))).unwrap();
+    app.handle_key(press(KeyCode::Char('9'))).unwrap();
+    // Typing snaps the view back to the top so the first match is visible.
+    assert_eq!(app.detail.scroll, 0);
+    // Esc in the prompt aborts the search entirely.
+    app.handle_key(press(KeyCode::Esc)).unwrap();
+    assert_eq!(app.mode, Mode::Detail);
+    assert!(app.detail.filter.is_empty());
+}
+
+#[tokio::test]
+async fn help_search_uses_own_buffer() {
+    let (mut app, _rx) = test_app();
+    app.handle_key(press(KeyCode::Char('?'))).unwrap();
+    assert_eq!(app.mode, Mode::Help);
+
+    app.handle_key(press(KeyCode::Char('/'))).unwrap();
+    assert_eq!(app.mode, Mode::DocFilter);
+    assert_eq!(app.doc_filter_return, Mode::Help);
+    for c in "logs".chars() {
+        app.handle_key(press(KeyCode::Char(c))).unwrap();
+    }
+    app.handle_key(press(KeyCode::Enter)).unwrap();
+    assert_eq!(app.mode, Mode::Help);
+    assert_eq!(app.help_filter, "logs");
+    assert!(
+        app.detail.filter.is_empty(),
+        "help search must not touch detail"
+    );
+
+    // Esc clears the search first, then closes help; reopening starts clean.
+    app.handle_key(press(KeyCode::Esc)).unwrap();
+    assert_eq!(app.mode, Mode::Help);
+    assert!(app.help_filter.is_empty());
+    app.handle_key(press(KeyCode::Esc)).unwrap();
+    assert_eq!(app.mode, Mode::Table);
+    app.help_filter = "stale".into();
+    app.handle_key(press(KeyCode::Char('?'))).unwrap();
+    assert!(app.help_filter.is_empty());
+}

@@ -33,14 +33,8 @@ impl App {
             Mode::Detail | Mode::Diff | Mode::Events => self.key_scroll(key, true),
             Mode::Logs => self.key_logs(key),
             Mode::LogFilter => self.key_log_filter(key),
-            Mode::Help => {
-                if matches!(
-                    key.code,
-                    KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('?')
-                ) {
-                    self.mode = Mode::Table;
-                }
-            }
+            Mode::DocFilter => self.key_doc_filter(key),
+            Mode::Help => self.key_help(key),
             Mode::Namespaces => self.key_namespaces(key),
             Mode::Contexts => self.key_contexts(key),
             Mode::Containers => self.key_containers(key),
@@ -153,7 +147,10 @@ impl App {
             }
             // Flux CD: toggle suspend/resume on the marked rows, or current.
             KeyCode::Char('t') => self.request_flux_menu(),
-            KeyCode::Char('?') => self.mode = Mode::Help,
+            KeyCode::Char('?') => {
+                self.help_filter.clear();
+                self.mode = Mode::Help;
+            }
             // User-defined plugins fall through here (built-ins take priority).
             KeyCode::Char(c) => self.try_plugin(c),
             _ => {}
@@ -489,6 +486,11 @@ impl App {
             &mut self.logs.view
         };
         match key.code {
+            // Esc backs out of an active search first (like the table view);
+            // `q` always leaves.
+            KeyCode::Esc if detail && !target.filter.is_empty() => {
+                target.filter.clear();
+            }
             KeyCode::Esc | KeyCode::Char('q') => {
                 // The underlying view (table/xray) watch kept running, so there
                 // is nothing to restart — just stop the log streams and return,
@@ -502,6 +504,11 @@ impl App {
                 if self.return_mode == Mode::Table {
                     self.restore_selection();
                 }
+            }
+            // Search within the document (k9s `/` in YAML/describe views).
+            KeyCode::Char('/') if detail => {
+                self.doc_filter_return = self.mode;
+                self.mode = Mode::DocFilter;
             }
             KeyCode::Char('j') | KeyCode::Down => target.scroll_by(1),
             KeyCode::Char('k') | KeyCode::Up => target.scroll_by(-1),
@@ -653,6 +660,60 @@ impl App {
             }
             KeyCode::Char(c) => self.logs.filter.push(c),
             _ => {}
+        }
+    }
+
+    pub(super) fn key_help(&mut self, key: KeyEvent) {
+        match key.code {
+            // Esc backs out of an active search first, then closes help.
+            KeyCode::Esc if !self.help_filter.is_empty() => self.help_filter.clear(),
+            KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('?') => self.mode = Mode::Table,
+            KeyCode::Char('/') => {
+                self.doc_filter_return = self.mode;
+                self.mode = Mode::DocFilter;
+            }
+            _ => {}
+        }
+    }
+
+    /// Type the search query for a single-document view (YAML/describe, diff,
+    /// events, help). Mirrors [`Self::key_log_filter`]: enter keeps the query,
+    /// esc clears it; either returns to the view it was opened from.
+    pub(super) fn key_doc_filter(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Esc => {
+                self.doc_filter_mut().clear();
+                self.reset_doc_scroll();
+                self.mode = self.doc_filter_return;
+            }
+            KeyCode::Enter => self.mode = self.doc_filter_return,
+            KeyCode::Backspace => {
+                self.doc_filter_mut().pop();
+                self.reset_doc_scroll();
+            }
+            KeyCode::Char(c) => {
+                self.doc_filter_mut().push(c);
+                self.reset_doc_scroll();
+            }
+            _ => {}
+        }
+    }
+
+    /// The query the doc search edits: the help view has its own buffer; every
+    /// other doc view is backed by `detail`.
+    fn doc_filter_mut(&mut self) -> &mut String {
+        if self.doc_filter_return == Mode::Help {
+            &mut self.help_filter
+        } else {
+            &mut self.detail.filter
+        }
+    }
+
+    /// Snap back to the top when the query changes, so the first match is
+    /// visible instead of a stale offset past the (now shorter) filtered list.
+    fn reset_doc_scroll(&mut self) {
+        if self.doc_filter_return != Mode::Help {
+            self.detail.scroll = 0;
         }
     }
 }
