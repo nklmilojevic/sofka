@@ -1218,6 +1218,7 @@ async fn metrics_update_invalidates_metric_sorted_rows() {
             ("default/a".to_string(), (10, 0)),
             ("default/b".to_string(), (100, 0)),
         ]),
+        containers: HashMap::new(),
     });
     let names: Vec<String> = app
         .rows()
@@ -1225,6 +1226,58 @@ async fn metrics_update_invalidates_metric_sorted_rows() {
         .map(|o| o.metadata.name.clone().unwrap())
         .collect();
     assert_eq!(names, ["b", "a"]);
+}
+
+#[test]
+fn pod_metrics_are_split_by_container() {
+    let metrics = obj(json!({
+        "apiVersion": "metrics.k8s.io/v1beta1",
+        "kind": "PodMetrics",
+        "metadata": {"name": "api", "namespace": "default"},
+        "containers": [
+            {"name": "app", "usage": {"cpu": "125m", "memory": "64Mi"}},
+            {"name": "sidecar", "usage": {"cpu": "50000000n", "memory": "16Mi"}}
+        ]
+    }));
+
+    assert_eq!(
+        container_usage_of(&metrics),
+        vec![
+            ("app".into(), (125, 64 * 1024 * 1024)),
+            ("sidecar".into(), (50, 16 * 1024 * 1024)),
+        ]
+    );
+    assert_eq!(usage_of(&metrics, false), (175, 80 * 1024 * 1024));
+}
+
+#[tokio::test]
+async fn container_picker_reads_latest_metrics_snapshot() {
+    let (mut app, _rx) = test_app();
+    app.switch_kind("pods");
+    apply(
+        &mut app,
+        json!({
+            "apiVersion": "v1", "kind": "Pod",
+            "metadata": {"name": "api", "namespace": "default"},
+            "spec": {"containers": [{"name": "app"}, {"name": "sidecar"}]}
+        }),
+    );
+    app.handle_msg(Msg::Metrics {
+        generation: app.generation,
+        data: HashMap::from([("default/api".into(), (175, 80 * 1024 * 1024))]),
+        containers: HashMap::from([
+            ("default/api/app".into(), (125, 64 * 1024 * 1024)),
+            ("default/api/sidecar".into(), (50, 16 * 1024 * 1024)),
+        ]),
+    });
+
+    let pod = app.selected().unwrap();
+    app.open_containers(&pod);
+    assert_eq!(
+        app.selected_pod_container_metrics("app"),
+        Some((125, 64 * 1024 * 1024))
+    );
+    assert_eq!(app.selected_pod_container_metrics("missing"), None);
 }
 
 #[tokio::test]
@@ -2746,6 +2799,7 @@ async fn cpu_and_memory_filters_use_metrics_snapshot() {
     app.handle_msg(Msg::Metrics {
         generation: app.generation,
         data,
+        containers: HashMap::new(),
     });
 
     type_filter(&mut app, "cpu>500m");

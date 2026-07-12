@@ -109,7 +109,8 @@ Not a marketing number - these are specific, checkable design choices:
   pick up their CRD's `additionalPrinterColumns`. `w` toggles wide-only
   columns (kubectl `-o wide`).
 - **Live CPU/MEM columns** for pods and nodes from the metrics API, with
-  outlier coloring; degrades gracefully when metrics-server is absent.
+  outlier coloring. The pod container picker also shows per-container CPU and
+  memory; both views degrade gracefully when metrics-server is absent.
 - **Drill-down navigation** with a breadcrumb stack: workload/service →
   pods, node → its pods, pod → containers, namespace → re-scope, CRD → its
   custom resources. `esc` pops back.

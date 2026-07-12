@@ -253,6 +253,7 @@ impl App {
         }
         self.store.clear();
         self.metrics.clear();
+        self.container_metrics.clear();
         self.marked.clear();
         self.invalidate_rows();
         if self.table_state.selected().is_none() {
@@ -450,18 +451,25 @@ impl App {
                 };
                 if let Ok(list) = api.list(&ListParams::default()).await {
                     let mut data = HashMap::new();
+                    let mut containers = HashMap::new();
                     for item in list {
                         let name = item.metadata.name.clone().unwrap_or_default();
                         let key = match &item.metadata.namespace {
                             Some(n) => format!("{n}/{name}"),
                             None => name,
                         };
+                        if !is_node {
+                            for (container, usage) in container_usage_of(&item) {
+                                containers.insert(format!("{key}/{container}"), usage);
+                            }
+                        }
                         data.insert(key, usage_of(&item, is_node));
                     }
                     if tx
                         .send(Msg::Metrics {
                             generation: genr,
                             data,
+                            containers,
                         })
                         .await
                         .is_err()
@@ -510,7 +518,11 @@ impl App {
             Msg::LogLines { generation, lines } if generation == self.log_gen => {
                 self.push_log_lines(lines);
             }
-            Msg::Metrics { generation, data } if generation == self.generation => {
+            Msg::Metrics {
+                generation,
+                data,
+                containers,
+            } if generation == self.generation => {
                 let sort_uses_metrics = self
                     .sort_column
                     .and_then(|i| {
@@ -519,6 +531,7 @@ impl App {
                     })
                     .is_some_and(|h| matches!(h.as_str(), "CPU" | "MEM"));
                 self.metrics = data;
+                self.container_metrics = containers;
                 if sort_uses_metrics {
                     self.invalidate_rows();
                 }

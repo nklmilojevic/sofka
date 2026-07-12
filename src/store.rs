@@ -31,6 +31,8 @@ pub enum Msg {
     Metrics {
         generation: u64,
         data: HashMap<String, (i64, i64)>,
+        /// Per-container usage keyed by `namespace/pod/container`.
+        containers: HashMap<String, (i64, i64)>,
     },
     /// CRD `additionalPrinterColumns` fallback for a custom-resource plural,
     /// fetched off-thread (`None` = CRD had nothing usable for the version).
