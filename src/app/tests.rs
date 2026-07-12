@@ -2220,3 +2220,77 @@ async fn copy_doc_on_empty_view_warns() {
     assert!(app.flash.contains("nothing to copy"));
     assert_eq!(app.mode, Mode::Detail, "copy must not leave the view");
 }
+
+#[tokio::test]
+async fn x_decodes_secret_data_into_detail_view() {
+    use base64::Engine;
+    use base64::engine::general_purpose::STANDARD as BASE64;
+
+    let (mut app, _rx) = test_app();
+    app.switch_kind("secrets");
+    apply(
+        &mut app,
+        json!({"apiVersion": "v1", "kind": "Secret",
+        "metadata": {"name": "creds", "namespace": "default"},
+        "type": "Opaque",
+        "data": {
+            "password": BASE64.encode("hunter2"),
+            "config.yaml": BASE64.encode("a: 1\nb: 2\n"),
+            "cert.der": BASE64.encode([0u8, 159, 146, 150]),
+        }}),
+    );
+    app.table_state.select(Some(0));
+    app.handle_key(press(KeyCode::Char('x'))).unwrap();
+
+    assert_eq!(app.mode, Mode::Detail);
+    assert!(app.detail.title.contains("decoded"), "{}", app.detail.title);
+    let lines: Vec<&str> = app.detail.lines.iter().map(String::as_str).collect();
+    assert!(lines.contains(&"password: hunter2"), "{lines:?}");
+    // Multiline values render as a stringData-style literal block.
+    let block_start = lines
+        .iter()
+        .position(|l| *l == "config.yaml: |")
+        .expect("literal block header");
+    assert_eq!(lines[block_start + 1], "  a: 1");
+    assert_eq!(lines[block_start + 2], "  b: 2");
+    // Binary values get a placeholder, not mojibake.
+    assert!(lines.contains(&"cert.der: <binary: 4 bytes>"), "{lines:?}");
+
+    // Esc returns to the table on the same row.
+    app.handle_key(press(KeyCode::Esc)).unwrap();
+    assert_eq!(app.mode, Mode::Table);
+}
+
+#[tokio::test]
+async fn x_on_secret_without_data_warns() {
+    let (mut app, _rx) = test_app();
+    app.switch_kind("secrets");
+    apply(
+        &mut app,
+        json!({"apiVersion": "v1", "kind": "Secret",
+            "metadata": {"name": "empty", "namespace": "default"},
+            "type": "Opaque"}),
+    );
+    app.table_state.select(Some(0));
+    app.handle_key(press(KeyCode::Char('x'))).unwrap();
+    assert_eq!(app.mode, Mode::Table, "no data — stay on the table");
+    assert!(app.flash.contains("no data"));
+}
+
+#[tokio::test]
+async fn x_outside_secrets_is_left_to_plugins() {
+    let (mut app, _rx) = test_app();
+    app.switch_kind("pods");
+    apply(
+        &mut app,
+        json!({"apiVersion": "v1", "kind": "Pod",
+            "metadata": {"name": "web", "namespace": "default"}}),
+    );
+    app.table_state.select(Some(0));
+    app.handle_key(press(KeyCode::Char('x'))).unwrap();
+    assert_eq!(
+        app.mode,
+        Mode::Table,
+        "x must not open a decode view for pods"
+    );
+}

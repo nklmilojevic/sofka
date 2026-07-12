@@ -296,6 +296,11 @@ fn header_hints(app: &App) -> Vec<Line<'static>> {
             hint_line(&[("⏎", "resources"), ("y", "yaml"), ("d", "describe")]),
             hint_line(&[("e", "edit"), ("^d", "delete")]),
         ],
+        "secrets" => vec![
+            hint_line(&[("x", "decode"), ("y", "yaml"), ("d", "describe")]),
+            hint_line(&[("e", "edit"), ("E", "events"), ("c", "copy name")]),
+            hint_line(&[("^d", "delete")]),
+        ],
         _ => vec![
             hint_line(&[("⏎", "yaml"), ("d", "describe"), ("E", "events")]),
             hint_line(&[("e", "edit"), ("c", "copy name")]),
@@ -1453,6 +1458,7 @@ fn draw_help(frame: &mut Frame, app: &App, area: Rect) {
         bind("l · p", "logs (workload = all pods) · previous logs"),
         bind("c", "copy resource name · in doc views: copy the document"),
         bind("/", "search within YAML/describe/diff/events/help"),
+        bind("x", "secrets: show data base64-decoded"),
         Line::from(""),
         Line::from(Span::styled("  Act", theme::title())),
         bind("e", "edit in $EDITOR (kubectl edit)"),
