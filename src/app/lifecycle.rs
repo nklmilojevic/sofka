@@ -258,6 +258,9 @@ impl App {
         if self.table_state.selected().is_none() {
             self.table_state.select(Some(0));
         }
+        self.refresh_view_spec();
+        self.apply_view_sort();
+        self.maybe_fetch_printer_columns(&kind);
         let handle = self.cluster.spawn_watch(
             &kind,
             &self.namespace,
@@ -277,6 +280,49 @@ impl App {
             self.last_rbac_ns = Some(self.namespace.clone());
             self.refresh_rbac();
         }
+    }
+
+    /// For a custom resource with neither curated columns nor a user view,
+    /// fetch its CRD off-thread and read `additionalPrinterColumns` for the
+    /// watched version — a better automatic fallback than NAME/AGE. Results
+    /// (including "nothing usable") are cached per plural for the session.
+    fn maybe_fetch_printer_columns(&mut self, kind: &Kind) {
+        let user_has_columns = self
+            .active_user_view()
+            .is_some_and(|v| !v.columns.is_empty());
+        if crate::columns::has_curated(&self.kind_plural)
+            || kind.ar.group.is_empty()
+            || kind.ar.plural.to_lowercase() != self.kind_plural
+            || self.crd_views.contains_key(&self.kind_plural)
+            || user_has_columns
+        {
+            return;
+        }
+        let Some(crd_kind) = self.cluster.resolve("customresourcedefinitions") else {
+            return;
+        };
+        let client = self.cluster.client.clone();
+        let name = format!("{}.{}", self.kind_plural, kind.ar.group);
+        let version = kind.ar.version.clone();
+        let plural = self.kind_plural.clone();
+        let tx = self.tx.clone();
+        let genr = self.generation;
+        let handle = tokio::spawn(async move {
+            let api: Api<DynamicObject> = Api::all_with(client, &crd_kind.ar);
+            // No CRD (aggregated API) or no permission → stay on NAME/AGE.
+            let Ok(crd) = api.get(&name).await else {
+                return;
+            };
+            let view = crate::views::printer_columns_view(&crd.data, &version);
+            let _ = tx
+                .send(Msg::PrinterColumns {
+                    generation: genr,
+                    plural,
+                    view: Box::new(view),
+                })
+                .await;
+        });
+        self.tasks.push(handle);
     }
 
     /// Restart the watch when the filter's `-l`/`-f` selectors no longer
@@ -467,11 +513,25 @@ impl App {
             Msg::Metrics { generation, data } if generation == self.generation => {
                 let sort_uses_metrics = self
                     .sort_column
-                    .and_then(|i| self.display_headers().get(i).copied())
-                    .is_some_and(|h| matches!(h, "CPU" | "MEM"));
+                    .and_then(|i| {
+                        let headers = self.display_headers();
+                        headers.get(i).cloned()
+                    })
+                    .is_some_and(|h| matches!(h.as_str(), "CPU" | "MEM"));
                 self.metrics = data;
                 if sort_uses_metrics {
                     self.invalidate_rows();
+                }
+            }
+            Msg::PrinterColumns {
+                generation,
+                plural,
+                view,
+            } if generation == self.generation => {
+                let for_current = plural == self.kind_plural;
+                self.crd_views.insert(plural, *view);
+                if for_current {
+                    self.refresh_view_spec();
                 }
             }
             Msg::PulseData { generation, data } if generation == self.generation => {

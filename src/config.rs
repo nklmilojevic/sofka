@@ -53,8 +53,64 @@ pub struct Config {
     pub aliases: HashMap<String, String>,
     /// User-defined shell-out plugins bound to keys.
     pub plugins: Vec<Plugin>,
+    /// Custom table views keyed by resource — see [`ViewConfig`]. Compiled
+    /// and validated by [`crate::views::compile`].
+    pub views: HashMap<String, ViewConfig>,
     /// Color skin: a built-in palette name plus optional per-swatch overrides.
     pub skin: Skin,
+}
+
+/// A custom table view for one resource kind. Keyed in `[views]` by
+/// apiVersion/plural (`"cert-manager.io/v1/certificates"`, `"v1/pods"`),
+/// group/plural, bare plural, or lowercased kind. Columns overlay the curated
+/// defaults (matching headers replace in place, new ones land before AGE)
+/// unless `replace = true` swaps them out entirely. `path` is a JSON Pointer
+/// (RFC 6901) into the object as served by the API.
+///
+/// ```toml
+/// [views."cert-manager.io/v1/certificates"]
+/// sort = "EXPIRES:desc"   # initial sort column, ":asc" (default) or ":desc"
+///
+/// [[views."cert-manager.io/v1/certificates".columns]]
+/// name = "READY"
+/// path = "/status/conditions/0/status"
+/// type = "status"         # text (default) / status / number / quantity / time
+///
+/// [[views."cert-manager.io/v1/certificates".columns]]
+/// name = "EXPIRES"
+/// path = "/status/notAfter"
+/// type = "time"
+/// wide = true              # only shown in wide mode (`w`)
+/// ```
+#[derive(Debug, Default, Clone, Deserialize)]
+#[serde(default)]
+pub struct ViewConfig {
+    /// Initial sort: a column header, optionally suffixed `:asc`/`:desc`.
+    pub sort: Option<String>,
+    /// Replace the curated columns instead of overlaying them.
+    pub replace: bool,
+    pub columns: Vec<ViewColumnConfig>,
+}
+
+/// One column of a [`ViewConfig`]. Everything is optional at parse time so a
+/// half-written column degrades to a validation warning instead of discarding
+/// the whole config file.
+#[derive(Debug, Default, Clone, Deserialize)]
+#[serde(default)]
+pub struct ViewColumnConfig {
+    /// Column header (displayed uppercased).
+    pub name: String,
+    /// JSON Pointer to the cell value, e.g. `/status/phase`.
+    pub path: String,
+    /// Value type: `text` (default), `status`, `number`, `quantity`, `time`.
+    #[serde(rename = "type")]
+    pub kind: Option<String>,
+    /// Only shown in wide mode.
+    pub wide: bool,
+    /// Fixed display width in columns (defaults to a flexible share).
+    pub width: Option<u16>,
+    /// Cell alignment: `left` (default), `center`, `right`.
+    pub align: Option<String>,
 }
 
 /// Skin selection. `name` picks a built-in palette (see

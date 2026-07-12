@@ -414,6 +414,15 @@ enum SortKey {
     Text(String),
 }
 
+impl From<crate::views::SortValue> for SortKey {
+    fn from(v: crate::views::SortValue) -> Self {
+        match v {
+            crate::views::SortValue::Num(n) => SortKey::Num(n),
+            crate::views::SortValue::Text(t) => SortKey::Text(t),
+        }
+    }
+}
+
 impl SortKey {
     fn cmp_to(&self, other: &Self) -> std::cmp::Ordering {
         use std::cmp::Ordering;
@@ -640,6 +649,17 @@ pub struct App {
     pub should_quit: bool,
     matcher: SkimMatcherV2,
     rows_cache: RefCell<RowsCache>,
+
+    /// Compiled custom views from config, re-resolved on context switch.
+    pub user_views: HashMap<String, crate::views::View>,
+    /// CRD printer-column fallbacks fetched per plural for this cluster
+    /// (`None` = fetched, nothing usable). Cleared on context switch.
+    crd_views: HashMap<String, Option<crate::views::View>>,
+    /// Wide mode (`w`): show wide-only columns.
+    pub wide: bool,
+    /// Active column layout for the current view; rebuilt by
+    /// [`App::refresh_view_spec`] whenever kind/views/wide change.
+    spec: crate::columns::ViewSpec,
 }
 
 impl App {
@@ -738,6 +758,10 @@ impl App {
                 keys: Vec::new(),
                 cells: HashMap::new(),
             }),
+            user_views: HashMap::new(),
+            crd_views: HashMap::new(),
+            wide: false,
+            spec: crate::columns::build_spec("", None, None, false),
         }
     }
 

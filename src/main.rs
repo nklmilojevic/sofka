@@ -11,6 +11,7 @@ mod k8s;
 mod store;
 mod theme;
 mod ui;
+mod views;
 
 use std::time::Duration;
 
@@ -146,6 +147,11 @@ async fn main() -> Result<()> {
     app.all_contexts = Cluster::list_contexts();
     app.user_aliases = cfg.aliases.clone();
     app.plugins = cfg.plugins.clone();
+    let (user_views, view_warnings) = views::compile(&cfg.views);
+    for w in &view_warnings {
+        eprintln!("warning: {w}");
+    }
+    app.user_views = user_views;
     app.skin_colors = cfg.skin.colors.clone();
     app.config = loader;
     app.session_skin = Some(session_skin);
@@ -177,6 +183,12 @@ async fn main() -> Result<()> {
         // a successful pick connects and lands on the default resource.
         Some(err) => app.start_disconnected(err),
         None => app.switch_kind(&resource),
+    }
+    // View config problems must be visible inside the TUI, not only on the
+    // (about-to-be-hidden) stderr.
+    if let Some(w) = view_warnings.first() {
+        app.flash = w.clone();
+        app.flash_err = true;
     }
 
     if args.snapshot {

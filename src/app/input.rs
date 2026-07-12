@@ -119,6 +119,8 @@ impl App {
             // Sorting: S cycles the column, I inverts the direction.
             KeyCode::Char('S') => self.cycle_sort(),
             KeyCode::Char('I') => self.toggle_sort_dir(),
+            // Wide mode: show wide-only columns (kubectl `-o wide`).
+            KeyCode::Char('w') => self.toggle_wide(),
             // `f`/Shift-F = port-forward.
             KeyCode::Char('f') | KeyCode::Char('F') => self.request_port_forward(),
             KeyCode::Char('n') => self.open_namespaces(),

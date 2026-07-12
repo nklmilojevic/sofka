@@ -213,32 +213,6 @@ impl App {
     }
 }
 
-/// Columns whose cell is a count/number and should sort numerically.
-pub(super) fn is_numeric_header(header: &str) -> bool {
-    matches!(
-        header,
-        "READY"
-            | "RESTARTS"
-            | "DATA"
-            | "ACTIVE"
-            | "DESIRED"
-            | "CURRENT"
-            | "AVAILABLE"
-            | "UP-TO-DATE"
-            | "COMPLETIONS"
-            | "ENDPOINTS"
-    )
-}
-
-/// Parse the leading number of a cell (`"3"`, `"1/2"` → 1, `"<none>"` → 0).
-pub(super) fn parse_leading_num(s: &str) -> f64 {
-    let t = s.trim_start_matches(|c: char| !c.is_ascii_digit() && c != '-');
-    let end = t
-        .find(|c: char| !c.is_ascii_digit() && c != '-')
-        .unwrap_or(t.len());
-    t[..end].parse::<f64>().unwrap_or(0.0)
-}
-
 /// Move a list selection one step, clamped to `[0, len)`. Shared by every
 /// modal picker (namespaces, contexts, containers, set-image, xray).
 pub(super) fn list_step(state: &mut ListState, len: usize, down: bool) {

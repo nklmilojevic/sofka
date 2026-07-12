@@ -103,6 +103,11 @@ Not a marketing number - these are specific, checkable design choices:
   statefulsets, daemonsets, services, nodes, namespaces, configmaps, secrets,
   jobs, cronjobs, PVC/PV, ingresses, endpoints, CustomResourceDefinitions)
   with a NAME/AGE fallback for everything else.
+- **Custom views** - user-defined columns for any resource in config
+  (`[views]`), extracted via JSON Pointer with typed sorting (quantities,
+  numbers, timestamps sort by value). Unknown custom resources automatically
+  pick up their CRD's `additionalPrinterColumns`. `w` toggles wide-only
+  columns (kubectl `-o wide`).
 - **Live CPU/MEM columns** for pods and nodes from the metrics API, with
   outlier coloring; degrades gracefully when metrics-server is absent.
 - **Drill-down navigation** with a breadcrumb stack: workload/service →
@@ -138,7 +143,8 @@ Not a marketing number - these are specific, checkable design choices:
 - **Skinnable** - built-in Catppuccin, Gruvbox, Solarized, Nord, Dracula,
   Tokyo Night, One Dark, Rosé Pine, and Monokai palettes, auto-detected
   dark/light default, plus per-swatch overrides in config.
-- **Config file** (TOML): aliases, default namespace/resource, plugins, skin.
+- **Config file** (TOML): aliases, default namespace/resource, plugins,
+  views, skin.
 
 ## Installation
 
@@ -209,6 +215,48 @@ command = "argocd"
 args = ["app", "sync", "$NAME"]
 scopes = ["deployments"]   # omit for all resources
 ```
+
+### Custom views
+
+Define table columns for any resource — most usefully for custom resources
+that would otherwise fall back to NAME/AGE. Views are keyed by
+apiVersion/plural (`"cert-manager.io/v1/certificates"`, `"v1/pods"`),
+group/plural, bare plural, or lowercased kind; the most specific key wins.
+
+```toml
+[views."cert-manager.io/v1/certificates"]
+sort = "EXPIRES:desc"     # initial sort column, ":asc" (default) or ":desc"
+# replace = true          # replace the curated columns instead of overlaying
+
+[[views."cert-manager.io/v1/certificates".columns]]
+name = "READY"
+path = "/status/conditions/0/status"
+type = "status"           # colors the row like other status columns
+
+[[views."cert-manager.io/v1/certificates".columns]]
+name = "EXPIRES"
+path = "/status/notAfter"
+type = "time"             # rendered as elapsed ("3d4h") / "in 30d"
+
+[[views."cert-manager.io/v1/certificates".columns]]
+name = "ISSUER"
+path = "/spec/issuerRef/name"
+wide = true               # only shown in wide mode (`w`)
+```
+
+`path` is a JSON Pointer (RFC 6901) into the object as served by the API —
+`/metadata/…`, `/spec/…`, `/status/…`, array indices like
+`/status/conditions/0/status`. Column `type` is `text` (default), `status`,
+`number`, `quantity` (`500m`, `1Gi`), or `time`; typed columns sort by value,
+not lexically. Optional `width` (fixed columns) and `align`
+(`left`/`center`/`right`) tune the layout. By default columns overlay the
+curated ones: a matching header replaces it in place, new columns land before
+AGE. Invalid entries are skipped with a warning shown in-app — they never
+take the TUI down.
+
+Custom resources without an explicit view automatically use their CRD's
+`additionalPrinterColumns` (columns with `priority > 0` become wide-only),
+so most CRs get useful columns with zero configuration.
 
 ### Per-cluster / per-context overrides
 
