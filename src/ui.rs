@@ -63,7 +63,15 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         Mode::Diff => draw_diff(frame, &app.detail, chunks[1]),
         Mode::Events => draw_scrollable(frame, &app.detail, chunks[1], theme::peach()),
         Mode::Logs | Mode::LogFilter => draw_logs(frame, app, chunks[1]),
-        Mode::Help => draw_help(frame, chunks[1]),
+        // While typing a doc search, keep drawing the view it was opened from
+        // so the matches narrow live under the prompt.
+        Mode::DocFilter => match app.doc_filter_return {
+            Mode::Diff => draw_diff(frame, &app.detail, chunks[1]),
+            Mode::Events => draw_scrollable(frame, &app.detail, chunks[1], theme::peach()),
+            Mode::Help => draw_help(frame, app, chunks[1]),
+            _ => draw_scrollable(frame, &app.detail, chunks[1], theme::sky()),
+        },
+        Mode::Help => draw_help(frame, app, chunks[1]),
         Mode::Pulse => draw_pulse(frame, app, chunks[1]),
         Mode::Xray => draw_xray(frame, app, chunks[1]),
         Mode::PortForwards => draw_port_forwards(frame, app, chunks[1]),
@@ -229,6 +237,7 @@ fn header_hints(app: &App) -> Vec<Line<'static>> {
             | Mode::Events
             | Mode::Logs
             | Mode::LogFilter
+            | Mode::DocFilter
             | Mode::Help
             | Mode::Pulse
             | Mode::Xray
@@ -286,6 +295,11 @@ fn header_hints(app: &App) -> Vec<Line<'static>> {
         "customresourcedefinitions" => vec![
             hint_line(&[("⏎", "resources"), ("y", "yaml"), ("d", "describe")]),
             hint_line(&[("e", "edit"), ("^d", "delete")]),
+        ],
+        "secrets" => vec![
+            hint_line(&[("x", "decode"), ("y", "yaml"), ("d", "describe")]),
+            hint_line(&[("e", "edit"), ("E", "events"), ("c", "copy name")]),
+            hint_line(&[("^d", "delete")]),
         ],
         _ => vec![
             hint_line(&[("⏎", "yaml"), ("d", "describe"), ("E", "events")]),
@@ -610,17 +624,20 @@ fn draw_scrollable(
     accent: ratatui::style::Color,
 ) {
     let inner_h = area.height.saturating_sub(2) as usize;
-    let (start, end) = visible_line_window(view.lines.len(), view.scroll, inner_h);
-    let text: Vec<Line> = view
-        .lines
-        .range(start..end)
-        .map(|l| Line::from(highlight_yaml(l)))
+    let shown = doc_filtered_lines(view);
+    // The scroll offset is clamped against the unfiltered length by the key
+    // handlers; re-clamp against the (shorter) filtered list.
+    let scroll = view.scroll.min(shown.len().saturating_sub(1));
+    let (start, end) = visible_line_window(shown.len(), scroll, inner_h);
+    let text: Vec<Line> = shown[start..end]
+        .iter()
+        .map(|l| highlight_matches(Line::from(highlight_yaml(l)), &view.filter))
         .collect();
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(accent))
-        .title(Span::styled(format!(" {} ", view.title), theme::title()));
+        .title(Span::styled(doc_title(view, shown.len()), theme::title()));
     let p = Paragraph::new(text).block(block);
     // Wrap folds long lines; otherwise honor the horizontal offset so content
     // past the right edge can be scrolled into view.
@@ -1243,24 +1260,26 @@ fn klog_level(l: &str, level: char) -> bool {
 /// Unified-diff view with +/- line coloring.
 fn draw_diff(frame: &mut Frame, view: &crate::app::Scrollable, area: Rect) {
     let inner_h = area.height.saturating_sub(2) as usize;
-    let (start, end) = visible_line_window(view.lines.len(), view.scroll, inner_h);
-    let lines: Vec<Line> = view
-        .lines
-        .range(start..end)
+    let shown = doc_filtered_lines(view);
+    let scroll = view.scroll.min(shown.len().saturating_sub(1));
+    let (start, end) = visible_line_window(shown.len(), scroll, inner_h);
+    let lines: Vec<Line> = shown[start..end]
+        .iter()
         .map(|l| {
             let color = match l.chars().next() {
                 Some('+') => theme::green(),
                 Some('-') => theme::red(),
                 _ => theme::overlay1(),
             };
-            Line::from(Span::styled(l.clone(), Style::default().fg(color)))
+            let line = Line::from(Span::styled((*l).clone(), Style::default().fg(color)));
+            highlight_matches(line, &view.filter)
         })
         .collect();
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(theme::peach()))
-        .title(Span::styled(format!(" {} ", view.title), theme::title()));
+        .title(Span::styled(doc_title(view, shown.len()), theme::title()));
     let p = Paragraph::new(lines).block(block);
     let p = if view.wrap {
         p.wrap(Wrap { trim: false })
@@ -1274,6 +1293,47 @@ fn visible_line_window(len: usize, scroll: usize, height: usize) -> (usize, usiz
     let start = scroll.min(len);
     let end = start.saturating_add(height).min(len);
     (start, end)
+}
+
+/// The lines a doc view shows: all of them, or only those matching the active
+/// `/` search (case-insensitive substring, like the logs filter).
+fn doc_filtered_lines(view: &crate::app::Scrollable) -> Vec<&String> {
+    let filter = view.filter.to_lowercase();
+    view.lines
+        .iter()
+        .filter(|l| filter.is_empty() || l.to_lowercase().contains(&filter))
+        .collect()
+}
+
+/// Doc-view title, extended with the active search query and its match count
+/// (` title · /query [n] `), mirroring the logs title.
+fn doc_title(view: &crate::app::Scrollable, shown: usize) -> String {
+    if view.filter.is_empty() {
+        format!(" {} ", view.title)
+    } else {
+        format!(" {} · /{} [{}] ", view.title, view.filter, shown)
+    }
+}
+
+/// Overlay search-match highlights on an already-styled line, preserving each
+/// span's own style for the unmatched stretches. A needle spanning two spans
+/// (e.g. across a YAML key/value boundary) is not highlighted — the line is
+/// still *shown* (filtering matches on the raw text), just not marked.
+fn highlight_matches(line: Line<'static>, needle: &str) -> Line<'static> {
+    if needle.is_empty() {
+        return line;
+    }
+    let mut spans = Vec::with_capacity(line.spans.len());
+    for span in line.spans {
+        push_highlighted(&mut spans, &span.content, needle, span.style);
+    }
+    Line::from(spans)
+}
+
+/// Concatenated plain text of a styled line, for filtering render-time-built
+/// views (help) where no raw string backs the line.
+fn line_text(line: &Line) -> String {
+    line.spans.iter().map(|s| s.content.as_ref()).collect()
 }
 
 /// YAML / `kubectl describe` colorization: comments dimmed, section headers in
@@ -1354,7 +1414,7 @@ fn value_style(value: &str) -> Style {
     Style::default().fg(theme::text())
 }
 
-fn draw_help(frame: &mut Frame, area: Rect) {
+fn draw_help(frame: &mut Frame, app: &App, area: Rect) {
     let bind = |k: &str, d: &str| {
         Line::from(vec![
             Span::styled(format!("  {k:<14}"), Style::default().fg(theme::yellow())),
@@ -1396,7 +1456,9 @@ fn draw_help(frame: &mut Frame, area: Rect) {
         Line::from(Span::styled("  Inspect", theme::title())),
         bind("y · d", "view YAML · describe (kubectl)"),
         bind("l · p", "logs (workload = all pods) · previous logs"),
-        bind("c", "copy resource name to clipboard"),
+        bind("c", "copy resource name · in doc views: copy the document"),
+        bind("/", "search within YAML/describe/diff/events/help"),
+        bind("x", "secrets: show data base64-decoded"),
         Line::from(""),
         Line::from(Span::styled("  Act", theme::title())),
         bind("e", "edit in $EDITOR (kubectl edit)"),
@@ -1429,13 +1491,27 @@ fn draw_help(frame: &mut Frame, area: Rect) {
         bind(":q / ctrl-c", "quit"),
         bind("?", "toggle help"),
     ];
+    // `/` search: keep only matching binding lines (section headers and
+    // spacers match like any other text), highlighting the matched runs.
+    let needle = app.help_filter.to_lowercase();
+    let (lines, title) = if needle.is_empty() {
+        (lines, " Help ".to_string())
+    } else {
+        let shown: Vec<Line> = lines
+            .into_iter()
+            .filter(|l| line_text(l).to_lowercase().contains(&needle))
+            .map(|l| highlight_matches(l, &app.help_filter))
+            .collect();
+        let title = format!(" Help · /{} [{}] ", app.help_filter, shown.len());
+        (shown, title)
+    };
     frame.render_widget(
         Paragraph::new(lines).block(
             Block::default()
                 .borders(Borders::ALL)
                 .border_type(BorderType::Rounded)
                 .border_style(theme::border_focused())
-                .title(Span::styled(" Help ", theme::title())),
+                .title(Span::styled(title, theme::title())),
         ),
         area,
     );
@@ -1932,6 +2008,23 @@ fn draw_prompt(frame: &mut Frame, app: &App, area: Rect) {
             Span::styled(app.logs.filter.clone(), Style::default().fg(theme::text())),
             Span::styled("█", Style::default().fg(theme::teal())),
         ]),
+        Mode::DocFilter => {
+            let query = if app.doc_filter_return == Mode::Help {
+                app.help_filter.clone()
+            } else {
+                app.detail.filter.clone()
+            };
+            Line::from(vec![
+                Span::styled(
+                    "search /",
+                    Style::default()
+                        .fg(theme::teal())
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(query, Style::default().fg(theme::text())),
+                Span::styled("█", Style::default().fg(theme::teal())),
+            ])
+        }
         Mode::Confirm => Line::from(Span::styled(
             confirm_action_hint(app.confirm_allows_force_toggle(), ConfirmHintStyle::Prompt),
             Style::default().fg(theme::yellow()),
@@ -1941,9 +2034,10 @@ fn draw_prompt(frame: &mut Frame, app: &App, area: Rect) {
             Line::from(Span::styled(hint, theme::dim()))
         }
         Mode::Detail | Mode::Events | Mode::Diff => {
-            let hint = "  j/k:scroll  h/l:← →  g/G:top/bottom  w:wrap  esc:back";
+            let hint = "  j/k:scroll  h/l:← →  g/G:top/bottom  /:search  w:wrap  c:copy  esc:back";
             Line::from(Span::styled(hint, theme::dim()))
         }
+        Mode::Help => Line::from(Span::styled("  /:search  ?/esc:back", theme::dim())),
         Mode::FluxMenu => Line::from(Span::styled(
             "  j/k: move   enter: confirm   esc: cancel",
             theme::dim(),

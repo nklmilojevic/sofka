@@ -56,6 +56,35 @@ impl App {
         self.mode = Mode::Detail;
     }
 
+    /// Show the selected Secret with its `data` base64-decoded (k9s `x`), as
+    /// it would appear in `stringData`. A plain [`Mode::Detail`] view, so `/`
+    /// search and `c` copy work like every other single-document view.
+    pub(super) fn open_decoded_secret(&mut self) {
+        self.set_return_mode();
+        let Some(obj) = self.selected_ref() else {
+            return;
+        };
+        let Some(data) = obj.data.get("data").and_then(Value::as_object) else {
+            self.flash_warn("secret has no data");
+            return;
+        };
+        if data.is_empty() {
+            self.flash_warn("secret has no data");
+            return;
+        }
+        let mut lines: Vec<String> = Vec::new();
+        for (key, value) in data {
+            lines.extend(decoded_secret_entry(key, value));
+        }
+        let title = obj.metadata.name.clone().unwrap_or_else(|| "secret".into());
+        self.detail = Scrollable {
+            title: format!("{title} — decoded"),
+            lines: lines.into(),
+            ..Default::default()
+        };
+        self.mode = Mode::Detail;
+    }
+
     /// Describe the selection via `kubectl describe`, off-thread so the UI loop
     /// keeps rendering. Falls back to the object's YAML if kubectl is missing
     /// or fails. The result arrives as `Msg::Detail`.
@@ -313,5 +342,33 @@ impl App {
         if let Some(task) = self.event_task.take() {
             task.abort();
         }
+    }
+}
+
+/// Render one Secret `data` entry as stringData-style YAML lines: single-line
+/// values inline (`key: value`), multiline ones as a literal block (`key: |`).
+/// Values that aren't valid base64 or don't decode to UTF-8 text (TLS certs
+/// in DER, random binary) get a placeholder instead of mojibake.
+fn decoded_secret_entry(key: &str, value: &Value) -> Vec<String> {
+    use base64::Engine;
+    use base64::engine::general_purpose::STANDARD as BASE64;
+
+    let Some(b64) = value.as_str() else {
+        return vec![format!("{key}: <not a string>")];
+    };
+    let Ok(bytes) = BASE64.decode(b64) else {
+        return vec![format!("{key}: <invalid base64>")];
+    };
+    let text = match String::from_utf8(bytes) {
+        Ok(text) => text,
+        Err(e) => return vec![format!("{key}: <binary: {} bytes>", e.as_bytes().len())],
+    };
+    let text = text.trim_end_matches('\n');
+    if text.contains('\n') {
+        let mut lines = vec![format!("{key}: |")];
+        lines.extend(text.lines().map(|l| format!("  {l}")));
+        lines
+    } else {
+        vec![format!("{key}: {text}")]
     }
 }

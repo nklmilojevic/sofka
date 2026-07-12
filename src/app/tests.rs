@@ -2152,3 +2152,203 @@ async fn failed_switch_while_disconnected_reopens_picker() {
     });
     assert_eq!(app.mode, Mode::Table);
 }
+
+#[tokio::test]
+async fn doc_search_filters_detail_view() {
+    let (mut app, _rx) = test_app();
+    apply(
+        &mut app,
+        json!({"apiVersion": "v1", "kind": "Pod",
+            "metadata": {"name": "web", "namespace": "default"}}),
+    );
+    app.table_state.select(Some(0));
+    app.handle_key(press(KeyCode::Char('y'))).unwrap();
+    assert_eq!(app.mode, Mode::Detail);
+
+    // `/` opens the search prompt for the detail view; typing builds the query.
+    app.handle_key(press(KeyCode::Char('/'))).unwrap();
+    assert_eq!(app.mode, Mode::DocFilter);
+    assert_eq!(app.doc_filter_return, Mode::Detail);
+    for c in "kind".chars() {
+        app.handle_key(press(KeyCode::Char(c))).unwrap();
+    }
+    assert_eq!(app.detail.filter, "kind");
+
+    // Enter keeps the query and returns to the view.
+    app.handle_key(press(KeyCode::Enter)).unwrap();
+    assert_eq!(app.mode, Mode::Detail);
+    assert_eq!(app.detail.filter, "kind");
+
+    // First esc clears the search (stays), second esc leaves the view.
+    app.handle_key(press(KeyCode::Esc)).unwrap();
+    assert_eq!(app.mode, Mode::Detail);
+    assert!(app.detail.filter.is_empty());
+    app.handle_key(press(KeyCode::Esc)).unwrap();
+    assert_eq!(app.mode, Mode::Table);
+}
+
+#[tokio::test]
+async fn doc_search_esc_clears_and_scroll_resets() {
+    let (mut app, _rx) = test_app();
+    app.detail = Scrollable {
+        title: "x — YAML".into(),
+        lines: (0..100).map(|i| format!("line {i}")).collect(),
+        scroll: 50,
+        ..Default::default()
+    };
+    app.mode = Mode::Detail;
+
+    app.handle_key(press(KeyCode::Char('/'))).unwrap();
+    app.handle_key(press(KeyCode::Char('9'))).unwrap();
+    // Typing snaps the view back to the top so the first match is visible.
+    assert_eq!(app.detail.scroll, 0);
+    // Esc in the prompt aborts the search entirely.
+    app.handle_key(press(KeyCode::Esc)).unwrap();
+    assert_eq!(app.mode, Mode::Detail);
+    assert!(app.detail.filter.is_empty());
+}
+
+#[tokio::test]
+async fn help_search_uses_own_buffer() {
+    let (mut app, _rx) = test_app();
+    app.handle_key(press(KeyCode::Char('?'))).unwrap();
+    assert_eq!(app.mode, Mode::Help);
+
+    app.handle_key(press(KeyCode::Char('/'))).unwrap();
+    assert_eq!(app.mode, Mode::DocFilter);
+    assert_eq!(app.doc_filter_return, Mode::Help);
+    for c in "logs".chars() {
+        app.handle_key(press(KeyCode::Char(c))).unwrap();
+    }
+    app.handle_key(press(KeyCode::Enter)).unwrap();
+    assert_eq!(app.mode, Mode::Help);
+    assert_eq!(app.help_filter, "logs");
+    assert!(
+        app.detail.filter.is_empty(),
+        "help search must not touch detail"
+    );
+
+    // Esc clears the search first, then closes help; reopening starts clean.
+    app.handle_key(press(KeyCode::Esc)).unwrap();
+    assert_eq!(app.mode, Mode::Help);
+    assert!(app.help_filter.is_empty());
+    app.handle_key(press(KeyCode::Esc)).unwrap();
+    assert_eq!(app.mode, Mode::Table);
+    app.help_filter = "stale".into();
+    app.handle_key(press(KeyCode::Char('?'))).unwrap();
+    assert!(app.help_filter.is_empty());
+}
+
+#[tokio::test]
+async fn copy_doc_respects_active_search() {
+    let (mut app, _rx) = test_app();
+    app.detail = Scrollable {
+        title: "web — YAML".into(),
+        lines: vec![
+            "apiVersion: v1".to_string(),
+            "kind: Pod".to_string(),
+            "metadata:".to_string(),
+            "  name: web".to_string(),
+        ]
+        .into(),
+        ..Default::default()
+    };
+
+    // No search: the whole document.
+    assert_eq!(
+        app.filtered_doc_text(),
+        "apiVersion: v1\nkind: Pod\nmetadata:\n  name: web"
+    );
+
+    // Active search: only the matching lines (case-insensitive).
+    app.detail.filter = "KIND".into();
+    assert_eq!(app.filtered_doc_text(), "kind: Pod");
+}
+
+#[tokio::test]
+async fn copy_doc_on_empty_view_warns() {
+    let (mut app, _rx) = test_app();
+    app.detail = Scrollable {
+        title: "empty".into(),
+        ..Default::default()
+    };
+    app.mode = Mode::Detail;
+    app.handle_key(press(KeyCode::Char('c'))).unwrap();
+    assert!(app.flash_err);
+    assert!(app.flash.contains("nothing to copy"));
+    assert_eq!(app.mode, Mode::Detail, "copy must not leave the view");
+}
+
+#[tokio::test]
+async fn x_decodes_secret_data_into_detail_view() {
+    use base64::Engine;
+    use base64::engine::general_purpose::STANDARD as BASE64;
+
+    let (mut app, _rx) = test_app();
+    app.switch_kind("secrets");
+    apply(
+        &mut app,
+        json!({"apiVersion": "v1", "kind": "Secret",
+        "metadata": {"name": "creds", "namespace": "default"},
+        "type": "Opaque",
+        "data": {
+            "password": BASE64.encode("hunter2"),
+            "config.yaml": BASE64.encode("a: 1\nb: 2\n"),
+            "cert.der": BASE64.encode([0u8, 159, 146, 150]),
+        }}),
+    );
+    app.table_state.select(Some(0));
+    app.handle_key(press(KeyCode::Char('x'))).unwrap();
+
+    assert_eq!(app.mode, Mode::Detail);
+    assert!(app.detail.title.contains("decoded"), "{}", app.detail.title);
+    let lines: Vec<&str> = app.detail.lines.iter().map(String::as_str).collect();
+    assert!(lines.contains(&"password: hunter2"), "{lines:?}");
+    // Multiline values render as a stringData-style literal block.
+    let block_start = lines
+        .iter()
+        .position(|l| *l == "config.yaml: |")
+        .expect("literal block header");
+    assert_eq!(lines[block_start + 1], "  a: 1");
+    assert_eq!(lines[block_start + 2], "  b: 2");
+    // Binary values get a placeholder, not mojibake.
+    assert!(lines.contains(&"cert.der: <binary: 4 bytes>"), "{lines:?}");
+
+    // Esc returns to the table on the same row.
+    app.handle_key(press(KeyCode::Esc)).unwrap();
+    assert_eq!(app.mode, Mode::Table);
+}
+
+#[tokio::test]
+async fn x_on_secret_without_data_warns() {
+    let (mut app, _rx) = test_app();
+    app.switch_kind("secrets");
+    apply(
+        &mut app,
+        json!({"apiVersion": "v1", "kind": "Secret",
+            "metadata": {"name": "empty", "namespace": "default"},
+            "type": "Opaque"}),
+    );
+    app.table_state.select(Some(0));
+    app.handle_key(press(KeyCode::Char('x'))).unwrap();
+    assert_eq!(app.mode, Mode::Table, "no data — stay on the table");
+    assert!(app.flash.contains("no data"));
+}
+
+#[tokio::test]
+async fn x_outside_secrets_is_left_to_plugins() {
+    let (mut app, _rx) = test_app();
+    app.switch_kind("pods");
+    apply(
+        &mut app,
+        json!({"apiVersion": "v1", "kind": "Pod",
+            "metadata": {"name": "web", "namespace": "default"}}),
+    );
+    app.table_state.select(Some(0));
+    app.handle_key(press(KeyCode::Char('x'))).unwrap();
+    assert_eq!(
+        app.mode,
+        Mode::Table,
+        "x must not open a decode view for pods"
+    );
+}
