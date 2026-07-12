@@ -594,6 +594,25 @@ fn draw_table(frame: &mut Frame, app: &mut App, area: Rect) {
             Style::default().fg(theme::mark()),
         ));
     }
+    // Keep the active filter visible after leaving the `/` prompt (esc
+    // clears it, `/` re-opens it for editing), and say whether the API or
+    // this process is doing the filtering. Malformed input turns red.
+    if !app.filter.is_empty() {
+        let style = if app.filter_error().is_some() {
+            Style::default().fg(theme::red())
+        } else {
+            Style::default().fg(theme::teal())
+        };
+        title.push(Span::styled(format!(" /{}", app.filter), style));
+        title.push(Span::styled(
+            if app.filter_server_side() {
+                " ·server"
+            } else {
+                " ·local"
+            },
+            theme::dim(),
+        ));
+    }
     title.push(Span::raw(" "));
 
     let mut render_state = ratatui::widgets::TableState::default();
@@ -1492,6 +1511,10 @@ fn draw_help(frame: &mut Frame, app: &App, area: Rect) {
         bind(":pf", "view/stop background port-forwards"),
         bind(":skin", "switch color skin live"),
         bind(
+            ":reload · :config",
+            "reload config from disk · config sources + warnings",
+        ),
+        bind(
             "enter",
             "drill down (deploy→pods, pod→containers, ns→re-scope)",
         ),
@@ -1501,7 +1524,10 @@ fn draw_help(frame: &mut Frame, app: &App, area: Rect) {
         bind("j/k g/G", "move · top/bottom"),
         bind("S · I", "sort by column (cycle) · invert direction"),
         bind("w", "toggle wide columns (kubectl -o wide)"),
-        bind("/", "fuzzy filter"),
+        bind(
+            "/",
+            "filter: fuzzy · !inverse · -l/-f selectors (server-side on ⏎) · col=val cpu>500m age<2h",
+        ),
         bind("n · 0-9", "namespace switcher · 0 = all namespaces"),
         bind("ctrl-r", "refresh watch"),
         Line::from(""),
@@ -2040,16 +2066,35 @@ fn draw_prompt(frame: &mut Frame, app: &App, area: Rect) {
             Span::styled(app.command.clone(), Style::default().fg(theme::text())),
             Span::styled("█", Style::default().fg(theme::mauve())),
         ]),
-        Mode::Filter => Line::from(vec![
-            Span::styled(
-                "/",
-                Style::default()
-                    .fg(theme::teal())
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(app.filter.clone(), Style::default().fg(theme::text())),
-            Span::styled("█", Style::default().fg(theme::teal())),
-        ]),
+        Mode::Filter => {
+            let mut spans = vec![
+                Span::styled(
+                    "/",
+                    Style::default()
+                        .fg(theme::teal())
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(app.filter.clone(), Style::default().fg(theme::text())),
+                Span::styled("█", Style::default().fg(theme::teal())),
+            ];
+            // Structured-grammar feedback: a parse error, a `-l`/`-f`
+            // selector waiting for ⏎ to restart the watch server-side, or
+            // confirmation that the watch is already selector-scoped.
+            if let Some(err) = app.filter_error() {
+                spans.push(Span::styled(
+                    format!("  ✗ {err}"),
+                    Style::default().fg(theme::red()),
+                ));
+            } else if app.filter_selectors_pending() {
+                spans.push(Span::styled(
+                    "  ⏎ apply server-side",
+                    Style::default().fg(theme::yellow()),
+                ));
+            } else if app.filter_server_side() {
+                spans.push(Span::styled("  ·server", theme::dim()));
+            }
+            Line::from(spans)
+        }
         Mode::LogFilter => Line::from(vec![
             Span::styled(
                 "log search /",

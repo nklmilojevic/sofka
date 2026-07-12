@@ -2598,3 +2598,469 @@ async fn invalid_view_sort_column_warns_instead_of_crashing() {
     assert!(app.flash.contains("NOPE"), "{}", app.flash);
     assert!(app.flash_err);
 }
+
+/// Type `/`, the filter text, then ⏎ — the way a user applies a filter.
+fn type_filter(app: &mut App, text: &str) {
+    app.handle_key(press(KeyCode::Char('/'))).unwrap();
+    for c in text.chars() {
+        app.handle_key(press(KeyCode::Char(c))).unwrap();
+    }
+    app.handle_key(press(KeyCode::Enter)).unwrap();
+}
+
+fn row_names(app: &App) -> Vec<String> {
+    app.rows()
+        .iter()
+        .map(|o| o.metadata.name.clone().unwrap_or_default())
+        .collect()
+}
+
+#[tokio::test]
+async fn legacy_fuzzy_filter_with_spaces_is_one_pattern() {
+    let (mut app, _rx) = test_app();
+    app.switch_kind("pods");
+    for n in ["alpha", "beta"] {
+        apply(
+            &mut app,
+            json!({"apiVersion": "v1", "kind": "Pod",
+                   "metadata": {"name": n, "namespace": "default"}}),
+        );
+    }
+    // "default alp" fuzzy-matches across the "namespace name" haystack —
+    // exactly the pre-grammar behavior (spaces are pattern chars, not ANDs).
+    type_filter(&mut app, "default alp");
+    assert_eq!(row_names(&app), ["alpha"]);
+    assert!(!app.filter_server_side());
+}
+
+#[tokio::test]
+async fn inverse_filter_hides_fuzzy_matches() {
+    let (mut app, _rx) = test_app();
+    app.switch_kind("pods");
+    for n in ["api-1", "api-1-canary", "worker"] {
+        apply(
+            &mut app,
+            json!({"apiVersion": "v1", "kind": "Pod",
+                   "metadata": {"name": n, "namespace": "default"}}),
+        );
+    }
+    type_filter(&mut app, "!canary");
+    assert_eq!(row_names(&app), ["api-1", "worker"]);
+
+    // Terms AND together: positive fuzzy + inverse.
+    app.filter = "api !canary".into();
+    app.invalidate_rows();
+    assert_eq!(row_names(&app), ["api-1"]);
+}
+
+#[tokio::test]
+async fn status_filter_matches_status_column() {
+    let (mut app, _rx) = test_app();
+    app.switch_kind("pods");
+    apply(
+        &mut app,
+        json!({"apiVersion": "v1", "kind": "Pod",
+        "metadata": {"name": "crashy", "namespace": "default"},
+        "status": {"phase": "Running", "containerStatuses": [
+            {"ready": false, "restartCount": 3,
+             "state": {"waiting": {"reason": "CrashLoopBackOff"}}}
+        ]}}),
+    );
+    apply(
+        &mut app,
+        json!({"apiVersion": "v1", "kind": "Pod",
+        "metadata": {"name": "healthy", "namespace": "default"},
+        "status": {"phase": "Running", "containerStatuses": [
+            {"ready": true, "restartCount": 0, "state": {"running": {}}}
+        ]}}),
+    );
+
+    // Equality is case-insensitive so nobody has to remember CamelCase.
+    type_filter(&mut app, "status=crashloopbackoff");
+    assert_eq!(row_names(&app), ["crashy"]);
+
+    app.filter = "status!=CrashLoopBackOff".into();
+    app.invalidate_rows();
+    assert_eq!(row_names(&app), ["healthy"]);
+}
+
+#[tokio::test]
+async fn restarts_filter_compares_numerically() {
+    let (mut app, _rx) = test_app();
+    app.switch_kind("pods");
+    for (name, restarts) in [("calm", 0), ("flappy", 7)] {
+        apply(
+            &mut app,
+            json!({"apiVersion": "v1", "kind": "Pod",
+            "metadata": {"name": name, "namespace": "default"},
+            "status": {"phase": "Running", "containerStatuses": [
+                {"ready": true, "restartCount": restarts, "state": {"running": {}}}
+            ]}}),
+        );
+    }
+    type_filter(&mut app, "restarts>=5");
+    assert_eq!(row_names(&app), ["flappy"]);
+
+    app.filter = "restarts<5".into();
+    app.invalidate_rows();
+    assert_eq!(row_names(&app), ["calm"]);
+}
+
+#[tokio::test]
+async fn age_filter_compares_creation_timestamp() {
+    use k8s_openapi::jiff::Timestamp;
+    let (mut app, _rx) = test_app();
+    app.switch_kind("pods");
+    let now = Timestamp::now().as_second();
+    for (name, age_secs) in [("old", 3 * 3600), ("fresh", 600)] {
+        let created = Timestamp::from_second(now - age_secs).unwrap().to_string();
+        apply(
+            &mut app,
+            json!({"apiVersion": "v1", "kind": "Pod",
+                   "metadata": {"name": name, "namespace": "default",
+                                "creationTimestamp": created}}),
+        );
+    }
+    type_filter(&mut app, "age<2h");
+    assert_eq!(row_names(&app), ["fresh"]);
+
+    app.filter = "age>2h".into();
+    app.invalidate_rows();
+    assert_eq!(row_names(&app), ["old"]);
+}
+
+#[tokio::test]
+async fn cpu_and_memory_filters_use_metrics_snapshot() {
+    let (mut app, _rx) = test_app();
+    app.switch_kind("pods");
+    for n in ["hungry", "light"] {
+        apply(
+            &mut app,
+            json!({"apiVersion": "v1", "kind": "Pod",
+                   "metadata": {"name": n, "namespace": "default"}}),
+        );
+    }
+    let mut data = HashMap::new();
+    data.insert("default/hungry".to_string(), (600, 2 * 1024 * 1024 * 1024));
+    data.insert("default/light".to_string(), (100, 64 * 1024 * 1024));
+    app.handle_msg(Msg::Metrics {
+        generation: app.generation,
+        data,
+    });
+
+    type_filter(&mut app, "cpu>500m");
+    assert_eq!(row_names(&app), ["hungry"]);
+
+    app.filter = "memory>1Gi".into();
+    app.invalidate_rows();
+    assert_eq!(row_names(&app), ["hungry"]);
+
+    app.filter = "mem<=512Mi".into();
+    app.invalidate_rows();
+    assert_eq!(row_names(&app), ["light"]);
+}
+
+#[tokio::test]
+async fn label_selector_goes_server_side_on_enter_and_survives_navigation() {
+    let (mut app, _rx) = test_app();
+    app.switch_kind("pods");
+    let before = app.generation;
+
+    type_filter(&mut app, "-l app=api,env=prod");
+    assert_eq!(
+        app.applied_filter_labels.as_deref(),
+        Some("app=api,env=prod")
+    );
+    assert!(app.filter_server_side());
+    assert_eq!(
+        app.generation,
+        before + 1,
+        "⏎ must restart the watch with the selector"
+    );
+    assert!(app.flash.contains("server-side"), "{}", app.flash);
+
+    // A refresh (ctrl-r) keeps the selector: it derives from the filter.
+    app.handle_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL))
+        .unwrap();
+    assert_eq!(
+        app.applied_filter_labels.as_deref(),
+        Some("app=api,env=prod")
+    );
+
+    // Switching namespace with `0` keeps the filter — and the selector.
+    app.handle_key(press(KeyCode::Char('0'))).unwrap();
+    assert!(app.all_namespaces());
+    assert_eq!(
+        app.applied_filter_labels.as_deref(),
+        Some("app=api,env=prod")
+    );
+
+    // Esc clears the filter and widens the watch back out.
+    let gen_before_clear = app.generation;
+    app.handle_key(press(KeyCode::Esc)).unwrap();
+    assert!(app.filter.is_empty());
+    assert_eq!(app.applied_filter_labels, None);
+    assert!(!app.filter_server_side());
+    assert_eq!(app.generation, gen_before_clear + 1);
+}
+
+#[tokio::test]
+async fn field_selector_goes_server_side_on_enter() {
+    let (mut app, _rx) = test_app();
+    app.switch_kind("pods");
+    type_filter(&mut app, "-f spec.nodeName=node-3");
+    assert_eq!(
+        app.applied_filter_fields.as_deref(),
+        Some("spec.nodeName=node-3")
+    );
+    assert_eq!(app.applied_filter_labels, None);
+    assert!(app.filter_server_side());
+}
+
+#[tokio::test]
+async fn local_filter_edits_never_restart_the_watch() {
+    let (mut app, _rx) = test_app();
+    app.switch_kind("pods");
+    let before = app.generation;
+    type_filter(&mut app, "api");
+    app.handle_key(press(KeyCode::Char('/'))).unwrap();
+    app.handle_key(press(KeyCode::Backspace)).unwrap();
+    app.handle_key(press(KeyCode::Enter)).unwrap();
+    assert_eq!(app.generation, before, "no `-l`/`-f` → no rewatch");
+    assert!(!app.filter_server_side());
+}
+
+#[tokio::test]
+async fn drill_clears_server_selector_and_pop_restores_it() {
+    let (mut app, _rx) = test_app();
+    app.switch_kind("deployments");
+    type_filter(&mut app, "-l env=prod");
+    assert_eq!(app.applied_filter_labels.as_deref(), Some("env=prod"));
+
+    apply(
+        &mut app,
+        json!({
+            "apiVersion": "apps/v1", "kind": "Deployment",
+            "metadata": {"name": "web", "namespace": "default"},
+            "spec": {"selector": {"matchLabels": {"app": "web"}}}
+        }),
+    );
+    app.table_state.select(Some(0));
+
+    // Drill: like the fuzzy filter, the filter (and with it the server-side
+    // selector) is cleared for the child view; the drill's own selector takes
+    // over.
+    app.handle_key(press(KeyCode::Enter)).unwrap();
+    assert_eq!(app.kind_plural, "pods");
+    assert!(app.filter.is_empty());
+    assert_eq!(app.applied_filter_labels, None);
+    assert_eq!(app.labels.as_deref(), Some("app=web"));
+
+    // Pop: the saved frame restores the filter, and the rewatch re-applies
+    // its selector server-side.
+    app.handle_key(press(KeyCode::Esc)).unwrap();
+    assert_eq!(app.kind_plural, "deployments");
+    assert_eq!(app.filter, "-l env=prod");
+    assert_eq!(app.applied_filter_labels.as_deref(), Some("env=prod"));
+    assert_eq!(app.labels, None);
+}
+
+#[tokio::test]
+async fn root_switch_and_history_clear_server_selector_like_fuzzy() {
+    let (mut app, _rx) = test_app();
+    app.switch_kind("pods");
+    type_filter(&mut app, "-l app=api");
+    assert!(app.filter_server_side());
+
+    // A fresh root view clears the filter (fuzzy always worked this way) —
+    // and therefore the selector.
+    app.switch_kind("deployments");
+    assert!(app.filter.is_empty());
+    assert_eq!(app.applied_filter_labels, None);
+
+    // History replay lands on the root view without the old filter.
+    app.handle_key(press(KeyCode::Char('['))).unwrap();
+    assert_eq!(app.kind_plural, "pods");
+    assert!(app.filter.is_empty());
+    assert_eq!(app.applied_filter_labels, None);
+}
+
+#[tokio::test]
+async fn malformed_filter_enter_warns_and_stays_local() {
+    let (mut app, _rx) = test_app();
+    app.switch_kind("pods");
+    let before = app.generation;
+    type_filter(&mut app, "-l");
+    assert!(app.flash_err);
+    assert!(app.flash.contains("-l"), "{}", app.flash);
+    assert_eq!(app.generation, before, "broken selector must not rewatch");
+    assert!(!app.filter_server_side());
+    assert!(app.filter_error().is_some());
+}
+
+#[tokio::test]
+async fn structured_filter_highlights_first_fuzzy_term() {
+    let (mut app, _rx) = test_app();
+    app.filter = "!zzz khc status=Running".into();
+    let idx = app.filter_match_indices("kube-httpcache-0").unwrap();
+    assert_eq!(idx.len(), 3);
+
+    // No positive fuzzy term → nothing to highlight.
+    app.filter = "-l app=api".into();
+    assert_eq!(app.filter_match_indices("kube-httpcache-0"), None);
+}
+
+#[test]
+fn join_selectors_merges_drill_and_filter() {
+    let some = |s: &str| Some(s.to_string());
+    assert_eq!(join_selectors(&None, &None), None);
+    assert_eq!(join_selectors(&some("a=b"), &None), some("a=b"));
+    assert_eq!(join_selectors(&None, &some("c=d")), some("c=d"));
+    assert_eq!(join_selectors(&some("a=b"), &some("c=d")), some("a=b,c=d"));
+}
+
+// ----- config reload (`:reload`) and validation (`:config`) ---------------
+
+fn write_config(dir: &std::path::Path, text: &str) {
+    std::fs::create_dir_all(dir).unwrap();
+    std::fs::write(dir.join("config.toml"), text).unwrap();
+}
+
+#[tokio::test]
+async fn reload_applies_config_changes_live() {
+    let dir = std::env::temp_dir().join(format!("sofka-app-reload-ok-{}", std::process::id()));
+    write_config(&dir, "[aliases]\ndep = \"deployments\"\n");
+    let (mut app, _rx) = test_app();
+    app.config = crate::config::ConfigLoader::from_dir(Some(dir.clone()));
+
+    app.reload_config();
+    assert_eq!(
+        app.user_aliases.get("dep").map(String::as_str),
+        Some("deployments")
+    );
+    assert!(app.cluster.resolve("dep").is_some(), "alias registered");
+    assert!(!app.flash_err);
+    assert!(app.config_warnings.is_empty());
+
+    // Edit the file on disk: `:reload` picks up new aliases, mode, and skin
+    // without a restart. (The skin is the built-in default so the write to
+    // the global palette is value-identical — parallel tests read it.)
+    write_config(
+        &dir,
+        "readonly = true\n[aliases]\nks = \"services\"\n[skin]\nname = \"catppuccin-mocha\"\n",
+    );
+    app.reload_config();
+    assert!(app.readonly);
+    assert_eq!(
+        app.user_aliases.get("ks").map(String::as_str),
+        Some("services")
+    );
+    assert!(!app.user_aliases.contains_key("dep"), "aliases replaced");
+    assert_eq!(app.session_skin.as_deref(), Some("catppuccin-mocha"));
+    assert_eq!(app.active_skin.as_deref(), Some("catppuccin-mocha"));
+    assert!(app.flash.contains("config reloaded"), "{}", app.flash);
+    assert!(!app.flash_err);
+
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[tokio::test]
+async fn failed_reload_keeps_last_known_good_config() {
+    let dir = std::env::temp_dir().join(format!("sofka-app-reload-bad-{}", std::process::id()));
+    write_config(&dir, "readonly = true\n[aliases]\ndep = \"deployments\"\n");
+    let (mut app, _rx) = test_app();
+    app.config = crate::config::ConfigLoader::from_dir(Some(dir.clone()));
+    app.reload_config();
+    assert!(app.readonly);
+
+    // A type error on disk: the running config must stay exactly as it was.
+    write_config(&dir, "readonly = \"yes\"\n");
+    app.reload_config();
+    assert!(app.readonly, "previous readonly kept");
+    assert_eq!(
+        app.user_aliases.get("dep").map(String::as_str),
+        Some("deployments")
+    );
+    assert!(app.flash_err);
+    assert!(app.flash.contains("previous config kept"), "{}", app.flash);
+    // The recorded error names the file, the offending key, and the problem.
+    let err = &app.config_warnings[0];
+    assert!(err.contains("config.toml"), "{err}");
+    assert!(err.contains("readonly"), "{err}");
+    assert!(err.contains("expected a boolean"), "{err}");
+
+    // A later good edit recovers without a restart.
+    write_config(&dir, "readonly = false\n");
+    app.reload_config();
+    assert!(!app.readonly);
+    assert!(app.config_warnings.is_empty());
+
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[tokio::test]
+async fn reload_reports_skin_validation_warnings() {
+    let dir = std::env::temp_dir().join(format!("sofka-app-reload-skin-{}", std::process::id()));
+    write_config(
+        &dir,
+        "[skin]\nname = \"no-such-skin\"\n[skin.colors]\ngreen = \"zzz\"\n",
+    );
+    let (mut app, _rx) = test_app();
+    app.config = crate::config::ConfigLoader::from_dir(Some(dir.clone()));
+    app.reload_config();
+    assert!(app.flash_err);
+    assert!(app.flash.contains("warning"), "{}", app.flash);
+    assert!(
+        app.config_warnings
+            .iter()
+            .any(|w| w.contains("skin.name") && w.contains("no-such-skin")),
+        "{:?}",
+        app.config_warnings
+    );
+    assert!(
+        app.config_warnings
+            .iter()
+            .any(|w| w.contains("skin.colors.green") && w.contains("invalid hex")),
+        "{:?}",
+        app.config_warnings
+    );
+
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[tokio::test]
+async fn reload_palette_command_dispatches() {
+    let (mut app, _rx) = test_app();
+    assert!(app.run_palette_command("reload"));
+    assert!(app.flash.contains("config reloaded"), "{}", app.flash);
+}
+
+#[tokio::test]
+async fn config_view_lists_sources_active_skin_and_warnings() {
+    let dir = std::env::temp_dir().join(format!("sofka-app-cfg-view-{}", std::process::id()));
+    write_config(&dir, "[skin]\nname = \"catppuccin-mocha\"\n");
+    let (mut app, _rx) = test_app();
+    app.config = crate::config::ConfigLoader::from_dir(Some(dir.clone()));
+    app.reload_config();
+    app.config_warnings = vec!["skin.colors.red: invalid hex 'x' (expected #rrggbb)".into()];
+
+    assert!(app.run_palette_command("config"));
+    assert_eq!(app.mode, Mode::Detail);
+    let text = app
+        .detail
+        .lines
+        .iter()
+        .cloned()
+        .collect::<Vec<_>>()
+        .join("\n");
+    let base = dir.join("config.toml").display().to_string();
+    assert!(text.contains(&base) && text.contains("(loaded)"), "{text}");
+    assert!(text.contains("skin: catppuccin-mocha"), "{text}");
+    assert!(text.contains("skin.colors.red"), "{text}");
+
+    // Esc returns to the table, like any doc view.
+    app.handle_key(press(KeyCode::Esc)).unwrap();
+    assert_eq!(app.mode, Mode::Table);
+
+    std::fs::remove_dir_all(&dir).unwrap();
+}

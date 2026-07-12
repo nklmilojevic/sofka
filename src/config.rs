@@ -193,28 +193,80 @@ pub struct ConfigLoader {
 
 impl ConfigLoader {
     /// Read the base config, warning on stderr (we're pre-TUI) and falling
-    /// back to defaults if it's malformed — syntax or types.
-    pub fn load() -> Self {
-        let mut loader = Self::from_dir(config_dir());
-        if let Some(dir) = &loader.dir
-            && let Ok(text) = std::fs::read_to_string(dir.join("config.toml"))
-            && let Err(e) = toml::from_str::<Config>(&text)
-        {
-            eprintln!(
-                "warning: ignoring invalid {}: {e}",
-                dir.join("config.toml").display()
-            );
-            loader.base = None;
+    /// back to defaults if it's malformed — syntax or types. The validation
+    /// errors are also returned so the TUI can keep showing them (`:config`).
+    pub fn load() -> (Self, Vec<String>) {
+        let dir = config_dir();
+        let empty = Self {
+            base: None,
+            dir: dir.clone(),
+        };
+        match empty.reload() {
+            Ok(loader) => (loader, Vec::new()),
+            Err(e) => {
+                eprintln!("warning: ignoring invalid {e}");
+                (Self { base: None, dir }, vec![e])
+            }
         }
-        loader
     }
 
+    #[cfg(test)]
     pub(crate) fn from_dir(dir: Option<PathBuf>) -> Self {
         let base = dir.as_ref().and_then(|d| {
             let text = std::fs::read_to_string(d.join("config.toml")).ok()?;
             parse_doc(&text).ok()
         });
         Self { base, dir }
+    }
+
+    /// Re-read the base `config.toml` from disk, validated end-to-end (TOML
+    /// syntax *and* the typed [`Config`] shape). `Ok` carries a fresh loader
+    /// ready to [`resolve`](Self::resolve); `Err` carries the precise error —
+    /// file, offending key, and what's wrong — so the caller keeps the last
+    /// known-good loader instead. A missing base file is not an error: it
+    /// loads as defaults, like at startup.
+    pub fn reload(&self) -> Result<Self, String> {
+        let dir = self.dir.clone();
+        let Some(path) = self.base_path() else {
+            return Ok(Self { base: None, dir });
+        };
+        match std::fs::read_to_string(&path) {
+            Err(_) => Ok(Self { base: None, dir }),
+            Ok(text) => match validate(&text) {
+                Ok(value) => Ok(Self {
+                    base: Some(value),
+                    dir,
+                }),
+                Err(e) => Err(format!("{}: {e}", path.display())),
+            },
+        }
+    }
+
+    /// The base `config.toml` path, when a config directory is known.
+    pub fn base_path(&self) -> Option<PathBuf> {
+        self.dir.as_ref().map(|d| d.join("config.toml"))
+    }
+
+    /// Whether a parsed base config is active (as opposed to a missing or
+    /// invalid file, both of which fall back to defaults).
+    pub fn has_base(&self) -> bool {
+        self.base.is_some()
+    }
+
+    /// Override files consulted for the given kubeconfig cluster/context, in
+    /// merge order (cluster level first, then context level). The files need
+    /// not exist — this is the search path, for [`resolve`](Self::resolve)
+    /// and the `:config` view.
+    pub fn override_paths(&self, context: &str, cluster: &str) -> Vec<PathBuf> {
+        let mut paths = Vec::new();
+        if let (Some(dir), false) = (&self.dir, cluster.is_empty()) {
+            let cluster_dir = dir.join("clusters").join(sanitize(cluster));
+            paths.push(cluster_dir.join("config.toml"));
+            if !context.is_empty() {
+                paths.push(cluster_dir.join(sanitize(context)).join("config.toml"));
+            }
+        }
+        paths
     }
 
     /// Merge override files for the given kubeconfig cluster/context over the
@@ -228,21 +280,14 @@ impl ConfigLoader {
             .unwrap_or_else(|| toml::Value::Table(toml::map::Map::new()));
         let mut overlay = toml::Value::Table(toml::map::Map::new());
 
-        if let (Some(dir), false) = (&self.dir, cluster.is_empty()) {
-            let cluster_dir = dir.join("clusters").join(sanitize(cluster));
-            let mut paths = vec![cluster_dir.join("config.toml")];
-            if !context.is_empty() {
-                paths.push(cluster_dir.join(sanitize(context)).join("config.toml"));
-            }
-            for path in paths {
-                match read_value(&path) {
-                    Ok(Some(v)) => {
-                        merge(&mut merged, v.clone());
-                        merge(&mut overlay, v);
-                    }
-                    Ok(None) => {}
-                    Err(e) => warnings.push(format!("ignoring invalid {}: {e}", path.display())),
+        for path in self.override_paths(context, cluster) {
+            match read_value(&path) {
+                Ok(Some(v)) => {
+                    merge(&mut merged, v.clone());
+                    merge(&mut overlay, v);
                 }
+                Ok(None) => {}
+                Err(e) => warnings.push(format!("ignoring invalid {}: {e}", path.display())),
             }
         }
 
@@ -283,6 +328,27 @@ fn merge(base: &mut toml::Value, overlay: toml::Value) {
             }
         }
         (slot, v) => *slot = v,
+    }
+}
+
+/// Validate a config document end-to-end — TOML syntax and the typed
+/// [`Config`] shape — returning the raw table (kept raw for later override
+/// merging) only when both pass. The typed pass is what turns e.g.
+/// `readonly = "yes"` into a precise "expected a boolean" error pointing at
+/// the offending line instead of silently loading defaults.
+fn validate(text: &str) -> Result<toml::Value, toml::de::Error> {
+    toml::from_str::<Config>(text)?;
+    parse_doc(text)
+}
+
+/// Human-readable state of one config file, for the `:config` view:
+/// `loaded` (present and parseable), `absent`, or `invalid` (present but
+/// malformed TOML — it is being skipped).
+pub fn file_state(path: &Path) -> &'static str {
+    match read_value(path) {
+        Ok(Some(_)) => "loaded",
+        Ok(None) => "absent",
+        Err(_) => "invalid — skipped",
     }
 }
 
@@ -486,6 +552,67 @@ mod tests {
         assert_eq!(bare.skin_override, None);
 
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn reload_swaps_base_and_rejects_invalid_with_precise_errors() {
+        let dir =
+            std::env::temp_dir().join(format!("sofka-cfg-reload-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+
+        std::fs::write(&path, "default_namespace = \"one\"\n").unwrap();
+        let loader = ConfigLoader::from_dir(Some(dir.clone()));
+        assert!(loader.has_base());
+        assert_eq!(loader.base_path(), Some(path.clone()));
+
+        // A valid edit on disk is picked up.
+        std::fs::write(&path, "default_namespace = \"two\"\n").unwrap();
+        let loader = loader.reload().unwrap();
+        let r = loader.resolve("", "");
+        assert_eq!(r.config.default_namespace.as_deref(), Some("two"));
+
+        // A type error is rejected, naming the file and the offending key.
+        std::fs::write(&path, "readonly = \"yes\"\n").unwrap();
+        let err = loader.reload().err().unwrap();
+        assert!(err.contains("config.toml"), "{err}");
+        assert!(err.contains("readonly"), "{err}");
+        assert!(err.contains("expected a boolean"), "{err}");
+
+        // Malformed TOML syntax is rejected too.
+        std::fs::write(&path, "not toml [[[").unwrap();
+        assert!(loader.reload().err().unwrap().contains("config.toml"));
+        assert_eq!(file_state(&path), "invalid — skipped");
+
+        // A missing base file reloads as defaults, never an error.
+        std::fs::remove_file(&path).unwrap();
+        let loader = loader.reload().unwrap();
+        assert!(!loader.has_base());
+        assert_eq!(file_state(&path), "absent");
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn override_paths_follow_cluster_then_context() {
+        let dir = PathBuf::from("/tmp/sofka-nowhere");
+        let loader = ConfigLoader::from_dir(Some(dir.clone()));
+        assert_eq!(
+            loader.override_paths("prod-ctx", "prod-cluster"),
+            vec![
+                dir.join("clusters")
+                    .join("prod-cluster")
+                    .join("config.toml"),
+                dir.join("clusters")
+                    .join("prod-cluster")
+                    .join("prod-ctx")
+                    .join("config.toml"),
+            ]
+        );
+        // No cluster name (in-cluster) — no override levels at all.
+        assert!(loader.override_paths("ctx", "").is_empty());
+        // No context name — cluster level only.
+        assert_eq!(loader.override_paths("", "c1").len(), 1);
     }
 
     #[test]

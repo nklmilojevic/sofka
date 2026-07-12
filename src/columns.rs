@@ -520,7 +520,7 @@ fn is_numeric_header(header: &str) -> bool {
 }
 
 /// Parse the leading number of a cell (`"3"`, `"1/2"` → 1, `"<none>"` → 0).
-fn parse_leading_num(s: &str) -> f64 {
+pub(crate) fn parse_leading_num(s: &str) -> f64 {
     let t = s.trim_start_matches(|c: char| !c.is_ascii_digit() && c != '-');
     let end = t
         .find(|c: char| !c.is_ascii_digit() && c != '-')

@@ -281,6 +281,8 @@ enum PaletteAction {
     PortForwards,
     Skin,
     Helm,
+    Reload,
+    ConfigInfo,
 }
 
 const PALETTE_COMMANDS: &[PaletteCommand] = &[
@@ -315,6 +317,14 @@ const PALETTE_COMMANDS: &[PaletteCommand] = &[
     PaletteCommand {
         action: PaletteAction::Skin,
         names: &["skin", "skins"],
+    },
+    PaletteCommand {
+        action: PaletteAction::Reload,
+        names: &["reload"],
+    },
+    PaletteCommand {
+        action: PaletteAction::ConfigInfo,
+        names: &["config", "cfg"],
     },
     PaletteCommand {
         action: PaletteAction::Quit,
@@ -426,6 +436,13 @@ impl SortKey {
     }
 }
 
+/// The active filter string alongside its parsed form, so the grammar is
+/// reparsed only when the string actually changes — never per frame or row.
+struct FilterCache {
+    raw: String,
+    parsed: crate::filter::ParsedFilter,
+}
+
 /// Lazily-rebuilt cache of the display-ordered, filtered row keys. Recomputing
 /// the sort + fuzzy filter on every `rows()` call (per frame, per keystroke) is
 /// wasteful on large clusters; we rebuild only when the store or filter changes.
@@ -515,6 +532,14 @@ pub struct App {
     pub sort_column: Option<usize>,
     pub sort_desc: bool,
     pub filter: String,
+    /// Parsed form of `filter`, refreshed lazily when the string changes so
+    /// neither row matching nor rendering reparses it per frame.
+    filter_cache: RefCell<FilterCache>,
+    /// Server-side selectors (`-l`/`-f` filter terms) the running watch was
+    /// started with. Compared against the parsed filter to know when a
+    /// restart is needed and to mark the filter as server-side in the UI.
+    applied_filter_labels: Option<String>,
+    applied_filter_fields: Option<String>,
     pub command: String,
     pub cmd_suggestions: Vec<Suggestion>,
     pub cmd_sel: usize,
@@ -575,6 +600,13 @@ pub struct App {
     /// Skin for contexts without an override: config `skin.name` (or the
     /// auto-detected default), replaced by a manual `:skin` choice.
     pub session_skin: Option<String>,
+    /// Name of the palette currently installed (session skin or a per-context
+    /// override), shown by `:config`. `None` until any skin is applied.
+    pub active_skin: Option<String>,
+    /// Validation problems from the most recent config (re)load — invalid
+    /// base config, skipped override layers, bad skin values. Shown by
+    /// `:config`; replaced wholesale on every `:reload`.
+    pub config_warnings: Vec<String>,
     /// Effective read-only mode: mutating actions are refused with a flash.
     pub readonly: bool,
     /// Session-wide pin from `--readonly`/`--write`; wins over any config
@@ -655,6 +687,12 @@ impl App {
             sort_column: None,
             sort_desc: false,
             filter: String::new(),
+            filter_cache: RefCell::new(FilterCache {
+                raw: String::new(),
+                parsed: crate::filter::parse(""),
+            }),
+            applied_filter_labels: None,
+            applied_filter_fields: None,
             command: String::new(),
             cmd_suggestions: Vec::new(),
             cmd_sel: 0,
@@ -690,6 +728,8 @@ impl App {
             skin_colors: HashMap::new(),
             config: crate::config::ConfigLoader::default(),
             session_skin: None,
+            active_skin: None,
+            config_warnings: Vec::new(),
             readonly: false,
             readonly_override: None,
             image_values: Vec::new(),
