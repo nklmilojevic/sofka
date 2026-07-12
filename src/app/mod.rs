@@ -281,6 +281,8 @@ enum PaletteAction {
     PortForwards,
     Skin,
     Helm,
+    Reload,
+    ConfigInfo,
 }
 
 const PALETTE_COMMANDS: &[PaletteCommand] = &[
@@ -315,6 +317,14 @@ const PALETTE_COMMANDS: &[PaletteCommand] = &[
     PaletteCommand {
         action: PaletteAction::Skin,
         names: &["skin", "skins"],
+    },
+    PaletteCommand {
+        action: PaletteAction::Reload,
+        names: &["reload"],
+    },
+    PaletteCommand {
+        action: PaletteAction::ConfigInfo,
+        names: &["config", "cfg"],
     },
     PaletteCommand {
         action: PaletteAction::Quit,
@@ -581,6 +591,13 @@ pub struct App {
     /// Skin for contexts without an override: config `skin.name` (or the
     /// auto-detected default), replaced by a manual `:skin` choice.
     pub session_skin: Option<String>,
+    /// Name of the palette currently installed (session skin or a per-context
+    /// override), shown by `:config`. `None` until any skin is applied.
+    pub active_skin: Option<String>,
+    /// Validation problems from the most recent config (re)load — invalid
+    /// base config, skipped override layers, bad skin values. Shown by
+    /// `:config`; replaced wholesale on every `:reload`.
+    pub config_warnings: Vec<String>,
     /// Effective read-only mode: mutating actions are refused with a flash.
     pub readonly: bool,
     /// Session-wide pin from `--readonly`/`--write`; wins over any config
@@ -691,6 +708,8 @@ impl App {
             skin_colors: HashMap::new(),
             config: crate::config::ConfigLoader::default(),
             session_skin: None,
+            active_skin: None,
+            config_warnings: Vec::new(),
             readonly: false,
             readonly_override: None,
             image_values: Vec::new(),

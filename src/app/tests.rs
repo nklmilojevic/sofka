@@ -2672,3 +2672,149 @@ fn join_selectors_merges_drill_and_filter() {
     assert_eq!(join_selectors(&None, &some("c=d")), some("c=d"));
     assert_eq!(join_selectors(&some("a=b"), &some("c=d")), some("a=b,c=d"));
 }
+
+// ----- config reload (`:reload`) and validation (`:config`) ---------------
+
+fn write_config(dir: &std::path::Path, text: &str) {
+    std::fs::create_dir_all(dir).unwrap();
+    std::fs::write(dir.join("config.toml"), text).unwrap();
+}
+
+#[tokio::test]
+async fn reload_applies_config_changes_live() {
+    let dir = std::env::temp_dir().join(format!("sofka-app-reload-ok-{}", std::process::id()));
+    write_config(&dir, "[aliases]\ndep = \"deployments\"\n");
+    let (mut app, _rx) = test_app();
+    app.config = crate::config::ConfigLoader::from_dir(Some(dir.clone()));
+
+    app.reload_config();
+    assert_eq!(
+        app.user_aliases.get("dep").map(String::as_str),
+        Some("deployments")
+    );
+    assert!(app.cluster.resolve("dep").is_some(), "alias registered");
+    assert!(!app.flash_err);
+    assert!(app.config_warnings.is_empty());
+
+    // Edit the file on disk: `:reload` picks up new aliases, mode, and skin
+    // without a restart. (The skin is the built-in default so the write to
+    // the global palette is value-identical — parallel tests read it.)
+    write_config(
+        &dir,
+        "readonly = true\n[aliases]\nks = \"services\"\n[skin]\nname = \"catppuccin-mocha\"\n",
+    );
+    app.reload_config();
+    assert!(app.readonly);
+    assert_eq!(
+        app.user_aliases.get("ks").map(String::as_str),
+        Some("services")
+    );
+    assert!(!app.user_aliases.contains_key("dep"), "aliases replaced");
+    assert_eq!(app.session_skin.as_deref(), Some("catppuccin-mocha"));
+    assert_eq!(app.active_skin.as_deref(), Some("catppuccin-mocha"));
+    assert!(app.flash.contains("config reloaded"), "{}", app.flash);
+    assert!(!app.flash_err);
+
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[tokio::test]
+async fn failed_reload_keeps_last_known_good_config() {
+    let dir = std::env::temp_dir().join(format!("sofka-app-reload-bad-{}", std::process::id()));
+    write_config(&dir, "readonly = true\n[aliases]\ndep = \"deployments\"\n");
+    let (mut app, _rx) = test_app();
+    app.config = crate::config::ConfigLoader::from_dir(Some(dir.clone()));
+    app.reload_config();
+    assert!(app.readonly);
+
+    // A type error on disk: the running config must stay exactly as it was.
+    write_config(&dir, "readonly = \"yes\"\n");
+    app.reload_config();
+    assert!(app.readonly, "previous readonly kept");
+    assert_eq!(
+        app.user_aliases.get("dep").map(String::as_str),
+        Some("deployments")
+    );
+    assert!(app.flash_err);
+    assert!(app.flash.contains("previous config kept"), "{}", app.flash);
+    // The recorded error names the file, the offending key, and the problem.
+    let err = &app.config_warnings[0];
+    assert!(err.contains("config.toml"), "{err}");
+    assert!(err.contains("readonly"), "{err}");
+    assert!(err.contains("expected a boolean"), "{err}");
+
+    // A later good edit recovers without a restart.
+    write_config(&dir, "readonly = false\n");
+    app.reload_config();
+    assert!(!app.readonly);
+    assert!(app.config_warnings.is_empty());
+
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[tokio::test]
+async fn reload_reports_skin_validation_warnings() {
+    let dir = std::env::temp_dir().join(format!("sofka-app-reload-skin-{}", std::process::id()));
+    write_config(
+        &dir,
+        "[skin]\nname = \"no-such-skin\"\n[skin.colors]\ngreen = \"zzz\"\n",
+    );
+    let (mut app, _rx) = test_app();
+    app.config = crate::config::ConfigLoader::from_dir(Some(dir.clone()));
+    app.reload_config();
+    assert!(app.flash_err);
+    assert!(app.flash.contains("warning"), "{}", app.flash);
+    assert!(
+        app.config_warnings
+            .iter()
+            .any(|w| w.contains("skin.name") && w.contains("no-such-skin")),
+        "{:?}",
+        app.config_warnings
+    );
+    assert!(
+        app.config_warnings
+            .iter()
+            .any(|w| w.contains("skin.colors.green") && w.contains("invalid hex")),
+        "{:?}",
+        app.config_warnings
+    );
+
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[tokio::test]
+async fn reload_palette_command_dispatches() {
+    let (mut app, _rx) = test_app();
+    assert!(app.run_palette_command("reload"));
+    assert!(app.flash.contains("config reloaded"), "{}", app.flash);
+}
+
+#[tokio::test]
+async fn config_view_lists_sources_active_skin_and_warnings() {
+    let dir = std::env::temp_dir().join(format!("sofka-app-cfg-view-{}", std::process::id()));
+    write_config(&dir, "[skin]\nname = \"catppuccin-mocha\"\n");
+    let (mut app, _rx) = test_app();
+    app.config = crate::config::ConfigLoader::from_dir(Some(dir.clone()));
+    app.reload_config();
+    app.config_warnings = vec!["skin.colors.red: invalid hex 'x' (expected #rrggbb)".into()];
+
+    assert!(app.run_palette_command("config"));
+    assert_eq!(app.mode, Mode::Detail);
+    let text = app
+        .detail
+        .lines
+        .iter()
+        .cloned()
+        .collect::<Vec<_>>()
+        .join("\n");
+    let base = dir.join("config.toml").display().to_string();
+    assert!(text.contains(&base) && text.contains("(loaded)"), "{text}");
+    assert!(text.contains("skin: catppuccin-mocha"), "{text}");
+    assert!(text.contains("skin.colors.red"), "{text}");
+
+    // Esc returns to the table, like any doc view.
+    app.handle_key(press(KeyCode::Esc)).unwrap();
+    assert_eq!(app.mode, Mode::Table);
+
+    std::fs::remove_dir_all(&dir).unwrap();
+}

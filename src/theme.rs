@@ -283,6 +283,36 @@ pub fn resolve_skin(name: Option<&str>, colors: &HashMap<String, String>) -> Pal
     p
 }
 
+/// Check a skin selection without applying it: an unknown built-in name, an
+/// unknown swatch key under `[skin.colors]`, or a malformed hex value. One
+/// human-readable warning per problem (sorted for stable output), empty when
+/// the selection is clean — the validation half of [`resolve_skin`], for the
+/// `:reload`/`:config` report.
+pub fn validate_skin(name: Option<&str>, colors: &HashMap<String, String>) -> Vec<String> {
+    let mut warns = Vec::new();
+    if let Some(n) = name
+        && builtin(&n.trim().to_ascii_lowercase()).is_none()
+    {
+        warns.push(format!(
+            "skin.name: unknown skin '{n}' (known: {})",
+            BUILTIN_NAMES.join(", ")
+        ));
+    }
+    let mut probe = catppuccin_mocha();
+    for (k, v) in colors {
+        let key = k.trim().to_ascii_lowercase();
+        match parse_hex(v) {
+            Some(c) if probe.set(&key, c) => {}
+            Some(_) => warns.push(format!("skin.colors.{k}: unknown swatch name")),
+            None => warns.push(format!(
+                "skin.colors.{k}: invalid hex '{v}' (expected #rrggbb)"
+            )),
+        }
+    }
+    warns.sort();
+    warns
+}
+
 /// Parse `#rrggbb` (or `rrggbb`) into a `Color::Rgb`. Returns `None` for any
 /// other length or non-hex content.
 fn parse_hex(s: &str) -> Option<Color> {
@@ -581,6 +611,34 @@ mod tests {
         assert_eq!(mem_severity(100 * 1024 * 1024), None); // 100Mi
         assert_eq!(mem_severity(300 * 1024 * 1024), Some(peach())); // 300Mi
         assert_eq!(mem_severity(2048 * 1024 * 1024), Some(red())); // 2Gi
+    }
+
+    #[test]
+    fn validate_skin_reports_each_problem_and_passes_clean_config() {
+        let mut colors = HashMap::new();
+        colors.insert("red".to_string(), "#010203".to_string());
+        assert!(validate_skin(Some("gruvbox-dark"), &colors).is_empty());
+        assert!(validate_skin(None, &HashMap::new()).is_empty());
+
+        colors.insert("nope".to_string(), "#040506".to_string());
+        colors.insert("green".to_string(), "zzzzzz".to_string());
+        let warns = validate_skin(Some("no-such-skin"), &colors);
+        assert_eq!(warns.len(), 3);
+        assert!(
+            warns
+                .iter()
+                .any(|w| w.contains("skin.name") && w.contains("no-such-skin"))
+        );
+        assert!(
+            warns
+                .iter()
+                .any(|w| w.contains("skin.colors.nope") && w.contains("unknown swatch"))
+        );
+        assert!(
+            warns
+                .iter()
+                .any(|w| w.contains("skin.colors.green") && w.contains("invalid hex"))
+        );
     }
 
     #[test]

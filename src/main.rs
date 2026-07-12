@@ -66,7 +66,7 @@ struct Args {
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
-    let loader = config::ConfigLoader::load();
+    let (loader, mut config_warnings) = config::ConfigLoader::load();
 
     // Connect before taking over the terminal so errors are readable. An
     // unreachable current context isn't fatal for the interactive TUI: start
@@ -89,6 +89,7 @@ async fn main() -> Result<()> {
     for w in &resolved.warnings {
         eprintln!("warning: {w}");
     }
+    config_warnings.extend(resolved.warnings.clone());
     let cfg = resolved.config;
     cluster.add_aliases(&cfg.aliases);
 
@@ -148,6 +149,10 @@ async fn main() -> Result<()> {
     app.skin_colors = cfg.skin.colors.clone();
     app.config = loader;
     app.session_skin = Some(session_skin);
+    app.active_skin = Some(initial_skin);
+    // Keep initial-load validation problems visible in-app (`:config`), not
+    // just on the stderr that the alternate screen is about to cover.
+    app.config_warnings = config_warnings;
     // CLI flags pin the mode for the whole session; otherwise config decides,
     // re-resolved per context on every `:ctx` switch.
     app.readonly_override = match (args.readonly, args.write) {
