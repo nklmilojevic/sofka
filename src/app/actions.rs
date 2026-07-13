@@ -19,13 +19,50 @@ impl App {
             return;
         }
         let cascade = Cascade::Background;
-        self.confirm_label = delete_confirm_label(&self.kind_plural, &targets, force, cascade);
+        let managed = self.recreated_note();
+        self.confirm_label = delete_confirm_label(
+            &self.kind_plural,
+            &targets,
+            force,
+            cascade,
+            managed.as_deref(),
+        );
         self.confirm_action = Some(ConfirmAction::Delete {
             targets,
             force,
             cascade,
+            managed,
         });
         self.mode = Mode::Confirm;
+    }
+
+    /// A short "managed by X — recreated on delete" warning when any object in
+    /// the current delete selection is owned by Flux or a controller (so the
+    /// user knows deletion won't stick). `None` when nothing is managed.
+    fn recreated_note(&self) -> Option<String> {
+        let objs = self.action_target_objects();
+        let managed: Vec<String> = objs.iter().filter_map(managed_by).collect();
+        let (mine, total) = (managed.len(), objs.len());
+        let first = managed.into_iter().next()?;
+        Some(if total == 1 {
+            format!("⚠ managed by {first} — recreated on delete")
+        } else {
+            format!("⚠ {mine}/{total} managed (e.g. {first}) — recreated on delete")
+        })
+    }
+
+    /// The objects targeted by a bulk-or-single action (marked rows, else the
+    /// selection), as owned clones.
+    fn action_target_objects(&self) -> Vec<DynamicObject> {
+        if self.marked.is_empty() {
+            self.selected_ref().cloned().into_iter().collect()
+        } else {
+            self.rows()
+                .into_iter()
+                .filter(|o| self.marked.contains(&row_key(o)))
+                .cloned()
+                .collect()
+        }
     }
 
     pub(super) fn spawn_patch_action<F>(
@@ -624,13 +661,25 @@ impl App {
             return;
         };
         let name = obj.metadata.name.clone().unwrap_or_default();
+        // A Flux-managed object gets its spec reverted on the next reconcile —
+        // warn (and confirm) before opening the editor.
+        let flux = flux_managed_by(obj);
         let mut argv = self.kubectl_base();
         argv.extend(["edit".into(), self.kind_plural.clone(), name]);
         if let Some(ns) = &obj.metadata.namespace {
             argv.push("-n".into());
             argv.push(ns.clone());
         }
-        self.pending = Some(Suspend::Shell(argv));
+        match flux {
+            Some(owner) => {
+                self.confirm_label = format!(
+                    "⚠ Managed by {owner} — your edit will be reverted on the next reconcile. Edit anyway?"
+                );
+                self.confirm_action = Some(ConfirmAction::Edit { argv });
+                self.mode = Mode::Confirm;
+            }
+            None => self.pending = Some(Suspend::Shell(argv)),
+        }
     }
 
     pub(super) fn request_exec(&mut self) {
