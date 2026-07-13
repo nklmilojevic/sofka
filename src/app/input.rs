@@ -922,6 +922,22 @@ impl App {
                 self.flash_err = false;
                 return;
             }
+            // Fullscreen: whole frame, no borders, so terminal text selection
+            // copies clean lines (k9s binds `f`, taken here by follow).
+            KeyCode::Char('F') => {
+                self.logs.fullscreen = !self.logs.fullscreen;
+                self.flash = format!(
+                    "fullscreen: {}",
+                    if self.logs.fullscreen { "on" } else { "off" }
+                );
+                self.flash_err = false;
+                return;
+            }
+            // k9s time anchors: `0` re-tails, `1`-`5` re-stream a window.
+            KeyCode::Char(c @ '0'..='5') => {
+                self.apply_log_anchor(c);
+                return;
+            }
             // Provider logs: `T` changes the lookback period (re-queries).
             KeyCode::Char('T') => {
                 if self.provider_logs_active() {

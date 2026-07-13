@@ -75,6 +75,32 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         app.mode,
         Mode::Command | Mode::Filter | Mode::LogFilter | Mode::DocFilter
     );
+
+    // Fullscreen logs (F): the pane takes the whole frame — no header, status
+    // line, or crumbs — so terminal text selection copies clean lines. The
+    // prompt line stays while typing a filter, and the lookback prompt still
+    // pops up over the logs.
+    if app.logs.fullscreen
+        && (matches!(app.mode, Mode::Logs | Mode::LogFilter)
+            || (app.mode == Mode::Prompt && app.prompt_over_logs()))
+    {
+        let mut constraints = vec![Constraint::Min(3)];
+        if needs_prompt {
+            constraints.push(Constraint::Length(1));
+        }
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints(constraints)
+            .split(frame.area());
+        draw_logs(frame, app, chunks[0]);
+        if app.mode == Mode::Prompt {
+            draw_prompt_popup(frame, app, chunks[0]);
+        }
+        if needs_prompt {
+            draw_prompt(frame, app, chunks[1]);
+        }
+        return;
+    }
     let mut constraints = vec![
         Constraint::Length(if compact { 1 } else { 7 }), // header
         Constraint::Min(3),                              // body
@@ -839,8 +865,20 @@ fn draw_scrollable(
 /// not a full restyle; and the display-row offset is a `usize`, immune to the
 /// `u16` ceiling of `Paragraph::scroll`.
 fn draw_logs(frame: &mut Frame, app: &mut App, area: Rect) {
-    let inner_w = area.width.saturating_sub(2).max(1) as usize;
-    let inner_h = area.height.saturating_sub(2) as usize;
+    // Fullscreen drops the borders (side glyphs would end up in every
+    // terminal-selection copy); the title still takes the top row.
+    let fullscreen = app.logs.fullscreen;
+    let (inner_w, inner_h) = if fullscreen {
+        (
+            area.width.max(1) as usize,
+            area.height.saturating_sub(1) as usize,
+        )
+    } else {
+        (
+            area.width.saturating_sub(2).max(1) as usize,
+            area.height.saturating_sub(2) as usize,
+        )
+    };
 
     let shown: Vec<&String> = app
         .logs
@@ -925,7 +963,7 @@ fn draw_logs(frame: &mut Frame, app: &mut App, area: Rect) {
     }
 
     let flags = format!(
-        "{}{}{}",
+        "{}{}{}{}",
         if app.logs.stopped {
             " ⏹stopped"
         } else if app.logs.follow {
@@ -935,6 +973,11 @@ fn draw_logs(frame: &mut Frame, app: &mut App, area: Rect) {
         },
         if app.logs.wrap { " wrap" } else { "" },
         if app.logs.timestamps { " ts" } else { "" },
+        // Provider views manage the window in their own title suffix.
+        match app.logs.anchor_label() {
+            Some(l) if !app.provider_logs_active() => format!(" ⏱{l}"),
+            _ => String::new(),
+        },
     );
     let title = if bad_regex {
         format!(
@@ -955,14 +998,18 @@ fn draw_logs(frame: &mut Frame, app: &mut App, area: Rect) {
 
     // The rows are already the exact viewport slice — no Paragraph scroll or
     // wrap, so ratatui can't re-lay-out (and disagree with) the math above.
-    let p = Paragraph::new(rows).block(
+    let block = if fullscreen {
+        // Borderless: `Block::inner` still reserves one row for the top title,
+        // matching the fullscreen `inner_h` above.
+        Block::default().title(Span::styled(title, theme::title()))
+    } else {
         Block::default()
             .borders(Borders::ALL)
             .border_type(BorderType::Rounded)
             .border_style(Style::default().fg(theme::green()))
-            .title(Span::styled(title, theme::title())),
-    );
-    frame.render_widget(p, area);
+            .title(Span::styled(title, theme::title()))
+    };
+    frame.render_widget(Paragraph::new(rows).block(block), area);
 }
 
 /// Display rows `raw` occupies when char-wrapped to `width` columns: ANSI
@@ -1750,6 +1797,11 @@ fn draw_help(frame: &mut Frame, app: &App, area: Rect) {
         bind(
             "x · z · c · ctrl-s",
             "stop/resume · clear buffer · copy · save to file",
+        ),
+        bind("shift-f", "fullscreen (no borders — easy terminal copying)"),
+        bind(
+            "0 – 5",
+            "time anchor: tail · 1m · 5m · 15m · 30m · 1h (re-streams)",
         ),
         bind(
             "shift-t",
@@ -2822,9 +2874,9 @@ fn draw_prompt(frame: &mut Frame, app: &App, area: Rect) {
         )),
         Mode::Logs => {
             let hint = if app.provider_logs_active() {
-                "  /filter  s:autoscroll  w:wrap  t:timestamps  T:period  x:stop/resume  z:clear  c:copy  ^s:save  esc:back"
+                "  /filter  s:autoscroll  w:wrap  t:timestamps  F:fullscreen  0-5:since  T:period  x:stop/resume  z:clear  c:copy  ^s:save  esc:back"
             } else {
-                "  /filter  s:autoscroll  w:wrap  t:timestamps  x:stop/resume  z:clear  c:copy  ^s:save  esc:back"
+                "  /filter  s:autoscroll  w:wrap  t:timestamps  F:fullscreen  0-5:since  x:stop/resume  z:clear  c:copy  ^s:save  esc:back"
             };
             Line::from(Span::styled(hint, theme::dim()))
         }
@@ -3347,5 +3399,60 @@ mod tests {
         assert_eq!(spans[0].style.fg, Some(theme::sky()));
         assert_eq!(spans.last().unwrap().content, "Running");
         assert_eq!(spans.last().unwrap().style.fg, Some(theme::green()));
+    }
+
+    /// Fullscreen logs (`F`) own the entire frame: no header above, no status
+    /// line below, and no border glyphs anywhere — so a terminal text
+    /// selection copies clean log lines.
+    #[tokio::test]
+    async fn fullscreen_logs_take_the_whole_frame_without_borders() {
+        use crate::k8s::Cluster;
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let (tx, _rx) = tokio::sync::mpsc::channel(16);
+        let mut app = App::new(Cluster::fake(), tx);
+        app.mode = Mode::Logs;
+        app.logs.view.title = "web — logs".into();
+        app.logs.view.lines = (0..3).map(|i| format!("log line {i}")).collect();
+
+        let render = |app: &mut App| {
+            let mut term = Terminal::new(TestBackend::new(60, 12)).unwrap();
+            term.draw(|f| draw(f, app)).unwrap();
+            let buffer = term.backend().buffer().clone();
+            (0..buffer.area.height)
+                .map(|y| {
+                    (0..buffer.area.width)
+                        .map(|x| buffer[(x, y)].symbol())
+                        .collect::<String>()
+                })
+                .collect::<Vec<String>>()
+        };
+
+        // Bordered by default: the pane sits under the 7-line header.
+        let normal = render(&mut app);
+        assert!(
+            normal.iter().any(|r| r.contains('╭')),
+            "normal logs view should draw its border"
+        );
+        assert!(!normal[0].contains("web — logs"), "header owns the top row");
+
+        app.logs.fullscreen = true;
+        let full = render(&mut app);
+        assert!(
+            full[0].contains("web — logs"),
+            "fullscreen title owns the top row: {:?}",
+            full[0]
+        );
+        assert!(
+            full.iter().any(|r| r.starts_with("log line")),
+            "lines start at column 0 (no left border)"
+        );
+        for r in &full {
+            assert!(
+                !r.contains('╭') && !r.contains('│') && !r.contains('╰'),
+                "no border glyphs in fullscreen: {r:?}"
+            );
+        }
     }
 }

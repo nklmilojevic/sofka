@@ -445,15 +445,54 @@ impl App {
     }
 
     /// The configured initial `tail` line count and optional `since` lookback
-    /// (epoch seconds), parsed from `[logs]`. An unparseable `since` is ignored.
-    fn log_tail_and_since(&self) -> (i64, Option<i64>) {
+    /// (epoch seconds), parsed from `[logs]`. An unparseable `since` is
+    /// ignored. A `0`–`5` time anchor overrides the config for the session.
+    pub(super) fn log_tail_and_since(&self) -> (i64, Option<i64>) {
         let tail = self.logs_cfg.tail.max(1);
-        let since = self
-            .logs_cfg
-            .since
-            .as_deref()
-            .and_then(|s| crate::providers::parse_lookback(s).ok());
+        let since = match self.logs.since_anchor {
+            Some(0) => None, // `0`: forced plain tail
+            Some(secs) => Some(secs),
+            None => self
+                .logs_cfg
+                .since
+                .as_deref()
+                .and_then(|s| crate::providers::parse_lookback(s).ok()),
+        };
         (tail, since)
+    }
+
+    /// Apply a `0`–`5` time anchor (k9s): `0` re-tails, `1`–`5` re-stream the
+    /// last 1m/5m/15m/30m/1h. On a provider view the digit sets the provider
+    /// lookback instead (`0` = the default window).
+    pub(super) fn apply_log_anchor(&mut self, key: char) {
+        let (secs, label) = match key {
+            '0' => (0, "tail"),
+            '1' => (60, "1m"),
+            '2' => (300, "5m"),
+            '3' => (900, "15m"),
+            '4' => (1800, "30m"),
+            '5' => (3600, "1h"),
+            _ => return,
+        };
+        if self.provider_logs_active() {
+            let label = if key == '0' {
+                crate::providers::DEFAULT_LOOKBACK
+            } else {
+                label
+            };
+            self.apply_provider_lookback(label);
+            return;
+        }
+        self.logs.since_anchor = Some(secs);
+        self.flash = if secs == 0 {
+            format!("showing tail ({} lines)", self.logs_cfg.tail.max(1))
+        } else {
+            format!("showing last {label}")
+        };
+        self.flash_err = false;
+        if !self.logs.stopped {
+            self.retail_logs();
+        }
     }
 
     pub(super) fn spawn_selector_logs(&mut self, ns: String, labels: String, timestamps: bool) {
