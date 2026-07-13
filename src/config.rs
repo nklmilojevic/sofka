@@ -274,14 +274,18 @@ pub struct Skin {
 }
 
 /// A shell-out plugin (k9s-style). Bound to `key` on resources matching
-/// `scopes` (plural names; empty = all). Placeholders `$NAME`, `$NAMESPACE`,
-/// `$NS`, `$CONTEXT`, `$RESOURCE` are substituted in `command`/`args`.
+/// `scopes` (plural names; empty = all).
 ///
 /// `key` is a [key chord](crate::keys::KeyChord): a single character (`"g"`),
 /// or a modifier combination (`"ctrl-g"`, `"alt-x"`, `"shift-b"`), or a
 /// function/named key (`"f5"`, `"ctrl-f2"`). A single lowercase char keeps the
 /// original single-key behaviour, so existing configs are unchanged. Built-in
 /// keys win over a plugin bound to the same chord.
+///
+/// Placeholders are substituted in `command`/`args`, each as one argument (no
+/// implicit shell): `$NAME`, `$NAMESPACE`/`$NS`, `$CONTEXT`, `$CLUSTER`,
+/// `$RESOURCE` (plural), `$GROUP`, `$VERSION`, `$KIND`, and `$FILTER` (the
+/// active row filter).
 ///
 /// ```toml
 /// [[plugins]]
@@ -290,8 +294,17 @@ pub struct Skin {
 /// command = "argocd"
 /// args = ["app", "sync", "$NAME"]
 /// scopes = ["deployments"]
+/// dangerous = true          # confirm (showing the command) before running
+///
+/// [[plugins]]
+/// key = "shift-y"
+/// name = "yaml-summary"
+/// command = "kubectl"
+/// args = ["get", "$RESOURCE", "$NAME", "-n", "$NAMESPACE", "-o", "yaml"]
+/// mutating = false          # read-only: allowed even in --readonly mode
+/// output = "popup"          # capture into a scrollable view (not the terminal)
 /// ```
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 pub struct Plugin {
     /// Key chord that triggers the plugin (see [`crate::keys::KeyChord`]).
     pub key: String,
@@ -301,20 +314,57 @@ pub struct Plugin {
     pub args: Vec<String>,
     #[serde(default)]
     pub scopes: Vec<String>,
+    /// Whether the plugin can modify the cluster. `None`/absent defaults to
+    /// `true` — blocked in read-only mode. Set `false` for a known read-only
+    /// plugin so it stays available with `--readonly`.
+    pub mutating: Option<bool>,
+    /// Confirm (showing the exact command) before running.
+    #[serde(default)]
+    pub confirm: bool,
+    /// Mark the plugin dangerous: implies `confirm` and is highlighted red in
+    /// the confirmation dialog.
+    #[serde(default)]
+    pub dangerous: bool,
+    /// Run the command through `sh -c` instead of executing the argv directly.
+    /// An explicit opt-in into shell interpretation; placeholders are still
+    /// passed as separate positional arguments (`$1`, `$2`, …), never spliced
+    /// into the script string.
+    #[serde(default)]
+    pub shell: bool,
+    /// Output mode: `terminal` (default; interactive, inherits the terminal),
+    /// `popup` (captured into a scrollable view), or `background` (detached,
+    /// notifies on completion).
+    pub output: Option<String>,
+    /// Timeout for `popup`/`background` runs (`"30s"`, `"2m"`). Default 30s.
+    /// Ignored for `terminal` (interactive) plugins.
+    pub timeout: Option<String>,
 }
 
-/// Validation warnings for plugin key chords that don't parse (see
-/// [`crate::keys::KeyChord::parse`]). A bad chord disables just that plugin —
-/// it can never match a keypress — so it's reported, not fatal.
-pub fn plugin_key_warnings(plugins: &[Plugin]) -> Vec<String> {
-    plugins
-        .iter()
-        .filter_map(|p| {
-            crate::keys::KeyChord::parse(&p.key)
-                .err()
-                .map(|e| format!("plugin {:?}: invalid key — {e}", p.name))
-        })
-        .collect()
+/// Validation warnings for plugins: an unparseable key chord (see
+/// [`crate::keys::KeyChord::parse`]), an unknown `output` mode, or a malformed
+/// `timeout`. A bad chord disables just that plugin; a bad output/timeout
+/// falls back to the default. Reported, never fatal.
+pub fn plugin_warnings(plugins: &[Plugin]) -> Vec<String> {
+    let mut warns = Vec::new();
+    for p in plugins {
+        if let Err(e) = crate::keys::KeyChord::parse(&p.key) {
+            warns.push(format!("plugin {:?}: invalid key — {e}", p.name));
+        }
+        if let Some(o) = &p.output
+            && !matches!(o.as_str(), "terminal" | "popup" | "background")
+        {
+            warns.push(format!(
+                "plugin {:?}: unknown output {o:?} (expected terminal/popup/background) — using terminal",
+                p.name
+            ));
+        }
+        if let Some(t) = &p.timeout
+            && let Err(e) = crate::providers::parse_lookback(t)
+        {
+            warns.push(format!("plugin {:?}: timeout: {e} — using 30s", p.name));
+        }
+    }
+    warns
 }
 
 /// Config resolved for one (cluster, context) pair: the base config with any
@@ -577,6 +627,56 @@ mod tests {
         assert_eq!(p.key, "g");
         assert_eq!(p.args, vec!["app", "sync", "$NAME"]);
         assert_eq!(p.scopes, vec!["deployments"]);
+    }
+
+    #[test]
+    fn parses_rich_plugin_fields() {
+        let toml = r#"
+            [[plugins]]
+            key = "shift-y"
+            name = "yaml"
+            command = "kubectl"
+            args = ["get", "$RESOURCE", "$NAME"]
+            mutating = false
+            dangerous = true
+            shell = true
+            output = "popup"
+            timeout = "45s"
+        "#;
+        let cfg: Config = toml::from_str(toml).unwrap();
+        let p = &cfg.plugins[0];
+        assert_eq!(p.mutating, Some(false));
+        assert!(p.dangerous && p.shell);
+        assert_eq!(p.output.as_deref(), Some("popup"));
+        assert_eq!(p.timeout.as_deref(), Some("45s"));
+        assert!(plugin_warnings(&cfg.plugins).is_empty());
+
+        // Legacy minimal plugin still parses; new fields default off.
+        let cfg: Config =
+            toml::from_str("[[plugins]]\nkey = \"g\"\nname = \"x\"\ncommand = \"true\"").unwrap();
+        let p = &cfg.plugins[0];
+        assert_eq!(p.mutating, None);
+        assert!(!p.confirm && !p.dangerous && !p.shell);
+        assert!(p.output.is_none());
+    }
+
+    #[test]
+    fn plugin_warnings_flag_bad_output_and_timeout() {
+        let cfg: Config = toml::from_str(
+            r#"
+            [[plugins]]
+            key = "ctrl-x"
+            name = "bad"
+            command = "true"
+            output = "sidebar"
+            timeout = "soon"
+        "#,
+        )
+        .unwrap();
+        let w = plugin_warnings(&cfg.plugins);
+        assert_eq!(w.len(), 2, "{w:?}");
+        assert!(w.iter().any(|s| s.contains("unknown output")));
+        assert!(w.iter().any(|s| s.contains("timeout")));
     }
 
     #[test]

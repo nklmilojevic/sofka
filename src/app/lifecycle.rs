@@ -600,6 +600,39 @@ impl App {
                     .select((!self.explain_items.is_empty()).then_some(first));
                 self.mode = Mode::Explain;
             }
+            Msg::PluginOutput {
+                generation,
+                title,
+                lines,
+                warn,
+            } if generation == self.generation => {
+                self.detail = Scrollable {
+                    title,
+                    lines: lines.into(),
+                    ..Default::default()
+                };
+                self.mode = Mode::Detail;
+                match warn {
+                    Some(w) => self.flash_warn(&w),
+                    None => {
+                        self.flash = "plugin done".into();
+                        self.flash_err = false;
+                    }
+                }
+            }
+            Msg::PluginDone {
+                generation,
+                name,
+                ok,
+                summary,
+            } if generation == self.generation => {
+                if ok {
+                    self.flash = format!("plugin {name}: {summary}");
+                    self.flash_err = false;
+                } else {
+                    self.flash_warn(&format!("plugin {name}: {summary}"));
+                }
+            }
             Msg::Detail {
                 generation,
                 title,

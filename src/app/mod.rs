@@ -186,6 +186,24 @@ enum ConfirmAction {
     /// Uninstall one or more Helm releases (`helm uninstall`), `(name, ns)`
     /// per release — bulk when marked, like [`ConfirmAction::Delete`].
     HelmUninstall { targets: Vec<(String, String)> },
+    /// Run a confirmed plugin (`confirm`/`dangerous`) once accepted.
+    Plugin {
+        argv: Vec<String>,
+        name: String,
+        mode: PluginMode,
+        timeout: u64,
+    },
+}
+
+/// How a plugin's output is delivered.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PluginMode {
+    /// Interactive, inheriting the terminal (default) — suspends the TUI.
+    Terminal,
+    /// Captured off-thread into a scrollable document view.
+    Popup,
+    /// Detached; a notification flashes on completion.
+    Background,
 }
 
 /// What the logs view is currently streaming, so it can be re-streamed when

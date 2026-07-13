@@ -2289,8 +2289,7 @@ async fn readonly_blocks_mutating_actions() {
         key: "g".into(),
         name: "argocd-sync".into(),
         command: "argocd".into(),
-        args: vec![],
-        scopes: vec![],
+        ..Default::default()
     }];
     app.flash.clear();
     assert!(
@@ -2321,8 +2320,7 @@ async fn modifier_plugin_chord_does_not_trigger_plain_key_builtin() {
         key: "ctrl-g".into(),
         name: "gen".into(),
         command: "true".into(),
-        args: vec![],
-        scopes: vec![],
+        ..Default::default()
     }];
     app.table_state.select(Some(2));
 
@@ -2345,6 +2343,101 @@ async fn modifier_plugin_chord_does_not_trigger_plain_key_builtin() {
     app.handle_key(press(KeyCode::Char('g'))).unwrap();
     assert_eq!(app.table_state.selected(), Some(0), "plain g goes to top");
     assert!(app.pending.is_none(), "plain g is not the plugin");
+}
+
+/// Set up a one-pod table with the cursor on it, for plugin dispatch tests.
+fn app_with_pod() -> (App, Receiver<Msg>) {
+    let (mut app, rx) = test_app();
+    app.switch_kind("pods");
+    apply(
+        &mut app,
+        json!({"apiVersion": "v1", "kind": "Pod",
+               "metadata": {"name": "a", "namespace": "default"}}),
+    );
+    app.table_state.select(Some(0));
+    (app, rx)
+}
+
+#[tokio::test]
+async fn readonly_gates_mutating_plugins_only() {
+    let (mut app, _rx) = app_with_pod();
+    app.readonly = true;
+
+    // The default (mutating) plugin is blocked in read-only mode.
+    app.plugins = vec![crate::config::Plugin {
+        key: "g".into(),
+        name: "mut".into(),
+        command: "true".into(),
+        ..Default::default()
+    }];
+    assert!(app.try_plugin_key(press(KeyCode::Char('g'))));
+    assert!(app.pending.is_none(), "mutating plugin blocked");
+    assert!(app.flash.contains("read-only"));
+
+    // An explicitly read-only plugin runs even with --readonly.
+    app.plugins = vec![crate::config::Plugin {
+        key: "h".into(),
+        name: "ro".into(),
+        command: "true".into(),
+        mutating: Some(false),
+        ..Default::default()
+    }];
+    app.flash.clear();
+    assert!(app.try_plugin_key(press(KeyCode::Char('h'))));
+    assert!(
+        matches!(app.pending, Some(Suspend::Shell(_))),
+        "read-only plugin runs"
+    );
+}
+
+#[tokio::test]
+async fn dangerous_plugin_confirms_before_running() {
+    let (mut app, _rx) = app_with_pod();
+    app.plugins = vec![crate::config::Plugin {
+        key: "g".into(),
+        name: "danger".into(),
+        command: "true".into(),
+        dangerous: true,
+        ..Default::default()
+    }];
+    app.try_plugin_key(press(KeyCode::Char('g')));
+    assert_eq!(app.mode, Mode::Confirm);
+    assert!(app.pending.is_none(), "must not run before confirmation");
+    assert!(app.confirm_label.contains("danger") && app.confirm_label.contains('⚠'));
+
+    // Accepting runs it.
+    app.handle_key(press(KeyCode::Char('y'))).unwrap();
+    assert_eq!(app.mode, Mode::Table);
+    assert!(
+        matches!(app.pending, Some(Suspend::Shell(_))),
+        "runs after y"
+    );
+}
+
+#[tokio::test]
+async fn plugin_placeholders_substitute_as_separate_args() {
+    let (mut app, _rx) = app_with_pod();
+    app.plugins = vec![crate::config::Plugin {
+        key: "g".into(),
+        name: "p".into(),
+        command: "echo".into(),
+        args: vec!["$RESOURCE".into(), "$NAMESPACE".into(), "$NAME".into()],
+        ..Default::default()
+    }];
+    app.try_plugin_key(press(KeyCode::Char('g')));
+    let Some(Suspend::Shell(argv)) = &app.pending else {
+        panic!("plugin did not run");
+    };
+    // Each placeholder is one whole argv entry (boundaries preserved).
+    assert_eq!(
+        argv,
+        &vec![
+            "echo".to_string(),
+            "pods".into(),
+            "default".into(),
+            "a".into()
+        ]
+    );
 }
 
 #[tokio::test]
