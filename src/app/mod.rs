@@ -293,10 +293,14 @@ pub struct Scrollable {
     /// Word-wrap toggle. When on, long lines fold instead of being clipped, and
     /// horizontal scrolling is disabled.
     pub wrap: bool,
-    /// Case-insensitive substring search (`/`): only matching lines are shown,
-    /// with matches highlighted — same behavior as the logs filter. Reset
-    /// whenever a fresh document replaces the view.
+    /// Case-insensitive substring search (`/`), vim-style: the full document
+    /// stays rendered with every match highlighted, and `n`/`N` step between
+    /// them. Reset whenever a fresh document replaces the view. (The help view
+    /// keeps its own filtering search in `help_filter`.)
     pub filter: String,
+    /// Which match `n`/`N` last landed on (0-based into [`Self::match_lines`]),
+    /// for the `[cur/total]` counter and relative stepping.
+    pub match_idx: usize,
 }
 
 /// One command-palette suggestion — a built-in command (`:ctx`, `:pulse`), a
@@ -454,6 +458,51 @@ impl Scrollable {
             self.hscroll = 0;
         }
         self.wrap
+    }
+
+    /// Line indices (0-based) containing the active search query, matched
+    /// case-insensitively as a substring. Empty when no search is active.
+    pub fn match_lines(&self) -> Vec<usize> {
+        if self.filter.is_empty() {
+            return Vec::new();
+        }
+        let needle = self.filter.to_lowercase();
+        self.lines
+            .iter()
+            .enumerate()
+            .filter(|(_, l)| l.to_lowercase().contains(&needle))
+            .map(|(i, _)| i)
+            .collect()
+    }
+
+    /// Finalize a search: scroll to the first match at or after the current
+    /// position (wrapping to the first if none follow), so `⏎` lands on a hit
+    /// without disturbing the rest of the document. No-op with no matches.
+    pub fn focus_first_match(&mut self) {
+        let matches = self.match_lines();
+        if matches.is_empty() {
+            return;
+        }
+        let pos = matches.iter().position(|&i| i >= self.scroll).unwrap_or(0);
+        self.match_idx = pos;
+        self.scroll = matches[pos];
+    }
+
+    /// Step to the next (`forward`) or previous match, wrapping around, and
+    /// scroll it into view. No-op with no matches.
+    pub fn step_match(&mut self, forward: bool) {
+        let matches = self.match_lines();
+        let n = matches.len();
+        if n == 0 {
+            return;
+        }
+        let cur = self.match_idx.min(n - 1);
+        self.match_idx = if forward {
+            (cur + 1) % n
+        } else {
+            (cur + n - 1) % n
+        };
+        self.scroll = matches[self.match_idx];
     }
 }
 

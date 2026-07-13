@@ -2868,7 +2868,7 @@ async fn failed_switch_while_disconnected_reopens_picker() {
 }
 
 #[tokio::test]
-async fn doc_search_filters_detail_view() {
+async fn doc_search_highlights_without_filtering() {
     let (mut app, _rx) = test_app();
     apply(
         &mut app,
@@ -2878,6 +2878,7 @@ async fn doc_search_filters_detail_view() {
     app.table_state.select(Some(0));
     app.handle_key(press(KeyCode::Char('y'))).unwrap();
     assert_eq!(app.mode, Mode::Detail);
+    let total = app.detail.lines.len();
 
     // `/` opens the search prompt for the detail view; typing builds the query.
     app.handle_key(press(KeyCode::Char('/'))).unwrap();
@@ -2888,10 +2889,19 @@ async fn doc_search_filters_detail_view() {
     }
     assert_eq!(app.detail.filter, "kind");
 
-    // Enter keeps the query and returns to the view.
+    // Enter keeps the query, returns to the view, and jumps to the first match
+    // — the full document stays rendered (no lines removed).
     app.handle_key(press(KeyCode::Enter)).unwrap();
     assert_eq!(app.mode, Mode::Detail);
     assert_eq!(app.detail.filter, "kind");
+    assert_eq!(
+        app.detail.lines.len(),
+        total,
+        "search must not filter lines"
+    );
+    let matches = app.detail.match_lines();
+    assert_eq!(matches.len(), 1, "one `kind:` line");
+    assert_eq!(app.detail.scroll, matches[0], "jumped to the match");
 
     // First esc clears the search (stays), second esc leaves the view.
     app.handle_key(press(KeyCode::Esc)).unwrap();
@@ -2902,7 +2912,48 @@ async fn doc_search_filters_detail_view() {
 }
 
 #[tokio::test]
-async fn doc_search_esc_clears_and_scroll_resets() {
+async fn doc_search_n_and_capital_n_step_between_matches() {
+    let (mut app, _rx) = test_app();
+    app.detail = Scrollable {
+        title: "x — YAML".into(),
+        // Matches on lines 1, 3, 5.
+        lines: vec![
+            "alpha".into(),
+            "needle one".into(),
+            "beta".into(),
+            "needle two".into(),
+            "gamma".into(),
+            "needle three".into(),
+        ]
+        .into(),
+        ..Default::default()
+    };
+    app.mode = Mode::Detail;
+
+    app.handle_key(press(KeyCode::Char('/'))).unwrap();
+    for c in "needle".chars() {
+        app.handle_key(press(KeyCode::Char(c))).unwrap();
+    }
+    app.handle_key(press(KeyCode::Enter)).unwrap();
+    // Finalized on the first match.
+    assert_eq!(app.detail.scroll, 1);
+    assert_eq!(app.detail.match_idx, 0);
+
+    // `n` walks forward, then wraps back to the first.
+    app.handle_key(press(KeyCode::Char('n'))).unwrap();
+    assert_eq!(app.detail.scroll, 3);
+    app.handle_key(press(KeyCode::Char('n'))).unwrap();
+    assert_eq!(app.detail.scroll, 5);
+    app.handle_key(press(KeyCode::Char('n'))).unwrap();
+    assert_eq!(app.detail.scroll, 1, "wrapped to the first match");
+
+    // `N` walks backward (wrapping to the last).
+    app.handle_key(press(KeyCode::Char('N'))).unwrap();
+    assert_eq!(app.detail.scroll, 5);
+}
+
+#[tokio::test]
+async fn doc_search_esc_in_prompt_clears_query() {
     let (mut app, _rx) = test_app();
     app.detail = Scrollable {
         title: "x — YAML".into(),
@@ -2914,8 +2965,8 @@ async fn doc_search_esc_clears_and_scroll_resets() {
 
     app.handle_key(press(KeyCode::Char('/'))).unwrap();
     app.handle_key(press(KeyCode::Char('9'))).unwrap();
-    // Typing snaps the view back to the top so the first match is visible.
-    assert_eq!(app.detail.scroll, 0);
+    // Typing does not move the document — the search highlights in place.
+    assert_eq!(app.detail.scroll, 50);
     // Esc in the prompt aborts the search entirely.
     app.handle_key(press(KeyCode::Esc)).unwrap();
     assert_eq!(app.mode, Mode::Detail);
@@ -2954,7 +3005,7 @@ async fn help_search_uses_own_buffer() {
 }
 
 #[tokio::test]
-async fn copy_doc_respects_active_search() {
+async fn copy_doc_copies_the_whole_document() {
     let (mut app, _rx) = test_app();
     app.detail = Scrollable {
         title: "web — YAML".into(),
@@ -2968,15 +3019,13 @@ async fn copy_doc_respects_active_search() {
         ..Default::default()
     };
 
-    // No search: the whole document.
-    assert_eq!(
-        app.filtered_doc_text(),
-        "apiVersion: v1\nkind: Pod\nmetadata:\n  name: web"
-    );
+    let whole = "apiVersion: v1\nkind: Pod\nmetadata:\n  name: web";
+    assert_eq!(app.doc_text(), whole);
 
-    // Active search: only the matching lines (case-insensitive).
+    // An active search highlights in place; it does not filter, so copy still
+    // returns the whole document.
     app.detail.filter = "KIND".into();
-    assert_eq!(app.filtered_doc_text(), "kind: Pod");
+    assert_eq!(app.doc_text(), whole);
 }
 
 #[tokio::test]

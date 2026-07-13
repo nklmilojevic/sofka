@@ -815,11 +815,17 @@ impl App {
                     self.restore_selection();
                 }
             }
-            // Search within the document (k9s `/` in YAML/describe views).
+            // Search within the document (k9s `/` in YAML/describe views):
+            // matches are highlighted in place while the full document stays
+            // rendered, vim-style, and `n`/`N` step between them.
             KeyCode::Char('/') if detail => {
                 self.doc_filter_return = self.mode;
                 self.mode = Mode::DocFilter;
             }
+            // Jump to the next / previous search match (vim `n`/`N`). No-op
+            // when no search is active.
+            KeyCode::Char('n') if detail => target.step_match(true),
+            KeyCode::Char('N') if detail => target.step_match(false),
             // Copy the document to the clipboard (k9s `c`), same as the logs
             // view: an active search copies only the matching lines.
             KeyCode::Char('c') if detail => {
@@ -1013,17 +1019,21 @@ impl App {
         match key.code {
             KeyCode::Esc => {
                 self.doc_filter_mut().clear();
-                self.reset_doc_scroll();
                 self.mode = self.doc_filter_return;
             }
-            KeyCode::Enter => self.mode = self.doc_filter_return,
+            KeyCode::Enter => {
+                // Finalize: on a document view, jump to the first match so the
+                // hit is on screen; help filters in place and needs no jump.
+                if self.doc_filter_return != Mode::Help {
+                    self.detail.focus_first_match();
+                }
+                self.mode = self.doc_filter_return;
+            }
             KeyCode::Backspace => {
                 self.doc_filter_mut().pop();
-                self.reset_doc_scroll();
             }
             KeyCode::Char(c) => {
                 self.doc_filter_mut().push(c);
-                self.reset_doc_scroll();
             }
             _ => {}
         }
@@ -1036,14 +1046,6 @@ impl App {
             &mut self.help_filter
         } else {
             &mut self.detail.filter
-        }
-    }
-
-    /// Snap back to the top when the query changes, so the first match is
-    /// visible instead of a stale offset past the (now shorter) filtered list.
-    fn reset_doc_scroll(&mut self) {
-        if self.doc_filter_return != Mode::Help {
-            self.detail.scroll = 0;
         }
     }
 }

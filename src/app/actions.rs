@@ -462,10 +462,11 @@ impl App {
     }
 
     /// Copy the current single-document view (YAML/describe/diff/events) to
-    /// the clipboard (k9s `c` in those views). Mirrors [`Self::copy_logs`]:
-    /// with a `/` search active, only the matching lines are copied.
+    /// the clipboard (k9s `c` in those views). Copies the whole document — the
+    /// `/` search highlights in place, it doesn't filter, so there is no
+    /// "matching subset" to copy.
     pub(super) fn copy_doc(&mut self) {
-        let text = self.filtered_doc_text();
+        let text = self.doc_text();
         if text.is_empty() {
             self.flash_warn("nothing to copy");
             return;
@@ -478,12 +479,10 @@ impl App {
         );
     }
 
-    pub(super) fn filtered_doc_text(&self) -> String {
-        let f = self.detail.filter.to_lowercase();
+    pub(super) fn doc_text(&self) -> String {
         self.detail
             .lines
             .iter()
-            .filter(|l| f.is_empty() || l.to_lowercase().contains(&f))
             .cloned()
             .collect::<Vec<_>>()
             .join("\n")
