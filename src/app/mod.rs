@@ -102,6 +102,8 @@ pub enum Mode {
     Explain,
     /// Session-local state-change history for the selection.
     Timeline,
+    /// Flux GitOps ownership + reconciliation chain for the selection.
+    Gitops,
     Diff,
     Events,
     FluxMenu,
@@ -321,6 +323,7 @@ enum PaletteAction {
     Xray,
     Explain,
     Timeline,
+    Gitops,
     Diff,
     Events,
     PortForwards,
@@ -355,6 +358,10 @@ const PALETTE_COMMANDS: &[PaletteCommand] = &[
     PaletteCommand {
         action: PaletteAction::Timeline,
         names: &["timeline", "tl", "history"],
+    },
+    PaletteCommand {
+        action: PaletteAction::Gitops,
+        names: &["gitops", "flux", "reconcile", "recon"],
     },
     PaletteCommand {
         action: PaletteAction::Diff,
@@ -714,6 +721,12 @@ pub struct App {
     pub explain_title: String,
     /// The object the explain view is investigating, kept so `r` can re-gather.
     pub explain_source: Option<DynamicObject>,
+    /// GitOps view: the reconciliation-chain findings, cursor, title, and the
+    /// object being investigated (kept so `r` can re-gather).
+    pub gitops_items: Vec<crate::explain::Finding>,
+    pub gitops_state: ListState,
+    pub gitops_title: String,
+    pub gitops_source: Option<DynamicObject>,
     /// Session-local per-object state-change history, fed by the table watch.
     pub timeline: crate::timeline::Timeline,
     /// The `(plural, row_key)` the timeline view is showing, and its cursor.
@@ -853,6 +866,10 @@ impl App {
             explain_state: ListState::default(),
             explain_title: String::new(),
             explain_source: None,
+            gitops_items: Vec::new(),
+            gitops_state: ListState::default(),
+            gitops_title: String::new(),
+            gitops_source: None,
             timeline: crate::timeline::Timeline::default(),
             timeline_target: None,
             timeline_state: ListState::default(),
@@ -907,6 +924,7 @@ mod bookmarks;
 mod dashboards;
 mod details;
 mod explain;
+mod gitops;
 mod helpers;
 mod input;
 mod lifecycle;

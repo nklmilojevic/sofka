@@ -55,6 +55,12 @@ pub enum Msg {
         title: String,
         findings: Vec<crate::explain::Finding>,
     },
+    /// Reconciliation-chain findings for the GitOps view, gathered off-thread.
+    Gitops {
+        generation: u64,
+        title: String,
+        findings: Vec<crate::explain::Finding>,
+    },
     /// Captured output of an `output = "popup"` plugin run.
     PluginOutput {
         generation: u64,

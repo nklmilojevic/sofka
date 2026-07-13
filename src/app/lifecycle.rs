@@ -601,6 +601,22 @@ impl App {
                     .select((!self.explain_items.is_empty()).then_some(first));
                 self.mode = Mode::Explain;
             }
+            Msg::Gitops {
+                generation,
+                title,
+                findings,
+            } if generation == self.generation => {
+                self.gitops_items = findings;
+                self.gitops_title = title;
+                let first = self
+                    .gitops_items
+                    .iter()
+                    .position(|f| f.target.is_some())
+                    .unwrap_or(0);
+                self.gitops_state
+                    .select((!self.gitops_items.is_empty()).then_some(first));
+                self.mode = Mode::Gitops;
+            }
             Msg::PluginOutput {
                 generation,
                 title,
