@@ -174,7 +174,13 @@ enum ConfirmAction {
         targets: Vec<(String, String)>,
         force: bool,
         cascade: Cascade,
+        /// A "managed — will be recreated" warning when any target is owned by
+        /// Flux or a controller (shown in the dialog).
+        managed: Option<String>,
     },
+    /// Edit a Flux-managed object (`kubectl edit`) after warning that the edit
+    /// will be reverted on the next reconcile.
+    Edit { argv: Vec<String> },
     /// One or more node names to cordon and drain.
     Drain { targets: Vec<String> },
     /// Roll a Helm release back to an earlier revision (`helm rollback`) —

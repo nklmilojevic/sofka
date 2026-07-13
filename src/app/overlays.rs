@@ -68,9 +68,13 @@ impl App {
                             targets,
                             force,
                             cascade,
+                            ..
                         } => {
                             self.do_delete(targets, force, cascade);
                             self.marked.clear();
+                        }
+                        ConfirmAction::Edit { argv } => {
+                            self.pending = Some(Suspend::Shell(argv));
                         }
                         ConfirmAction::Drain { targets } => {
                             self.do_drain_nodes(targets);
@@ -101,15 +105,21 @@ impl App {
                         targets,
                         force,
                         cascade,
+                        managed,
                     }) => {
                         *force = !*force;
-                        Some((targets.clone(), *force, *cascade))
+                        Some((targets.clone(), *force, *cascade, managed.clone()))
                     }
                     _ => None,
                 };
-                if let Some((targets, force, cascade)) = update {
-                    self.confirm_label =
-                        delete_confirm_label(&self.kind_plural, &targets, force, cascade);
+                if let Some((targets, force, cascade, managed)) = update {
+                    self.confirm_label = delete_confirm_label(
+                        &self.kind_plural,
+                        &targets,
+                        force,
+                        cascade,
+                        managed.as_deref(),
+                    );
                 }
             }
             KeyCode::Char('c') | KeyCode::Char('C') => {
@@ -118,15 +128,21 @@ impl App {
                         targets,
                         force,
                         cascade,
+                        managed,
                     }) => {
                         *cascade = cascade.next();
-                        Some((targets.clone(), *force, *cascade))
+                        Some((targets.clone(), *force, *cascade, managed.clone()))
                     }
                     _ => None,
                 };
-                if let Some((targets, force, cascade)) = update {
-                    self.confirm_label =
-                        delete_confirm_label(&self.kind_plural, &targets, force, cascade);
+                if let Some((targets, force, cascade, managed)) = update {
+                    self.confirm_label = delete_confirm_label(
+                        &self.kind_plural,
+                        &targets,
+                        force,
+                        cascade,
+                        managed.as_deref(),
+                    );
                 }
             }
             _ => {

@@ -2358,6 +2358,57 @@ fn app_with_pod() -> (App, Receiver<Msg>) {
     (app, rx)
 }
 
+/// A pod carrying Flux kustomize toolkit labels (so it reads as managed).
+fn flux_managed_pod(app: &mut App) {
+    app.switch_kind("pods");
+    apply(
+        app,
+        json!({"apiVersion":"v1","kind":"Pod","metadata":{
+            "name":"a","namespace":"default","labels":{
+                "kustomize.toolkit.fluxcd.io/name":"apps",
+                "kustomize.toolkit.fluxcd.io/namespace":"flux-system"}}}),
+    );
+    app.table_state.select(Some(0));
+}
+
+#[tokio::test]
+async fn editing_flux_managed_object_confirms_with_revert_warning() {
+    let (mut app, _rx) = test_app();
+    flux_managed_pod(&mut app);
+    app.request_edit();
+    assert_eq!(app.mode, Mode::Confirm);
+    assert!(app.pending.is_none(), "must not edit before confirming");
+    assert!(
+        app.confirm_label.contains("Managed by Flux") && app.confirm_label.contains("reverted"),
+        "{}",
+        app.confirm_label
+    );
+    // Confirming opens the editor.
+    app.handle_key(press(KeyCode::Char('y'))).unwrap();
+    assert!(matches!(app.pending, Some(Suspend::Shell(_))));
+}
+
+#[tokio::test]
+async fn editing_unmanaged_object_skips_the_warning() {
+    let (mut app, _rx) = app_with_pod(); // plain pod, no toolkit labels
+    app.request_edit();
+    assert_ne!(app.mode, Mode::Confirm, "unmanaged edit needs no confirm");
+    assert!(matches!(app.pending, Some(Suspend::Shell(_))));
+}
+
+#[tokio::test]
+async fn deleting_managed_object_warns_it_will_be_recreated() {
+    let (mut app, _rx) = test_app();
+    flux_managed_pod(&mut app);
+    app.request_delete(false);
+    assert_eq!(app.mode, Mode::Confirm);
+    assert!(
+        app.confirm_label.contains("managed by Flux") && app.confirm_label.contains("recreated"),
+        "{}",
+        app.confirm_label
+    );
+}
+
 #[tokio::test]
 async fn readonly_gates_mutating_plugins_only() {
     let (mut app, _rx) = app_with_pod();

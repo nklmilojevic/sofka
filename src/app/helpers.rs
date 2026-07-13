@@ -43,11 +43,33 @@ pub(super) fn node_unschedulable_patch(unschedulable: bool) -> Value {
     json!({ "spec": { "unschedulable": unschedulable } })
 }
 
+/// What manages `obj`, if anything: its Flux owner (from the toolkit labels)
+/// preferred, else its controller/owner reference. Used to warn that a delete
+/// will be recreated.
+pub(super) fn managed_by(obj: &DynamicObject) -> Option<String> {
+    if let Some(f) = flux_managed_by(obj) {
+        return Some(f);
+    }
+    let owners = obj.metadata.owner_references.as_ref()?;
+    let owner = owners
+        .iter()
+        .find(|o| o.controller == Some(true))
+        .or_else(|| owners.first())?;
+    Some(format!("{}/{}", owner.kind, owner.name))
+}
+
+/// The Flux Kustomization/HelmRelease managing `obj`, from its toolkit labels.
+/// Used to warn that an edit will be reverted on the next reconcile.
+pub(super) fn flux_managed_by(obj: &DynamicObject) -> Option<String> {
+    crate::gitops::owner_ref(obj).map(|r| format!("Flux {}/{}", r.kind, r.name))
+}
+
 pub(super) fn delete_confirm_label(
     kind_plural: &str,
     targets: &[(String, String)],
     force: bool,
     cascade: Cascade,
+    managed: Option<&str>,
 ) -> String {
     let verb = if force { "Force delete" } else { "Delete" };
     // Background is the kubectl default, so only surface the unusual modes.
@@ -56,6 +78,8 @@ pub(super) fn delete_confirm_label(
         Cascade::Foreground => " (cascade: foreground)",
         Cascade::Orphan => " (orphan dependents)",
     };
+    // A managed target gets recreated straight after deletion — say so.
+    let managed = managed.map(|m| format!("  {m}")).unwrap_or_default();
     if targets.len() == 1 {
         let (name, ns) = &targets[0];
         let where_ns = if ns.is_empty() {
@@ -63,9 +87,12 @@ pub(super) fn delete_confirm_label(
         } else {
             format!(" in {ns}")
         };
-        format!("{verb} {} {name}{where_ns}{suffix}?", trim_s(kind_plural))
+        format!(
+            "{verb} {} {name}{where_ns}{suffix}?{managed}",
+            trim_s(kind_plural)
+        )
     } else {
-        format!("{verb} {} {}{suffix}?", targets.len(), kind_plural)
+        format!("{verb} {} {}{suffix}?{managed}", targets.len(), kind_plural)
     }
 }
 
