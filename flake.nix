@@ -3,11 +3,13 @@
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
+    # nixpkgs >= 26.11 dropped x86_64-darwin; keep Intel macs on the 26.05 release
+    nixpkgs-darwin-intel.url = "github:NixOS/nixpkgs/nixpkgs-26.05-darwin";
     flake-utils.url = "github:numtide/flake-utils";
   };
 
   outputs =
-    { self, nixpkgs, flake-utils }:
+    { self, nixpkgs, nixpkgs-darwin-intel, flake-utils }:
     let
       overlay = final: prev: {
         sofka = final.callPackage ./package.nix { };
@@ -23,7 +25,7 @@
       (
         system:
         let
-          pkgs = import nixpkgs {
+          pkgs = import (if system == "x86_64-darwin" then nixpkgs-darwin-intel else nixpkgs) {
             inherit system;
             overlays = [ overlay ];
           };
