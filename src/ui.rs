@@ -1631,6 +1631,26 @@ fn draw_help(frame: &mut Frame, app: &App, area: Rect) {
             lines.push(bind(&key, &format!("★ {}", b.name)));
         }
     }
+    // Saved workspaces: their chord (if any), view count, and Tab hint.
+    if !app.workspaces.is_empty() {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled("  Workspaces", theme::title())));
+        for w in &app.workspaces {
+            let key = w
+                .key
+                .as_deref()
+                .map(|k| {
+                    crate::keys::KeyChord::parse(k)
+                        .map(|c| c.label())
+                        .unwrap_or_else(|_| format!("{k}?"))
+                })
+                .unwrap_or_else(|| ":".to_string());
+            lines.push(bind(
+                &key,
+                &format!("▦ {} ({} views · Tab to cycle)", w.name, w.views.len()),
+            ));
+        }
+    }
     // `/` search: keep only matching binding lines (section headers and
     // spacers match like any other text), highlighting the matched runs.
     let needle = app.help_filter.to_lowercase();
@@ -2124,6 +2144,10 @@ fn draw_palette(frame: &mut Frame, app: &mut App, area: Rect) {
                     Style::default().fg(theme::yellow()),
                 ),
                 Span::styled("  bookmark", theme::dim()),
+            ])),
+            SuggestKind::Workspace => ListItem::new(Line::from(vec![
+                Span::styled(format!("▦ {}", s.label), Style::default().fg(theme::sky())),
+                Span::styled("  workspace", theme::dim()),
             ])),
         })
         .collect();

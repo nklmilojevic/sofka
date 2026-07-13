@@ -196,6 +196,13 @@ enum ConfirmAction {
     },
 }
 
+/// The workspace being cycled: its views and where in them we are.
+pub struct ActiveWorkspace {
+    pub name: String,
+    pub views: Vec<crate::config::WorkspaceView>,
+    pub index: usize,
+}
+
 /// How a plugin's output is delivered.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PluginMode {
@@ -293,6 +300,8 @@ pub enum SuggestKind {
     Context,
     /// A saved bookmark — Enter applies its full navigation command.
     Bookmark,
+    /// A saved workspace — Enter opens it (lands on its first view).
+    Workspace,
 }
 
 /// A built-in palette action, plus the names/aliases that select it. The first
@@ -629,6 +638,13 @@ pub struct App {
     /// A bookmark waiting for an in-flight context switch to land before its
     /// resource/namespace/filter/sort are applied.
     pub pending_bookmark: Option<crate::config::Bookmark>,
+    /// Saved workspaces (`[[workspaces]]`), re-applied on context switch and
+    /// `:reload`.
+    pub workspaces: Vec<crate::config::Workspace>,
+    /// A workspace waiting for an in-flight context switch before it opens.
+    pub pending_workspace: Option<crate::config::Workspace>,
+    /// The workspace currently being cycled with `Tab`/`Shift-Tab`, if any.
+    pub active_workspace: Option<ActiveWorkspace>,
     /// Resource plurals the user may list (None = unknown/all). "*" = all.
     rbac_allowed: Option<HashSet<String>>,
     last_rbac_ns: Option<String>,
@@ -794,6 +810,9 @@ impl App {
             plugins: Vec::new(),
             bookmarks: Vec::new(),
             pending_bookmark: None,
+            workspaces: Vec::new(),
+            pending_workspace: None,
+            active_workspace: None,
             rbac_allowed: None,
             last_rbac_ns: None,
             container_list: Vec::new(),
@@ -890,6 +909,7 @@ mod overlays;
 mod pickers;
 mod rows;
 mod timeline;
+mod workspaces;
 
 use helpers::*;
 
