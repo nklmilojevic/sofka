@@ -2188,7 +2188,7 @@ fn draw_explain(frame: &mut Frame, app: &mut App, area: Rect) {
         .collect();
 
     let title = format!(
-        " {}  ({} findings · r refresh · esc back) ",
+        " {}  ({} findings · ⏎/E/l evidence · r refresh) ",
         app.explain_title,
         app.explain_items.len()
     );
@@ -2402,7 +2402,7 @@ fn draw_prompt(frame: &mut Frame, app: &App, area: Rect) {
         }
         Mode::Help => Line::from(Span::styled("  /:search  ?/esc:back", theme::dim())),
         Mode::Explain => Line::from(Span::styled(
-            "  j/k: move   r: refresh   esc: back",
+            "  j/k: move   ⏎: go to resource   E: events   l: logs   r: refresh   esc: back",
             theme::dim(),
         )),
         Mode::FluxMenu => Line::from(Span::styled(

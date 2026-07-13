@@ -130,7 +130,68 @@ impl App {
                 }
             }
             KeyCode::Char('r') => self.refresh_explain(),
+            // Direct evidence navigation: jump to the resource behind the
+            // selected finding (⏎), or open its events (E) / logs (l). With no
+            // target on the current line, E/l fall back to the object being
+            // explained — so the whole evidence trail is one keystroke away.
+            KeyCode::Enter => self.explain_goto(),
+            KeyCode::Char('E') => self.explain_events(),
+            KeyCode::Char('l') => self.explain_logs(),
             _ => {}
+        }
+    }
+
+    /// The navigation target of the highlighted finding, if any.
+    fn selected_target(&self) -> Option<crate::explain::Target> {
+        self.explain_state
+            .selected()
+            .and_then(|i| self.explain_items.get(i))
+            .and_then(|f| f.target.clone())
+    }
+
+    /// ⏎ — land on the resource behind the selected finding (a blocking pod),
+    /// as a name-filtered table view. Everything you'd do next (logs, events,
+    /// containers) is then a single keystroke away.
+    fn explain_goto(&mut self) {
+        let Some(t) = self.selected_target() else {
+            self.flash_warn("no resource to jump to on this line");
+            return;
+        };
+        if t.plural != "pods" {
+            self.flash_warn("can only jump to pods here");
+            return;
+        }
+        self.drill_to_pods(
+            t.namespace.unwrap_or_default(),
+            None,
+            Some(format!("metadata.name={}", t.name)),
+            format!("pod/{}", t.name),
+        );
+        self.mode = Mode::Table;
+    }
+
+    /// `E` — open the event stream for the selected finding's target, or (no
+    /// target) the object being explained.
+    fn explain_events(&mut self) {
+        match self.selected_target() {
+            Some(t) => self.open_events_for(t.name, t.namespace.unwrap_or_default(), None),
+            None => self.open_events(),
+        }
+    }
+
+    /// `l` — stream logs for the selected finding's target pod, or (no target)
+    /// the object being explained.
+    fn explain_logs(&mut self) {
+        match self.selected_target() {
+            Some(t) if t.plural == "pods" => self.launch_logs(
+                LogSource::Pod {
+                    ns: t.namespace.unwrap_or_default(),
+                    name: t.name.clone(),
+                    containers: vec![],
+                },
+                format!("{} — logs", t.name),
+            ),
+            _ => self.open_logs(),
         }
     }
 }

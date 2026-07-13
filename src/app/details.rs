@@ -6,10 +6,12 @@ impl App {
     /// Remember which view a transient sub-view (logs/detail/diff) was opened
     /// from, so `esc` returns there (e.g. back to the xray tree, not the table).
     pub(super) fn set_return_mode(&mut self) {
-        self.return_mode = if self.mode == Mode::Xray {
-            Mode::Xray
-        } else {
-            Mode::Table
+        // A transient sub-view (logs/detail/events) opened from a list-style
+        // view returns to that view, not the table underneath it.
+        self.return_mode = match self.mode {
+            Mode::Xray => Mode::Xray,
+            Mode::Explain => Mode::Explain,
+            _ => Mode::Table,
         };
         // Remember the selected row so we can land back on it.
         self.return_selection = self.selected_ref().map(row_key);
@@ -248,27 +250,34 @@ impl App {
     /// available. Uses the discovered `events` resource, so core/v1 Events are
     /// preferred but events.k8s.io clusters still work.
     pub(super) fn open_events(&mut self) {
-        self.set_return_mode();
         let Some(obj) = self.selected_ref() else {
             self.flash_warn("no selection for events");
             return;
         };
+        let name = obj.metadata.name.clone().unwrap_or_default();
+        let ns = obj.metadata.namespace.clone().unwrap_or_default();
+        let uid = obj.metadata.uid.clone().filter(|u| !u.is_empty());
+        self.open_events_for(name, ns, uid);
+    }
+
+    /// Live Events for an object identified by coordinates (rather than the
+    /// current table selection), so the explain view can open the event stream
+    /// for a blocking pod. `uid` scopes precisely when known; otherwise we fall
+    /// back to a name(+namespace) selector.
+    pub(super) fn open_events_for(&mut self, name: String, ns: String, uid: Option<String>) {
+        self.set_return_mode();
         let Some(kind) = self.cluster.resolve("events") else {
             self.flash_warn("events kind unavailable");
             return;
         };
 
-        let name = obj.metadata.name.clone().unwrap_or_default();
-        let ns = obj.metadata.namespace.clone().unwrap_or_default();
         let title = format!("{name} — events");
         let field = if kind.ar.group == "events.k8s.io" {
             "regarding"
         } else {
             "involvedObject"
         };
-        let selector = obj
-            .metadata
-            .uid
+        let selector = uid
             .as_ref()
             .filter(|uid| !uid.is_empty())
             .map(|uid| format!("{field}.uid={uid}"))
