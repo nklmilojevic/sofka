@@ -1504,7 +1504,7 @@ fn draw_help(frame: &mut Frame, app: &App, area: Rect) {
             Span::styled(d.to_string(), theme::dim()),
         ])
     };
-    let lines = vec![
+    let mut lines = vec![
         Line::from(Span::styled("  Navigation", theme::title())),
         bind(
             ":<resource>",
@@ -1598,6 +1598,22 @@ fn draw_help(frame: &mut Frame, app: &App, area: Rect) {
         bind(":q / ctrl-c", "quit"),
         bind("?", "toggle help"),
     ];
+    // Config-defined plugins, with their (possibly modified) key chords.
+    if !app.plugins.is_empty() {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled("  Plugins", theme::title())));
+        for p in &app.plugins {
+            let key = crate::keys::KeyChord::parse(&p.key)
+                .map(|c| c.label())
+                .unwrap_or_else(|_| format!("{}?", p.key));
+            let scope = if p.scopes.is_empty() {
+                "all resources".to_string()
+            } else {
+                p.scopes.join(", ")
+            };
+            lines.push(bind(&key, &format!("{} ({scope})", p.name)));
+        }
+    }
     // `/` search: keep only matching binding lines (section headers and
     // spacers match like any other text), highlighting the matched runs.
     let needle = app.help_filter.to_lowercase();

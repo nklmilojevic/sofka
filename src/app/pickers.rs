@@ -267,6 +267,7 @@ impl App {
         let resolved = self.config.resolve(&name, &cluster.cluster_name);
         self.user_aliases = resolved.config.aliases;
         self.plugins = resolved.config.plugins;
+        let plugin_warnings = crate::config::plugin_key_warnings(&self.plugins);
         let (views, view_warnings) = crate::views::compile(&resolved.config.views);
         self.user_views = views;
         let (thresholds, threshold_warnings) =
@@ -312,6 +313,7 @@ impl App {
             .warnings
             .first()
             .or(view_warnings.first())
+            .or(plugin_warnings.first())
             .or(threshold_warnings.first())
             .or(provider_warnings.first())
         {
@@ -319,6 +321,7 @@ impl App {
         }
         // Keep `:config` in sync with the layers just resolved for this context.
         self.config_warnings = resolved.warnings;
+        self.config_warnings.extend(plugin_warnings);
         self.config_warnings.extend(threshold_warnings);
         let kind = resolved
             .config

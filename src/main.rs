@@ -9,6 +9,7 @@ mod explain;
 mod filter;
 mod helm;
 mod k8s;
+mod keys;
 mod providers;
 mod store;
 mod theme;
@@ -151,6 +152,10 @@ async fn main() -> Result<()> {
     app.all_contexts = Cluster::list_contexts();
     app.user_aliases = cfg.aliases.clone();
     app.plugins = cfg.plugins.clone();
+    for w in config::plugin_key_warnings(&app.plugins) {
+        eprintln!("warning: {w}");
+        config_warnings.push(w);
+    }
     let (user_views, view_warnings) = views::compile(&cfg.views);
     for w in &view_warnings {
         eprintln!("warning: {w}");

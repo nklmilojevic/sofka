@@ -26,6 +26,18 @@ impl App {
             }
         }
 
+        // Ctrl/alt combos in the table are user plugin chords (the reserved
+        // built-in ctrl keys above already returned). Route them here so they
+        // never fall through to the plain-key table bindings — `ctrl-g` must
+        // not trigger `g`. Unmatched combos are swallowed rather than misfiring.
+        if self.mode == Mode::Table
+            && (key.modifiers.contains(KeyModifiers::CONTROL)
+                || key.modifiers.contains(KeyModifiers::ALT))
+        {
+            self.try_plugin_key(key);
+            return Ok(());
+        }
+
         match self.mode {
             Mode::Table => self.key_table(key),
             Mode::Command => self.key_command(key),
@@ -168,26 +180,38 @@ impl App {
                 self.mode = Mode::Help;
             }
             // User-defined plugins fall through here (built-ins take priority).
-            KeyCode::Char(c) => self.try_plugin(c),
-            _ => {}
+            // Any unhandled key — a bare char, a function key — is offered to
+            // the plugin chords. Ctrl/alt combos are routed earlier, in
+            // `handle_key`, before the plain-key bindings above can claim them.
+            _ => {
+                self.try_plugin_key(key);
+            }
         }
     }
 
     /// Run a config-defined plugin bound to `c` if it applies to the current
     /// kind. Blocked in read-only mode: plugins shell out to arbitrary
-    /// commands, so we can't know they won't mutate the cluster.
-    pub(super) fn try_plugin(&mut self, c: char) {
+    /// commands, so we can't know they won't mutate the cluster. Returns
+    /// whether a plugin matched (so the caller can stop treating the event as
+    /// an unhandled key).
+    pub(super) fn try_plugin_key(&mut self, key: KeyEvent) -> bool {
         let Some(plugin) = self
             .plugins
             .iter()
             .find(|p| {
-                p.key == c
+                crate::keys::KeyChord::parse(&p.key).is_ok_and(|chord| chord.matches(&key))
                     && (p.scopes.is_empty() || p.scopes.iter().any(|s| s == &self.kind_plural))
             })
             .cloned()
         else {
-            return;
+            return false;
         };
+        self.run_plugin(plugin);
+        true
+    }
+
+    /// Substitute placeholders and queue the plugin's shell-out.
+    fn run_plugin(&mut self, plugin: crate::config::Plugin) {
         if self.deny_readonly() {
             return;
         }
