@@ -1679,20 +1679,33 @@ fn draw_help(frame: &mut Frame, app: &App, area: Rect) {
 
 fn draw_namespaces(frame: &mut Frame, app: &mut App, area: Rect) {
     let names = app.filtered_namespaces();
+    let browsing = app.ns_filter.is_empty();
     let items: Vec<ListItem> = names
         .iter()
         .map(|n| {
-            let color = if n == "<all>" {
-                theme::teal()
+            if n == "<all>" {
+                return ListItem::new(Span::styled(n.clone(), Style::default().fg(theme::teal())));
+            }
+            // Only tag favourites/recents while browsing (the pinned ordering);
+            // a filtered list is ranked by match, so a tag there would mislead.
+            let (tag, color) = if !browsing {
+                ("", theme::text())
+            } else if app.is_favorite_namespace(n) {
+                ("★ ", theme::yellow())
+            } else if app.is_recent_namespace(n) {
+                ("· ", theme::sky())
             } else {
-                theme::text()
+                ("", theme::text())
             };
-            ListItem::new(Span::styled(n.clone(), Style::default().fg(color)))
+            ListItem::new(Line::from(vec![
+                Span::styled(tag.to_string(), theme::dim()),
+                Span::styled(n.clone(), Style::default().fg(color)),
+            ]))
         })
         .collect();
     // Show the type-to-filter buffer in the title so it reads like an input.
     let title = if app.ns_filter.is_empty() {
-        " Namespaces (type to filter · ⏎ switch) ".to_string()
+        " Namespaces (★ fav · recent · ⏎ switch) ".to_string()
     } else {
         format!(" Namespaces · /{}_ ", app.ns_filter)
     };

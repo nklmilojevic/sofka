@@ -51,6 +51,9 @@ pub struct Config {
     pub readonly: bool,
     /// Custom alias -> canonical resource (plural/kind) mappings.
     pub aliases: HashMap<String, String>,
+    /// Namespaces pinned to the top of the switcher (a curated team list, in
+    /// the given order). Session-local recents follow them.
+    pub favorite_namespaces: Vec<String>,
     /// User-defined shell-out plugins bound to keys.
     pub plugins: Vec<Plugin>,
     /// Saved navigation commands bound to keys and the palette — see
@@ -942,6 +945,15 @@ mod tests {
         assert_eq!(w.len(), 2, "{w:?}");
         assert!(w.iter().any(|s| s.contains("unknown output")));
         assert!(w.iter().any(|s| s.contains("timeout")));
+    }
+
+    #[test]
+    fn parses_favorite_namespaces() {
+        let cfg: Config =
+            toml::from_str("favorite_namespaces = [\"kube-system\", \"monitoring\"]").unwrap();
+        assert_eq!(cfg.favorite_namespaces, vec!["kube-system", "monitoring"]);
+        let empty: Config = toml::from_str("").unwrap();
+        assert!(empty.favorite_namespaces.is_empty());
     }
 
     #[test]

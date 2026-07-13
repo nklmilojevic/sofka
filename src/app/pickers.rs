@@ -1,5 +1,8 @@
 use super::*;
 
+/// How many recent namespaces to keep per context in the switcher.
+const MAX_RECENT_NAMESPACES: usize = 8;
+
 impl App {
     /// Open the namespace switcher immediately with a loading placeholder, then
     /// fetch the list off-thread (it arrives as `Msg::Namespaces`).
@@ -55,21 +58,82 @@ impl App {
         }
     }
 
-    /// Namespaces for the switcher: `<all>` is always pinned first, the rest
-    /// fuzzy-matched against the type-to-filter buffer.
+    /// Namespaces for the switcher: `<all>` is always pinned first. When
+    /// browsing (no filter), configured favourites lead, then session recents,
+    /// then the remaining namespaces alphabetically. With a filter active,
+    /// everything is fuzzy-matched (favourites/recents lose their pinning so
+    /// the best textual match wins).
     pub fn filtered_namespaces(&self) -> Vec<String> {
         let mut out = vec!["<all>".to_string()];
         let rest = self.ns_list.iter().filter(|n| n.as_str() != "<all>");
-        if self.ns_filter.is_empty() {
-            out.extend(rest.cloned());
-        } else {
+        if !self.ns_filter.is_empty() {
             let mut scored: Vec<(i64, &String)> = rest
                 .filter_map(|n| self.matcher.fuzzy_match(n, &self.ns_filter).map(|s| (s, n)))
                 .collect();
             scored.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(b.1)));
             out.extend(scored.into_iter().map(|(_, n)| n.clone()));
+            return out;
+        }
+
+        let available: std::collections::HashSet<&str> = rest.map(String::as_str).collect();
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        // Favourites first, in configured order (pinned even if not currently
+        // listable — the switcher still accepts a verbatim pick).
+        for f in &self.namespace_favorites {
+            if !f.is_empty() && seen.insert(f.clone()) {
+                out.push(f.clone());
+            }
+        }
+        // Then session recents that still exist and aren't already favourites.
+        for r in self.recent_namespaces_for_context() {
+            if available.contains(r.as_str()) && seen.insert(r.clone()) {
+                out.push(r);
+            }
+        }
+        // Then everything else (ns_list is already sorted).
+        for n in self.ns_list.iter().filter(|n| n.as_str() != "<all>") {
+            if seen.insert(n.clone()) {
+                out.push(n.clone());
+            }
         }
         out
+    }
+
+    /// The recent namespaces for the current context, newest first.
+    fn recent_namespaces_for_context(&self) -> Vec<String> {
+        self.recent_namespaces
+            .get(&self.cluster.context)
+            .map(|dq| dq.iter().cloned().collect())
+            .unwrap_or_default()
+    }
+
+    /// Whether `n` is a configured favourite namespace.
+    pub fn is_favorite_namespace(&self, n: &str) -> bool {
+        self.namespace_favorites.iter().any(|f| f == n)
+    }
+
+    /// Whether `n` is a session-recent namespace for the current context.
+    pub fn is_recent_namespace(&self, n: &str) -> bool {
+        self.recent_namespaces
+            .get(&self.cluster.context)
+            .is_some_and(|dq| dq.iter().any(|r| r == n))
+    }
+
+    /// Record a real namespace selection into the current context's recents
+    /// (newest first, deduped, bounded). `<all>`/empty are not recorded.
+    pub(super) fn note_recent_namespace(&mut self, ns: &str) {
+        if ns.is_empty() || ns == "<all>" {
+            return;
+        }
+        let dq = self
+            .recent_namespaces
+            .entry(self.cluster.context.clone())
+            .or_default();
+        dq.retain(|r| r != ns);
+        dq.push_front(ns.to_string());
+        while dq.len() > MAX_RECENT_NAMESPACES {
+            dq.pop_back();
+        }
     }
 
     pub(super) fn key_namespaces(&mut self, key: KeyEvent) {
@@ -131,6 +195,7 @@ impl App {
 
     pub(super) fn set_namespace(&mut self, sel: String) {
         self.namespace = normalize_ns(&sel);
+        self.note_recent_namespace(&sel);
         self.flash = format!("namespace: {}", self.namespace_label());
         self.flash_err = false;
         self.ns_filter.clear();
@@ -266,6 +331,7 @@ impl App {
     pub(super) fn apply_context_switch(&mut self, name: String, mut cluster: Box<Cluster>) {
         let resolved = self.config.resolve(&name, &cluster.cluster_name);
         self.user_aliases = resolved.config.aliases;
+        self.namespace_favorites = resolved.config.favorite_namespaces;
         self.plugins = resolved.config.plugins;
         self.bookmarks = resolved.config.bookmarks;
         self.workspaces = resolved.config.workspaces;
