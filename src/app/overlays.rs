@@ -84,12 +84,12 @@ impl App {
                             self.marked.clear();
                         }
                         ConfirmAction::Plugin {
-                            argv,
+                            jobs,
                             name,
                             mode,
                             timeout,
                         } => {
-                            self.launch_plugin(argv, name, mode, timeout);
+                            self.launch_plugin(jobs, name, mode, timeout);
                         }
                     }
                 }

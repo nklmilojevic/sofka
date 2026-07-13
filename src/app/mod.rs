@@ -186,9 +186,10 @@ enum ConfirmAction {
     /// Uninstall one or more Helm releases (`helm uninstall`), `(name, ns)`
     /// per release — bulk when marked, like [`ConfirmAction::Delete`].
     HelmUninstall { targets: Vec<(String, String)> },
-    /// Run a confirmed plugin (`confirm`/`dangerous`) once accepted.
+    /// Run a confirmed plugin (`confirm`/`dangerous`) once accepted — one job
+    /// (label, argv) per target, so a bulk run confirms once.
     Plugin {
-        argv: Vec<String>,
+        jobs: Vec<(String, Vec<String>)>,
         name: String,
         mode: PluginMode,
         timeout: u64,
