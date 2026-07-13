@@ -83,6 +83,14 @@ impl App {
                             self.do_helm_uninstall(targets);
                             self.marked.clear();
                         }
+                        ConfirmAction::Plugin {
+                            argv,
+                            name,
+                            mode,
+                            timeout,
+                        } => {
+                            self.launch_plugin(argv, name, mode, timeout);
+                        }
                     }
                 }
                 self.mode = Mode::Table;

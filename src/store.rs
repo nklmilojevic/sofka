@@ -55,6 +55,21 @@ pub enum Msg {
         title: String,
         findings: Vec<crate::explain::Finding>,
     },
+    /// Captured output of an `output = "popup"` plugin run.
+    PluginOutput {
+        generation: u64,
+        title: String,
+        lines: Vec<String>,
+        /// Set when the plugin failed or timed out (a nonzero exit, stderr).
+        warn: Option<String>,
+    },
+    /// Completion notice for an `output = "background"` plugin run.
+    PluginDone {
+        generation: u64,
+        name: String,
+        ok: bool,
+        summary: String,
+    },
     /// Result of an off-thread `kubectl describe` (or its YAML fallback).
     Detail {
         generation: u64,

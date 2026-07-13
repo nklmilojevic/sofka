@@ -210,9 +210,16 @@ impl App {
         true
     }
 
-    /// Substitute placeholders and queue the plugin's shell-out.
+    /// Resolve placeholders, then run the plugin — after a confirmation prompt
+    /// when it's marked `confirm`/`dangerous`.
     fn run_plugin(&mut self, plugin: crate::config::Plugin) {
-        if self.deny_readonly() {
+        // A mutating plugin (the default) is blocked in read-only mode; one
+        // explicitly declared read-only stays available.
+        if plugin.mutating.unwrap_or(true) && self.readonly {
+            self.flash_warn(&format!(
+                "read-only mode — plugin '{}' may mutate (set mutating = false to allow)",
+                plugin.name
+            ));
             return;
         }
         let Some(obj) = self.selected_ref() else {
@@ -222,19 +229,126 @@ impl App {
         let name = obj.metadata.name.clone().unwrap_or_default();
         let ns = obj.metadata.namespace.clone().unwrap_or_default();
         let ctx = self.cluster.context.clone();
+        let cluster = self.cluster.cluster_name.clone();
         let res = self.kind_plural.clone();
+        let filter = self.filter.clone();
+        let (group, version, kind) = self
+            .kind
+            .as_ref()
+            .map(|k| (k.ar.group.clone(), k.ar.version.clone(), k.ar.kind.clone()))
+            .unwrap_or_default();
+        // Substitute each placeholder as one whole argument — never spliced
+        // into a shell string. `$NAMESPACE` before `$NS`/`$NAME` so the longer
+        // token wins.
         let subst = |s: &str| {
             s.replace("$NAMESPACE", &ns)
                 .replace("$NS", &ns)
                 .replace("$NAME", &name)
                 .replace("$CONTEXT", &ctx)
+                .replace("$CLUSTER", &cluster)
                 .replace("$RESOURCE", &res)
+                .replace("$GROUP", &group)
+                .replace("$VERSION", &version)
+                .replace("$KIND", &kind)
+                .replace("$FILTER", &filter)
         };
-        let mut argv = vec![subst(&plugin.command)];
+
+        // argv-by-default; `shell = true` opts into `sh -c`, still passing the
+        // substituted args as positional parameters ($1, $2, …) rather than
+        // interpolating them into the script.
+        let mut argv = if plugin.shell {
+            vec![
+                "sh".into(),
+                "-c".into(),
+                subst(&plugin.command),
+                "sofka".into(),
+            ]
+        } else {
+            vec![subst(&plugin.command)]
+        };
         argv.extend(plugin.args.iter().map(|a| subst(a)));
-        self.flash = format!("plugin: {}", plugin.name);
-        self.flash_err = false;
-        self.pending = Some(Suspend::Shell(argv));
+
+        let mode = match plugin.output.as_deref() {
+            Some("popup") => PluginMode::Popup,
+            Some("background") => PluginMode::Background,
+            _ => PluginMode::Terminal,
+        };
+        let timeout = plugin
+            .timeout
+            .as_deref()
+            .and_then(|t| crate::providers::parse_lookback(t).ok())
+            .unwrap_or(30)
+            .max(1) as u64;
+
+        if plugin.confirm || plugin.dangerous {
+            let cmd = truncate_cmd(&argv);
+            self.confirm_label = if plugin.dangerous {
+                format!("⚠ Run dangerous plugin '{}'?  {cmd}", plugin.name)
+            } else {
+                format!("Run plugin '{}'?  {cmd}", plugin.name)
+            };
+            self.confirm_action = Some(ConfirmAction::Plugin {
+                argv,
+                name: plugin.name.clone(),
+                mode,
+                timeout,
+            });
+            self.mode = Mode::Confirm;
+            return;
+        }
+        self.launch_plugin(argv, plugin.name.clone(), mode, timeout);
+    }
+
+    /// Dispatch a resolved plugin invocation by its output mode.
+    pub(super) fn launch_plugin(
+        &mut self,
+        argv: Vec<String>,
+        name: String,
+        mode: PluginMode,
+        timeout: u64,
+    ) {
+        if argv.is_empty() {
+            return;
+        }
+        match mode {
+            PluginMode::Terminal => {
+                self.flash = format!("plugin: {name}");
+                self.flash_err = false;
+                self.pending = Some(Suspend::Shell(argv));
+            }
+            PluginMode::Popup => {
+                // Mirror describe: stay put, swap to the doc view when output
+                // lands, so a view switch mid-run cleanly drops the result.
+                self.set_return_mode();
+                self.flash = format!("plugin: {name}…");
+                self.flash_err = false;
+                self.spawn_plugin(argv, format!("{name} — output"), mode, timeout);
+            }
+            PluginMode::Background => {
+                self.flash = format!("plugin: {name} (background)…");
+                self.flash_err = false;
+                self.spawn_plugin(argv, name, mode, timeout);
+            }
+        }
+    }
+
+    /// Run a plugin off-thread with a timeout and bounded output capture, then
+    /// report back via [`Msg`]. A hung command can't freeze the UI: the timeout
+    /// aborts it and the result is generation-gated like every other stream.
+    fn spawn_plugin(&mut self, argv: Vec<String>, title: String, mode: PluginMode, timeout: u64) {
+        let tx = self.tx.clone();
+        let genr = self.generation;
+        tokio::spawn(async move {
+            let run = tokio::process::Command::new(&argv[0])
+                .args(&argv[1..])
+                .output();
+            let outcome = tokio::time::timeout(Duration::from_secs(timeout), run).await;
+            let msg = match mode {
+                PluginMode::Popup => plugin_popup_msg(genr, title, timeout, outcome),
+                _ => plugin_done_msg(genr, title, timeout, outcome),
+            };
+            let _ = tx.send(msg).await;
+        });
     }
 
     pub(super) fn key_command(&mut self, key: KeyEvent) {
@@ -800,4 +914,120 @@ fn is_ctx_command(head: &str) -> bool {
     PALETTE_COMMANDS
         .iter()
         .any(|c| matches!(c.action, PaletteAction::Ctx) && c.names.contains(&head))
+}
+
+/// Bound the number of captured output lines and total bytes from a
+/// popup/background plugin, so a chatty command can't balloon memory or the
+/// redraw. Mirrors the log view's tail-buffer discipline.
+const PLUGIN_MAX_LINES: usize = 5_000;
+const PLUGIN_MAX_BYTES: usize = 1 << 20; // 1 MiB
+
+/// A short, single-line preview of an argv for the confirmation dialog.
+fn truncate_cmd(argv: &[String]) -> String {
+    let joined = argv.join(" ");
+    if joined.chars().count() > 120 {
+        let mut s: String = joined.chars().take(119).collect();
+        s.push('…');
+        s
+    } else {
+        joined
+    }
+}
+
+type SpawnOutcome = Result<std::io::Result<std::process::Output>, tokio::time::error::Elapsed>;
+
+/// Split captured bytes into bounded display lines.
+fn bounded_lines(bytes: &[u8]) -> Vec<String> {
+    let text = String::from_utf8_lossy(&bytes[..bytes.len().min(PLUGIN_MAX_BYTES)]);
+    let mut lines: Vec<String> = text
+        .lines()
+        .take(PLUGIN_MAX_LINES)
+        .map(str::to_string)
+        .collect();
+    if text.lines().count() > PLUGIN_MAX_LINES {
+        lines.push(format!("… output truncated at {PLUGIN_MAX_LINES} lines"));
+    }
+    lines
+}
+
+/// First non-empty line of stderr, for a compact failure summary.
+fn stderr_summary(stderr: &[u8]) -> String {
+    String::from_utf8_lossy(stderr)
+        .lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty())
+        .unwrap_or("failed")
+        .chars()
+        .take(160)
+        .collect()
+}
+
+/// Build the [`Msg::PluginOutput`] for a finished popup run.
+fn plugin_popup_msg(generation: u64, title: String, timeout: u64, outcome: SpawnOutcome) -> Msg {
+    match outcome {
+        Err(_) => Msg::PluginOutput {
+            generation,
+            title,
+            lines: vec![format!("timed out after {timeout}s")],
+            warn: Some(format!("plugin timed out after {timeout}s")),
+        },
+        Ok(Err(e)) => Msg::PluginOutput {
+            generation,
+            title,
+            lines: vec![format!("failed to run: {e}")],
+            warn: Some(format!("plugin failed to start: {e}")),
+        },
+        Ok(Ok(out)) => {
+            let mut lines = bounded_lines(&out.stdout);
+            let warn = if out.status.success() {
+                if lines.is_empty() {
+                    lines.push("(no output)".into());
+                }
+                None
+            } else {
+                let err = stderr_summary(&out.stderr);
+                if !err.is_empty() {
+                    lines.push(String::new());
+                    lines.push(format!("[stderr] {err}"));
+                }
+                Some(format!("plugin exited {}", exit_label(&out.status)))
+            };
+            Msg::PluginOutput {
+                generation,
+                title,
+                lines,
+                warn,
+            }
+        }
+    }
+}
+
+/// Build the [`Msg::PluginDone`] notification for a finished background run.
+fn plugin_done_msg(generation: u64, name: String, timeout: u64, outcome: SpawnOutcome) -> Msg {
+    let (ok, summary) = match outcome {
+        Err(_) => (false, format!("timed out after {timeout}s")),
+        Ok(Err(e)) => (false, format!("failed to start: {e}")),
+        Ok(Ok(out)) if out.status.success() => (true, "done".into()),
+        Ok(Ok(out)) => (
+            false,
+            format!(
+                "exited {} — {}",
+                exit_label(&out.status),
+                stderr_summary(&out.stderr)
+            ),
+        ),
+    };
+    Msg::PluginDone {
+        generation,
+        name,
+        ok,
+        summary,
+    }
+}
+
+fn exit_label(status: &std::process::ExitStatus) -> String {
+    match status.code() {
+        Some(c) => format!("code {c}"),
+        None => "by signal".into(),
+    }
 }

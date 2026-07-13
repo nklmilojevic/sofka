@@ -267,7 +267,7 @@ impl App {
         let resolved = self.config.resolve(&name, &cluster.cluster_name);
         self.user_aliases = resolved.config.aliases;
         self.plugins = resolved.config.plugins;
-        let plugin_warnings = crate::config::plugin_key_warnings(&self.plugins);
+        let plugin_warnings = crate::config::plugin_warnings(&self.plugins);
         let (views, view_warnings) = crate::views::compile(&resolved.config.views);
         self.user_views = views;
         let (thresholds, threshold_warnings) =

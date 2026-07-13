@@ -152,7 +152,7 @@ async fn main() -> Result<()> {
     app.all_contexts = Cluster::list_contexts();
     app.user_aliases = cfg.aliases.clone();
     app.plugins = cfg.plugins.clone();
-    for w in config::plugin_key_warnings(&app.plugins) {
+    for w in config::plugin_warnings(&app.plugins) {
         eprintln!("warning: {w}");
         config_warnings.push(w);
     }
