@@ -31,6 +31,8 @@ use tokio::task::JoinHandle;
 use crate::k8s::{Cluster, Kind};
 use crate::store::{Msg, Pulse, Store, XrayItem, row_key};
 
+pub(crate) use guardrails::ConfirmLevel;
+
 /// Maximum number of buffered log lines while following. A chatty pod would
 /// otherwise grow the buffer (and the unbounded channel feeding it) without
 /// limit; we keep the most recent lines, like k9s' tail buffer.
@@ -181,6 +183,8 @@ enum ConfirmAction {
     /// Edit a Flux-managed object (`kubectl edit`) after warning that the edit
     /// will be reverted on the next reconcile.
     Edit { argv: Vec<String> },
+    /// Shell into a pod, once a guardrail confirmation is satisfied.
+    Exec { ns: String, name: String },
     /// One or more node names to cordon and drain.
     Drain { targets: Vec<String> },
     /// Roll a Helm release back to an earlier revision (`helm rollback`) —
@@ -267,6 +271,12 @@ enum PromptKind {
     /// New lookback period for the provider logs view (`T`) — the only
     /// prompt opened from (and returning to) [`Mode::Logs`].
     ProviderLookback,
+    /// A guardrail typed-confirmation: the action runs only if the input
+    /// matches `expected` (a resource or context name).
+    GuardConfirm {
+        expected: String,
+        action: Box<ConfirmAction>,
+    },
 }
 
 #[derive(Default)]
@@ -664,6 +674,9 @@ pub struct App {
     /// Saved workspaces (`[[workspaces]]`), re-applied on context switch and
     /// `:reload`.
     pub workspaces: Vec<crate::config::Workspace>,
+    /// Declarative guardrails (`[[guardrails]]`), re-applied on context switch
+    /// and `:reload`.
+    pub guardrails: Vec<crate::config::Guardrail>,
     /// A workspace waiting for an in-flight context switch before it opens.
     pub pending_workspace: Option<crate::config::Workspace>,
     /// The workspace currently being cycled with `Tab`/`Shift-Tab`, if any.
@@ -844,6 +857,7 @@ impl App {
             workspaces: Vec::new(),
             pending_workspace: None,
             active_workspace: None,
+            guardrails: Vec::new(),
             rbac_allowed: None,
             last_rbac_ns: None,
             container_list: Vec::new(),
@@ -937,6 +951,7 @@ mod dashboards;
 mod details;
 mod explain;
 mod gitops;
+mod guardrails;
 mod helpers;
 mod input;
 mod lifecycle;

@@ -18,22 +18,30 @@ impl App {
         if targets.is_empty() {
             return;
         }
+        let action = if force { "force-delete" } else { "delete" };
+        let plural = self.kind_plural.clone();
+        let Some(level) = self.guard(action, &plural, &targets, ConfirmLevel::Plain) else {
+            return;
+        };
         let cascade = Cascade::Background;
         let managed = self.recreated_note();
-        self.confirm_label = delete_confirm_label(
-            &self.kind_plural,
-            &targets,
-            force,
-            cascade,
-            managed.as_deref(),
+        let label = delete_confirm_label(&plural, &targets, force, cascade, managed.as_deref());
+        let name_hint = if targets.len() == 1 {
+            targets[0].0.clone()
+        } else {
+            targets.len().to_string()
+        };
+        self.begin_guarded(
+            ConfirmAction::Delete {
+                targets,
+                force,
+                cascade,
+                managed,
+            },
+            label,
+            level,
+            name_hint,
         );
-        self.confirm_action = Some(ConfirmAction::Delete {
-            targets,
-            force,
-            cascade,
-            managed,
-        });
-        self.mode = Mode::Confirm;
     }
 
     /// A short "managed by X — recreated on delete" warning when any object in
@@ -194,7 +202,13 @@ impl App {
         if targets.is_empty() {
             return;
         }
-        self.confirm_label = if targets.len() == 1 {
+        // Guardrails match on (name, namespace); nodes are cluster-scoped.
+        let pairs: Vec<(String, String)> =
+            targets.iter().map(|n| (n.clone(), String::new())).collect();
+        let Some(level) = self.guard("drain", "nodes", &pairs, ConfirmLevel::Plain) else {
+            return;
+        };
+        let label = if targets.len() == 1 {
             format!("Drain node {}? Cordon and evict eligible pods.", targets[0])
         } else {
             format!(
@@ -202,8 +216,12 @@ impl App {
                 targets.len()
             )
         };
-        self.confirm_action = Some(ConfirmAction::Drain { targets });
-        self.mode = Mode::Confirm;
+        let name_hint = if targets.len() == 1 {
+            targets[0].clone()
+        } else {
+            targets.len().to_string()
+        };
+        self.begin_guarded(ConfirmAction::Drain { targets }, label, level, name_hint);
     }
 
     pub(super) fn do_drain_nodes(&mut self, targets: Vec<String>) {
@@ -695,7 +713,21 @@ impl App {
         };
         let name = obj.metadata.name.clone().unwrap_or_default();
         let ns = obj.metadata.namespace.clone().unwrap_or_default();
-        self.exec_into(ns, name, None);
+        // Shell is gated by guardrails (deny / confirm) but has no default
+        // confirmation, so an unguarded shell opens straight away.
+        let targets = [(name.clone(), ns.clone())];
+        let Some(level) = self.guard("shell", "pods", &targets, ConfirmLevel::None) else {
+            return;
+        };
+        self.begin_guarded(
+            ConfirmAction::Exec {
+                ns,
+                name: name.clone(),
+            },
+            format!("Shell into {name}?"),
+            level,
+            name,
+        );
     }
 
     /// Shell into `pod`, optionally pinned to `container` (k9s-style `-c`).
@@ -923,9 +955,11 @@ impl App {
         self.plugins = resolved.config.plugins;
         self.bookmarks = resolved.config.bookmarks;
         self.workspaces = resolved.config.workspaces;
+        self.guardrails = resolved.config.guardrails;
         warnings.extend(crate::config::plugin_warnings(&self.plugins));
         warnings.extend(crate::config::bookmark_warnings(&self.bookmarks));
         warnings.extend(crate::config::workspace_warnings(&self.workspaces));
+        warnings.extend(crate::config::guardrail_warnings(&self.guardrails));
         // Thresholds only change cell coloring (never the column layout), so —
         // unlike custom views — they're safe to re-apply live without yanking
         // the current view.

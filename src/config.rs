@@ -62,6 +62,9 @@ pub struct Config {
     /// Task-oriented collections of views — see [`Workspace`]. Validated by
     /// [`workspace_warnings`].
     pub workspaces: Vec<Workspace>,
+    /// Declarative safety policies gating dangerous actions — see
+    /// [`Guardrail`]. Validated by [`guardrail_warnings`].
+    pub guardrails: Vec<Guardrail>,
     /// Custom table views keyed by resource — see [`ViewConfig`]. Compiled
     /// and validated by [`crate::views::compile`].
     pub views: HashMap<String, ViewConfig>,
@@ -480,6 +483,70 @@ pub fn workspace_warnings(workspaces: &[Workspace]) -> Vec<String> {
                     "workspace {label:?}: unknown view {kind:?} (expected xray/pulse) — ignored"
                 ));
             }
+        }
+    }
+    warns
+}
+
+/// A declarative safety policy: match dangerous actions by context, namespace,
+/// resource, and action, then require extra confirmation, deny them, or cap a
+/// bulk selection. Gates `delete`, `force-delete`, `drain`, and `shell` today.
+/// Empty match lists mean "any"; glob `*` is supported in the patterns.
+///
+/// ```toml
+/// [[guardrails]]
+/// contexts = ["prod-*"]
+/// namespaces = ["kube-system", "payments"]
+/// actions = ["delete", "force-delete", "drain"]
+/// confirmation = "type-resource-name"   # confirm | type-resource-name | type-context-name
+///
+/// [[guardrails]]
+/// contexts = ["prod-*"]
+/// actions = ["force-delete", "drain", "shell"]
+/// deny = true
+/// reason = "not allowed on prod — use a break-glass context"
+///
+/// [[guardrails]]
+/// actions = ["delete"]
+/// max_bulk = 10          # refuse a marked delete of more than 10 at once
+/// ```
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct Guardrail {
+    /// Kubeconfig contexts this applies to (globs). Empty = any.
+    pub contexts: Vec<String>,
+    /// Namespaces this applies to (globs). Empty = any.
+    pub namespaces: Vec<String>,
+    /// Resource plurals/kinds this applies to (globs). Empty = any.
+    pub resources: Vec<String>,
+    /// Actions this applies to: `delete`, `force-delete`, `drain`, `shell`.
+    /// Empty = any.
+    pub actions: Vec<String>,
+    /// Block the action outright.
+    pub deny: bool,
+    /// Extra confirmation required: `confirm`, `type-resource-name`, or
+    /// `type-context-name`.
+    pub confirmation: Option<String>,
+    /// Maximum number of targets a single (bulk) action may touch.
+    pub max_bulk: Option<usize>,
+    /// Human note shown when the guardrail blocks or confirms.
+    pub reason: Option<String>,
+}
+
+/// Validation warnings for guardrails: an unknown `confirmation` mode.
+pub fn guardrail_warnings(guardrails: &[Guardrail]) -> Vec<String> {
+    let mut warns = Vec::new();
+    for (i, g) in guardrails.iter().enumerate() {
+        if let Some(c) = &g.confirmation
+            && !matches!(
+                c.as_str(),
+                "confirm" | "type-resource-name" | "type-context-name"
+            )
+        {
+            warns.push(format!(
+                "guardrail #{}: unknown confirmation {c:?} (expected confirm/type-resource-name/type-context-name) — treated as confirm",
+                i + 1
+            ));
         }
     }
     warns

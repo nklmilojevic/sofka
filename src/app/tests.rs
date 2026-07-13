@@ -2410,6 +2410,61 @@ async fn deleting_managed_object_warns_it_will_be_recreated() {
 }
 
 #[tokio::test]
+async fn guardrail_denies_an_action() {
+    let (mut app, _rx) = app_with_pod();
+    app.guardrails = vec![crate::config::Guardrail {
+        actions: vec!["delete".into()],
+        deny: true,
+        reason: Some("prod is locked".into()),
+        ..Default::default()
+    }];
+    app.request_delete(false);
+    assert_ne!(app.mode, Mode::Confirm);
+    assert!(app.confirm_action.is_none(), "denied — nothing to confirm");
+    assert!(
+        app.flash.contains("blocked by guardrail") && app.flash.contains("prod is locked"),
+        "{}",
+        app.flash
+    );
+}
+
+#[tokio::test]
+async fn guardrail_caps_bulk_delete() {
+    let (mut app, _rx) = app_with_two_marked_pods();
+    app.guardrails = vec![crate::config::Guardrail {
+        actions: vec!["delete".into()],
+        max_bulk: Some(1),
+        ..Default::default()
+    }];
+    app.request_delete(false);
+    assert_ne!(app.mode, Mode::Confirm);
+    assert!(app.flash.contains("exceeds the max"), "{}", app.flash);
+}
+
+#[tokio::test]
+async fn guardrail_type_resource_name_confirmation() {
+    let (mut app, _rx) = app_with_pod(); // single pod "a"
+    app.guardrails = vec![crate::config::Guardrail {
+        actions: vec!["delete".into()],
+        confirmation: Some("type-resource-name".into()),
+        ..Default::default()
+    }];
+    app.request_delete(false);
+    assert_eq!(app.mode, Mode::Prompt, "typed confirmation opens a prompt");
+
+    // A wrong name cancels without deleting.
+    app.prompt_input = "wrong".into();
+    app.handle_key(press(KeyCode::Enter)).unwrap();
+    assert!(app.flash.contains("did not match"), "{}", app.flash);
+
+    // The exact name proceeds.
+    app.request_delete(false);
+    app.prompt_input = "a".into();
+    app.handle_key(press(KeyCode::Enter)).unwrap();
+    assert!(app.flash.contains("deleting"), "{}", app.flash);
+}
+
+#[tokio::test]
 async fn readonly_gates_mutating_plugins_only() {
     let (mut app, _rx) = app_with_pod();
     app.readonly = true;
