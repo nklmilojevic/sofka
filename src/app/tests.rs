@@ -1052,17 +1052,18 @@ async fn log_lines_expand_tabs_and_strip_cr() {
 #[tokio::test]
 async fn log_buffer_is_capped() {
     let (mut app, _rx) = test_app();
-    for i in 0..(MAX_LOG_LINES + 50) {
+    let cap = app.logs_cfg.buffer;
+    for i in 0..(cap + 50) {
         app.handle_msg(Msg::LogLines {
             generation: app.log_gen,
             lines: vec![format!("line {i}")],
         });
     }
-    assert_eq!(app.logs.view.lines.len(), MAX_LOG_LINES);
+    assert_eq!(app.logs.view.lines.len(), cap);
     // Oldest lines dropped; newest retained.
     assert_eq!(
         app.logs.view.lines.back().unwrap(),
-        &format!("line {}", MAX_LOG_LINES + 49)
+        &format!("line {}", cap + 49)
     );
 }
 
@@ -1082,11 +1083,45 @@ async fn filtered_log_text_respects_active_filter() {
         app.filtered_log_text(),
         "api request started\nworker finished\napi request finished"
     );
-    app.logs.filter = "api".into();
+    app.logs.set_filter("api".into());
     assert_eq!(
         app.filtered_log_text(),
         "api request started\napi request finished"
     );
+}
+
+#[tokio::test]
+async fn log_filter_supports_regex_inverse_and_clear() {
+    let (mut app, _rx) = test_app();
+    app.mode = Mode::Logs;
+    app.handle_msg(Msg::LogLines {
+        generation: app.log_gen,
+        lines: vec![
+            "GET /api 200".into(),
+            "GET /healthz 200".into(),
+            "GET /api 503".into(),
+        ],
+    });
+
+    // Regex: keep 5xx.
+    app.logs.set_filter("/5\\d\\d/".into());
+    assert_eq!(app.filtered_log_text(), "GET /api 503");
+    assert!(!app.logs.matcher.is_error());
+
+    // Inverse substring: hide health checks.
+    app.logs.set_filter("!healthz".into());
+    assert_eq!(app.filtered_log_text(), "GET /api 200\nGET /api 503");
+
+    // Bad regex: flagged, matches nothing.
+    app.logs.set_filter("/[bad/".into());
+    assert!(app.logs.matcher.is_error());
+    assert_eq!(app.filtered_log_text(), "");
+
+    // `z` clears the buffer (stream keeps running underneath).
+    app.logs.set_filter(String::new());
+    app.handle_key(press(KeyCode::Char('z'))).unwrap();
+    assert!(app.logs.view.lines.is_empty());
+    assert!(app.flash.contains("cleared"), "{}", app.flash);
 }
 
 #[tokio::test]
@@ -1637,6 +1672,7 @@ async fn container_picker_shell_targets_selected_container() {
 #[tokio::test]
 async fn paused_logs_do_not_trim_below_paused_cap() {
     let (mut app, _rx) = test_app();
+    let cap = app.logs_cfg.buffer;
     app.logs.follow = false; // autoscroll OFF
     let lg = app.log_gen;
     let line = |i: usize| Msg::LogLines {
@@ -1645,16 +1681,16 @@ async fn paused_logs_do_not_trim_below_paused_cap() {
     };
     // Well past the *following* cap, but under the paused cap: nothing is
     // dropped, so a frozen view never appears to resume scrolling.
-    for i in 0..(MAX_LOG_LINES + 500) {
+    for i in 0..(cap + 500) {
         app.handle_msg(line(i));
     }
-    assert_eq!(app.logs.view.lines.len(), MAX_LOG_LINES + 500);
+    assert_eq!(app.logs.view.lines.len(), cap + 500);
 
     // Resuming follow trims the backlog back to the tight cap.
     app.mode = Mode::Logs;
     app.handle_key(press(KeyCode::Char('s'))).unwrap(); // follow on
     assert!(app.logs.follow);
-    assert_eq!(app.logs.view.lines.len(), MAX_LOG_LINES);
+    assert_eq!(app.logs.view.lines.len(), cap);
 }
 
 #[tokio::test]

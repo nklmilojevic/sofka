@@ -454,12 +454,11 @@ impl App {
     }
 
     pub(super) fn filtered_log_text(&self) -> String {
-        let f = self.logs.filter.to_lowercase();
         self.logs
             .view
             .lines
             .iter()
-            .filter(|l| f.is_empty() || l.to_lowercase().contains(&f))
+            .filter(|l| self.logs.matches(l))
             .cloned()
             .collect::<Vec<_>>()
             .join("\n")
@@ -1201,6 +1200,7 @@ impl App {
         self.guardrails = resolved.config.guardrails;
         self.debug = resolved.config.debug;
         self.bundle_cfg = resolved.config.bundle;
+        self.logs_cfg = resolved.config.logs;
         warnings.extend(crate::config::plugin_warnings(&self.plugins));
         warnings.extend(crate::config::bookmark_warnings(&self.bookmarks));
         warnings.extend(crate::config::workspace_warnings(&self.workspaces));

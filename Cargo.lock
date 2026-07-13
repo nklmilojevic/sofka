@@ -2432,6 +2432,7 @@ dependencies = [
  "k8s-openapi",
  "kube",
  "ratatui",
+ "regex",
  "serde",
  "serde_json",
  "serde_yaml",

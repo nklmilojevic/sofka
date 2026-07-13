@@ -888,7 +888,12 @@ impl App {
                 self.logs.follow = !self.logs.follow;
                 if self.logs.follow {
                     // Resumed tailing — trim the backlog accumulated while paused.
-                    let overflow = self.logs.view.lines.len().saturating_sub(MAX_LOG_LINES);
+                    let overflow = self
+                        .logs
+                        .view
+                        .lines
+                        .len()
+                        .saturating_sub(self.logs_cfg.buffer.max(1));
                     if overflow > 0 {
                         self.logs.view.lines.drain(0..overflow);
                     }
@@ -955,6 +960,14 @@ impl App {
                 self.copy_logs();
                 return;
             }
+            // Clear the on-screen buffer (the live stream keeps appending).
+            KeyCode::Char('z') => {
+                self.logs.view.lines.clear();
+                self.logs.view.scroll = 0;
+                self.flash = "log buffer cleared".into();
+                self.flash_err = false;
+                return;
+            }
             KeyCode::Char('/') => {
                 self.mode = Mode::LogFilter;
                 return;
@@ -1008,14 +1021,20 @@ impl App {
     pub(super) fn key_log_filter(&mut self, key: KeyEvent) {
         match key.code {
             KeyCode::Esc => {
-                self.logs.filter.clear();
+                self.logs.set_filter(String::new());
                 self.mode = Mode::Logs;
             }
             KeyCode::Enter => self.mode = Mode::Logs,
             KeyCode::Backspace => {
-                self.logs.filter.pop();
+                let mut f = self.logs.filter.clone();
+                f.pop();
+                self.logs.set_filter(f);
             }
-            KeyCode::Char(c) => self.logs.filter.push(c),
+            KeyCode::Char(c) => {
+                let mut f = self.logs.filter.clone();
+                f.push(c);
+                self.logs.set_filter(f);
+            }
             _ => {}
         }
     }
