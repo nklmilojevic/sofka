@@ -6,6 +6,7 @@ mod app;
 mod bundle;
 mod columns;
 mod config;
+mod diagnostics;
 mod explain;
 mod filter;
 mod gitops;
@@ -71,12 +72,24 @@ struct Args {
     /// needed). Lets you eyeball the UI headlessly.
     #[arg(long)]
     snapshot: bool,
+
+    /// Print version/build, config sources, directories, and the current
+    /// kubeconfig context, then exit (no cluster connection). For live
+    /// discovery/metrics/watch status, use `:info` inside the TUI.
+    #[arg(long)]
+    info: bool,
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
     let (loader, mut config_warnings) = config::ConfigLoader::load();
+
+    // `--info`: print static diagnostics (no cluster connection) and exit.
+    if args.info {
+        print_info(&loader, &config_warnings);
+        return Ok(());
+    }
 
     // Connect before taking over the terminal so errors are readable. An
     // unreachable current context isn't fatal for the interactive TUI: start
@@ -366,6 +379,69 @@ fn suspend_and_run(terminal: &mut ratatui::DefaultTerminal, argv: &[String]) {
         .status();
     *terminal = ratatui::init();
     let _ = terminal.clear();
+}
+
+/// `--info`: print static runtime diagnostics (no cluster connection). Emits
+/// only identifiers and paths — never credentials, tokens, or Secret values.
+fn print_info(loader: &config::ConfigLoader, warnings: &[String]) {
+    println!("sofka v{}", diagnostics::VERSION);
+    println!("  build: {}", diagnostics::build_line());
+
+    let (context, cluster, server) = k8s::current_context_info()
+        .unwrap_or_else(|| ("(none)".into(), String::new(), String::new()));
+    println!();
+    println!("Kubeconfig");
+    println!("  current context: {context}");
+    println!(
+        "  cluster:         {}",
+        if cluster.is_empty() {
+            "(unknown)"
+        } else {
+            &cluster
+        }
+    );
+    println!(
+        "  api server:      {}",
+        if server.is_empty() {
+            "(unknown)"
+        } else {
+            &server
+        }
+    );
+
+    println!();
+    println!("Config sources");
+    match loader.base_path() {
+        Some(path) => {
+            let state = if loader.has_base() {
+                "loaded"
+            } else if path.exists() {
+                "invalid — using defaults"
+            } else {
+                "absent — using defaults"
+            };
+            println!("  {} ({state})", path.display());
+        }
+        None => println!("  no config directory — using defaults"),
+    }
+    for path in loader.override_paths(&context, &cluster) {
+        println!("  {} ({})", path.display(), config::file_state(&path));
+    }
+
+    println!();
+    println!("Directories");
+    println!("  state:     {}", diagnostics::state_dir().display());
+    println!("  snapshots: {}", snapshot::snapshots_dir().display());
+    println!("  bundles:   {}", std::env::temp_dir().display());
+
+    if warnings.is_empty() {
+        println!("\nNo config validation warnings.");
+    } else {
+        println!("\nWarnings [{}]", warnings.len());
+        for w in warnings {
+            println!("  • {w}");
+        }
+    }
 }
 
 async fn run(

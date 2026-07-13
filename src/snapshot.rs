@@ -173,24 +173,10 @@ pub fn age(at: i64, now: i64) -> String {
     }
 }
 
-/// Directory snapshots are written to and browsed from: `$XDG_STATE_HOME/sofka/
-/// snapshots`, else `~/.local/state/sofka/snapshots`, else a temp fallback.
+/// Directory snapshots are written to and browsed from:
+/// `<state-dir>/snapshots` (see [`crate::diagnostics::state_dir`]).
 pub fn snapshots_dir() -> PathBuf {
-    if let Ok(x) = std::env::var("XDG_STATE_HOME")
-        && !x.is_empty()
-    {
-        return PathBuf::from(x).join("sofka").join("snapshots");
-    }
-    if let Ok(home) = std::env::var("HOME")
-        && !home.is_empty()
-    {
-        return PathBuf::from(home)
-            .join(".local")
-            .join("state")
-            .join("sofka")
-            .join("snapshots");
-    }
-    std::env::temp_dir().join("sofka").join("snapshots")
+    crate::diagnostics::state_dir().join("snapshots")
 }
 
 #[cfg(test)]

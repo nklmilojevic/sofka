@@ -340,6 +340,29 @@ fn current_context_name() -> Option<String> {
     kubeconfig.current_context
 }
 
+/// The current kubeconfig context, its cluster name, and API-server URL, read
+/// offline (no connection). For `--info`. `None` when there's no kubeconfig or
+/// no current context. The server URL never carries credentials.
+pub fn current_context_info() -> Option<(String, String, String)> {
+    let kubeconfig = kube::config::Kubeconfig::read().ok()?;
+    let context = kubeconfig.current_context.clone()?;
+    let cluster_name = kubeconfig
+        .contexts
+        .iter()
+        .find(|c| c.name == context)
+        .and_then(|c| c.context.as_ref())
+        .map(|c| c.cluster.clone())
+        .unwrap_or_default();
+    let server = kubeconfig
+        .clusters
+        .iter()
+        .find(|c| c.name == cluster_name)
+        .and_then(|c| c.cluster.as_ref())
+        .and_then(|c| c.server.clone())
+        .unwrap_or_default();
+    Some((context, cluster_name, server))
+}
+
 /// Kubeconfig cluster name a context points at, when the kubeconfig knows it.
 fn cluster_name_for(context: &str) -> Option<String> {
     let kubeconfig = kube::config::Kubeconfig::read().ok()?;

@@ -4038,6 +4038,30 @@ async fn reload_palette_command_dispatches() {
 }
 
 #[tokio::test]
+async fn info_view_reports_version_cluster_and_watch_health() {
+    let (mut app, _rx) = test_app();
+    app.watch_errors = 3;
+    app.last_error = Some("connection refused".into());
+    assert!(app.run_palette_command("info"));
+    assert_eq!(app.mode, Mode::Detail);
+    let text = app
+        .detail
+        .lines
+        .iter()
+        .cloned()
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(text.contains(&format!("sofka v{}", crate::diagnostics::VERSION)));
+    assert!(text.contains("Cluster"), "{text}");
+    assert!(text.contains("api server:"), "{text}");
+    assert!(text.contains("errors: 3"), "{text}");
+    assert!(text.contains("connection refused"), "{text}");
+    assert!(text.contains("Directories"), "{text}");
+    // Never leaks credentials — the report is identifiers and counts only.
+    assert!(!text.to_lowercase().contains("bearer"), "{text}");
+}
+
+#[tokio::test]
 async fn config_view_lists_sources_active_skin_and_warnings() {
     let dir = std::env::temp_dir().join(format!("sofka-app-cfg-view-{}", std::process::id()));
     write_config(&dir, "[skin]\nname = \"catppuccin-mocha\"\n");

@@ -524,6 +524,7 @@ impl App {
             PaletteAction::BundleSave => self.save_bundle(),
             PaletteAction::Snapshot => self.take_snapshot(""),
             PaletteAction::Snapshots => self.open_snapshots(),
+            PaletteAction::Info => self.open_info(),
             PaletteAction::Diff => self.open_diff(),
             PaletteAction::Events => self.open_events(),
             PaletteAction::PortForwards => self.open_port_forwards(),

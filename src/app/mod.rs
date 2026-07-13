@@ -372,6 +372,7 @@ enum PaletteAction {
     BundleSave,
     Snapshot,
     Snapshots,
+    Info,
     Diff,
     Events,
     PortForwards,
@@ -470,6 +471,10 @@ const PALETTE_COMMANDS: &[PaletteCommand] = &[
     PaletteCommand {
         action: PaletteAction::ConfigInfo,
         names: &["config", "cfg"],
+    },
+    PaletteCommand {
+        action: PaletteAction::Info,
+        names: &["info", "diagnostics", "about"],
     },
     PaletteCommand {
         action: PaletteAction::Quit,
@@ -795,6 +800,12 @@ pub struct App {
     pub pending_bundle: Option<(String, String)>,
     /// Session-local log of mutating actions taken (`:journal`).
     pub journal: crate::journal::Journal,
+    /// Count of watch/stream errors seen this session, for `:info` diagnostics.
+    pub watch_errors: u64,
+    /// The most recent error message, for `:info` diagnostics.
+    pub last_error: Option<String>,
+    /// Whether the Metrics API has ever returned data this session.
+    pub metrics_seen: bool,
     /// A workspace waiting for an in-flight context switch before it opens.
     pub pending_workspace: Option<crate::config::Workspace>,
     /// The workspace currently being cycled with `Tab`/`Shift-Tab`, if any.
@@ -985,6 +996,9 @@ impl App {
             bundle_cfg: crate::config::BundleConfig::default(),
             pending_bundle: None,
             journal: crate::journal::Journal::default(),
+            watch_errors: 0,
+            last_error: None,
+            metrics_seen: false,
             rbac_allowed: None,
             last_rbac_ns: None,
             container_list: Vec::new(),
@@ -1079,6 +1093,7 @@ mod bookmarks;
 mod bundle;
 mod dashboards;
 mod details;
+mod diagnostics;
 mod explain;
 mod gitops;
 mod guardrails;

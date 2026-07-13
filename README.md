@@ -243,6 +243,10 @@ Not a marketing number - these are specific, checkable design choices:
 - **Config file** (TOML): aliases, default namespace/resource, favourite
   namespaces, plugins, bookmarks, workspaces, views, thresholds, log provider,
   skin — with per-cluster/per-context overrides and live `:reload`.
+- **Runtime diagnostics** (`:info`, or `sofka --info`) - version/build, config
+  sources, live context/cluster/API server, discovery and Metrics API status,
+  watch error counts, and the state/snapshot/bundle directories. Prints only
+  identifiers and counts — never credentials, tokens, or Secret values.
 
 ## Installation
 
@@ -657,9 +661,11 @@ apply without restarting.
 sofka --check                # connect, run discovery, print a summary, exit
 sofka pods --snapshot        # render one frame of a resource view to stdout
 sofka dp -A --snapshot       # deployments, all namespaces
+sofka --info                 # version/build, config sources, dirs, kubeconfig context (no connection)
 ```
 
-These double as CI smoke tests.
+These double as CI smoke tests. `--info` prints only identifiers and paths —
+never credentials, tokens, or Secret values.
 
 ## Usage
 
@@ -704,6 +710,7 @@ header) and switching away restores write mode.
 | `:journal` / `:audit`                         | session-local log of the mutating actions you've taken                                                                                |
 | `:ctx` / `:ctx <name>`                        | context switcher popup / switch directly (the name tab-completes)                                                                     |
 | `:skin`                                       | switch the color skin live (`:skin gruvbox-dark` applies directly)                                                                    |
+| `:reload` / `:config` / `:info`               | reload config from disk · config sources + warnings · runtime diagnostics                                                             |
 | `l` / `p`                                     | logs (workload = all matching pods) / previous-container logs                                                                         |
 | `c`                                           | copy resource name to clipboard                                                                                                       |
 | `e`                                           | edit in `$EDITOR` (`kubectl edit`)                                                                                                    |
