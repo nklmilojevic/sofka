@@ -108,6 +108,8 @@ pub enum Mode {
     Skins,
     /// Browsing saved snapshots (`:snapshots`).
     Snapshots,
+    /// Cross-context fleet health dashboard (`:fleet`).
+    Fleet,
 }
 
 /// A request for the run loop to suspend the TUI and run an interactive
@@ -368,6 +370,7 @@ enum PaletteAction {
     Snapshot,
     Snapshots,
     Info,
+    Fleet,
     Diff,
     Events,
     PortForwards,
@@ -470,6 +473,10 @@ const PALETTE_COMMANDS: &[PaletteCommand] = &[
     PaletteCommand {
         action: PaletteAction::Info,
         names: &["info", "diagnostics", "about"],
+    },
+    PaletteCommand {
+        action: PaletteAction::Fleet,
+        names: &["fleet", "clusters", "multi"],
     },
     PaletteCommand {
         action: PaletteAction::Quit,
@@ -810,6 +817,12 @@ pub struct App {
     pub bundle_cfg: crate::config::BundleConfig,
     /// Log-view options (`[logs]`), re-applied on context switch and `:reload`.
     pub logs_cfg: crate::config::LogsConfig,
+    /// Cross-context fleet dashboard config (`[fleet]`).
+    pub fleet_cfg: crate::config::FleetConfig,
+    /// Fleet dashboard rows (one per configured context), filled in as each
+    /// context's summary lands.
+    pub fleet_rows: Vec<crate::fleet::FleetRow>,
+    pub fleet_state: ListState,
     /// The last bundle assembled by `:bundle`, previewed in the detail view and
     /// written to disk by `:bundle-save`: `(filename, text)`.
     pub pending_bundle: Option<(String, String)>,
@@ -1013,6 +1026,9 @@ impl App {
             launched_node_debuggers: Vec::new(),
             bundle_cfg: crate::config::BundleConfig::default(),
             logs_cfg: crate::config::LogsConfig::default(),
+            fleet_cfg: crate::config::FleetConfig::default(),
+            fleet_rows: Vec::new(),
+            fleet_state: ListState::default(),
             pending_bundle: None,
             journal: crate::journal::Journal::default(),
             watch_errors: 0,
@@ -1115,6 +1131,7 @@ mod dashboards;
 mod details;
 mod diagnostics;
 mod explain;
+mod fleet;
 mod gitops;
 mod guardrails;
 mod helpers;

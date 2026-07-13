@@ -83,6 +83,22 @@ pub struct Config {
     pub bundle: BundleConfig,
     /// Log-view options — see [`LogsConfig`].
     pub logs: LogsConfig,
+    /// Cross-context fleet dashboard (`:fleet`) — see [`FleetConfig`].
+    pub fleet: FleetConfig,
+}
+
+/// The opt-in cross-context fleet dashboard (`:fleet`). Only the kubeconfig
+/// contexts listed here are ever queried.
+///
+/// ```toml
+/// [fleet]
+/// contexts = ["prod-eu", "prod-us", "staging"]
+/// ```
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct FleetConfig {
+    /// Kubeconfig context names to summarize. Empty = the dashboard is off.
+    pub contexts: Vec<String>,
 }
 
 /// Log-view controls (kubelet streams).

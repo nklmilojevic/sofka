@@ -363,6 +363,12 @@ pub fn current_context_info() -> Option<(String, String, String)> {
     Some((context, cluster_name, server))
 }
 
+/// Public wrapper over [`cluster_name_for`] for resolving per-context config
+/// (fleet dashboard read-only policy) without a live connection.
+pub fn cluster_name_for_context(context: &str) -> String {
+    cluster_name_for(context).unwrap_or_default()
+}
+
 /// Kubeconfig cluster name a context points at, when the kubeconfig knows it.
 fn cluster_name_for(context: &str) -> Option<String> {
     let kubeconfig = kube::config::Kubeconfig::read().ok()?;
