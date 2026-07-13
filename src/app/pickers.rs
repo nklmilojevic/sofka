@@ -336,6 +336,7 @@ impl App {
         self.bookmarks = resolved.config.bookmarks;
         self.workspaces = resolved.config.workspaces;
         self.guardrails = resolved.config.guardrails;
+        self.debug = resolved.config.debug;
         let mut plugin_warnings = crate::config::plugin_warnings(&self.plugins);
         plugin_warnings.extend(crate::config::bookmark_warnings(&self.bookmarks));
         plugin_warnings.extend(crate::config::workspace_warnings(&self.workspaces));

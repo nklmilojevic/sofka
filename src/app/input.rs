@@ -517,6 +517,7 @@ impl App {
             PaletteAction::Gitops => self.open_gitops(),
             PaletteAction::CanI => self.open_can_i(),
             PaletteAction::Journal => self.open_journal(),
+            PaletteAction::Debug => self.request_debug(None),
             PaletteAction::Diff => self.open_diff(),
             PaletteAction::Events => self.open_events(),
             PaletteAction::PortForwards => self.open_port_forwards(),

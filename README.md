@@ -190,7 +190,7 @@ Not a marketing number - these are specific, checkable design choices:
   it - the same answer `kubectl auth can-i` gives, without leaving the TUI.
 - **Declarative guardrails** (`[[guardrails]]`) - config-defined rules that
   match on context/namespace/resource/action globs to **deny** a destructive
-  action outright (`delete`/`force-delete`/`drain`/`shell`), force
+  action outright (`delete`/`force-delete`/`drain`/`shell`/`debug`), force
   **type-to-confirm** (resource name or `context/name`), or cap **bulk**
   operations - so "never delete in prod", "always confirm a prod shell", and
   "no more than one at once" are enforced, not remembered.
@@ -198,6 +198,11 @@ Not a marketing number - these are specific, checkable design choices:
   of every mutating action you've taken (what, target, context, when),
   newest-first. Identifiers only - never secret input or decoded values - and
   never written to disk.
+- **Ephemeral debug containers** (`:debug`) - attach a throwaway debug
+  container to the selected pod via `kubectl debug`, prompting for the image
+  (prefilled with the `[debug]` default). `d` in the container picker targets
+  a specific container's process namespace (`--target`). Gated by read-only
+  mode and the `debug` guardrail; recorded in the journal.
 - **RBAC-aware palette** - hides resource kinds you can't `list`.
 - **Namespace switcher** (`n`) with pinned **favourites** (`favorite_namespaces`,
   ★) and per-context session **recents** (·) above the rest, and **context
@@ -469,8 +474,8 @@ remember. Each rule matches on `contexts`, `namespaces`, `resources`, and
 the strictest of: `deny` (block outright), `confirmation` (type to confirm),
 and `max_bulk` (cap how many rows one action may touch). The gated `actions`
 are the destructive verbs sofka takes directly — `delete`, `force-delete`,
-`drain`, and `shell` (exec). The first matching rule wins; `reason` is shown
-when it fires.
+`drain`, `shell` (exec), and `debug`. The first matching rule wins; `reason`
+is shown when it fires.
 
 ```toml
 [[guardrails]]
@@ -491,6 +496,25 @@ namespaces = ["kube-system"]
 actions = ["delete"]
 max_bulk = 1                     # no bulk deletes in kube-system
 ```
+
+### Ephemeral debug containers
+
+`:debug` attaches a throwaway debug container to the selected pod through
+`kubectl debug`, prompting for the image (prefilled with the default below).
+Leaving `command` empty launches an interactive shell (bash if the image ships
+it, else sh), mirroring the pod shell. `d` in the container picker pins
+`--target=<container>` so the debug container shares that container's process
+namespace. The ephemeral container persists on the pod until it's recreated —
+Kubernetes can't remove it — so there's nothing for sofka to clean up.
+
+```toml
+[debug]
+image = "nicolaka/netshoot:latest"   # default image the prompt is prefilled with
+command = ["bash"]                   # entrypoint; omit for an interactive shell
+```
+
+Debug creation is disabled in read-only mode and gated by the `debug`
+guardrail action.
 
 ### Log provider (VictoriaLogs)
 
@@ -619,6 +643,7 @@ header) and switching away restores write mode.
 | `e`                                        | edit in `$EDITOR` (`kubectl edit`)                                                                                                    |
 | `s`                                        | shell into pod / scale a workload (context-dependent)                                                                                 |
 | `a`                                        | attach to pod                                                                                                                         |
+| `:debug`                                   | attach an ephemeral debug container to the pod (`kubectl debug`; `d` in the container picker targets one)                             |
 | `i`                                        | set container image                                                                                                                   |
 | `r`                                        | rollout restart (workloads) / refresh (elsewhere)                                                                                     |
 | `f` / `shift-f`                            | port-forward (pods/services) - runs in the background                                                                                 |

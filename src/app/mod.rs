@@ -268,6 +268,14 @@ enum PromptKind {
         plural: String,
         container: String,
     },
+    /// Debug image for an ephemeral debug container (`:debug`), prefilled with
+    /// the configured default. `target` pins `--target=<container>` when the
+    /// workflow was launched from the container picker.
+    Debug {
+        ns: String,
+        pod: String,
+        target: Option<String>,
+    },
     /// New lookback period for the provider logs view (`T`) — the only
     /// prompt opened from (and returning to) [`Mode::Logs`].
     ProviderLookback,
@@ -346,6 +354,7 @@ enum PaletteAction {
     Gitops,
     CanI,
     Journal,
+    Debug,
     Diff,
     Events,
     PortForwards,
@@ -392,6 +401,10 @@ const PALETTE_COMMANDS: &[PaletteCommand] = &[
     PaletteCommand {
         action: PaletteAction::Journal,
         names: &["journal", "audit", "actions"],
+    },
+    PaletteCommand {
+        action: PaletteAction::Debug,
+        names: &["debug", "ephemeral", "dbg"],
     },
     PaletteCommand {
         action: PaletteAction::Diff,
@@ -731,6 +744,9 @@ pub struct App {
     /// Declarative guardrails (`[[guardrails]]`), re-applied on context switch
     /// and `:reload`.
     pub guardrails: Vec<crate::config::Guardrail>,
+    /// Ephemeral-debug-container defaults (`[debug]`) for `:debug`, re-applied
+    /// on context switch and `:reload`.
+    pub debug: crate::config::DebugConfig,
     /// Session-local log of mutating actions taken (`:journal`).
     pub journal: crate::journal::Journal,
     /// A workspace waiting for an in-flight context switch before it opens.
@@ -914,6 +930,7 @@ impl App {
             pending_workspace: None,
             active_workspace: None,
             guardrails: Vec::new(),
+            debug: crate::config::DebugConfig::default(),
             journal: crate::journal::Journal::default(),
             rbac_allowed: None,
             last_rbac_ns: None,
