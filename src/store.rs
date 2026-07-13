@@ -63,12 +63,13 @@ pub enum Msg {
         /// Set when the plugin failed or timed out (a nonzero exit, stderr).
         warn: Option<String>,
     },
-    /// Completion notice for an `output = "background"` plugin run.
-    PluginDone {
+    /// Completion notice for an `output = "background"` plugin run (single or
+    /// bulk): how many jobs succeeded and the failures (label + reason).
+    PluginBulkDone {
         generation: u64,
         name: String,
-        ok: bool,
-        summary: String,
+        ok: usize,
+        failed: Vec<String>,
     },
     /// Result of an off-thread `kubectl describe` (or its YAML fallback).
     Detail {

@@ -620,17 +620,28 @@ impl App {
                     }
                 }
             }
-            Msg::PluginDone {
+            Msg::PluginBulkDone {
                 generation,
                 name,
                 ok,
-                summary,
+                failed,
             } if generation == self.generation => {
-                if ok {
-                    self.flash = format!("plugin {name}: {summary}");
+                if failed.is_empty() {
+                    self.flash = format!("plugin {name}: {ok} ok");
                     self.flash_err = false;
                 } else {
-                    self.flash_warn(&format!("plugin {name}: {summary}"));
+                    let shown: Vec<&str> = failed.iter().take(3).map(String::as_str).collect();
+                    let more = failed.len().saturating_sub(shown.len());
+                    let tail = if more > 0 {
+                        format!(" (+{more} more)")
+                    } else {
+                        String::new()
+                    };
+                    self.flash_warn(&format!(
+                        "plugin {name}: {ok} ok, {} failed — {}{tail}",
+                        failed.len(),
+                        shown.join("; ")
+                    ));
                 }
             }
             Msg::Detail {

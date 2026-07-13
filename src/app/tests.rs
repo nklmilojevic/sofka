@@ -2440,6 +2440,60 @@ async fn plugin_placeholders_substitute_as_separate_args() {
     );
 }
 
+/// Two marked pods, cursor on the first.
+fn app_with_two_marked_pods() -> (App, Receiver<Msg>) {
+    let (mut app, rx) = test_app();
+    app.switch_kind("pods");
+    for n in ["a", "b"] {
+        apply(
+            &mut app,
+            json!({"apiVersion": "v1", "kind": "Pod",
+                   "metadata": {"name": n, "namespace": "default"}}),
+        );
+    }
+    let keys: Vec<String> = app.rows().iter().map(|o| row_key(o)).collect();
+    for k in keys {
+        app.marked.insert(k);
+    }
+    app.table_state.select(Some(0));
+    (app, rx)
+}
+
+#[tokio::test]
+async fn bulk_terminal_plugin_is_refused() {
+    let (mut app, _rx) = app_with_two_marked_pods();
+    app.plugins = vec![crate::config::Plugin {
+        key: "g".into(),
+        name: "t".into(),
+        command: "echo".into(),
+        args: vec!["$NAME".into()],
+        ..Default::default() // terminal output — can't run over a marked set
+    }];
+    app.try_plugin_key(press(KeyCode::Char('g')));
+    assert!(
+        app.flash.contains("marked set") && app.flash_err,
+        "flash: {}",
+        app.flash
+    );
+    assert!(app.pending.is_none(), "terminal bulk must not run");
+}
+
+#[tokio::test]
+async fn bulk_background_plugin_runs_over_all_marked() {
+    let (mut app, _rx) = app_with_two_marked_pods();
+    app.plugins = vec![crate::config::Plugin {
+        key: "g".into(),
+        name: "bg".into(),
+        command: "true".into(),
+        output: Some("background".into()),
+        ..Default::default()
+    }];
+    app.try_plugin_key(press(KeyCode::Char('g')));
+    // Bulk dispatch over the two marked rows; background never suspends.
+    assert!(app.flash.contains("×2"), "flash: {}", app.flash);
+    assert!(app.pending.is_none(), "background must not suspend the TUI");
+}
+
 #[tokio::test]
 async fn context_switch_resolves_readonly_and_cli_pin_wins() {
     let dir = std::env::temp_dir().join(format!("sofka-readonly-test-{}", std::process::id()));
