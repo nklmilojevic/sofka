@@ -676,6 +676,9 @@ pub struct App {
     pub log_provider: Option<crate::providers::LogProvider>,
     /// Compiled custom views from config, re-resolved on context switch.
     pub user_views: HashMap<String, crate::views::View>,
+    /// Compiled warning/critical coloring thresholds from config, re-resolved
+    /// on context switch and `:reload`.
+    pub thresholds: crate::thresholds::Compiled,
     /// CRD printer-column fallbacks fetched per plural for this cluster
     /// (`None` = fetched, nothing usable). Cleared on context switch.
     crd_views: HashMap<String, Option<crate::views::View>>,
@@ -787,6 +790,7 @@ impl App {
             }),
             log_provider: None,
             user_views: HashMap::new(),
+            thresholds: crate::thresholds::Compiled::default(),
             crd_views: HashMap::new(),
             wide: false,
             spec: crate::columns::build_spec("", None, None, false),

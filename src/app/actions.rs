@@ -871,6 +871,13 @@ impl App {
         let mut warnings = resolved.warnings;
         self.user_aliases = resolved.config.aliases;
         self.plugins = resolved.config.plugins;
+        // Thresholds only change cell coloring (never the column layout), so —
+        // unlike custom views — they're safe to re-apply live without yanking
+        // the current view.
+        let (thresholds, threshold_warnings) =
+            crate::thresholds::compile(&resolved.config.thresholds);
+        self.thresholds = thresholds;
+        warnings.extend(threshold_warnings);
         let (log_provider, provider_warnings) =
             crate::providers::compile(resolved.config.providers.logs.as_ref());
         self.log_provider = log_provider;

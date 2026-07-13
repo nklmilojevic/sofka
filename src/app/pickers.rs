@@ -269,6 +269,9 @@ impl App {
         self.plugins = resolved.config.plugins;
         let (views, view_warnings) = crate::views::compile(&resolved.config.views);
         self.user_views = views;
+        let (thresholds, threshold_warnings) =
+            crate::thresholds::compile(&resolved.config.thresholds);
+        self.thresholds = thresholds;
         let (log_provider, provider_warnings) =
             crate::providers::compile(resolved.config.providers.logs.as_ref());
         self.log_provider = log_provider;
@@ -307,12 +310,14 @@ impl App {
             .warnings
             .first()
             .or(view_warnings.first())
+            .or(threshold_warnings.first())
             .or(provider_warnings.first())
         {
             self.flash_warn(w);
         }
         // Keep `:config` in sync with the layers just resolved for this context.
         self.config_warnings = resolved.warnings;
+        self.config_warnings.extend(threshold_warnings);
         let kind = resolved
             .config
             .default_resource

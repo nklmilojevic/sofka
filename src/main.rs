@@ -11,6 +11,7 @@ mod k8s;
 mod providers;
 mod store;
 mod theme;
+mod thresholds;
 mod ui;
 mod views;
 
@@ -153,6 +154,11 @@ async fn main() -> Result<()> {
         eprintln!("warning: {w}");
     }
     app.user_views = user_views;
+    let (thresholds, threshold_warnings) = thresholds::compile(&cfg.thresholds);
+    for w in &threshold_warnings {
+        eprintln!("warning: {w}");
+    }
+    app.thresholds = thresholds;
     let (log_provider, provider_warnings) = providers::compile(cfg.providers.logs.as_ref());
     for w in &provider_warnings {
         eprintln!("warning: {w}");
@@ -164,6 +170,7 @@ async fn main() -> Result<()> {
     app.active_skin = Some(initial_skin);
     // Keep initial-load validation problems visible in-app (`:config`), not
     // just on the stderr that the alternate screen is about to cover.
+    config_warnings.extend(threshold_warnings);
     app.config_warnings = config_warnings;
     // CLI flags pin the mode for the whole session; otherwise config decides,
     // re-resolved per context on every `:ctx` switch.

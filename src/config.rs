@@ -61,6 +61,70 @@ pub struct Config {
     /// Optional external observability backends — see [`Providers`]. Compiled
     /// and validated by [`crate::providers::compile`].
     pub providers: Providers,
+    /// Warning/critical thresholds for value-based cell coloring — see
+    /// [`Thresholds`]. Compiled and validated by [`crate::thresholds::compile`].
+    pub thresholds: Thresholds,
+}
+
+/// Warning/critical thresholds that decide when a RESTARTS/CPU/MEM cell (or the
+/// container picker's request/limit utilization) turns a warning or critical
+/// tint. Global `[thresholds]` values apply everywhere; `[thresholds.resources.
+/// <key>]` overrides them for one resource kind, keyed like `[views]`
+/// (`apiVersion/plural`, `group/plural`, plural, or lowercased kind). Anything
+/// left unset keeps sofka's built-in defaults, so an empty config colors
+/// exactly as before. Compiled by [`crate::thresholds::compile`].
+///
+/// ```toml
+/// [thresholds]
+/// restarts = { warn = 3, critical = 10 }
+/// cpu = { warn = "200m", critical = "1" }     # absolute usage
+/// memory = { warn = "256Mi", critical = "1Gi" }
+/// utilization = { warn = 75, critical = 90 }  # percent of request/limit
+///
+/// [thresholds.resources.pods]                 # per-kind override
+/// restarts = { warn = 5, critical = 20 }
+/// ```
+#[derive(Debug, Default, Clone, Deserialize)]
+#[serde(default)]
+pub struct Thresholds {
+    /// Global defaults, applied to every resource.
+    #[serde(flatten)]
+    pub defaults: ThresholdSet,
+    /// Per-resource overrides layered over [`Self::defaults`].
+    pub resources: HashMap<String, ThresholdSet>,
+}
+
+/// One layer of thresholds: each metric is optional so a partial override only
+/// touches the bounds it names.
+#[derive(Debug, Default, Clone, Deserialize)]
+#[serde(default)]
+pub struct ThresholdSet {
+    /// Summed container restart count (RESTARTS cell).
+    pub restarts: Option<CountBand>,
+    /// Absolute CPU usage as a Kubernetes quantity (`200m`, `1`).
+    pub cpu: Option<QuantityBand>,
+    /// Absolute memory usage as a Kubernetes quantity (`256Mi`, `1Gi`).
+    pub memory: Option<QuantityBand>,
+    /// Usage as a percentage of a container's request/limit.
+    pub utilization: Option<CountBand>,
+}
+
+/// A numeric warn/critical band (counts, percentages). Either bound may be
+/// omitted to disable that level.
+#[derive(Debug, Default, Clone, Copy, Deserialize)]
+#[serde(default)]
+pub struct CountBand {
+    pub warn: Option<i64>,
+    pub critical: Option<i64>,
+}
+
+/// A Kubernetes-quantity warn/critical band (CPU/memory), parsed at compile
+/// time. Either bound may be omitted to disable that level.
+#[derive(Debug, Default, Clone, Deserialize)]
+#[serde(default)]
+pub struct QuantityBand {
+    pub warn: Option<String>,
+    pub critical: Option<String>,
 }
 
 /// External provider integrations. Sofka stays fully usable without any of
@@ -530,6 +594,39 @@ mod tests {
         );
         assert_eq!(logs.fields.pod.as_deref(), Some("pod_name"));
         assert!(logs.fields.namespace.is_none());
+    }
+
+    #[test]
+    fn parses_thresholds_section() {
+        let toml = r#"
+            [thresholds]
+            restarts = { warn = 3, critical = 10 }
+            cpu = { warn = "200m", critical = "1" }
+            memory = { warn = "256Mi", critical = "1Gi" }
+            utilization = { critical = 95 }
+
+            [thresholds.resources.pods]
+            restarts = { warn = 5, critical = 20 }
+        "#;
+        let cfg: Config = toml::from_str(toml).unwrap();
+        let t = &cfg.thresholds;
+        let d = &t.defaults;
+        assert_eq!(d.restarts.unwrap().warn, Some(3));
+        assert_eq!(d.restarts.unwrap().critical, Some(10));
+        assert_eq!(d.cpu.as_ref().unwrap().warn.as_deref(), Some("200m"));
+        assert_eq!(d.memory.as_ref().unwrap().critical.as_deref(), Some("1Gi"));
+        assert_eq!(d.utilization.unwrap().warn, None);
+        assert_eq!(d.utilization.unwrap().critical, Some(95));
+        let pods = t.resources.get("pods").unwrap();
+        assert_eq!(pods.restarts.unwrap().warn, Some(5));
+        assert_eq!(pods.restarts.unwrap().critical, Some(20));
+    }
+
+    #[test]
+    fn empty_config_has_default_thresholds() {
+        let cfg: Config = toml::from_str("").unwrap();
+        assert!(cfg.thresholds.defaults.restarts.is_none());
+        assert!(cfg.thresholds.resources.is_empty());
     }
 
     fn val(s: &str) -> toml::Value {
