@@ -105,9 +105,10 @@ pub struct FleetConfig {
 ///
 /// ```toml
 /// [logs]
-/// tail = 300       # initial lines fetched per stream
-/// buffer = 5000    # max lines retained while following (bounded tail)
-/// since = "1h"     # optional: only logs newer than this (overrides tail)
+/// tail = 300         # initial lines fetched per stream
+/// buffer = 5000      # max lines retained while following (bounded tail)
+/// since = "1h"       # optional: only logs newer than this (overrides tail)
+/// fullscreen = false # open log views fullscreen (F toggles; k9s fullScreenLogs)
 /// ```
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
@@ -120,6 +121,9 @@ pub struct LogsConfig {
     /// Optional lookback (`30m`, `4h`, `2d`): stream only logs newer than this.
     /// When set it replaces `tail` (Kubernetes accepts one or the other).
     pub since: Option<String>,
+    /// Start log views fullscreen — the pane takes the whole frame, without
+    /// header or borders (k9s `fullScreenLogs`). `F` toggles per session.
+    pub fullscreen: bool,
 }
 
 impl Default for LogsConfig {
@@ -128,6 +132,7 @@ impl Default for LogsConfig {
             tail: 300,
             buffer: 5000,
             since: None,
+            fullscreen: false,
         }
     }
 }

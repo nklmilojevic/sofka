@@ -580,6 +580,14 @@ pub struct LogsView {
     pub wrap: bool,
     pub timestamps: bool,
     pub stopped: bool,
+    /// Fullscreen (`F`, k9s): the pane takes the whole frame with no header,
+    /// borders, or status line, so terminal text selection copies clean lines.
+    /// Session-sticky like `wrap`/`timestamps`; seeded from `[logs] fullscreen`.
+    pub fullscreen: bool,
+    /// Time anchor for the kubelet streams, set by the `0`–`5` keys (k9s):
+    /// `Some(secs)` streams only logs newer than `secs`, `Some(0)` forces the
+    /// plain tail, `None` follows the config (`[logs] since`/`tail`).
+    pub since_anchor: Option<i64>,
     /// Total rendered rows (post-wrap, post-filter) and inner viewport height
     /// from the last draw. Recorded so key handlers clamp the scroll in the
     /// same *display-row* units the renderer uses — otherwise a wrapped buffer
@@ -605,6 +613,8 @@ impl Default for LogsView {
             wrap: false,
             timestamps: false,
             stopped: false,
+            fullscreen: false,
+            since_anchor: None,
             viewport_rows: 0,
             viewport_h: 0,
             last_wrap_width: 0,
@@ -624,6 +634,19 @@ impl LogsView {
     /// Whether `line` passes the active filter (empty filter = everything).
     pub fn matches(&self, line: &str) -> bool {
         self.matcher.matches(line)
+    }
+
+    /// Title label for the active `0`–`5` time anchor, if any.
+    pub fn anchor_label(&self) -> Option<&'static str> {
+        match self.since_anchor? {
+            0 => Some("tail"),
+            60 => Some("1m"),
+            300 => Some("5m"),
+            900 => Some("15m"),
+            1800 => Some("30m"),
+            3600 => Some("1h"),
+            _ => None,
+        }
     }
 }
 

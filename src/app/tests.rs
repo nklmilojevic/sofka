@@ -4559,3 +4559,84 @@ async fn lookback_key_only_applies_to_provider_logs() {
     assert_eq!(app.mode, Mode::Logs);
     assert!(app.flash.contains("provider logs"), "{}", app.flash);
 }
+
+#[tokio::test]
+async fn logs_fullscreen_toggles_with_shift_f() {
+    let (mut app, _rx) = test_app();
+    app.mode = Mode::Logs;
+    app.return_mode = Mode::Table;
+
+    assert!(!app.logs.fullscreen);
+    app.handle_key(press(KeyCode::Char('F'))).unwrap();
+    assert!(app.logs.fullscreen);
+    assert!(app.flash.contains("fullscreen: on"), "{}", app.flash);
+    assert_eq!(app.mode, Mode::Logs, "toggling must not leave the view");
+
+    app.handle_key(press(KeyCode::Char('F'))).unwrap();
+    assert!(!app.logs.fullscreen);
+}
+
+#[tokio::test]
+async fn logs_time_anchors_restream_kubelet_logs() {
+    let (mut app, _rx) = test_app();
+    app.mode = Mode::Logs;
+    app.return_mode = Mode::Table;
+    app.logs.source = Some(LogSource::Pod {
+        ns: "default".into(),
+        name: "web".into(),
+        containers: vec![],
+    });
+
+    // No anchor: the config decides (default = tail, no since).
+    assert_eq!(app.log_tail_and_since(), (app.logs_cfg.tail, None));
+
+    // `2` anchors to the last 5m and re-streams (generation bumps).
+    let gen_before = app.log_gen;
+    app.handle_key(press(KeyCode::Char('2'))).unwrap();
+    assert_eq!(app.logs.since_anchor, Some(300));
+    assert_eq!(app.logs.anchor_label(), Some("5m"));
+    assert_eq!(app.log_tail_and_since().1, Some(300));
+    assert!(app.log_gen > gen_before, "anchor must restart the stream");
+    assert!(app.flash.contains("5m"), "{}", app.flash);
+
+    // `0` forces the plain tail, even over a configured `since`.
+    app.logs_cfg.since = Some("4h".into());
+    app.handle_key(press(KeyCode::Char('0'))).unwrap();
+    assert_eq!(app.logs.since_anchor, Some(0));
+    assert_eq!(app.log_tail_and_since(), (app.logs_cfg.tail, None));
+    assert_eq!(app.logs.anchor_label(), Some("tail"));
+
+    // Without an anchor the configured `since` applies again.
+    app.logs.since_anchor = None;
+    assert_eq!(app.log_tail_and_since().1, Some(4 * 3600));
+}
+
+#[tokio::test]
+async fn logs_time_anchors_set_provider_lookback() {
+    let (mut app, _rx) = test_app();
+    app.mode = Mode::Logs;
+    app.return_mode = Mode::Table;
+    app.logs.source = Some(LogSource::Provider {
+        request: crate::providers::LogRequest::Namespace {
+            ns: "default".into(),
+        },
+    });
+    app.logs.view.title = "ns/default — victorialogs (1h)".into();
+
+    // `3` maps to the 15m window on the provider, not the kubelet anchor.
+    app.handle_key(press(KeyCode::Char('3'))).unwrap();
+    assert_eq!(app.provider_lookback_label(), "15m");
+    assert!(
+        app.logs.view.title.ends_with("victorialogs (15m)"),
+        "{}",
+        app.logs.view.title
+    );
+    assert_eq!(app.logs.since_anchor, None);
+
+    // `0` resets to the default lookback window.
+    app.handle_key(press(KeyCode::Char('0'))).unwrap();
+    assert_eq!(
+        app.provider_lookback_label(),
+        crate::providers::DEFAULT_LOOKBACK
+    );
+}

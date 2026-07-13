@@ -179,6 +179,9 @@ async fn main() -> Result<()> {
     app.debug = cfg.debug.clone();
     app.bundle_cfg = cfg.bundle.clone();
     app.logs_cfg = cfg.logs.clone();
+    // Seed the session toggle once; later `F` presses (and per-context config
+    // reloads) don't fight the user's in-session choice.
+    app.logs.fullscreen = cfg.logs.fullscreen;
     app.fleet_cfg = cfg.fleet.clone();
     for w in config::plugin_warnings(&app.plugins)
         .into_iter()
