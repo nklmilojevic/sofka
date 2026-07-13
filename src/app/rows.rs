@@ -280,6 +280,17 @@ impl App {
         &self.spec
     }
 
+    /// The coloring thresholds in effect for the current view: the current
+    /// kind's per-resource overrides layered over the global defaults, or the
+    /// bare defaults when the kind is unknown (synthetic helm views, an
+    /// unconnected cluster).
+    pub(crate) fn resolved_thresholds(&self) -> crate::thresholds::Thresholds {
+        match self.kind.as_ref() {
+            Some(k) => self.thresholds.resolve(&k.ar),
+            None => self.thresholds.defaults(),
+        }
+    }
+
     /// Rebuild the active column layout from the current kind, user views,
     /// printer-column fallback, and wide mode. An active sort stays pinned to
     /// its column *header* — indices shift when columns appear/disappear (wide

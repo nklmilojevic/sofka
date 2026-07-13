@@ -482,39 +482,13 @@ pub fn row_color(s: &str) -> Color {
     }
 }
 
-/// Restart-count severity: `None` for a clean 0 (falls back to the row
-/// color), a warning tint for a handful, red for a pod that's actively
-/// crash-looping. Absolute thresholds, mirroring k9s' restart colorer.
-pub fn restarts_severity(count: i64) -> Option<Color> {
-    if count >= 5 {
-        Some(red())
-    } else if count >= 1 {
-        Some(peach())
-    } else {
-        None
-    }
-}
-
-/// CPU-usage severity in millicores. `None` for unremarkable usage.
-pub fn cpu_severity(millicores: i64) -> Option<Color> {
-    if millicores >= 1000 {
-        Some(red())
-    } else if millicores >= 200 {
-        Some(peach())
-    } else {
-        None
-    }
-}
-
-/// Memory-usage severity in bytes. `None` for unremarkable usage.
-pub fn mem_severity(bytes: i64) -> Option<Color> {
-    let mi = bytes as f64 / (1024.0 * 1024.0);
-    if mi >= 1024.0 {
-        Some(red())
-    } else if mi >= 256.0 {
-        Some(peach())
-    } else {
-        None
+/// Foreground tint for a threshold [`Severity`](crate::thresholds::Severity):
+/// a warning stands out in peach, critical in red. The cutoffs themselves are
+/// user-configurable — see [`crate::thresholds`].
+pub fn severity_fg(sev: crate::thresholds::Severity) -> Color {
+    match sev {
+        crate::thresholds::Severity::Warn => peach(),
+        crate::thresholds::Severity::Critical => red(),
     }
 }
 
@@ -599,18 +573,10 @@ mod tests {
     }
 
     #[test]
-    fn resource_severity_thresholds() {
-        assert_eq!(restarts_severity(0), None);
-        assert_eq!(restarts_severity(1), Some(peach()));
-        assert_eq!(restarts_severity(5), Some(red()));
-
-        assert_eq!(cpu_severity(50), None);
-        assert_eq!(cpu_severity(200), Some(peach()));
-        assert_eq!(cpu_severity(1000), Some(red()));
-
-        assert_eq!(mem_severity(100 * 1024 * 1024), None); // 100Mi
-        assert_eq!(mem_severity(300 * 1024 * 1024), Some(peach())); // 300Mi
-        assert_eq!(mem_severity(2048 * 1024 * 1024), Some(red())); // 2Gi
+    fn severity_maps_to_warn_and_critical_tints() {
+        use crate::thresholds::Severity;
+        assert_eq!(severity_fg(Severity::Warn), peach());
+        assert_eq!(severity_fg(Severity::Critical), red());
     }
 
     #[test]

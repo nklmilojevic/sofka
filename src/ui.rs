@@ -433,6 +433,7 @@ fn draw_table(frame: &mut Frame, app: &mut App, area: Rect) {
     app.ensure_table_cell_cache(&visible_objects);
     let cell_cache = app.table_cell_cache();
     let spec = app.view_spec();
+    let thresholds = app.resolved_thresholds();
 
     let rows: Vec<Row> = visible_objects
         .iter()
@@ -520,16 +521,22 @@ fn draw_table(frame: &mut Frame, app: &mut App, area: Rect) {
                         c.into_cell_aligned(align).style(theme::dim())
                     } else if Some(i) == restarts_idx {
                         let n: i64 = c.as_str().trim().parse().unwrap_or(0);
-                        let color = theme::restarts_severity(n).unwrap_or(row_color);
+                        let color = thresholds
+                            .restarts
+                            .severity(n)
+                            .map(theme::severity_fg)
+                            .unwrap_or(row_color);
                         c.into_cell_aligned(align).style(Style::default().fg(color))
                     } else if Some(i) == cpu_idx {
                         let color = metrics_raw
-                            .and_then(|(cpu, _)| theme::cpu_severity(cpu))
+                            .and_then(|(cpu, _)| thresholds.cpu.severity(cpu))
+                            .map(theme::severity_fg)
                             .unwrap_or(row_color);
                         c.into_cell_aligned(align).style(Style::default().fg(color))
                     } else if Some(i) == mem_idx {
                         let color = metrics_raw
-                            .and_then(|(_, mem)| theme::mem_severity(mem))
+                            .and_then(|(_, mem)| thresholds.memory.severity(mem))
+                            .map(theme::severity_fg)
                             .unwrap_or(row_color);
                         c.into_cell_aligned(align).style(Style::default().fg(color))
                     } else {
@@ -1749,22 +1756,31 @@ fn draw_skins(frame: &mut Frame, app: &mut App, area: Rect) {
     );
 }
 
-/// Color a resource utilization percentage: close to the base (a request or,
-/// more importantly, a limit) is dangerous. A missing base dims to a muted
-/// tone so it reads as "not set" rather than "healthy".
-fn util_color(pct: Option<i64>) -> Color {
+/// Color a resource utilization percentage against the configured band: close
+/// to the base (a request or, more importantly, a limit) is dangerous. A
+/// missing base dims to a muted tone so it reads as "not set" rather than
+/// "healthy"; a present percentage below the warning line reads green.
+fn util_color(pct: Option<i64>, band: crate::thresholds::Band) -> Color {
+    use crate::thresholds::Severity;
     match pct {
-        Some(p) if p >= 90 => theme::red(),
-        Some(p) if p >= 75 => theme::yellow(),
-        Some(_) => theme::green(),
         None => theme::overlay1(),
+        Some(p) => match band.severity(p) {
+            Some(Severity::Critical) => theme::red(),
+            Some(Severity::Warn) => theme::yellow(),
+            None => theme::green(),
+        },
     }
 }
 
 /// Build the `%req/%lim` utilization cell for one resource, plus the color that
 /// reflects the worse (limit-first) utilization. `usage` is `None` when Metrics
 /// Server data is unavailable, in which case percentages cannot be computed.
-fn util_cell(usage: Option<i64>, request: Option<i64>, limit: Option<i64>) -> (String, Color) {
+fn util_cell(
+    usage: Option<i64>,
+    request: Option<i64>,
+    limit: Option<i64>,
+    band: crate::thresholds::Band,
+) -> (String, Color) {
     use crate::columns::{fmt_pct, usage_pct};
     let Some(usage) = usage else {
         return ("-/-".into(), theme::overlay1());
@@ -1772,7 +1788,7 @@ fn util_cell(usage: Option<i64>, request: Option<i64>, limit: Option<i64>) -> (S
     let req_pct = usage_pct(usage, request);
     let lim_pct = usage_pct(usage, limit);
     let text = format!("{}/{}", fmt_pct(req_pct), fmt_pct(lim_pct));
-    (text, util_color(lim_pct.or(req_pct)))
+    (text, util_color(lim_pct.or(req_pct), band))
 }
 
 // Numeric column widths for the container table, shared by the header and the
@@ -1805,6 +1821,7 @@ fn draw_containers(frame: &mut Frame, app: &mut App, area: Rect) {
     // Keep the name column readable but bounded so long names can't push the
     // numeric columns off the right edge; anything longer is ellipsized.
     let name_cap = (area.width as usize).saturating_sub(40).max(8);
+    let util_band = app.resolved_thresholds().utilization;
     let name_width = app
         .container_list
         .iter()
@@ -1841,10 +1858,18 @@ fn draw_containers(frame: &mut Frame, app: &mut App, area: Rect) {
                 .get(container)
                 .cloned()
                 .unwrap_or_default();
-            let (cpu_pct, cpu_pct_color) =
-                util_cell(usage.map(|(c, _)| c), res.cpu_request, res.cpu_limit);
-            let (mem_pct, mem_pct_color) =
-                util_cell(usage.map(|(_, m)| m), res.mem_request, res.mem_limit);
+            let (cpu_pct, cpu_pct_color) = util_cell(
+                usage.map(|(c, _)| c),
+                res.cpu_request,
+                res.cpu_limit,
+                util_band,
+            );
+            let (mem_pct, mem_pct_color) = util_cell(
+                usage.map(|(_, m)| m),
+                res.mem_request,
+                res.mem_limit,
+                util_band,
+            );
             let name = truncate_cols(container, name_width);
             ListItem::new(Line::from(vec![
                 Span::styled(
