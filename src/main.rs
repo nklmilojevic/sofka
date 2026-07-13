@@ -14,6 +14,7 @@ mod helm;
 mod journal;
 mod k8s;
 mod keys;
+mod logfilter;
 mod providers;
 mod snapshot;
 mod store;
@@ -175,6 +176,7 @@ async fn main() -> Result<()> {
     app.guardrails = cfg.guardrails.clone();
     app.debug = cfg.debug.clone();
     app.bundle_cfg = cfg.bundle.clone();
+    app.logs_cfg = cfg.logs.clone();
     for w in config::plugin_warnings(&app.plugins)
         .into_iter()
         .chain(config::bookmark_warnings(&app.bookmarks))

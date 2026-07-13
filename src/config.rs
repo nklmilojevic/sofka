@@ -81,6 +81,39 @@ pub struct Config {
     pub debug: DebugConfig,
     /// Diagnostic-bundle (`:bundle`) options — see [`BundleConfig`].
     pub bundle: BundleConfig,
+    /// Log-view options — see [`LogsConfig`].
+    pub logs: LogsConfig,
+}
+
+/// Log-view controls (kubelet streams).
+///
+/// ```toml
+/// [logs]
+/// tail = 300       # initial lines fetched per stream
+/// buffer = 5000    # max lines retained while following (bounded tail)
+/// since = "1h"     # optional: only logs newer than this (overrides tail)
+/// ```
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct LogsConfig {
+    /// Initial lines requested per stream (`kubectl logs --tail`).
+    pub tail: i64,
+    /// Maximum lines retained in the follow buffer before the oldest are
+    /// dropped (keeps a chatty pod from growing memory without bound).
+    pub buffer: usize,
+    /// Optional lookback (`30m`, `4h`, `2d`): stream only logs newer than this.
+    /// When set it replaces `tail` (Kubernetes accepts one or the other).
+    pub since: Option<String>,
+}
+
+impl Default for LogsConfig {
+    fn default() -> Self {
+        Self {
+            tail: 300,
+            buffer: 5000,
+            since: None,
+        }
+    }
 }
 
 /// Options for the `:bundle` diagnostic-bundle export.

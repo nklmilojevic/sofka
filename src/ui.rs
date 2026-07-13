@@ -746,8 +746,6 @@ fn draw_scrollable(
 /// not a full restyle; and the display-row offset is a `usize`, immune to the
 /// `u16` ceiling of `Paragraph::scroll`.
 fn draw_logs(frame: &mut Frame, app: &mut App, area: Rect) {
-    let filter = app.logs.filter.to_lowercase();
-    let active = !filter.is_empty();
     let inner_w = area.width.saturating_sub(2).max(1) as usize;
     let inner_h = area.height.saturating_sub(2) as usize;
 
@@ -756,8 +754,18 @@ fn draw_logs(frame: &mut Frame, app: &mut App, area: Rect) {
         .view
         .lines
         .iter()
-        .filter(|l| !active || l.to_lowercase().contains(&filter))
+        .filter(|l| app.logs.matches(l))
         .collect();
+
+    let filter = app.logs.filter.clone();
+    let active = !filter.is_empty();
+    let bad_regex = app.logs.matcher.is_error();
+    // Highlight matches only for a plain substring filter — not inverse (`!…`,
+    // which hides matches) or regex (`/…/`, whose spans we don't track).
+    let is_plain = active
+        && !filter.starts_with('!')
+        && !(filter.len() >= 2 && filter.starts_with('/') && filter.ends_with('/'));
+    let highlight = if is_plain { filter.as_str() } else { "" };
 
     // Exact display height of every shown line, so follow can anchor the
     // newest line to the *bottom* of the viewport (not the top).
@@ -805,7 +813,7 @@ fn draw_logs(frame: &mut Frame, app: &mut App, area: Rect) {
         if row >= scroll + inner_h {
             break;
         }
-        let line = render_log_line(l, &app.logs.filter);
+        let line = render_log_line(l, highlight);
         if app.logs.wrap {
             for (j, sub) in wrap_line(line, inner_w).into_iter().enumerate() {
                 let r = row + j;
@@ -835,11 +843,16 @@ fn draw_logs(frame: &mut Frame, app: &mut App, area: Rect) {
         if app.logs.wrap { " wrap" } else { "" },
         if app.logs.timestamps { " ts" } else { "" },
     );
-    let title = if active {
+    let title = if bad_regex {
+        format!(
+            " {} · /{} [invalid regex]{} ",
+            app.logs.view.title, filter, flags
+        )
+    } else if active {
         format!(
             " {} · /{} [{}]{} ",
             app.logs.view.title,
-            app.logs.filter,
+            filter,
             shown.len(),
             flags
         )
@@ -1625,8 +1638,14 @@ fn draw_help(frame: &mut Frame, app: &App, area: Rect) {
         ),
         Line::from(""),
         Line::from(Span::styled("  Logs view", theme::title())),
-        bind("/ · s · w · t", "search · autoscroll · wrap · timestamps"),
-        bind("x · c · ctrl-s", "stop/resume · copy · save to file"),
+        bind(
+            "/ · s · w · t",
+            "filter (text · /regex/ · !invert) · autoscroll · wrap · timestamps",
+        ),
+        bind(
+            "x · z · c · ctrl-s",
+            "stop/resume · clear buffer · copy · save to file",
+        ),
         bind(
             "shift-t",
             "provider logs: change lookback period (30m, 4h, 2d)",
@@ -2580,7 +2599,7 @@ fn draw_prompt(frame: &mut Frame, app: &App, area: Rect) {
         }
         Mode::LogFilter => Line::from(vec![
             Span::styled(
-                "log search /",
+                "log filter (text · /re/ · !invert) /",
                 Style::default()
                     .fg(theme::teal())
                     .add_modifier(Modifier::BOLD),
@@ -2611,9 +2630,9 @@ fn draw_prompt(frame: &mut Frame, app: &App, area: Rect) {
         )),
         Mode::Logs => {
             let hint = if app.provider_logs_active() {
-                "  /search  s:autoscroll  w:wrap  t:timestamps  T:period  x:stop/resume  c:copy  ^s:save  esc:back"
+                "  /filter  s:autoscroll  w:wrap  t:timestamps  T:period  x:stop/resume  z:clear  c:copy  ^s:save  esc:back"
             } else {
-                "  /search  s:autoscroll  w:wrap  t:timestamps  x:stop/resume  c:copy  ^s:save  esc:back"
+                "  /filter  s:autoscroll  w:wrap  t:timestamps  x:stop/resume  z:clear  c:copy  ^s:save  esc:back"
             };
             Line::from(Span::styled(hint, theme::dim()))
         }

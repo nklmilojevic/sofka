@@ -20,7 +20,7 @@ impl App {
         // trimming so indices don't shift under the frozen view (only a huge
         // backlog hits the larger paused cap).
         let cap = if self.logs.follow {
-            MAX_LOG_LINES
+            self.logs_cfg.buffer.max(1)
         } else {
             MAX_LOG_LINES_PAUSED
         };
@@ -33,14 +33,13 @@ impl App {
         // rows the dropped lines occupied on screen — filtered lines take none,
         // wrapped lines take several — so the frozen view stays put.
         if !self.logs.follow {
-            let filter = self.logs.filter.to_lowercase();
             let rows: usize = self
                 .logs
                 .view
                 .lines
                 .iter()
                 .take(overflow)
-                .filter(|l| filter.is_empty() || l.to_lowercase().contains(&filter))
+                .filter(|l| self.logs.matches(l))
                 .map(|l| match self.logs.last_wrap_width {
                     0 => 1,
                     w => crate::ui::wrapped_height(l, w),
@@ -257,7 +256,7 @@ impl App {
             ..Default::default()
         };
         self.logs.follow = true;
-        self.logs.filter.clear();
+        self.logs.set_filter(String::new());
         self.logs.stopped = false;
         self.mode = Mode::Logs;
         self.restart_log_stream();
@@ -419,14 +418,25 @@ impl App {
         let tx = self.tx.clone();
         let genr = self.log_gen;
         let flag = self.log_flag.clone();
+        let (tail, since) = self.log_tail_and_since();
         let handle = tokio::spawn(async move {
             let api: Api<Pod> = Api::namespaced(client, &ns);
+            // `since` and `tail` are mutually exclusive in the API; prefer the
+            // configured lookback when set. Previous-container logs take neither.
+            let (tail_lines, since_seconds) = if previous {
+                (None, None)
+            } else if since.is_some() {
+                (None, since)
+            } else {
+                (Some(tail), None)
+            };
             let lp = LogParams {
                 follow: !previous,
                 previous,
                 container,
                 timestamps,
-                tail_lines: if previous { None } else { Some(300) },
+                tail_lines,
+                since_seconds,
                 ..Default::default()
             };
             forward_log_stream(api, pod, lp, prefix, tx, genr, flag).await;
@@ -434,11 +444,27 @@ impl App {
         self.log_tasks.push(handle);
     }
 
+    /// The configured initial `tail` line count and optional `since` lookback
+    /// (epoch seconds), parsed from `[logs]`. An unparseable `since` is ignored.
+    fn log_tail_and_since(&self) -> (i64, Option<i64>) {
+        let tail = self.logs_cfg.tail.max(1);
+        let since = self
+            .logs_cfg
+            .since
+            .as_deref()
+            .and_then(|s| crate::providers::parse_lookback(s).ok());
+        (tail, since)
+    }
+
     pub(super) fn spawn_selector_logs(&mut self, ns: String, labels: String, timestamps: bool) {
         let client = self.cluster.client.clone();
         let tx = self.tx.clone();
         let genr = self.log_gen;
         let flag = self.log_flag.clone();
+        let (tail, since) = self.log_tail_and_since();
+        // Bound the per-pod tail so an aggregate over many pods stays sane; the
+        // follow buffer trims the total anyway.
+        let per_pod_tail = tail.min(100);
         let handle = tokio::spawn(async move {
             let list_api: Api<Pod> = if ns.is_empty() {
                 Api::all(client.clone())
@@ -485,11 +511,16 @@ impl App {
                     let (pn, pns) = (pod_name.clone(), pod_ns.clone());
                     streams.spawn(async move {
                         let api: Api<Pod> = Api::namespaced(client, &pns);
+                        let (tail_lines, since_seconds) = match since {
+                            Some(s) => (None, Some(s)),
+                            None => (Some(per_pod_tail), None),
+                        };
                         let lp = LogParams {
                             follow: true,
                             container: Some(c),
                             timestamps,
-                            tail_lines: Some(100),
+                            tail_lines,
+                            since_seconds,
                             ..Default::default()
                         };
                         forward_log_stream(api, pn, lp, prefix, tx, genr, flag).await;

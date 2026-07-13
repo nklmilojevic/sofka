@@ -33,15 +33,10 @@ use crate::store::{Msg, Pulse, Store, XrayItem, row_key};
 
 pub(crate) use guardrails::ConfirmLevel;
 
-/// Maximum number of buffered log lines while following. A chatty pod would
-/// otherwise grow the buffer (and the unbounded channel feeding it) without
-/// limit; we keep the most recent lines, like k9s' tail buffer.
-const MAX_LOG_LINES: usize = 5_000;
-
 /// Larger cap used while autoscroll is paused: we stop trimming so the line
 /// indices don't shift under the frozen view (which would make it appear to
 /// resume scrolling). Only a runaway firehose during a very long pause hits
-/// this; resuming follow trims back to [`MAX_LOG_LINES`].
+/// this; resuming follow trims back to the configured `[logs] buffer`.
 const MAX_LOG_LINES_PAUSED: usize = 100_000;
 
 /// Log streams batch lines before sending them through the UI channel. This
@@ -567,6 +562,9 @@ pub struct LogsView {
     pub view: Scrollable,
     pub follow: bool,
     pub filter: String,
+    /// Compiled form of [`Self::filter`] (substring / regex / inverse). Rebuilt
+    /// by [`Self::set_filter`] whenever the filter text changes.
+    pub matcher: crate::logfilter::LogMatcher,
     pub wrap: bool,
     pub timestamps: bool,
     pub stopped: bool,
@@ -591,6 +589,7 @@ impl Default for LogsView {
             view: Scrollable::empty(),
             follow: true,
             filter: String::new(),
+            matcher: crate::logfilter::LogMatcher::default(),
             wrap: false,
             timestamps: false,
             stopped: false,
@@ -599,6 +598,20 @@ impl Default for LogsView {
             last_wrap_width: 0,
             source: None,
         }
+    }
+}
+
+impl LogsView {
+    /// Replace the filter text and recompile its matcher (substring / regex /
+    /// inverse) in one place, so the cached matcher never drifts.
+    pub fn set_filter(&mut self, filter: String) {
+        self.matcher = crate::logfilter::LogMatcher::new(&filter);
+        self.filter = filter;
+    }
+
+    /// Whether `line` passes the active filter (empty filter = everything).
+    pub fn matches(&self, line: &str) -> bool {
+        self.matcher.matches(line)
     }
 }
 
@@ -795,6 +808,8 @@ pub struct App {
     /// Diagnostic-bundle (`:bundle`) options, re-applied on context switch and
     /// `:reload`.
     pub bundle_cfg: crate::config::BundleConfig,
+    /// Log-view options (`[logs]`), re-applied on context switch and `:reload`.
+    pub logs_cfg: crate::config::LogsConfig,
     /// The last bundle assembled by `:bundle`, previewed in the detail view and
     /// written to disk by `:bundle-save`: `(filename, text)`.
     pub pending_bundle: Option<(String, String)>,
@@ -994,6 +1009,7 @@ impl App {
             debug: crate::config::DebugConfig::default(),
             launched_node_debuggers: Vec::new(),
             bundle_cfg: crate::config::BundleConfig::default(),
+            logs_cfg: crate::config::LogsConfig::default(),
             pending_bundle: None,
             journal: crate::journal::Journal::default(),
             watch_errors: 0,

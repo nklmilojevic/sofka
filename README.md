@@ -227,8 +227,10 @@ Not a marketing number - these are specific, checkable design choices:
   switcher** (`:ctx`).
 - **YAML view** (`y`) and **describe** (`d`, via `kubectl`).
 - **Logs** (`l`) - per-container on a pod, aggregated across all matching
-  pods on a workload/service. In-logs **search** (`/`) with highlighting;
-  `p` for previous-container logs. ANSI color codes from the source app are
+  pods on a workload/service. In-logs **filter** (`/`): case-insensitive
+  substring (highlighted), `/regex/`, or `!` to invert; `z` clears the buffer,
+  `p` shows previous-container logs. Configurable initial tail, follow buffer,
+  and `since` lookback (`[logs]`). ANSI color codes from the source app are
   parsed and mapped onto the active skin, not printed as literal escapes.
 - **VictoriaLogs integration** (`L` / `:vlogs`) - log history for the
   selected pod, container, workload, service, or whole namespace from a
@@ -586,6 +588,23 @@ into a viewer with a staleness banner (it's a point-in-time capture), and `d`
 deletes the highlighted file. This is distinct from the one-frame `--snapshot`
 CI flag — it's an interactive capture-and-review workflow.
 
+### Log controls
+
+The kubelet logs view (`l`) keeps a bounded follow buffer. Tune the initial
+tail, the buffer size, and an optional `since` lookback:
+
+```toml
+[logs]
+tail = 300       # initial lines fetched per stream (kubectl --tail)
+buffer = 5000    # max lines kept while following (oldest dropped)
+since = "1h"     # optional: only logs newer than this — replaces tail
+```
+
+In the view, `/` filters with a case-insensitive substring, a `/regex/`, or a
+leading `!` to invert (keep non-matching lines); a malformed regex is flagged
+rather than hiding everything. `z` clears the on-screen buffer (the live stream
+keeps appending). A pod's logs already stream every container at once.
+
 ### Log provider (VictoriaLogs)
 
 `L` (or `:vlogs`) opens log history for the selection from a VictoriaLogs
@@ -730,9 +749,10 @@ header) and switching away restores write mode.
 | `?`                                           | help                                                                                                                                  |
 | _(config)_                                    | plugin / bookmark / workspace key chords — `ctrl-`/`alt-`/`shift-`/`fN`; listed in `?` help                                           |
 
-**Logs view:** `/` search+highlight · `s` autoscroll · `w` wrap · `t`
-timestamps · `x` stop/resume stream · `c` copy buffer · `ctrl-s` save to file
-· `esc` back. The newest line anchors to the bottom of the viewport.
+**Logs view:** `/` filter (substring · `/regex/` · `!invert`) · `s` autoscroll
+· `w` wrap · `t` timestamps · `x` stop/resume stream · `z` clear buffer · `c`
+copy buffer · `ctrl-s` save to file · `esc` back. The newest line anchors to
+the bottom of the viewport.
 
 **Document views** (YAML, describe, diff, events): `/` searches vim-style —
 the whole document stays on screen with every match highlighted, and `n` / `N`

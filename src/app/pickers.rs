@@ -338,6 +338,7 @@ impl App {
         self.guardrails = resolved.config.guardrails;
         self.debug = resolved.config.debug;
         self.bundle_cfg = resolved.config.bundle;
+        self.logs_cfg = resolved.config.logs;
         // Tracked debuggers belong to the previous cluster/context.
         self.launched_node_debuggers.clear();
         let mut plugin_warnings = crate::config::plugin_warnings(&self.plugins);
