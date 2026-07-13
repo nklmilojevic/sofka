@@ -3,6 +3,7 @@
 //! A from-scratch reimagining of k9s built on kube-rs + ratatui, async-first.
 
 mod app;
+mod bundle;
 mod columns;
 mod config;
 mod explain;
@@ -159,6 +160,7 @@ async fn main() -> Result<()> {
     app.workspaces = cfg.workspaces.clone();
     app.guardrails = cfg.guardrails.clone();
     app.debug = cfg.debug.clone();
+    app.bundle_cfg = cfg.bundle.clone();
     for w in config::plugin_warnings(&app.plugins)
         .into_iter()
         .chain(config::bookmark_warnings(&app.bookmarks))

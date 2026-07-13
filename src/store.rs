@@ -147,6 +147,19 @@ pub enum Msg {
         deleted: usize,
         failed: Vec<String>,
     },
+    /// An assembled diagnostic bundle (`:bundle`), ready to preview and save.
+    Bundle {
+        generation: u64,
+        title: String,
+        text: String,
+        /// Suggested filename for `:bundle-save`.
+        filename: String,
+    },
+    /// Result of writing a bundle to disk (`:bundle-save`).
+    BundleSaved {
+        generation: u64,
+        result: Result<std::path::PathBuf, String>,
+    },
     Error {
         generation: u64,
         error: String,

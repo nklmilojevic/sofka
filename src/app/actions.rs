@@ -1200,6 +1200,7 @@ impl App {
         self.workspaces = resolved.config.workspaces;
         self.guardrails = resolved.config.guardrails;
         self.debug = resolved.config.debug;
+        self.bundle_cfg = resolved.config.bundle;
         warnings.extend(crate::config::plugin_warnings(&self.plugins));
         warnings.extend(crate::config::bookmark_warnings(&self.bookmarks));
         warnings.extend(crate::config::workspace_warnings(&self.workspaces));

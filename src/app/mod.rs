@@ -366,6 +366,8 @@ enum PaletteAction {
     Journal,
     Debug,
     DebugClean,
+    Bundle,
+    BundleSave,
     Diff,
     Events,
     PortForwards,
@@ -420,6 +422,14 @@ const PALETTE_COMMANDS: &[PaletteCommand] = &[
     PaletteCommand {
         action: PaletteAction::DebugClean,
         names: &["debug-clean", "debug-cleanup", "dbgclean"],
+    },
+    PaletteCommand {
+        action: PaletteAction::Bundle,
+        names: &["bundle", "diag", "incident"],
+    },
+    PaletteCommand {
+        action: PaletteAction::BundleSave,
+        names: &["bundle-save", "bundle-write"],
     },
     PaletteCommand {
         action: PaletteAction::Diff,
@@ -765,6 +775,12 @@ pub struct App {
     /// Node debugger pods launched this session, as `(namespace, node)`, so
     /// `:debug-clean` can find and delete them. Cleared on context switch.
     pub launched_node_debuggers: Vec<(String, String)>,
+    /// Diagnostic-bundle (`:bundle`) options, re-applied on context switch and
+    /// `:reload`.
+    pub bundle_cfg: crate::config::BundleConfig,
+    /// The last bundle assembled by `:bundle`, previewed in the detail view and
+    /// written to disk by `:bundle-save`: `(filename, text)`.
+    pub pending_bundle: Option<(String, String)>,
     /// Session-local log of mutating actions taken (`:journal`).
     pub journal: crate::journal::Journal,
     /// A workspace waiting for an in-flight context switch before it opens.
@@ -950,6 +966,8 @@ impl App {
             guardrails: Vec::new(),
             debug: crate::config::DebugConfig::default(),
             launched_node_debuggers: Vec::new(),
+            bundle_cfg: crate::config::BundleConfig::default(),
+            pending_bundle: None,
             journal: crate::journal::Journal::default(),
             rbac_allowed: None,
             last_rbac_ns: None,
@@ -1040,6 +1058,7 @@ impl App {
 mod actions;
 mod authz;
 mod bookmarks;
+mod bundle;
 mod dashboards;
 mod details;
 mod explain;

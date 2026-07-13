@@ -209,6 +209,13 @@ Not a marketing number - these are specific, checkable design choices:
   that access and requires confirmation before creating it, gates it behind
   read-only mode and the `node-debug` guardrail, and tracks what it launched
   so `:debug-clean` can remove the debugger pods afterwards.
+- **Diagnostic bundles** (`:bundle`) - assemble a redacted incident bundle for
+  the selected object into one Markdown document: its (redacted) YAML, owner,
+  the incident explanation, recent events, the session timeline, bounded recent
+  logs, and a metrics snapshot. Secret `data`/`stringData`, credential-looking
+  annotations, and `last-applied-configuration` are stripped unconditionally,
+  and a manifest spells out what was included and what was withheld. You review
+  the bundle in a preview, then `:bundle-save` writes it to a file.
 - **RBAC-aware palette** - hides resource kinds you can't `list`.
 - **Namespace switcher** (`n`) with pinned **favourites** (`favorite_namespaces`,
   ★) and per-context session **recents** (·) above the rest, and **context
@@ -534,6 +541,28 @@ node_profile = "sysadmin"                # kubectl debug --profile (optional)
 Both are disabled in read-only mode and gated by guardrails — the `debug`
 action for pods, `node-debug` for nodes.
 
+### Diagnostic bundles
+
+`:bundle` assembles a redacted incident bundle for the selected object — its
+YAML, owner, the incident explanation, recent events, the session timeline,
+bounded recent logs, and a metrics snapshot — into one Markdown document for
+handing off between application and platform teams. It's gathered off-thread
+and shown in a preview; `:bundle-save` then writes it to a temp file.
+
+Redaction is unconditional: Secret `data`/`stringData` values, any
+credential-looking annotation (keys containing `token`, `password`, `secret`,
+`apikey`, `credential`, …), and `last-applied-configuration` are replaced with
+a placeholder, `managedFields` is dropped, and env vars sourced from Secrets
+are flagged (their values are references, not literals). Every bundle carries a
+manifest of exactly what was included and what was withheld.
+
+```toml
+[bundle]
+anonymize = false   # replace context/cluster identity with placeholders
+log_lines = 200     # max recent log lines per pod
+max_pods = 3        # cap how many pods contribute logs
+```
+
 ### Log provider (VictoriaLogs)
 
 `L` (or `:vlogs`) opens log history for the selection from a VictoriaLogs
@@ -663,6 +692,7 @@ header) and switching away restores write mode.
 | `a`                                        | attach to pod                                                                                                                         |
 | `:debug`                                   | pod: ephemeral debug container (`d` in the picker targets one) · node: privileged debug pod (previewed + confirmed)                   |
 | `:debug-clean`                             | delete the node debugger pods launched this session                                                                                   |
+| `:bundle` / `:bundle-save`                 | assemble a redacted diagnostic bundle for the selection · write the previewed bundle to a file                                        |
 | `i`                                        | set container image                                                                                                                   |
 | `r`                                        | rollout restart (workloads) / refresh (elsewhere)                                                                                     |
 | `f` / `shift-f`                            | port-forward (pods/services) - runs in the background                                                                                 |
