@@ -58,6 +58,72 @@ pub struct Config {
     pub views: HashMap<String, ViewConfig>,
     /// Color skin: a built-in palette name plus optional per-swatch overrides.
     pub skin: Skin,
+    /// Optional external observability backends — see [`Providers`]. Compiled
+    /// and validated by [`crate::providers::compile`].
+    pub providers: Providers,
+}
+
+/// External provider integrations. Sofka stays fully usable without any of
+/// these; they add views over data the Kubernetes API doesn't keep. Set them
+/// per cluster with override files so each cluster points at its own backend.
+#[derive(Debug, Default, Clone, Deserialize)]
+#[serde(default)]
+pub struct Providers {
+    /// A log-search backend, queried for the selected object with `L` — see
+    /// [`crate::providers`] for the full example.
+    pub logs: Option<LogProviderConfig>,
+}
+
+/// One log backend. Only `type = "victorialogs"` is supported today.
+///
+/// Everything here is optional except `type` — even the whole section:
+/// without one (or without `url`), sofka autodiscovers a VictoriaLogs
+/// service in the cluster and reaches it through the API-server proxy.
+///
+/// ```toml
+/// [providers.logs]
+/// type = "victorialogs"
+/// url = "https://vlogs.example.com"   # omit to autodiscover in-cluster
+/// lookback = "1h"          # optional: initial query window (s/m/h/d)
+/// limit = 300              # optional: lines fetched by the initial query
+///
+/// [providers.logs.headers]         # optional: sent with every request
+/// Authorization = "Bearer <token>"
+///
+/// [providers.logs.fields]          # optional: ingested field names
+/// namespace = "kubernetes.pod_namespace"
+/// pod = "kubernetes.pod_name"
+/// container = "kubernetes.container_name"
+/// ```
+#[derive(Debug, Default, Clone, Deserialize)]
+#[serde(default)]
+pub struct LogProviderConfig {
+    /// Backend kind: `"victorialogs"`.
+    #[serde(rename = "type")]
+    pub kind: String,
+    /// Base URL of the backend, e.g. `https://vlogs.example.com` or
+    /// `http://localhost:9428` (via a port-forward). Empty/omitted:
+    /// autodiscover a VictoriaLogs service and use the API-server proxy.
+    pub url: String,
+    /// How far back the initial query reaches (`"30m"`, `"1h"`, `"2d"`).
+    pub lookback: Option<String>,
+    /// Number of lines fetched by the initial query.
+    pub limit: Option<usize>,
+    /// Extra HTTP headers, e.g. an Authorization bearer token.
+    pub headers: HashMap<String, String>,
+    /// Log-record field names as ingested by the log shipper.
+    pub fields: LogProviderFields,
+}
+
+/// Field-name mapping for a log backend. Defaults match the vector setup from
+/// the VictoriaLogs Kubernetes docs; other shippers name these differently
+/// (discover yours via `/select/logsql/stream_field_names`).
+#[derive(Debug, Default, Clone, Deserialize)]
+#[serde(default)]
+pub struct LogProviderFields {
+    pub namespace: Option<String>,
+    pub pod: Option<String>,
+    pub container: Option<String>,
 }
 
 /// A custom table view for one resource kind. Keyed in `[views]` by
@@ -434,6 +500,36 @@ mod tests {
         assert!(cfg.aliases.is_empty());
         assert!(cfg.plugins.is_empty());
         assert!(cfg.default_resource.is_none());
+        assert!(cfg.providers.logs.is_none());
+    }
+
+    #[test]
+    fn parses_providers_section() {
+        let toml = r#"
+            [providers.logs]
+            type = "victorialogs"
+            url = "https://vlogs.example.com"
+            lookback = "2h"
+            limit = 500
+
+            [providers.logs.headers]
+            Authorization = "Bearer token"
+
+            [providers.logs.fields]
+            pod = "pod_name"
+        "#;
+        let cfg: Config = toml::from_str(toml).unwrap();
+        let logs = cfg.providers.logs.unwrap();
+        assert_eq!(logs.kind, "victorialogs");
+        assert_eq!(logs.url, "https://vlogs.example.com");
+        assert_eq!(logs.lookback.as_deref(), Some("2h"));
+        assert_eq!(logs.limit, Some(500));
+        assert_eq!(
+            logs.headers.get("Authorization").map(String::as_str),
+            Some("Bearer token")
+        );
+        assert_eq!(logs.fields.pod.as_deref(), Some("pod_name"));
+        assert!(logs.fields.namespace.is_none());
     }
 
     fn val(s: &str) -> toml::Value {

@@ -47,6 +47,14 @@ impl App {
                     self.exec_into(ns, name, Some(c));
                 }
             }
+            KeyCode::Char('L') => {
+                if let Some(i) = self.container_state.selected()
+                    && let Some(c) = self.container_list.get(i).cloned()
+                    && let Some((ns, name)) = self.container_pod.clone()
+                {
+                    self.launch_provider_container_logs(ns, name, c);
+                }
+            }
             _ => {}
         }
     }
@@ -123,12 +131,22 @@ impl App {
     pub(super) fn key_prompt(&mut self, key: KeyEvent) {
         match key.code {
             KeyCode::Esc => {
+                // The lookback prompt is the one prompt opened from the logs
+                // view; every other prompt starts at (and returns to) the table.
+                self.mode = if self.prompt_over_logs() {
+                    Mode::Logs
+                } else {
+                    Mode::Table
+                };
                 self.prompt_kind = None;
-                self.mode = Mode::Table;
             }
             KeyCode::Enter => {
                 let input = self.prompt_input.trim().to_string();
-                self.mode = Mode::Table;
+                self.mode = if self.prompt_over_logs() {
+                    Mode::Logs
+                } else {
+                    Mode::Table
+                };
                 match self.prompt_kind.take() {
                     Some(PromptKind::Scale { ns, name }) => match input.parse::<i32>() {
                         Ok(n) if n >= 0 => self.do_scale(ns, name, n),
@@ -158,6 +176,11 @@ impl App {
                             self.do_set_image(ns, name, plural, container, input);
                         }
                     }
+                    // Empty input = cancel, keep the current period.
+                    Some(PromptKind::ProviderLookback) if !input.is_empty() => {
+                        self.apply_provider_lookback(&input)
+                    }
+                    Some(PromptKind::ProviderLookback) => {}
                     None => {}
                 }
             }

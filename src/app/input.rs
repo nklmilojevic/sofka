@@ -98,6 +98,8 @@ impl App {
             KeyCode::Char('x') if self.kind_plural == "secrets" => self.open_decoded_secret(),
             KeyCode::Char('E') => self.open_events(),
             KeyCode::Char('l') => self.open_logs(),
+            // Logs from the configured external provider ([providers.logs]).
+            KeyCode::Char('L') => self.open_provider_logs(),
             KeyCode::Char('p') => self.open_previous_logs(),
             KeyCode::Char('e') => self.request_edit(),
             // k9s: `s` = shell on pods, scale on scalable workloads.
@@ -287,6 +289,7 @@ impl App {
             PaletteAction::Diff => self.open_diff(),
             PaletteAction::Events => self.open_events(),
             PaletteAction::PortForwards => self.open_port_forwards(),
+            PaletteAction::ProviderLogs => self.open_provider_logs(),
             PaletteAction::Skin => self.open_skins(),
             PaletteAction::Helm => self.open_helm_releases(),
             PaletteAction::Reload => self.reload_config(),
@@ -589,6 +592,21 @@ impl App {
                 self.logs.wrap = !self.logs.wrap;
                 self.flash = format!("wrap: {}", if self.logs.wrap { "on" } else { "off" });
                 self.flash_err = false;
+                return;
+            }
+            // Provider logs: `T` changes the lookback period (re-queries).
+            KeyCode::Char('T') => {
+                if self.provider_logs_active() {
+                    self.prompt_label = format!(
+                        "lookback period — e.g. 30m, 4h, 2d (current: {})",
+                        self.provider_lookback_label()
+                    );
+                    self.prompt_input.clear();
+                    self.prompt_kind = Some(PromptKind::ProviderLookback);
+                    self.mode = Mode::Prompt;
+                } else {
+                    self.flash_warn("lookback period applies to provider logs (L)");
+                }
                 return;
             }
             // k9s: `t` toggles timestamps (re-streams).

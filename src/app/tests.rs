@@ -3294,3 +3294,313 @@ async fn config_view_lists_sources_active_skin_and_warnings() {
 
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+// ----- provider logs (VictoriaLogs) ------------------------------------
+
+fn install_provider(app: &mut App) {
+    let cfg = crate::config::LogProviderConfig {
+        kind: "victorialogs".into(),
+        // Unroutable on purpose: the spawned backfill task fails into the
+        // log buffer; these tests only assert on launch-time state.
+        url: "http://localhost:1".into(),
+        ..Default::default()
+    };
+    let (provider, warnings) = crate::providers::compile(Some(&cfg));
+    assert!(warnings.is_empty(), "{warnings:?}");
+    app.log_provider = provider;
+}
+
+#[tokio::test]
+async fn provider_logs_from_pod_row() {
+    let (mut app, _rx) = test_app();
+    install_provider(&mut app);
+    app.switch_kind("pods");
+    apply(
+        &mut app,
+        json!({
+            "apiVersion": "v1", "kind": "Pod",
+            "metadata": {"name": "api-1", "namespace": "prod"},
+            "spec": {"containers": [{"name": "app"}, {"name": "istio"}]}
+        }),
+    );
+    app.table_state.select(Some(0));
+    app.handle_key(press(KeyCode::Char('L'))).unwrap();
+
+    assert_eq!(app.mode, Mode::Logs);
+    assert!(
+        app.logs.view.title.contains("victorialogs (1h)"),
+        "{}",
+        app.logs.view.title
+    );
+    match &app.logs.source {
+        Some(LogSource::Provider {
+            request:
+                crate::providers::LogRequest::Pod {
+                    ns,
+                    pod,
+                    container,
+                    multi_container,
+                },
+        }) => {
+            assert_eq!(ns, "prod");
+            assert_eq!(pod, "api-1");
+            assert!(container.is_none());
+            assert!(*multi_container);
+        }
+        other => panic!("unexpected source: {other:?}"),
+    }
+
+    // Provider lines ride the shared log channel/generation.
+    app.handle_msg(Msg::LogLines {
+        generation: app.log_gen,
+        lines: vec!["hello from vlogs".into()],
+    });
+    assert_eq!(app.logs.view.lines[0], "hello from vlogs");
+
+    // Esc returns without disturbing the table watch.
+    app.handle_key(press(KeyCode::Esc)).unwrap();
+    assert_eq!(app.mode, Mode::Table);
+}
+
+#[tokio::test]
+async fn provider_logs_discover_when_unconfigured() {
+    let (mut app, _rx) = test_app();
+    assert!(app.log_provider.is_none());
+    app.switch_kind("pods");
+    apply(
+        &mut app,
+        json!({
+            "apiVersion": "v1", "kind": "Pod",
+            "metadata": {"name": "api-1", "namespace": "prod"},
+            "spec": {"containers": [{"name": "app"}]}
+        }),
+    );
+    app.table_state.select(Some(0));
+
+    // No config: the view still opens (with default lookback in the title);
+    // the spawned task autodiscovers before querying.
+    app.handle_key(press(KeyCode::Char('L'))).unwrap();
+    assert_eq!(app.mode, Mode::Logs);
+    assert!(
+        app.logs.view.title.contains("victorialogs (1h)"),
+        "{}",
+        app.logs.view.title
+    );
+
+    // A successful discovery is reported back and cached for later presses…
+    let cfg = crate::config::LogProviderConfig {
+        kind: "victorialogs".into(),
+        url: "http://localhost:1".into(),
+        ..Default::default()
+    };
+    let discovered = crate::providers::compile(Some(&cfg)).0.unwrap();
+    app.handle_msg(Msg::LogProviderDiscovered {
+        generation: app.generation,
+        provider: Box::new(discovered),
+    });
+    assert!(app.log_provider.is_some());
+
+    // …but a stale discovery (older view generation, e.g. after a context
+    // switch) is dropped.
+    let (mut app2, _rx2) = test_app();
+    let cfg2 = crate::config::LogProviderConfig {
+        kind: "victorialogs".into(),
+        url: "http://localhost:1".into(),
+        ..Default::default()
+    };
+    let stale = crate::providers::compile(Some(&cfg2)).0.unwrap();
+    app2.bump_generation();
+    app2.handle_msg(Msg::LogProviderDiscovered {
+        generation: app2.generation - 1,
+        provider: Box::new(stale),
+    });
+    assert!(app2.log_provider.is_none());
+}
+
+#[tokio::test]
+async fn provider_logs_scopes_workload_namespace_and_rejects_others() {
+    let (mut app, _rx) = test_app();
+    install_provider(&mut app);
+
+    app.switch_kind("deployments");
+    apply(
+        &mut app,
+        json!({
+            "apiVersion": "apps/v1", "kind": "Deployment",
+            "metadata": {"name": "web", "namespace": "prod"},
+            "spec": {"selector": {"matchLabels": {"app": "web"}}}
+        }),
+    );
+    app.table_state.select(Some(0));
+    app.handle_key(press(KeyCode::Char('L'))).unwrap();
+    assert_eq!(app.mode, Mode::Logs);
+    match &app.logs.source {
+        Some(LogSource::Provider {
+            request: crate::providers::LogRequest::Selector { ns, labels },
+        }) => {
+            assert_eq!(ns, "prod");
+            assert_eq!(labels, "app=web");
+        }
+        other => panic!("unexpected source: {other:?}"),
+    }
+    app.handle_key(press(KeyCode::Esc)).unwrap();
+
+    app.switch_kind("namespaces");
+    apply(
+        &mut app,
+        json!({
+            "apiVersion": "v1", "kind": "Namespace",
+            "metadata": {"name": "prod"}
+        }),
+    );
+    app.table_state.select(Some(0));
+    app.handle_key(press(KeyCode::Char('L'))).unwrap();
+    assert_eq!(app.mode, Mode::Logs);
+    match &app.logs.source {
+        Some(LogSource::Provider {
+            request: crate::providers::LogRequest::Namespace { ns },
+        }) => assert_eq!(ns, "prod"),
+        other => panic!("unexpected source: {other:?}"),
+    }
+    app.handle_key(press(KeyCode::Esc)).unwrap();
+
+    app.switch_kind("secrets");
+    apply(
+        &mut app,
+        json!({
+            "apiVersion": "v1", "kind": "Secret",
+            "metadata": {"name": "creds", "namespace": "prod"}
+        }),
+    );
+    app.table_state.select(Some(0));
+    app.handle_key(press(KeyCode::Char('L'))).unwrap();
+    assert_eq!(app.mode, Mode::Table);
+    assert!(app.flash.contains("provider logs"), "{}", app.flash);
+}
+
+#[tokio::test]
+async fn provider_logs_for_one_container_from_picker() {
+    let (mut app, _rx) = test_app();
+    install_provider(&mut app);
+    app.switch_kind("pods");
+    apply(
+        &mut app,
+        json!({
+            "apiVersion": "v1", "kind": "Pod",
+            "metadata": {"name": "api-1", "namespace": "prod"},
+            "spec": {"containers": [{"name": "app"}, {"name": "istio"}]}
+        }),
+    );
+    app.table_state.select(Some(0));
+    app.handle_key(press(KeyCode::Enter)).unwrap();
+    assert_eq!(app.mode, Mode::Containers);
+
+    app.handle_key(press(KeyCode::Char('L'))).unwrap();
+    assert_eq!(app.mode, Mode::Logs);
+    assert!(
+        app.logs.view.title.starts_with("api-1:app —"),
+        "{}",
+        app.logs.view.title
+    );
+    match &app.logs.source {
+        Some(LogSource::Provider {
+            request:
+                crate::providers::LogRequest::Pod {
+                    container: Some(c), ..
+                },
+        }) => assert_eq!(c, "app"),
+        other => panic!("unexpected source: {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn provider_lookback_prompt_changes_period_and_requeries() {
+    let (mut app, _rx) = test_app();
+    install_provider(&mut app);
+    app.switch_kind("pods");
+    apply(
+        &mut app,
+        json!({
+            "apiVersion": "v1", "kind": "Pod",
+            "metadata": {"name": "api-1", "namespace": "prod"},
+            "spec": {"containers": [{"name": "app"}]}
+        }),
+    );
+    app.table_state.select(Some(0));
+    app.handle_key(press(KeyCode::Char('L'))).unwrap();
+    assert!(app.logs.view.title.contains("victorialogs (1h)"));
+
+    // `T` prompts for a period, drawn over the logs view.
+    app.handle_key(press(KeyCode::Char('T'))).unwrap();
+    assert_eq!(app.mode, Mode::Prompt);
+    assert!(app.prompt_over_logs());
+    assert!(
+        app.prompt_label.contains("current: 1h"),
+        "{}",
+        app.prompt_label
+    );
+
+    // Esc returns to the logs view, keeping the period.
+    app.handle_key(press(KeyCode::Esc)).unwrap();
+    assert_eq!(app.mode, Mode::Logs);
+    assert!(app.logs.view.title.contains("(1h)"));
+
+    // A valid period retitles, updates the session provider, and re-queries
+    // (new log generation).
+    let gen_before = app.log_gen;
+    app.handle_key(press(KeyCode::Char('T'))).unwrap();
+    app.handle_key(press(KeyCode::Char('4'))).unwrap();
+    app.handle_key(press(KeyCode::Char('h'))).unwrap();
+    app.handle_key(press(KeyCode::Enter)).unwrap();
+    assert_eq!(app.mode, Mode::Logs);
+    assert!(
+        app.logs.view.title.contains("victorialogs (4h)"),
+        "{}",
+        app.logs.view.title
+    );
+    assert_eq!(app.log_provider.as_ref().unwrap().lookback_label, "4h");
+    assert!(app.log_gen > gen_before, "lookback change must re-stream");
+    assert_eq!(app.flash, "lookback: 4h");
+
+    // Garbage is rejected with a warning; nothing changes.
+    app.handle_key(press(KeyCode::Char('T'))).unwrap();
+    for c in "soon".chars() {
+        app.handle_key(press(KeyCode::Char(c))).unwrap();
+    }
+    app.handle_key(press(KeyCode::Enter)).unwrap();
+    assert_eq!(app.mode, Mode::Logs);
+    assert!(app.flash_err);
+    assert!(app.flash.contains("lookback"), "{}", app.flash);
+    assert!(app.logs.view.title.contains("(4h)"));
+
+    // Later provider launches inherit the changed period.
+    app.handle_key(press(KeyCode::Esc)).unwrap();
+    app.handle_key(press(KeyCode::Char('L'))).unwrap();
+    assert!(
+        app.logs.view.title.contains("victorialogs (4h)"),
+        "{}",
+        app.logs.view.title
+    );
+}
+
+#[tokio::test]
+async fn lookback_key_only_applies_to_provider_logs() {
+    let (mut app, _rx) = test_app();
+    app.switch_kind("pods");
+    apply(
+        &mut app,
+        json!({
+            "apiVersion": "v1", "kind": "Pod",
+            "metadata": {"name": "api-1", "namespace": "prod"},
+            "spec": {"containers": [{"name": "app"}]}
+        }),
+    );
+    app.table_state.select(Some(0));
+
+    // Kubelet logs: `T` explains itself instead of prompting.
+    app.handle_key(press(KeyCode::Char('l'))).unwrap();
+    assert_eq!(app.mode, Mode::Logs);
+    app.handle_key(press(KeyCode::Char('T'))).unwrap();
+    assert_eq!(app.mode, Mode::Logs);
+    assert!(app.flash.contains("provider logs"), "{}", app.flash);
+}

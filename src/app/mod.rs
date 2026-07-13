@@ -186,7 +186,7 @@ enum ConfirmAction {
 
 /// What the logs view is currently streaming, so it can be re-streamed when
 /// toggling timestamps (k9s `t`).
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 enum LogSource {
     /// Every container of one pod.
     Pod {
@@ -202,6 +202,12 @@ enum LogSource {
         pod: String,
         container: Option<String>,
         previous: bool,
+    },
+    /// The configured external log provider (`[providers.logs]`), queried for
+    /// the selection instead of the kubelet — survives pod restarts and covers
+    /// deleted pods and whole namespaces.
+    Provider {
+        request: crate::providers::LogRequest,
     },
 }
 
@@ -220,6 +226,9 @@ enum PromptKind {
         plural: String,
         container: String,
     },
+    /// New lookback period for the provider logs view (`T`) — the only
+    /// prompt opened from (and returning to) [`Mode::Logs`].
+    ProviderLookback,
 }
 
 #[derive(Default)]
@@ -279,6 +288,7 @@ enum PaletteAction {
     Diff,
     Events,
     PortForwards,
+    ProviderLogs,
     Skin,
     Helm,
     Reload,
@@ -313,6 +323,10 @@ const PALETTE_COMMANDS: &[PaletteCommand] = &[
     PaletteCommand {
         action: PaletteAction::PortForwards,
         names: &["pf", "portforwards", "forwards"],
+    },
+    PaletteCommand {
+        action: PaletteAction::ProviderLogs,
+        names: &["vlogs", "plogs", "providerlogs"],
     },
     PaletteCommand {
         action: PaletteAction::Skin,
@@ -657,6 +671,9 @@ pub struct App {
     matcher: SkimMatcherV2,
     rows_cache: RefCell<RowsCache>,
 
+    /// Compiled log provider from `[providers.logs]`, re-resolved on context
+    /// switch and `:reload` so each cluster can point at its own backend.
+    pub log_provider: Option<crate::providers::LogProvider>,
     /// Compiled custom views from config, re-resolved on context switch.
     pub user_views: HashMap<String, crate::views::View>,
     /// CRD printer-column fallbacks fetched per plural for this cluster
@@ -768,6 +785,7 @@ impl App {
                 keys: Vec::new(),
                 cells: HashMap::new(),
             }),
+            log_provider: None,
             user_views: HashMap::new(),
             crd_views: HashMap::new(),
             wide: false,
@@ -777,6 +795,18 @@ impl App {
 
     pub fn all_namespaces(&self) -> bool {
         self.namespace.is_empty()
+    }
+
+    /// Whether the active prompt was opened from the logs view, so the
+    /// renderer keeps the logs (not the table) underneath it.
+    pub fn prompt_over_logs(&self) -> bool {
+        matches!(self.prompt_kind, Some(PromptKind::ProviderLookback))
+    }
+
+    /// Whether the logs view is showing the external log provider (enables
+    /// provider-only keys like `T`).
+    pub fn provider_logs_active(&self) -> bool {
+        matches!(self.logs.source, Some(LogSource::Provider { .. }))
     }
 }
 

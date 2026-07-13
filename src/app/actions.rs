@@ -848,8 +848,8 @@ impl App {
     }
 
     /// `:reload` — re-read the configuration from disk and apply it live:
-    /// aliases, plugins, skin (+ per-swatch overrides), background fill, and
-    /// read-only mode. Launch defaults (`default_namespace`/`default_resource`)
+    /// aliases, plugins, the log provider, skin (+ per-swatch overrides),
+    /// background fill, and read-only mode. Launch defaults (`default_namespace`/`default_resource`)
     /// are deliberately not re-applied — a reload must never yank the current
     /// view. A reload that fails validation keeps the last known-good config
     /// active and reports the precise error (file, key, what's wrong) instead.
@@ -871,6 +871,10 @@ impl App {
         let mut warnings = resolved.warnings;
         self.user_aliases = resolved.config.aliases;
         self.plugins = resolved.config.plugins;
+        let (log_provider, provider_warnings) =
+            crate::providers::compile(resolved.config.providers.logs.as_ref());
+        self.log_provider = log_provider;
+        warnings.extend(provider_warnings);
         self.skin_colors = resolved.config.skin.colors;
         self.readonly = self.readonly_override.unwrap_or(resolved.config.readonly);
         self.cluster.add_aliases(&self.user_aliases);

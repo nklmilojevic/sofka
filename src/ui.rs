@@ -83,6 +83,8 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         Mode::Diff => draw_diff(frame, &app.detail, chunks[1]),
         Mode::Events => draw_scrollable(frame, &app.detail, chunks[1], theme::peach()),
         Mode::Logs | Mode::LogFilter => draw_logs(frame, app, chunks[1]),
+        // The lookback prompt opens from the logs view — keep it underneath.
+        Mode::Prompt if app.prompt_over_logs() => draw_logs(frame, app, chunks[1]),
         // While typing a doc search, keep drawing the view it was opened from
         // so the matches narrow live under the prompt.
         Mode::DocFilter => match app.doc_filter_return {
@@ -1534,6 +1536,10 @@ fn draw_help(frame: &mut Frame, app: &App, area: Rect) {
         Line::from(Span::styled("  Inspect", theme::title())),
         bind("y · d", "view YAML · describe (kubectl)"),
         bind("l · p", "logs (workload = all pods) · previous logs"),
+        bind(
+            "shift-l · :vlogs",
+            "VictoriaLogs history (autodiscovered or [providers.logs]) — pods/workloads/ns",
+        ),
         bind("c", "copy resource name · in doc views: copy the document"),
         bind("/", "search within YAML/describe/diff/events/help"),
         bind("x", "secrets: show data base64-decoded"),
@@ -1565,6 +1571,10 @@ fn draw_help(frame: &mut Frame, app: &App, area: Rect) {
         Line::from(Span::styled("  Logs view", theme::title())),
         bind("/ · s · w · t", "search · autoscroll · wrap · timestamps"),
         bind("x · c · ctrl-s", "stop/resume · copy · save to file"),
+        bind(
+            "shift-t",
+            "provider logs: change lookback period (30m, 4h, 2d)",
+        ),
         Line::from(""),
         bind(":q / ctrl-c", "quit"),
         bind("?", "toggle help"),
@@ -1867,7 +1877,7 @@ fn draw_containers(frame: &mut Frame, app: &mut App, area: Rect) {
         format!(" · {}", app.container_qos)
     };
     let title = format!(" Containers{qos} ");
-    let footer = " ⏎ logs · p previous · s shell ";
+    let footer = " ⏎ logs · p previous · s shell · L provider ";
 
     // Size the box to its contents: header + rows + borders, and wide enough
     // for the columns, the title, or the footer — whichever needs the most.
@@ -2284,7 +2294,11 @@ fn draw_prompt(frame: &mut Frame, app: &App, area: Rect) {
             Style::default().fg(theme::yellow()),
         )),
         Mode::Logs => {
-            let hint = "  /search  s:autoscroll  w:wrap  t:timestamps  x:stop/resume  c:copy  ^s:save  esc:back";
+            let hint = if app.provider_logs_active() {
+                "  /search  s:autoscroll  w:wrap  t:timestamps  T:period  x:stop/resume  c:copy  ^s:save  esc:back"
+            } else {
+                "  /search  s:autoscroll  w:wrap  t:timestamps  x:stop/resume  c:copy  ^s:save  esc:back"
+            };
             Line::from(Span::styled(hint, theme::dim()))
         }
         Mode::Detail | Mode::Events | Mode::Diff => {

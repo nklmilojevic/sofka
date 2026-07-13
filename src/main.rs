@@ -8,6 +8,7 @@ mod config;
 mod filter;
 mod helm;
 mod k8s;
+mod providers;
 mod store;
 mod theme;
 mod ui;
@@ -152,6 +153,11 @@ async fn main() -> Result<()> {
         eprintln!("warning: {w}");
     }
     app.user_views = user_views;
+    let (log_provider, provider_warnings) = providers::compile(cfg.providers.logs.as_ref());
+    for w in &provider_warnings {
+        eprintln!("warning: {w}");
+    }
+    app.log_provider = log_provider;
     app.skin_colors = cfg.skin.colors.clone();
     app.config = loader;
     app.session_skin = Some(session_skin);
