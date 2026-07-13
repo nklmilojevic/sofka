@@ -866,12 +866,12 @@ platform binaries, publishes crates.io, and warms the Nix cache.
 
 ### Milestone 5: debugging and collaboration
 
-- [ ] Ephemeral container workflow.
-- [ ] Node debug pod workflow.
-- [ ] Redacted diagnostic bundles.
-- [ ] Screen dumps and structured snapshots.
-- [ ] Runtime diagnostics and structured logs.
-- [ ] Richer log controls.
+- [x] Ephemeral container workflow.
+- [x] Node debug pod workflow.
+- [x] Redacted diagnostic bundles.
+- [x] Screen dumps and structured snapshots.
+- [x] Runtime diagnostics. _(Structured application logging is still to come.)_
+- [x] Richer log controls.
 
 ### Milestone 6: fleet and integrations
 
