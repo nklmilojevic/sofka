@@ -518,6 +518,21 @@ impl App {
             Msg::LogLines { generation, lines } if generation == self.log_gen => {
                 self.push_log_lines(lines);
             }
+            Msg::LogProviderDiscovered {
+                generation,
+                provider,
+            } if generation == self.generation => {
+                // Cache the resolution (discovered transport and/or detected
+                // field names) for later `L` presses. A fully-configured
+                // provider stays authoritative and is never replaced.
+                if self
+                    .log_provider
+                    .as_ref()
+                    .is_none_or(|p| p.needs_discovery() || p.needs_field_detection())
+                {
+                    self.log_provider = Some(*provider);
+                }
+            }
             Msg::Metrics {
                 generation,
                 data,

@@ -143,11 +143,18 @@ Not a marketing number - these are specific, checkable design choices:
   pods on a workload/service. In-logs **search** (`/`) with highlighting;
   `p` for previous-container logs. ANSI color codes from the source app are
   parsed and mapped onto the active skin, not printed as literal escapes.
+- **VictoriaLogs integration** (`L` / `:vlogs`) - log history for the
+  selected pod, container, workload, service, or whole namespace from a
+  VictoriaLogs backend: a lookback query plus live tail, in the same logs
+  view. Zero-config: sofka autodiscovers the VictoriaLogs service in the
+  cluster and reaches it through the API-server proxy; or point
+  `[providers.logs]` at an external URL. Covers restarted and deleted pods —
+  the backend remembers what the kubelet no longer has.
 - **Skinnable** - built-in Catppuccin, Gruvbox, Solarized, Nord, Dracula,
   Tokyo Night, One Dark, Rosé Pine, and Monokai palettes, auto-detected
   dark/light default, plus per-swatch overrides in config.
 - **Config file** (TOML): aliases, default namespace/resource, plugins,
-  views, skin.
+  views, log provider, skin.
 
 ## Installation
 
@@ -260,6 +267,38 @@ take the TUI down.
 Custom resources without an explicit view automatically use their CRD's
 `additionalPrinterColumns` (columns with `priority > 0` become wide-only),
 so most CRs get useful columns with zero configuration.
+
+### Log provider (VictoriaLogs)
+
+`L` (or `:vlogs`) opens log history for the selection from a VictoriaLogs
+backend instead of the kubelet. With no configuration at all, sofka finds the
+VictoriaLogs `Service` in the cluster by its well-known labels (Helm charts
+and the VictoriaMetrics operator) and queries it through the Kubernetes
+API-server service proxy, reusing your kubeconfig credentials. Configure it
+only to point at an external endpoint or to adjust the defaults:
+
+```toml
+[providers.logs]
+type = "victorialogs"
+url = "https://vlogs.example.com"  # omit to autodiscover in-cluster
+lookback = "1h"                    # initial query window (s/m/h/d)
+limit = 300                        # lines fetched by the initial query
+
+[providers.logs.headers]           # optional, sent with every request
+Authorization = "Bearer <token>"
+
+# Field names as ingested by your log shipper. Omit this section to let
+# sofka detect the convention from the backend's stream fields — vector,
+# fluentd, fluent-bit, OpenTelemetry, and bare namespace/pod/container
+# names are recognized. Configure only for exotic pipelines.
+[providers.logs.fields]
+namespace = "kubernetes.pod_namespace"
+pod = "kubernetes.pod_name"
+container = "kubernetes.container_name"
+```
+
+Like every section, `[providers.logs]` can live in a per-cluster or
+per-context override file, so each cluster can use its own backend.
 
 ### Per-cluster / per-context overrides
 

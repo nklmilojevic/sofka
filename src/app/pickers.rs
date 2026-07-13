@@ -269,6 +269,9 @@ impl App {
         self.plugins = resolved.config.plugins;
         let (views, view_warnings) = crate::views::compile(&resolved.config.views);
         self.user_views = views;
+        let (log_provider, provider_warnings) =
+            crate::providers::compile(resolved.config.providers.logs.as_ref());
+        self.log_provider = log_provider;
         // Printer-column fallbacks came from the old cluster's CRDs.
         self.crd_views.clear();
         self.skin_colors = resolved.config.skin.colors;
@@ -300,7 +303,12 @@ impl App {
         self.apply_context_skin(resolved.skin_override);
         self.flash = format!("context: {name}");
         self.flash_err = false;
-        if let Some(w) = resolved.warnings.first().or(view_warnings.first()) {
+        if let Some(w) = resolved
+            .warnings
+            .first()
+            .or(view_warnings.first())
+            .or(provider_warnings.first())
+        {
             self.flash_warn(w);
         }
         // Keep `:config` in sync with the layers just resolved for this context.
