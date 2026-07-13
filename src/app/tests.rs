@@ -2503,6 +2503,53 @@ async fn bookmark_applies_resource_namespace_filter_and_sort() {
 }
 
 #[tokio::test]
+async fn workspace_opens_first_view_and_tab_cycles() {
+    let (mut app, _rx) = test_app();
+    app.workspaces = vec![crate::config::Workspace {
+        key: Some("ctrl-w".into()),
+        name: "ops".into(),
+        context: None,
+        views: vec![
+            crate::config::WorkspaceView {
+                name: "pods".into(),
+                resource: "pods".into(),
+                namespace: Some("checkout".into()),
+                ..Default::default()
+            },
+            crate::config::WorkspaceView {
+                name: "deploys".into(),
+                resource: "deployments".into(),
+                ..Default::default()
+            },
+        ],
+    }];
+    assert!(app.open_workspace_named("ops"));
+    assert_eq!(app.kind_plural, "pods");
+    assert_eq!(app.namespace, "checkout");
+    assert!(app.flash.contains("[1/2]"));
+
+    // Tab advances to the second view; wraps back on the third press.
+    app.handle_key(press(KeyCode::Tab)).unwrap();
+    assert_eq!(app.kind_plural, "deployments");
+    assert!(app.flash.contains("[2/2]"));
+    app.handle_key(press(KeyCode::Tab)).unwrap();
+    assert_eq!(app.kind_plural, "pods");
+    assert!(app.flash.contains("[1/2]"));
+
+    // Shift-Tab goes back.
+    app.handle_key(press(KeyCode::BackTab)).unwrap();
+    assert_eq!(app.kind_plural, "deployments");
+}
+
+#[tokio::test]
+async fn tab_is_a_noop_without_an_active_workspace() {
+    let (mut app, _rx) = test_app();
+    app.switch_kind("pods");
+    assert!(!app.cycle_workspace(true));
+    assert_eq!(app.kind_plural, "pods");
+}
+
+#[tokio::test]
 async fn bookmark_key_chord_triggers_it() {
     let (mut app, _rx) = test_app();
     app.bookmarks = vec![crate::config::Bookmark {

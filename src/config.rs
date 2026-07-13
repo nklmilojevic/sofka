@@ -56,6 +56,9 @@ pub struct Config {
     /// Saved navigation commands bound to keys and the palette — see
     /// [`Bookmark`]. Validated by [`bookmark_warnings`].
     pub bookmarks: Vec<Bookmark>,
+    /// Task-oriented collections of views — see [`Workspace`]. Validated by
+    /// [`workspace_warnings`].
+    pub workspaces: Vec<Workspace>,
     /// Custom table views keyed by resource — see [`ViewConfig`]. Compiled
     /// and validated by [`crate::views::compile`].
     pub views: HashMap<String, ViewConfig>,
@@ -377,6 +380,106 @@ pub struct Bookmark {
     pub sort: Option<String>,
     /// A view to open after landing: `xray` or `pulse`.
     pub view: Option<String>,
+}
+
+/// A task-oriented collection of views — checkout operations, a cluster
+/// upgrade, certificate renewal — saved as plain config a team can share.
+/// Opening a workspace switches to its (optional) context and lands on its
+/// first view; `Tab`/`Shift-Tab` cycle through the rest without leaving it.
+///
+/// ```toml
+/// [[workspaces]]
+/// key = "ctrl-w"
+/// name = "Checkout ops"
+/// context = "prod-eu"          # optional: switched once on open
+///
+/// [[workspaces.views]]
+/// name = "API pods"
+/// resource = "pods"
+/// namespace = "checkout"
+/// filter = "-l app=api"
+/// sort = "RESTARTS:desc"
+///
+/// [[workspaces.views]]
+/// name = "Ingress"
+/// resource = "ingresses"
+/// namespace = "checkout"
+/// ```
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct Workspace {
+    /// Optional key chord (see [`crate::keys::KeyChord`]) to open it.
+    pub key: Option<String>,
+    pub name: String,
+    /// Kubeconfig context, switched to once when the workspace opens.
+    pub context: Option<String>,
+    pub views: Vec<WorkspaceView>,
+}
+
+/// One view within a [`Workspace`]: like a [`Bookmark`] without its own key or
+/// context (the workspace owns those).
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct WorkspaceView {
+    pub name: String,
+    pub resource: String,
+    pub namespace: Option<String>,
+    pub filter: Option<String>,
+    pub sort: Option<String>,
+    pub view: Option<String>,
+}
+
+impl WorkspaceView {
+    /// The equivalent [`Bookmark`] (no key/context), so the app can apply a
+    /// workspace view through the same path as a bookmark.
+    pub fn as_bookmark(&self) -> Bookmark {
+        Bookmark {
+            key: None,
+            name: self.name.clone(),
+            resource: self.resource.clone(),
+            namespace: self.namespace.clone(),
+            context: None,
+            filter: self.filter.clone(),
+            sort: self.sort.clone(),
+            view: self.view.clone(),
+        }
+    }
+}
+
+/// Validation warnings for workspaces: an unparseable key chord, a missing
+/// name, no views, or a bad view (missing resource / unknown view kind).
+pub fn workspace_warnings(workspaces: &[Workspace]) -> Vec<String> {
+    let mut warns = Vec::new();
+    for w in workspaces {
+        let label = if w.name.is_empty() {
+            "<unnamed>"
+        } else {
+            &w.name
+        };
+        if w.name.trim().is_empty() {
+            warns.push("workspace: missing `name`".into());
+        }
+        if let Some(k) = &w.key
+            && let Err(e) = crate::keys::KeyChord::parse(k)
+        {
+            warns.push(format!("workspace {label:?}: invalid key — {e}"));
+        }
+        if w.views.is_empty() {
+            warns.push(format!("workspace {label:?}: no [[workspaces.views]]"));
+        }
+        for v in &w.views {
+            if v.resource.trim().is_empty() {
+                warns.push(format!("workspace {label:?}: a view is missing `resource`"));
+            }
+            if let Some(kind) = &v.view
+                && !matches!(kind.as_str(), "xray" | "pulse")
+            {
+                warns.push(format!(
+                    "workspace {label:?}: unknown view {kind:?} (expected xray/pulse) — ignored"
+                ));
+            }
+        }
+    }
+    warns
 }
 
 /// Validation warnings for bookmarks: an unparseable key chord, a missing
@@ -771,6 +874,55 @@ mod tests {
         assert!(w.iter().any(|s| s.contains("missing `resource`")), "{w:?}");
         assert!(w.iter().any(|s| s.contains("invalid key")), "{w:?}");
         assert!(w.iter().any(|s| s.contains("unknown view")), "{w:?}");
+    }
+
+    #[test]
+    fn parses_workspaces_and_flags_problems() {
+        let cfg: Config = toml::from_str(
+            r#"
+            [[workspaces]]
+            key = "ctrl-w"
+            name = "Checkout ops"
+            context = "prod-eu"
+
+            [[workspaces.views]]
+            name = "API pods"
+            resource = "pods"
+            namespace = "checkout"
+            filter = "-l app=api"
+            sort = "RESTARTS:desc"
+
+            [[workspaces.views]]
+            name = "Ingress"
+            resource = "ingresses"
+        "#,
+        )
+        .unwrap();
+        let w = &cfg.workspaces[0];
+        assert_eq!(w.name, "Checkout ops");
+        assert_eq!(w.context.as_deref(), Some("prod-eu"));
+        assert_eq!(w.views.len(), 2);
+        assert_eq!(w.views[0].resource, "pods");
+        assert!(workspace_warnings(&cfg.workspaces).is_empty());
+
+        let bad: Config = toml::from_str(
+            r#"
+            [[workspaces]]
+            name = ""
+            key = "hyper-x"
+        "#,
+        )
+        .unwrap();
+        let warns = workspace_warnings(&bad.workspaces);
+        assert!(
+            warns.iter().any(|s| s.contains("missing `name`")),
+            "{warns:?}"
+        );
+        assert!(warns.iter().any(|s| s.contains("invalid key")), "{warns:?}");
+        assert!(
+            warns.iter().any(|s| s.contains("no [[workspaces.views]]")),
+            "{warns:?}"
+        );
     }
 
     #[test]

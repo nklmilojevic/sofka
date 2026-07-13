@@ -35,7 +35,7 @@ impl App {
             && (key.modifiers.contains(KeyModifiers::CONTROL)
                 || key.modifiers.contains(KeyModifiers::ALT))
         {
-            if !self.try_bookmark_key(key) {
+            if !self.try_bookmark_key(key) && !self.try_workspace_key(key) {
                 self.try_plugin_key(key);
             }
             return Ok(());
@@ -150,6 +150,13 @@ impl App {
             // Browser-style view history: [ back, ] forward.
             KeyCode::Char('[') => self.history_back(),
             KeyCode::Char(']') => self.history_forward(),
+            // Cycle the active workspace's views (no-op when none is open).
+            KeyCode::Tab => {
+                self.cycle_workspace(true);
+            }
+            KeyCode::BackTab => {
+                self.cycle_workspace(false);
+            }
             // k9s: 0 = all namespaces.
             KeyCode::Char('0') => {
                 self.namespace.clear();
@@ -188,7 +195,7 @@ impl App {
             // are routed earlier, in `handle_key`, before the plain-key
             // bindings above can claim them.
             _ => {
-                if !self.try_bookmark_key(key) {
+                if !self.try_bookmark_key(key) && !self.try_workspace_key(key) {
                     self.try_plugin_key(key);
                 }
             }
@@ -449,6 +456,11 @@ impl App {
                             self.apply_bookmark_named(&s.label);
                         }
                     }
+                    Some(SuggestKind::Workspace) => {
+                        if let Some(s) = picked {
+                            self.open_workspace_named(&s.label);
+                        }
+                    }
                     // An exact typed built-in wins (stable muscle memory), then
                     // the highlighted suggestion, then the raw text as a resource.
                     _ => {
@@ -463,7 +475,8 @@ impl App {
                                 // Handled by the outer match arms above.
                                 SuggestKind::Namespace
                                 | SuggestKind::Context
-                                | SuggestKind::Bookmark => {}
+                                | SuggestKind::Bookmark
+                                | SuggestKind::Workspace => {}
                             }
                         } else if !head.is_empty() {
                             self.switch_kind_ns(&head, ns_arg);
@@ -600,6 +613,24 @@ impl App {
                     Suggestion {
                         label: b.name.clone(),
                         kind: SuggestKind::Bookmark,
+                    },
+                ));
+            }
+        }
+
+        // Saved workspaces, matched by name, ranked alongside bookmarks.
+        for w in &self.workspaces {
+            let score = if q.is_empty() {
+                Some(i64::MAX)
+            } else {
+                self.matcher.fuzzy_match(&w.name, q).map(|s| s + 1_000)
+            };
+            if let Some(score) = score {
+                scored.push((
+                    score,
+                    Suggestion {
+                        label: w.name.clone(),
+                        kind: SuggestKind::Workspace,
                     },
                 ));
             }

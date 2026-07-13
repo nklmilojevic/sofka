@@ -268,8 +268,10 @@ impl App {
         self.user_aliases = resolved.config.aliases;
         self.plugins = resolved.config.plugins;
         self.bookmarks = resolved.config.bookmarks;
+        self.workspaces = resolved.config.workspaces;
         let mut plugin_warnings = crate::config::plugin_warnings(&self.plugins);
         plugin_warnings.extend(crate::config::bookmark_warnings(&self.bookmarks));
+        plugin_warnings.extend(crate::config::workspace_warnings(&self.workspaces));
         let (views, view_warnings) = crate::views::compile(&resolved.config.views);
         self.user_views = views;
         let (thresholds, threshold_warnings) =
@@ -325,9 +327,11 @@ impl App {
         self.config_warnings = resolved.warnings;
         self.config_warnings.extend(plugin_warnings);
         self.config_warnings.extend(threshold_warnings);
-        // A bookmark that requested this context lands on its own view; a plain
-        // switch lands on the context's default resource.
-        if self.pending_bookmark.is_some() {
+        // A bookmark/workspace that requested this context lands on its own
+        // view(s); a plain switch lands on the context's default resource.
+        if self.pending_workspace.is_some() {
+            self.apply_pending_workspace();
+        } else if self.pending_bookmark.is_some() {
             self.apply_pending_bookmark();
         } else {
             let kind = resolved
