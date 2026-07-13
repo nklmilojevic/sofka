@@ -62,7 +62,7 @@ impl Finding {
         }
     }
 
-    fn with_target(mut self, target: Target) -> Self {
+    pub fn with_target(mut self, target: Target) -> Self {
         self.target = Some(target);
         self
     }

@@ -184,6 +184,28 @@ impl App {
         self.start_watch();
     }
 
+    /// Navigate to a specific object by (plural, namespace, name) — a
+    /// name-filtered table view. Used to jump to the resource behind a GitOps
+    /// chain node (owner/source/dependency).
+    pub(super) fn navigate_to_target(&mut self, t: &crate::explain::Target) {
+        let Some(kind) = self.cluster.resolve(&t.plural) else {
+            self.flash_warn(&format!("cannot resolve '{}'", t.plural));
+            return;
+        };
+        self.push_frame();
+        self.kind_plural = kind.ar.plural.to_lowercase();
+        self.kind = Some(kind);
+        self.namespace = t.namespace.clone().unwrap_or_default();
+        self.labels = None;
+        self.fields = Some(format!("metadata.name={}", t.name));
+        self.scope_label = Some(t.name.clone());
+        self.filter.clear();
+        self.reset_sort();
+        self.table_state.select(Some(0));
+        self.mode = Mode::Table;
+        self.start_watch();
+    }
+
     pub(super) fn set_namespace_and_return(&mut self, name: &str) {
         let ns = if name == "<all>" {
             String::new()

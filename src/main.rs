@@ -7,6 +7,7 @@ mod columns;
 mod config;
 mod explain;
 mod filter;
+mod gitops;
 mod helm;
 mod k8s;
 mod keys;

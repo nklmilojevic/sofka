@@ -97,6 +97,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         Mode::Pulse => draw_pulse(frame, app, chunks[1]),
         Mode::Xray => draw_xray(frame, app, chunks[1]),
         Mode::Explain => draw_explain(frame, app, chunks[1]),
+        Mode::Gitops => draw_gitops(frame, app, chunks[1]),
         Mode::Timeline => draw_timeline(frame, app, chunks[1]),
         Mode::PortForwards => draw_port_forwards(frame, app, chunks[1]),
         _ => draw_table(frame, app, chunks[1]),
@@ -267,6 +268,7 @@ fn header_hints(app: &App) -> Vec<Line<'static>> {
             | Mode::Xray
             | Mode::Explain
             | Mode::Timeline
+            | Mode::Gitops
             | Mode::PortForwards
     ) {
         return Vec::new();
@@ -1562,6 +1564,10 @@ fn draw_help(frame: &mut Frame, app: &App, area: Rect) {
             "shift-t · :timeline",
             "session-local state-change history for the selection",
         ),
+        bind(
+            ":gitops · :flux",
+            "Flux owner, source, revisions & reconciliation chain (⏎ to jump)",
+        ),
         Line::from(""),
         Line::from(Span::styled("  Act", theme::title())),
         bind("e", "edit in $EDITOR (kubectl edit)"),
@@ -2223,7 +2229,17 @@ fn draw_xray(frame: &mut Frame, app: &mut App, area: Rect) {
 
 /// Explain-unhealthy view: a ranked, evidence-backed list of findings for the
 /// selected object. Lines carrying a navigation target are marked with a `→`.
-fn draw_explain(frame: &mut Frame, app: &mut App, area: Rect) {
+/// Render a list of [`crate::explain::Finding`]s (shared by the explain and
+/// GitOps views): coloured by level, indented, with a `→` on lines that carry
+/// a jump target. Shows `empty_msg` while the findings are still gathering.
+fn draw_findings(
+    frame: &mut Frame,
+    area: Rect,
+    title: String,
+    findings: &[crate::explain::Finding],
+    empty_msg: &str,
+    state: &mut ListState,
+) {
     use crate::explain::Level;
     let color = |level: Level| match level {
         Level::Heading => theme::yellow(),
@@ -2234,54 +2250,74 @@ fn draw_explain(frame: &mut Frame, app: &mut App, area: Rect) {
         Level::Evidence => theme::subtext0(),
     };
 
-    if app.explain_items.is_empty() {
-        let items = vec![ListItem::new(Line::from(Span::styled(
-            "gathering evidence…",
+    let items: Vec<ListItem> = if findings.is_empty() {
+        vec![ListItem::new(Line::from(Span::styled(
+            empty_msg.to_string(),
             theme::dim(),
-        )))];
-        let mut state = ListState::default();
-        render_framed_list(
-            frame,
-            area,
-            items,
-            Span::styled(format!(" {} ", app.explain_title), theme::title()),
-            &mut state,
-        );
-        return;
-    }
+        )))]
+    } else {
+        findings
+            .iter()
+            .map(|f| {
+                let indent = "  ".repeat(f.indent as usize);
+                let mut spans = vec![Span::raw(indent)];
+                let style = match f.level {
+                    Level::Heading => Style::default()
+                        .fg(color(f.level))
+                        .add_modifier(Modifier::BOLD),
+                    _ => Style::default().fg(color(f.level)),
+                };
+                spans.push(Span::styled(f.text.clone(), style));
+                if f.target.is_some() {
+                    spans.push(Span::styled("  →", theme::dim()));
+                }
+                ListItem::new(Line::from(spans))
+            })
+            .collect()
+    };
 
-    let items: Vec<ListItem> = app
-        .explain_items
-        .iter()
-        .map(|f| {
-            let indent = "  ".repeat(f.indent as usize);
-            let mut spans = vec![Span::raw(indent)];
-            let style = match f.level {
-                Level::Heading => Style::default()
-                    .fg(color(f.level))
-                    .add_modifier(Modifier::BOLD),
-                _ => Style::default().fg(color(f.level)),
-            };
-            spans.push(Span::styled(f.text.clone(), style));
-            // A trailing arrow marks a line you can jump into (evidence nav).
-            if f.target.is_some() {
-                spans.push(Span::styled("  →", theme::dim()));
-            }
-            ListItem::new(Line::from(spans))
-        })
-        .collect();
-
-    let title = format!(
-        " {}  ({} findings · ⏎/E/l evidence · r refresh) ",
-        app.explain_title,
-        app.explain_items.len()
-    );
     render_framed_list(
         frame,
         area,
         items,
         Span::styled(title, theme::title()),
+        state,
+    );
+}
+
+fn draw_explain(frame: &mut Frame, app: &mut App, area: Rect) {
+    let title = if app.explain_items.is_empty() {
+        format!(" {} ", app.explain_title)
+    } else {
+        format!(
+            " {}  ({} findings · ⏎/E/l evidence · r refresh) ",
+            app.explain_title,
+            app.explain_items.len()
+        )
+    };
+    draw_findings(
+        frame,
+        area,
+        title,
+        &app.explain_items,
+        "gathering evidence…",
         &mut app.explain_state,
+    );
+}
+
+fn draw_gitops(frame: &mut Frame, app: &mut App, area: Rect) {
+    let title = if app.gitops_items.is_empty() {
+        format!(" {} ", app.gitops_title)
+    } else {
+        format!(" {}  (⏎ jump · r refresh · esc back) ", app.gitops_title)
+    };
+    draw_findings(
+        frame,
+        area,
+        title,
+        &app.gitops_items,
+        "following the reconciliation chain…",
+        &mut app.gitops_state,
     );
 }
 
@@ -2536,6 +2572,10 @@ fn draw_prompt(frame: &mut Frame, app: &App, area: Rect) {
         )),
         Mode::Timeline => Line::from(Span::styled(
             "  j/k: move   g/G: top/bottom   esc: back",
+            theme::dim(),
+        )),
+        Mode::Gitops => Line::from(Span::styled(
+            "  j/k: move   ⏎: jump to owner/source   r: refresh   esc: back",
             theme::dim(),
         )),
         Mode::FluxMenu => Line::from(Span::styled(
