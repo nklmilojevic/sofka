@@ -140,9 +140,9 @@ Not a marketing number - these are specific, checkable design choices:
 - **Drill-down navigation** with a breadcrumb stack: workload/service →
   pods, node → its pods, pod → containers, namespace → re-scope, CRD → its
   custom resources. `esc` pops back.
-- **Command palette** (`:`) - fuzzy over the full resource catalog _and_
-  built-in commands (`ctx`, `pulse`, `xray`, `explain`, `timeline`, `diff`,
-  `events`, `pf`) together, plus
+- **Command palette** (`:`) - fuzzy over the full resource catalog, built-in
+  commands (`ctx`, `pulse`, `xray`, `explain`, `timeline`, `diff`, `events`,
+  `pf`), and saved bookmarks/workspaces together, plus
   row **filtering** (`/`) with matched-character highlighting: fuzzy text,
   `!text` inverse match, `-l`/`-f` label & field selectors (evaluated by the
   API server on ⏎), and typed column comparisons (`status=CrashLoopBackOff`,
@@ -156,13 +156,28 @@ Not a marketing number - these are specific, checkable design choices:
   patches.
 - **Background port-forwards** (`f`/`F` to start, `:pf` to manage).
 - **Plugins** - config-defined shell-out commands bound to keys, scoped per
-  resource.
+  resource. Keys are full **chords** (`ctrl-g`, `alt-x`, `shift-b`, `f5`);
+  commands run in the **terminal**, a captured **popup**, or the **background**
+  (with a timeout and bounded output); can require **confirmation** or be
+  flagged **dangerous**; declare themselves read-only (`mutating = false`) to
+  stay usable in `--readonly`; substitute rich placeholders as separate
+  arguments (`$NAME`/`$NAMESPACE`/`$CONTEXT`/`$CLUSTER`/`$RESOURCE`/`$GROUP`/
+  `$VERSION`/`$KIND`/`$FILTER`); and run over **every marked row** at once,
+  reporting partial failures.
+- **Bookmarks** (`[[bookmarks]]`) - saved navigation commands bound to a chord
+  and the command palette: jump to a resource, optionally in another
+  context/namespace, with a filter, sort, and view applied in one keystroke.
+- **Workspaces** (`[[workspaces]]`) - a named, task-oriented collection of
+  views; open it and cycle its views with `Tab`/`Shift-Tab` without leaving
+  the workspace.
 - **Diff** (`:diff`) - unified diff of the live object vs its
   `last-applied-configuration`.
 - **Events** (`:events` / `E`) - live Kubernetes Events for the selected
   object, filtered by UID when available.
 - **RBAC-aware palette** - hides resource kinds you can't `list`.
-- **Namespace switcher** (`n`) and **context switcher** (`:ctx`).
+- **Namespace switcher** (`n`) with pinned **favourites** (`favorite_namespaces`,
+  ★) and per-context session **recents** (·) above the rest, and **context
+  switcher** (`:ctx`).
 - **YAML view** (`y`) and **describe** (`d`, via `kubectl`).
 - **Logs** (`l`) - per-container on a pod, aggregated across all matching
   pods on a workload/service. In-logs **search** (`/`) with highlighting;
@@ -178,9 +193,9 @@ Not a marketing number - these are specific, checkable design choices:
 - **Skinnable** - built-in Catppuccin, Gruvbox, Solarized, Nord, Dracula,
   Tokyo Night, One Dark, Rosé Pine, and Monokai palettes, auto-detected
   dark/light default, plus per-swatch overrides in config.
-- **Config file** (TOML): aliases, default namespace/resource, plugins,
-  views, thresholds, log provider, skin — with per-cluster/per-context
-  overrides and live `:reload`.
+- **Config file** (TOML): aliases, default namespace/resource, favourite
+  namespaces, plugins, bookmarks, workspaces, views, thresholds, log provider,
+  skin — with per-cluster/per-context overrides and live `:reload`.
 
 ## Installation
 
@@ -229,6 +244,10 @@ default_resource  = "deployments"
 readonly          = false  # true disables every mutating action (delete, edit,
                            # scale, shell, plugins, …); --readonly/--write win
 
+# Namespaces pinned to the top of the `n` switcher (★); session recents (·)
+# follow them.
+favorite_namespaces = ["kube-system", "monitoring"]
+
 [aliases]
 dep = "deployments"
 
@@ -245,12 +264,19 @@ background = true        # fill views with the skin's own background swatch
 red = "#fb4934"
 
 [[plugins]]
-key = "g"
+key = "ctrl-g"             # a key chord: ctrl-/alt-/shift-, function keys, …
 name = "argocd-sync"
 command = "argocd"
 args = ["app", "sync", "$NAME"]
 scopes = ["deployments"]   # omit for all resources
+dangerous = true           # confirm (showing the command) before running
+# mutating = false         # allow in --readonly mode (declares it read-only)
+# output = "popup"         # "terminal" (default) / "popup" / "background"
+# shell = true             # run via `sh -c` (args stay positional $1, $2, …)
 ```
+
+See [Plugins](#plugins) below for the full plugin surface (output modes,
+placeholders, bulk invocation over marked rows).
 
 ### Custom views
 
@@ -317,6 +343,98 @@ restarts = { warn = 5, critical = 20 }
 
 Either bound of a band may be omitted to disable that level; `warn` is peach,
 `critical` is red.
+
+### Plugins
+
+`[[plugins]]` bind a shell-out command to a key. `key` is a **chord**: a single
+character (`"g"`), a modifier combination (`"ctrl-g"`, `"alt-x"`, `"shift-b"`),
+or a function/named key (`"f5"`, `"ctrl-f2"`). Built-in keys win over a plugin
+bound to the same chord.
+
+```toml
+[[plugins]]
+key = "shift-y"
+name = "yaml-summary"
+command = "kubectl"
+args = ["get", "$RESOURCE", "$NAME", "-n", "$NAMESPACE", "-o", "yaml"]
+scopes = ["pods", "deployments"]   # omit for all resources
+mutating = false          # read-only: still runs under --readonly
+output = "popup"          # captured into a scrollable view (see below)
+
+[[plugins]]
+key = "ctrl-x"
+name = "restart-rollout"
+command = "kubectl"
+args = ["rollout", "restart", "$RESOURCE/$NAME", "-n", "$NAMESPACE"]
+scopes = ["deployments"]
+dangerous = true          # confirm (showing the exact command) first
+```
+
+- **Placeholders** are substituted as whole arguments (never spliced into a
+  shell string): `$NAME`, `$NAMESPACE`/`$NS`, `$CONTEXT`, `$CLUSTER`,
+  `$RESOURCE` (plural), `$GROUP`, `$VERSION`, `$KIND`, `$FILTER`.
+- **`output`**: `terminal` (default, interactive — suspends the TUI), `popup`
+  (captured off-thread into a scrollable view), or `background` (detached, a
+  notification flashes on completion). `popup`/`background` honour `timeout`
+  (`"30s"`, default) and bound their captured output.
+- **`mutating`** (default `true`): a mutating plugin is blocked in read-only
+  mode; set `false` to allow a known read-only one.
+- **`confirm`**/**`dangerous`**: prompt before running, showing the exact
+  executable and arguments; `dangerous` is flagged ⚠.
+- **`shell = true`**: opt into `sh -c`; placeholders are still passed as
+  positional parameters (`$1`, `$2`, …), never interpolated into the script.
+- **Bulk**: with rows marked (`space`), a `popup`/`background` plugin runs over
+  every marked row, reporting partial failures. (Interactive `terminal`
+  plugins can't compose over a set and refuse a marked run.)
+
+Invalid values (bad chord, unknown `output`, malformed `timeout`) disable just
+that plugin / fall back to the default, with a warning shown in `:config`.
+Plugins appear in `?` help with their chord and scope.
+
+### Bookmarks
+
+`[[bookmarks]]` are saved navigation commands — jump to a resource, optionally
+in another context/namespace, with a filter, sort, and view applied in one
+keystroke. They're triggered by an optional key chord and always available in
+the command palette (`★`, ranked above resources).
+
+```toml
+[[bookmarks]]
+key = "shift-1"                          # optional
+name = "Prod API failures"
+resource = "pods"
+context = "prod-eu"                      # optional: switched first
+namespace = "checkout"                   # optional; all/* = all namespaces
+filter = "status!=Running -l app=api"    # optional, same syntax as `/`
+sort = "RESTARTS:desc"                   # optional: COLUMN[:asc|:desc]
+view = "xray"                            # optional: xray | pulse
+```
+
+### Workspaces
+
+`[[workspaces]]` group several views into a named, task-oriented set (checkout
+ops, a cluster upgrade, cert renewal). Opening one (chord or palette, `▦`)
+switches its optional context once and lands on the first view; **`Tab`** /
+**`Shift-Tab`** cycle the rest without leaving the workspace.
+
+```toml
+[[workspaces]]
+key = "ctrl-w"
+name = "Checkout ops"
+context = "prod-eu"          # optional: switched once on open
+
+[[workspaces.views]]
+name = "API pods"
+resource = "pods"
+namespace = "checkout"
+filter = "-l app=api"
+sort = "RESTARTS:desc"
+
+[[workspaces.views]]
+name = "Ingress"
+resource = "ingresses"
+namespace = "checkout"
+```
 
 ### Log provider (VictoriaLogs)
 
@@ -422,6 +540,7 @@ header) and switching away restores write mode.
 | `:<resource>`             | command palette - fuzzy over kinds and built-in commands                                                                              |
 | `:<resource> <ns>`        | switch kind and namespace at once (`:deploy social`; `all`/`*` = all namespaces; the namespace tab-completes)                         |
 | `[` / `]`                 | view history - back / forward through visited kind+namespace views                                                                    |
+| `Tab` / `shift-Tab`       | cycle views of the active workspace (when one is open)                                                                                |
 | `enter`                   | drill down (workload/svc → pods, node → its pods, pod → containers, ns → re-scope, CRD → its resources)                               |
 | `esc`                     | go back / pop the view stack / clear filter / clear marks                                                                             |
 | `j`/`k`, `↓`/`↑`, `g`/`G` | navigate                                                                                                                              |
@@ -449,6 +568,7 @@ header) and switching away restores write mode.
 | `ctrl-d` / `ctrl-k`       | delete / force-delete (marked rows, or current); in confirm: `f` toggles force, `c` cycles cascade (background → foreground → orphan) |
 | `:q`, `ctrl-c`            | quit                                                                                                                                  |
 | `?`                       | help                                                                                                                                  |
+| _(config)_                | plugin / bookmark / workspace key chords — `ctrl-`/`alt-`/`shift-`/`fN`; listed in `?` help                                           |
 
 **Logs view:** `/` search+highlight · `s` autoscroll · `w` wrap · `t`
 timestamps · `x` stop/resume stream · `c` copy buffer · `ctrl-s` save to file
@@ -469,10 +589,13 @@ main.rs      CLI (clap), terminal lifecycle, the async select! event loop,
              and the --check / --snapshot headless modes.
 app.rs       All application state + input handling (a mode state machine:
              Table / Command / Filter / Detail / Logs / FluxMenu /
-             PortForwards / Help / Namespaces / …). Spawns watch/log/
-             port-forward tasks.
+             PortForwards / Help / Namespaces / …), split into app/*.rs
+             (plugins, bookmarks, workspaces, navigation, …). Spawns watch/
+             log/port-forward tasks.
 k8s.rs       Cluster connect, API discovery, alias registry + group-priority
              resolution, watch-task spawning, namespace listing.
+keys.rs      Key-chord parsing + matching (ctrl-/alt-/shift-, function keys)
+             for plugin, bookmark, and workspace bindings, with unit tests.
 store.rs     In-memory resource store + the Msg enum that watch tasks send to
              the UI (generation-tagged so stale streams are dropped).
 columns.rs   Per-kind column definitions and cell extraction from
@@ -539,12 +662,12 @@ platform binaries, publishes crates.io, and warms the Nix cache.
 
 ### Milestone 3: extensibility and repeatable workflows
 
-- [ ] Modifier-aware hotkeys.
-- [ ] Rich plugin execution and output modes.
-- [ ] Bulk plugins.
-- [ ] Bookmarks and saved queries.
-- [ ] Operational workspaces.
-- [ ] Namespace favourites and recents.
+- [x] Modifier-aware hotkeys.
+- [x] Rich plugin execution and output modes.
+- [x] Bulk plugins.
+- [x] Bookmarks and saved queries.
+- [x] Operational workspaces.
+- [x] Namespace favourites and recents.
 
 ### Milestone 4: GitOps and safety
 
