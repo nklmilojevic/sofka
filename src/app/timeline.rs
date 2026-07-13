@@ -44,15 +44,9 @@ impl App {
             }
             KeyCode::Char('j') | KeyCode::Down => list_step(&mut self.timeline_state, len, true),
             KeyCode::Char('k') | KeyCode::Up => list_step(&mut self.timeline_state, len, false),
-            KeyCode::Char('g') | KeyCode::Home => {
-                if len > 0 {
-                    self.timeline_state.select(Some(0));
-                }
-            }
-            KeyCode::Char('G') | KeyCode::End => {
-                if len > 0 {
-                    self.timeline_state.select(Some(len - 1));
-                }
+            KeyCode::Char('g') | KeyCode::Home if len > 0 => self.timeline_state.select(Some(0)),
+            KeyCode::Char('G') | KeyCode::End if len > 0 => {
+                self.timeline_state.select(Some(len - 1))
             }
             _ => {}
         }
