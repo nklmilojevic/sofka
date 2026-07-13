@@ -13,6 +13,7 @@ mod providers;
 mod store;
 mod theme;
 mod thresholds;
+mod timeline;
 mod ui;
 mod views;
 

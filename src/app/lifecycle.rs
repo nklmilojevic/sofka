@@ -503,10 +503,15 @@ impl App {
                 key,
                 obj,
             } if generation == self.generation => {
+                // Record state changes against the previous version before it's
+                // overwritten (session-local timeline).
+                self.timeline
+                    .observe(&self.kind_plural, &key, self.store.get(&key), &obj);
                 self.store.apply(key.clone(), *obj);
                 self.invalidate_row(&key);
             }
             Msg::Deleted { generation, key } if generation == self.generation => {
+                self.timeline.observe_delete(&self.kind_plural, &key);
                 self.store.remove(&key);
                 self.invalidate_row(&key);
             }

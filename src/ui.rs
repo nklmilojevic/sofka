@@ -97,6 +97,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         Mode::Pulse => draw_pulse(frame, app, chunks[1]),
         Mode::Xray => draw_xray(frame, app, chunks[1]),
         Mode::Explain => draw_explain(frame, app, chunks[1]),
+        Mode::Timeline => draw_timeline(frame, app, chunks[1]),
         Mode::PortForwards => draw_port_forwards(frame, app, chunks[1]),
         _ => draw_table(frame, app, chunks[1]),
     }
@@ -265,6 +266,7 @@ fn header_hints(app: &App) -> Vec<Line<'static>> {
             | Mode::Pulse
             | Mode::Xray
             | Mode::Explain
+            | Mode::Timeline
             | Mode::PortForwards
     ) {
         return Vec::new();
@@ -275,13 +277,13 @@ fn header_hints(app: &App) -> Vec<Line<'static>> {
             hint_line(&[("s", "shell"), ("a", "attach"), ("f", "port-fwd")]),
             hint_line(&[("y", "yaml"), ("d", "describe"), ("E", "events")]),
             hint_line(&[("e", "edit"), ("o", "node"), ("J", "owner")]),
-            hint_line(&[("X", "explain"), ("^d", "delete"), ("^k", "kill")]),
+            hint_line(&[("X", "explain"), ("T", "timeline"), ("^d", "delete")]),
         ],
         "deployments" | "statefulsets" => vec![
             hint_line(&[("⏎", "pods"), ("l", "logs"), ("E", "events")]),
             hint_line(&[("s", "scale"), ("r", "restart"), ("i", "image")]),
             hint_line(&[("y", "yaml"), ("d", "describe"), ("e", "edit")]),
-            hint_line(&[("X", "explain"), ("f", "port-fwd"), ("^d", "delete")]),
+            hint_line(&[("X", "explain"), ("T", "timeline"), ("f", "port-fwd")]),
         ],
         "daemonsets" => vec![
             hint_line(&[("⏎", "pods"), ("l", "logs"), ("E", "events")]),
@@ -1556,6 +1558,10 @@ fn draw_help(frame: &mut Frame, app: &App, area: Rect) {
             "shift-x · :explain",
             "explain why the selection is unhealthy (evidence-backed)",
         ),
+        bind(
+            "shift-t · :timeline",
+            "session-local state-change history for the selection",
+        ),
         Line::from(""),
         Line::from(Span::styled("  Act", theme::title())),
         bind("e", "edit in $EDITOR (kubectl edit)"),
@@ -2201,6 +2207,51 @@ fn draw_explain(frame: &mut Frame, app: &mut App, area: Rect) {
     );
 }
 
+/// Session-local timeline: the state changes observed for one object while
+/// sofka has been watching, oldest first.
+fn draw_timeline(frame: &mut Frame, app: &mut App, area: Rect) {
+    use crate::timeline::Level;
+    let color = |level: Level| match level {
+        Level::Info => theme::text(),
+        Level::Good => theme::green(),
+        Level::Warn => theme::peach(),
+        Level::Bad => theme::red(),
+    };
+    let (target, entries) = match &app.timeline_target {
+        Some((plural, rk)) => (rk.clone(), app.timeline.entries(plural, rk)),
+        None => (String::new(), None),
+    };
+    let count = entries.map(|e| e.len()).unwrap_or(0);
+
+    let items: Vec<ListItem> = match entries {
+        Some(e) if !e.is_empty() => e
+            .iter()
+            .map(|entry| {
+                ListItem::new(Line::from(vec![
+                    Span::styled(
+                        format!("{}  ", crate::timeline::clock(entry.at)),
+                        theme::dim(),
+                    ),
+                    Span::styled(entry.text.clone(), Style::default().fg(color(entry.level))),
+                ]))
+            })
+            .collect(),
+        _ => vec![ListItem::new(Line::from(Span::styled(
+            "no changes observed yet — the timeline records what happens while sofka watches",
+            theme::dim(),
+        )))],
+    };
+
+    let title = format!(" {target} — timeline  ({count} events · session-local) ");
+    render_framed_list(
+        frame,
+        area,
+        items,
+        Span::styled(title, theme::title()),
+        &mut app.timeline_state,
+    );
+}
+
 /// Pulse dashboard: cluster-health tiles.
 fn draw_pulse(frame: &mut Frame, app: &App, area: Rect) {
     let p = &app.pulse;
@@ -2403,6 +2454,10 @@ fn draw_prompt(frame: &mut Frame, app: &App, area: Rect) {
         Mode::Help => Line::from(Span::styled("  /:search  ?/esc:back", theme::dim())),
         Mode::Explain => Line::from(Span::styled(
             "  j/k: move   ⏎: go to resource   E: events   l: logs   r: refresh   esc: back",
+            theme::dim(),
+        )),
+        Mode::Timeline => Line::from(Span::styled(
+            "  j/k: move   g/G: top/bottom   esc: back",
             theme::dim(),
         )),
         Mode::FluxMenu => Line::from(Span::styled(
