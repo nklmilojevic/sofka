@@ -878,6 +878,278 @@ fn parse_entry(line: &str, fields: &Fields) -> Option<LogEntry> {
     })
 }
 
+// ===== metrics provider (right-sizing) =====================================
+
+/// Label selectors that identify a Prometheus-compatible query service across
+/// common installs: the VictoriaMetrics k8s-stack / operator (`vmsingle`), the
+/// single-node Helm chart, and kube-prometheus-stack Prometheus.
+const METRICS_DISCOVERY_SELECTORS: &[&str] = &[
+    "app.kubernetes.io/name=vmsingle",
+    "app.kubernetes.io/name=victoria-metrics-single",
+    "app.kubernetes.io/name=prometheus",
+    "operated-prometheus=true",
+];
+
+pub const DEFAULT_METRICS_WINDOW: &str = "7d";
+const DEFAULT_METRICS_STEP: &str = "5m";
+const DEFAULT_HEADROOM: u32 = 15;
+
+/// A compiled Prometheus-compatible metrics backend for `:rightsize`. Reaches
+/// the query API at `/api/v1/query` over the same transports as the log
+/// provider (direct URL or the API-server service proxy).
+#[derive(Clone)]
+pub struct MetricsProvider {
+    transport: Transport,
+    headers: Vec<(String, String)>,
+    /// Quantile lookback (`"7d"`), verbatim for the PromQL and titles.
+    pub window: String,
+    /// Subquery resolution for the CPU `rate()` (`"5m"`).
+    pub step: String,
+    /// Percent headroom added over P95 for the suggested request.
+    pub headroom: u32,
+}
+
+impl Default for MetricsProvider {
+    fn default() -> Self {
+        Self {
+            transport: Transport::Auto,
+            headers: Vec::new(),
+            window: DEFAULT_METRICS_WINDOW.into(),
+            step: DEFAULT_METRICS_STEP.into(),
+            headroom: DEFAULT_HEADROOM,
+        }
+    }
+}
+
+/// Validate `[providers.metrics]` into a [`MetricsProvider`]. An omitted/empty
+/// url means "autodiscover in-cluster" (resolved on first use). Accepts
+/// `prometheus` and `victoriametrics` (the same query API).
+pub fn compile_metrics(
+    cfg: Option<&crate::config::MetricsProviderConfig>,
+) -> (Option<MetricsProvider>, Vec<String>) {
+    let Some(cfg) = cfg else {
+        return (None, Vec::new());
+    };
+    let mut warnings = Vec::new();
+    match cfg.kind.as_str() {
+        "prometheus" | "victoriametrics" => {}
+        "" => {
+            warnings.push(
+                "providers.metrics: missing `type` (expected \"prometheus\" or \"victoriametrics\")"
+                    .into(),
+            );
+            return (None, warnings);
+        }
+        other => {
+            warnings.push(format!(
+                "providers.metrics: unsupported type {other:?} (expected \"prometheus\"/\"victoriametrics\")"
+            ));
+            return (None, warnings);
+        }
+    }
+
+    let url = cfg.url.trim().trim_end_matches('/').to_string();
+    let transport = if url.is_empty() {
+        Transport::Auto
+    } else if url.starts_with("http://") || url.starts_with("https://") {
+        Transport::Direct { url }
+    } else {
+        warnings.push(format!(
+            "providers.metrics: url {:?} must start with http:// or https:// (or be omitted for autodiscovery)",
+            cfg.url
+        ));
+        return (None, warnings);
+    };
+
+    let window = cfg
+        .window
+        .clone()
+        .unwrap_or_else(|| DEFAULT_METRICS_WINDOW.into());
+    if let Err(e) = parse_lookback(&window) {
+        warnings.push(format!("providers.metrics: window: {e}"));
+        return (None, warnings);
+    }
+    let step = cfg
+        .step
+        .clone()
+        .unwrap_or_else(|| DEFAULT_METRICS_STEP.into());
+    if let Err(e) = parse_lookback(&step) {
+        warnings.push(format!("providers.metrics: step: {e}"));
+        return (None, warnings);
+    }
+
+    (
+        Some(MetricsProvider {
+            transport,
+            headers: cfg
+                .headers
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect(),
+            window,
+            step,
+            headroom: cfg.headroom.unwrap_or(DEFAULT_HEADROOM),
+        }),
+        warnings,
+    )
+}
+
+/// Find a Prometheus/VictoriaMetrics query `Service` and resolve `base`'s
+/// transport to the API-server proxy for it.
+pub async fn discover_metrics(
+    client: kube::Client,
+    base: &MetricsProvider,
+) -> Result<MetricsProvider, String> {
+    let api: Api<Service> = Api::all(client.clone());
+    for selector in METRICS_DISCOVERY_SELECTORS {
+        let list = api
+            .list(&ListParams::default().labels(selector))
+            .await
+            .map_err(|e| format!("discovering metrics services: {e}"))?
+            .items;
+        if let Some((ns, service, port)) = pick_metrics_service(&list) {
+            let mut provider = base.clone();
+            provider.transport = Transport::ServiceProxy {
+                client,
+                ns,
+                service,
+                port,
+            };
+            return Ok(provider);
+        }
+    }
+    Err(
+        "no Prometheus/VictoriaMetrics service found — set [providers.metrics] url in config.toml"
+            .into(),
+    )
+}
+
+/// First (by namespace/name) service with a usable port, preferring `http`,
+/// then the well-known query ports (Prometheus 9090, VM single 8428/8429).
+fn pick_metrics_service(services: &[Service]) -> Option<(String, String, i32)> {
+    let mut candidates: Vec<(&Service, i32)> = services
+        .iter()
+        .filter_map(|s| {
+            let ports = s.spec.as_ref()?.ports.as_ref()?;
+            let port = ports
+                .iter()
+                .find(|p| p.name.as_deref() == Some("http"))
+                .or_else(|| ports.iter().find(|p| matches!(p.port, 9090 | 8428 | 8429)))
+                .or_else(|| ports.first())?;
+            Some((s, port.port))
+        })
+        .collect();
+    candidates.sort_by_key(|(s, _)| {
+        (
+            s.metadata.namespace.clone().unwrap_or_default(),
+            s.metadata.name.clone().unwrap_or_default(),
+        )
+    });
+    let (svc, port) = candidates.first()?;
+    Some((
+        svc.metadata.namespace.clone().unwrap_or_default(),
+        svc.metadata.name.clone().unwrap_or_default(),
+        *port,
+    ))
+}
+
+impl MetricsProvider {
+    /// Whether the transport still needs [`discover_metrics`].
+    pub fn needs_discovery(&self) -> bool {
+        matches!(self.transport, Transport::Auto)
+    }
+
+    /// A human-readable description of where queries go, for messages.
+    pub fn location(&self) -> String {
+        match &self.transport {
+            Transport::Direct { url } => url.clone(),
+            Transport::ServiceProxy {
+                ns, service, port, ..
+            } => format!("{ns}/{service}:{port} (API-server proxy)"),
+            Transport::Auto => "autodiscover".into(),
+        }
+    }
+
+    /// Run one instant query, returning the first sample value (`None` = no
+    /// data). Bounded by [`QUERY_TIMEOUT_SECS`].
+    pub async fn query(&self, promql: &str) -> Result<Option<f64>, String> {
+        let fut = self.fetch_query(promql);
+        let body = tokio::time::timeout(std::time::Duration::from_secs(QUERY_TIMEOUT_SECS), fut)
+            .await
+            .map_err(|_| format!("query timed out after {QUERY_TIMEOUT_SECS}s"))??;
+        Ok(crate::rightsize::scalar_from_query(&body))
+    }
+
+    /// POST `query=<promql>` to `/api/v1/query` over the active transport.
+    async fn fetch_query(&self, promql: &str) -> Result<String, String> {
+        let params = [("query", promql)];
+        match &self.transport {
+            Transport::ServiceProxy {
+                client,
+                ns,
+                service,
+                port,
+            } => {
+                let uri =
+                    format!("/api/v1/namespaces/{ns}/services/{service}:{port}/proxy/api/v1/query");
+                let mut req = http::Request::post(uri).header(
+                    http::header::CONTENT_TYPE,
+                    "application/x-www-form-urlencoded",
+                );
+                for (name, value) in &self.headers {
+                    req = req.header(name.as_str(), value.as_str());
+                }
+                let req = req
+                    .body(form_body(&params).into_bytes())
+                    .map_err(|e| format!("building request: {e}"))?;
+                client
+                    .request_text(req)
+                    .await
+                    .map_err(|e| format!("{}: {e}", self.location()))
+            }
+            Transport::Direct { url } => {
+                let https = hyper_rustls::HttpsConnectorBuilder::new()
+                    .with_native_roots()
+                    .map_err(|e| format!("loading system TLS roots: {e}"))?
+                    .https_or_http()
+                    .enable_http1()
+                    .build();
+                let http_client = hyper_util::client::legacy::Client::builder(
+                    hyper_util::rt::TokioExecutor::new(),
+                )
+                .build(https);
+                let full = format!("{url}/api/v1/query");
+                let mut req = hyper::Request::post(&full).header(
+                    http::header::CONTENT_TYPE,
+                    "application/x-www-form-urlencoded",
+                );
+                for (name, value) in &self.headers {
+                    req = req.header(name.as_str(), value.as_str());
+                }
+                let req = req
+                    .body(Full::new(Bytes::from(form_body(&params))))
+                    .map_err(|e| format!("building request: {e}"))?;
+                let resp = http_client
+                    .request(req)
+                    .await
+                    .map_err(|e| format!("{full}: {e}"))?;
+                let status = resp.status();
+                let body = resp
+                    .into_body()
+                    .collect()
+                    .await
+                    .map_err(|e| format!("reading response: {e}"))?
+                    .to_bytes();
+                if !status.is_success() {
+                    return Err(http_error(status, &body));
+                }
+                Ok(String::from_utf8_lossy(&body).into_owned())
+            }
+            Transport::Auto => Err("metrics provider not discovered yet".into()),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

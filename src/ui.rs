@@ -1690,6 +1690,10 @@ fn draw_help(frame: &mut Frame, app: &App, area: Rect) {
             "session-local state-change history for the selection",
         ),
         bind(
+            ":rightsize",
+            "historical right-sizing: P50/P95/P99 usage → suggested requests + patch (needs [providers.metrics])",
+        ),
+        bind(
             ":gitops · :flux",
             "Flux owner, source, revisions & reconciliation chain (⏎ to jump)",
         ),

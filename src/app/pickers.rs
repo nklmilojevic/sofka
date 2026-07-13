@@ -354,6 +354,9 @@ impl App {
         let (log_provider, provider_warnings) =
             crate::providers::compile(resolved.config.providers.logs.as_ref());
         self.log_provider = log_provider;
+        let (metrics_provider, _mw) =
+            crate::providers::compile_metrics(resolved.config.providers.metrics.as_ref());
+        self.metrics_provider = metrics_provider;
         // Printer-column fallbacks came from the old cluster's CRDs.
         self.crd_views.clear();
         // The timeline recorded the old cluster's objects.

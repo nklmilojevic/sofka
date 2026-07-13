@@ -239,6 +239,12 @@ Not a marketing number - these are specific, checkable design choices:
   cluster and reaches it through the API-server proxy; or point
   `[providers.logs]` at an external URL. Covers restarted and deleted pods —
   the backend remembers what the kubelet no longer has.
+- **Right-sizing** (`:rightsize`) - when a Prometheus/VictoriaMetrics backend is
+  reachable, estimate right-sized requests for the selected workload from
+  historical usage: per container, current requests vs P50/P95/P99 CPU & memory
+  over a window, a suggested request (P95 + headroom), OOM/throttle evidence,
+  and a **patch preview** — never a mutation. The backend is **autodiscovered**
+  in-cluster (or set `[providers.metrics]`).
 - **Fleet dashboard** (`:fleet`) - an opt-in cross-context health summary:
   connectivity, Kubernetes version, node readiness, unhealthy pods, Flux
   failures, and the read-only policy for each configured context, side by side.
@@ -632,6 +638,40 @@ read-only policy. `⏎` switches to the highlighted context (via the normal
 context-switch path); `r` re-gathers. Only these non-sensitive summaries are
 held in memory.
 
+### Right-sizing (metrics provider)
+
+`:rightsize` on a workload (or pod) estimates right-sized requests from
+historical usage in a **Prometheus-compatible** backend — Prometheus _or_
+VictoriaMetrics, which share the query API. For each container it shows current
+requests, P50/P95/P99 CPU & memory over the window, a suggested request (P95 +
+headroom), OOM/throttle evidence, and a **strategic-merge patch preview**
+(copy with `c`). It **never mutates** — apply the patch yourself with
+`kubectl patch` if you agree.
+
+Zero-config by default: with no `[providers.metrics]` section, sofka
+autodiscovers a Prometheus/VictoriaMetrics query `Service` in the cluster (by
+well-known labels) and reaches it through the API-server proxy, exactly like
+the log provider. Configure it only to point at an external endpoint or tune
+the window/headroom:
+
+```toml
+[providers.metrics]
+type = "prometheus"        # or "victoriametrics" (same query API)
+url = "https://prom.example.com"   # omit to autodiscover in-cluster
+window = "7d"              # lookback for the P50/P95/P99 quantiles
+step = "5m"                # subquery resolution for the CPU rate()
+headroom = 15              # percent added over P95 for the suggestion
+
+[providers.metrics.headers]        # optional
+Authorization = "Bearer <token>"
+```
+
+Uses the standard cAdvisor metric names (`container_cpu_usage_seconds_total`,
+`container_memory_working_set_bytes`, `container_oom_events_total`,
+`container_cpu_cfs_throttled_periods_total`). VictoriaMetrics **cluster** mode
+(vmselect) needs a tenant path in the `url`; single-node VM and Prometheus
+serve the API at the root and autodiscover cleanly.
+
 ### Log provider (VictoriaLogs)
 
 `L` (or `:vlogs`) opens log history for the selection from a VictoriaLogs
@@ -755,6 +795,7 @@ header) and switching away restores write mode.
 | `:gitops` / `:flux`                           | Flux owner, source, revisions & reconciliation chain for the selection (`⏎` to jump)                                                  |
 | `:can-i` / `:can-i <verb> <resource> [ns]`    | what you can do here / check a single action (`SelfSubjectAccessReview`)                                                              |
 | `:journal` / `:audit`                         | session-local log of the mutating actions you've taken                                                                                |
+| `:rightsize`                                  | historical right-sizing: P50/P95/P99 usage → suggested requests + patch preview (needs a metrics backend)                             |
 | `:ctx` / `:ctx <name>`                        | context switcher popup / switch directly (the name tab-completes)                                                                     |
 | `:fleet`                                      | cross-context health dashboard (opt-in `[fleet]` contexts; `⏎` switches, `r` refreshes)                                               |
 | `:skin`                                       | switch the color skin live (`:skin gruvbox-dark` applies directly)                                                                    |

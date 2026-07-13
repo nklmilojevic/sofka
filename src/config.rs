@@ -282,6 +282,43 @@ pub struct Providers {
     /// A log-search backend, queried for the selected object with `L` — see
     /// [`crate::providers`] for the full example.
     pub logs: Option<LogProviderConfig>,
+    /// A Prometheus-compatible metrics backend for right-sizing (`:rightsize`).
+    pub metrics: Option<MetricsProviderConfig>,
+}
+
+/// A Prometheus-compatible historical-metrics backend for `:rightsize`. Works
+/// against Prometheus or VictoriaMetrics (same query API). Everything is
+/// optional except `type`, including the section: without a `url`, sofka
+/// autodiscovers a Prometheus/VictoriaMetrics query service in the cluster and
+/// reaches it through the API-server proxy.
+///
+/// ```toml
+/// [providers.metrics]
+/// type = "prometheus"          # or "victoriametrics" (same query API)
+/// url = "https://prom.example.com"  # omit to autodiscover in-cluster
+/// window = "7d"                # lookback for the P50/P95/P99 quantiles
+/// step = "5m"                  # subquery resolution for CPU rate()
+/// headroom = 15                # percent added over P95 for the suggestion
+///
+/// [providers.metrics.headers]  # optional: sent with every request
+/// Authorization = "Bearer <token>"
+/// ```
+#[derive(Debug, Default, Clone, Deserialize)]
+#[serde(default)]
+pub struct MetricsProviderConfig {
+    /// Backend kind: `"prometheus"` or `"victoriametrics"` (same query API).
+    #[serde(rename = "type")]
+    pub kind: String,
+    /// Base URL, e.g. `https://prom.example.com`. Empty/omitted: autodiscover.
+    pub url: String,
+    /// Lookback window for the quantiles (`"7d"`, `"24h"`).
+    pub window: Option<String>,
+    /// Subquery resolution for the CPU `rate()` (`"5m"`).
+    pub step: Option<String>,
+    /// Percent headroom added over P95 for the suggested request.
+    pub headroom: Option<u32>,
+    /// Extra HTTP headers, e.g. an Authorization bearer token.
+    pub headers: HashMap<String, String>,
 }
 
 /// One log backend. Only `type = "victorialogs"` is supported today.
