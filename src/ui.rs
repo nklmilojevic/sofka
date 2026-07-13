@@ -1530,6 +1530,10 @@ fn draw_help(frame: &mut Frame, app: &App, area: Rect) {
             "reload config from disk · config sources + warnings",
         ),
         bind(
+            ":can-i",
+            "what you can do here · :can-i <verb> <resource> [ns] checks one action",
+        ),
+        bind(
             "enter",
             "drill down (deploy→pods, pod→containers, ns→re-scope)",
         ),

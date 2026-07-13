@@ -507,6 +507,7 @@ impl App {
             PaletteAction::Explain => self.open_explain(),
             PaletteAction::Timeline => self.open_timeline(),
             PaletteAction::Gitops => self.open_gitops(),
+            PaletteAction::CanI => self.open_can_i(),
             PaletteAction::Diff => self.open_diff(),
             PaletteAction::Events => self.open_events(),
             PaletteAction::PortForwards => self.open_port_forwards(),
@@ -534,6 +535,23 @@ impl App {
                 self.open_skins();
             } else {
                 self.apply_skin(&rest);
+            }
+            return true;
+        }
+        // `:can-i <verb> <resource> [ns]` checks one action; bare `:can-i`
+        // opens the overview.
+        let mut parts = cmd.split_whitespace();
+        if let Some(first) = parts.next()
+            && matches!(
+                first.to_ascii_lowercase().as_str(),
+                "can-i" | "cani" | "can"
+            )
+        {
+            let rest = parts.collect::<Vec<_>>().join(" ");
+            if rest.is_empty() {
+                self.open_can_i();
+            } else {
+                self.check_can_i(&rest);
             }
             return true;
         }

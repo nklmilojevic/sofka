@@ -601,6 +601,14 @@ impl App {
                     .select((!self.explain_items.is_empty()).then_some(first));
                 self.mode = Mode::Explain;
             }
+            Msg::CanIResult {
+                generation,
+                text,
+                ok,
+            } if generation == self.generation => {
+                self.flash = text;
+                self.flash_err = !ok;
+            }
             Msg::Gitops {
                 generation,
                 title,
