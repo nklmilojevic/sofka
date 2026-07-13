@@ -686,6 +686,32 @@ impl App {
                     ));
                 }
             }
+            Msg::Bundle {
+                generation,
+                title,
+                text,
+                filename,
+            } if generation == self.generation => {
+                self.detail = Scrollable {
+                    title: format!("{title} (:bundle-save to write)"),
+                    lines: text.lines().map(String::from).collect(),
+                    ..Default::default()
+                };
+                self.pending_bundle = Some((filename, text));
+                self.set_return_mode();
+                self.mode = Mode::Detail;
+                self.flash = "bundle ready — review, then :bundle-save".into();
+                self.flash_err = false;
+            }
+            Msg::BundleSaved { generation, result } if generation == self.generation => {
+                match result {
+                    Ok(path) => {
+                        self.flash = format!("saved bundle → {}", path.display());
+                        self.flash_err = false;
+                    }
+                    Err(e) => self.flash_warn(&format!("bundle save failed: {e}")),
+                }
+            }
             Msg::Detail {
                 generation,
                 title,

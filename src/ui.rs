@@ -1595,6 +1595,10 @@ fn draw_help(frame: &mut Frame, app: &App, area: Rect) {
             ":debug-clean",
             "delete the node debugger pods launched this session",
         ),
+        bind(
+            ":bundle · :bundle-save",
+            "assemble a redacted diagnostic bundle for the selection · write it to a file",
+        ),
         bind("i", "set container image"),
         bind(
             "r",

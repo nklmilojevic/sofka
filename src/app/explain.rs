@@ -197,7 +197,7 @@ impl App {
 }
 
 /// List one kind, narrowed to a label selector (a workload's pods).
-async fn list_selected(
+pub(super) async fn list_selected(
     client: &Client,
     ar: &ApiResource,
     namespaced: bool,
@@ -217,7 +217,7 @@ async fn list_selected(
 
 /// Keep only events that regard the object or one of its pods, matching by UID
 /// (falling back to name when an event carries no UID).
-fn filter_events(
+pub(super) fn filter_events(
     all: &[DynamicObject],
     obj: &DynamicObject,
     pods: &[DynamicObject],

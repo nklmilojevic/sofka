@@ -519,6 +519,8 @@ impl App {
             PaletteAction::Journal => self.open_journal(),
             PaletteAction::Debug => self.request_debug(None),
             PaletteAction::DebugClean => self.request_debug_cleanup(),
+            PaletteAction::Bundle => self.open_bundle(),
+            PaletteAction::BundleSave => self.save_bundle(),
             PaletteAction::Diff => self.open_diff(),
             PaletteAction::Events => self.open_events(),
             PaletteAction::PortForwards => self.open_port_forwards(),

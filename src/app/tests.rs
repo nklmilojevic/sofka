@@ -1537,6 +1537,47 @@ async fn shellouts_pin_to_active_context() {
 }
 
 #[tokio::test]
+async fn bundle_save_without_a_pending_bundle_warns() {
+    let (mut app, _rx) = app_with_pod();
+    app.save_bundle();
+    assert!(app.flash.contains("no bundle to save"), "{}", app.flash);
+    assert!(app.flash_err);
+}
+
+#[tokio::test]
+async fn bundle_needs_a_selection() {
+    let (mut app, _rx) = test_app();
+    // No kind/selection yet — bundle refuses rather than assembling nothing.
+    app.open_bundle();
+    assert_ne!(app.mode, Mode::Detail);
+    assert!(app.flash_err);
+}
+
+#[tokio::test]
+async fn bundle_redaction_strips_secret_values_from_yaml() {
+    // A real DynamicObject through the app's own YAML path must not leak the
+    // Secret's data once redacted.
+    let (mut app, _rx) = test_app();
+    app.switch_kind("secrets");
+    apply(
+        &mut app,
+        json!({"apiVersion": "v1", "kind": "Secret",
+               "metadata": {"name": "creds", "namespace": "default"},
+               "data": {"password": "aHVudGVyMg=="}}),
+    );
+    app.table_state.select(Some(0));
+    let obj = app.selected_ref().unwrap().clone();
+    let (yaml, notes) = crate::bundle::redact_to_yaml(&obj, "Secret");
+    let joined = yaml.join("\n");
+    assert!(
+        !joined.contains("aHVudGVyMg=="),
+        "secret value leaked: {joined}"
+    );
+    assert!(joined.contains(crate::bundle::REDACTED));
+    assert!(notes.iter().any(|n| n.contains("Secret data")));
+}
+
+#[tokio::test]
 async fn container_picker_shell_targets_selected_container() {
     let (mut app, _rx) = test_app();
     app.switch_kind("pods");

@@ -79,6 +79,38 @@ pub struct Config {
     /// Defaults for the ephemeral-debug-container workflow (`:debug`) — see
     /// [`DebugConfig`].
     pub debug: DebugConfig,
+    /// Diagnostic-bundle (`:bundle`) options — see [`BundleConfig`].
+    pub bundle: BundleConfig,
+}
+
+/// Options for the `:bundle` diagnostic-bundle export.
+///
+/// ```toml
+/// [bundle]
+/// anonymize = true    # replace context/cluster identity with placeholders
+/// log_lines = 200     # max recent log lines per pod
+/// max_pods = 3        # cap how many pods contribute logs
+/// ```
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct BundleConfig {
+    /// Replace the context and cluster identity with placeholders (for sharing
+    /// a bundle without leaking which cluster it came from).
+    pub anonymize: bool,
+    /// Maximum recent log lines fetched per pod.
+    pub log_lines: i64,
+    /// Cap on how many pods contribute logs to a workload's bundle.
+    pub max_pods: usize,
+}
+
+impl Default for BundleConfig {
+    fn default() -> Self {
+        Self {
+            anonymize: false,
+            log_lines: 200,
+            max_pods: 3,
+        }
+    }
 }
 
 /// Defaults for `:debug`, which attaches an ephemeral debug container to the
