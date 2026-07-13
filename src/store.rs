@@ -55,6 +55,12 @@ pub enum Msg {
         title: String,
         findings: Vec<crate::explain::Finding>,
     },
+    /// Result of a `:can-i <verb> <resource>` access review, shown as a flash.
+    CanIResult {
+        generation: u64,
+        text: String,
+        ok: bool,
+    },
     /// Reconciliation-chain findings for the GitOps view, gathered off-thread.
     Gitops {
         generation: u64,

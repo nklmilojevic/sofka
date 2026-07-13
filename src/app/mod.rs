@@ -330,6 +330,7 @@ enum PaletteAction {
     Explain,
     Timeline,
     Gitops,
+    CanI,
     Diff,
     Events,
     PortForwards,
@@ -368,6 +369,10 @@ const PALETTE_COMMANDS: &[PaletteCommand] = &[
     PaletteCommand {
         action: PaletteAction::Gitops,
         names: &["gitops", "flux", "reconcile", "recon"],
+    },
+    PaletteCommand {
+        action: PaletteAction::CanI,
+        names: &["can-i", "cani", "can"],
     },
     PaletteCommand {
         action: PaletteAction::Diff,
@@ -926,6 +931,7 @@ impl App {
 }
 
 mod actions;
+mod authz;
 mod bookmarks;
 mod dashboards;
 mod details;
