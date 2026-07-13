@@ -2503,6 +2503,66 @@ async fn bookmark_applies_resource_namespace_filter_and_sort() {
 }
 
 #[tokio::test]
+async fn namespace_switcher_pins_favorites_then_recents() {
+    let (mut app, _rx) = test_app();
+    app.ns_list = ["<all>", "alpha", "beta", "checkout", "monitoring"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    app.namespace_favorites = vec!["monitoring".into()];
+    // Recents, oldest→newest (newest ends up first).
+    app.note_recent_namespace("checkout");
+    app.note_recent_namespace("alpha");
+
+    // Browsing: <all>, favourite, recents (newest first), then the rest.
+    assert_eq!(
+        app.filtered_namespaces(),
+        vec!["<all>", "monitoring", "alpha", "checkout", "beta"]
+    );
+    assert!(app.is_favorite_namespace("monitoring"));
+    assert!(app.is_recent_namespace("alpha") && !app.is_recent_namespace("beta"));
+
+    // A filter falls back to pure fuzzy ranking (no pinning).
+    app.ns_filter = "beta".into();
+    assert_eq!(app.filtered_namespaces(), vec!["<all>", "beta"]);
+}
+
+#[tokio::test]
+async fn recent_namespaces_dedupe_and_bound() {
+    let (mut app, _rx) = test_app();
+    for n in ["a", "b", "c", "a"] {
+        app.note_recent_namespace(n);
+    }
+    // `a` moved to the front, no duplicate.
+    let recents: Vec<String> = app
+        .recent_namespaces
+        .get(&app.cluster.context)
+        .unwrap()
+        .iter()
+        .cloned()
+        .collect();
+    assert_eq!(recents, vec!["a", "c", "b"]);
+
+    // Bounded to 8, newest kept.
+    for i in 0..12 {
+        app.note_recent_namespace(&format!("ns{i}"));
+    }
+    let dq = app.recent_namespaces.get(&app.cluster.context).unwrap();
+    assert_eq!(dq.len(), 8);
+    assert_eq!(dq.front().unwrap(), "ns11");
+    // `<all>` and empty are never recorded.
+    app.note_recent_namespace("<all>");
+    app.note_recent_namespace("");
+    assert_eq!(
+        app.recent_namespaces
+            .get(&app.cluster.context)
+            .unwrap()
+            .len(),
+        8
+    );
+}
+
+#[tokio::test]
 async fn workspace_opens_first_view_and_tab_cycles() {
     let (mut app, _rx) = test_app();
     app.workspaces = vec![crate::config::Workspace {

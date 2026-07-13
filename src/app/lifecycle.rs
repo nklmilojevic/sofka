@@ -16,6 +16,7 @@ impl App {
             Some(kind) => {
                 if let Some(ns) = ns {
                     self.namespace = normalize_ns(ns);
+                    self.note_recent_namespace(ns);
                 }
                 let title = kind.title();
                 self.set_root_view(kind);

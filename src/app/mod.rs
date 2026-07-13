@@ -616,6 +616,11 @@ pub struct App {
 
     pub ns_list: Vec<String>,
     pub ns_state: ListState,
+    /// Namespaces pinned to the top of the switcher (config `favorite_namespaces`),
+    /// re-applied on context switch and `:reload`.
+    pub namespace_favorites: Vec<String>,
+    /// Session-local recently-selected namespaces, newest first, per context.
+    pub recent_namespaces: HashMap<String, VecDeque<String>>,
     /// Type-to-filter buffer for the namespace switcher; also accepted verbatim
     /// (freeform) so you can switch to a namespace that isn't listed (e.g. when
     /// cluster-wide namespace listing is restricted).
@@ -801,6 +806,8 @@ impl App {
             logs: LogsView::default(),
             ns_list: Vec::new(),
             ns_state: ListState::default(),
+            namespace_favorites: Vec::new(),
+            recent_namespaces: HashMap::new(),
             ns_filter: String::new(),
             ctx_list: Vec::new(),
             ctx_state: ListState::default(),

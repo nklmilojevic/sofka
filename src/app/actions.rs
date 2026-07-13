@@ -870,6 +870,7 @@ impl App {
             .resolve(&self.cluster.context, &self.cluster.cluster_name);
         let mut warnings = resolved.warnings;
         self.user_aliases = resolved.config.aliases;
+        self.namespace_favorites = resolved.config.favorite_namespaces;
         self.plugins = resolved.config.plugins;
         self.bookmarks = resolved.config.bookmarks;
         self.workspaces = resolved.config.workspaces;

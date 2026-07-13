@@ -151,6 +151,7 @@ async fn main() -> Result<()> {
     // palette can complete `:ctx <name>` without re-reading the file per keystroke.
     app.all_contexts = Cluster::list_contexts();
     app.user_aliases = cfg.aliases.clone();
+    app.namespace_favorites = cfg.favorite_namespaces.clone();
     app.plugins = cfg.plugins.clone();
     app.bookmarks = cfg.bookmarks.clone();
     app.workspaces = cfg.workspaces.clone();

@@ -207,6 +207,7 @@ impl App {
             self.table_state.select(Some(0));
         }
         self.namespace = ns;
+        self.note_recent_namespace(name);
         self.flash = format!("namespace: {}", self.namespace_label());
         self.flash_err = false;
         self.record_history();
