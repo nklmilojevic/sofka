@@ -98,6 +98,8 @@ pub enum Mode {
     Prompt,
     Pulse,
     Xray,
+    /// Deterministic "why is this unhealthy?" explanation for the selection.
+    Explain,
     Diff,
     Events,
     FluxMenu,
@@ -285,6 +287,7 @@ enum PaletteAction {
     Ctx,
     Pulse,
     Xray,
+    Explain,
     Diff,
     Events,
     PortForwards,
@@ -311,6 +314,10 @@ const PALETTE_COMMANDS: &[PaletteCommand] = &[
     PaletteCommand {
         action: PaletteAction::Xray,
         names: &["xray", "x"],
+    },
+    PaletteCommand {
+        action: PaletteAction::Explain,
+        names: &["explain", "why", "diagnose"],
     },
     PaletteCommand {
         action: PaletteAction::Diff,
@@ -645,6 +652,13 @@ pub struct App {
     pub pulse: Pulse,
     pub xray_items: Vec<XrayItem>,
     pub xray_state: ListState,
+    /// Findings from the explain-unhealthy view, and the row cursor over them
+    /// (used to jump to the evidence behind a line).
+    pub explain_items: Vec<crate::explain::Finding>,
+    pub explain_state: ListState,
+    pub explain_title: String,
+    /// The object the explain view is investigating, kept so `r` can re-gather.
+    pub explain_source: Option<DynamicObject>,
 
     pub confirm_label: String,
     confirm_action: Option<ConfirmAction>,
@@ -768,6 +782,10 @@ impl App {
             pulse: Pulse::default(),
             xray_items: Vec::new(),
             xray_state: ListState::default(),
+            explain_items: Vec::new(),
+            explain_state: ListState::default(),
+            explain_title: String::new(),
+            explain_source: None,
             confirm_label: String::new(),
             confirm_action: None,
             prompt_label: String::new(),
@@ -817,6 +835,7 @@ impl App {
 mod actions;
 mod dashboards;
 mod details;
+mod explain;
 mod helpers;
 mod input;
 mod lifecycle;

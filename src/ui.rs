@@ -96,6 +96,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         Mode::Help => draw_help(frame, app, chunks[1]),
         Mode::Pulse => draw_pulse(frame, app, chunks[1]),
         Mode::Xray => draw_xray(frame, app, chunks[1]),
+        Mode::Explain => draw_explain(frame, app, chunks[1]),
         Mode::PortForwards => draw_port_forwards(frame, app, chunks[1]),
         _ => draw_table(frame, app, chunks[1]),
     }
@@ -263,6 +264,7 @@ fn header_hints(app: &App) -> Vec<Line<'static>> {
             | Mode::Help
             | Mode::Pulse
             | Mode::Xray
+            | Mode::Explain
             | Mode::PortForwards
     ) {
         return Vec::new();
@@ -273,24 +275,24 @@ fn header_hints(app: &App) -> Vec<Line<'static>> {
             hint_line(&[("s", "shell"), ("a", "attach"), ("f", "port-fwd")]),
             hint_line(&[("y", "yaml"), ("d", "describe"), ("E", "events")]),
             hint_line(&[("e", "edit"), ("o", "node"), ("J", "owner")]),
-            hint_line(&[("^d", "delete"), ("^k", "kill")]),
+            hint_line(&[("X", "explain"), ("^d", "delete"), ("^k", "kill")]),
         ],
         "deployments" | "statefulsets" => vec![
             hint_line(&[("⏎", "pods"), ("l", "logs"), ("E", "events")]),
             hint_line(&[("s", "scale"), ("r", "restart"), ("i", "image")]),
             hint_line(&[("y", "yaml"), ("d", "describe"), ("e", "edit")]),
-            hint_line(&[("f", "port-fwd"), ("^d", "delete")]),
+            hint_line(&[("X", "explain"), ("f", "port-fwd"), ("^d", "delete")]),
         ],
         "daemonsets" => vec![
             hint_line(&[("⏎", "pods"), ("l", "logs"), ("E", "events")]),
             hint_line(&[("r", "restart"), ("i", "image")]),
             hint_line(&[("y", "yaml"), ("d", "describe"), ("e", "edit")]),
-            hint_line(&[("^d", "delete")]),
+            hint_line(&[("X", "explain"), ("^d", "delete")]),
         ],
         "replicasets" | "jobs" => vec![
             hint_line(&[("⏎", "pods"), ("l", "logs"), ("E", "events")]),
             hint_line(&[("y", "yaml"), ("d", "describe"), ("e", "edit")]),
-            hint_line(&[("J", "owner"), ("^d", "delete")]),
+            hint_line(&[("X", "explain"), ("J", "owner"), ("^d", "delete")]),
         ],
         "services" => vec![
             hint_line(&[("⏎", "pods"), ("f", "port-fwd")]),
@@ -1550,6 +1552,10 @@ fn draw_help(frame: &mut Frame, app: &App, area: Rect) {
         bind("c", "copy resource name · in doc views: copy the document"),
         bind("/", "search within YAML/describe/diff/events/help"),
         bind("x", "secrets: show data base64-decoded"),
+        bind(
+            "shift-x · :explain",
+            "explain why the selection is unhealthy (evidence-backed)",
+        ),
         Line::from(""),
         Line::from(Span::styled("  Act", theme::title())),
         bind("e", "edit in $EDITOR (kubectl edit)"),
@@ -2131,6 +2137,70 @@ fn draw_xray(frame: &mut Frame, app: &mut App, area: Rect) {
     );
 }
 
+/// Explain-unhealthy view: a ranked, evidence-backed list of findings for the
+/// selected object. Lines carrying a navigation target are marked with a `→`.
+fn draw_explain(frame: &mut Frame, app: &mut App, area: Rect) {
+    use crate::explain::Level;
+    let color = |level: Level| match level {
+        Level::Heading => theme::yellow(),
+        Level::Info => theme::text(),
+        Level::Good => theme::green(),
+        Level::Warn => theme::peach(),
+        Level::Critical => theme::red(),
+        Level::Evidence => theme::subtext0(),
+    };
+
+    if app.explain_items.is_empty() {
+        let items = vec![ListItem::new(Line::from(Span::styled(
+            "gathering evidence…",
+            theme::dim(),
+        )))];
+        let mut state = ListState::default();
+        render_framed_list(
+            frame,
+            area,
+            items,
+            Span::styled(format!(" {} ", app.explain_title), theme::title()),
+            &mut state,
+        );
+        return;
+    }
+
+    let items: Vec<ListItem> = app
+        .explain_items
+        .iter()
+        .map(|f| {
+            let indent = "  ".repeat(f.indent as usize);
+            let mut spans = vec![Span::raw(indent)];
+            let style = match f.level {
+                Level::Heading => Style::default()
+                    .fg(color(f.level))
+                    .add_modifier(Modifier::BOLD),
+                _ => Style::default().fg(color(f.level)),
+            };
+            spans.push(Span::styled(f.text.clone(), style));
+            // A trailing arrow marks a line you can jump into (evidence nav).
+            if f.target.is_some() {
+                spans.push(Span::styled("  →", theme::dim()));
+            }
+            ListItem::new(Line::from(spans))
+        })
+        .collect();
+
+    let title = format!(
+        " {}  ({} findings · r refresh · esc back) ",
+        app.explain_title,
+        app.explain_items.len()
+    );
+    render_framed_list(
+        frame,
+        area,
+        items,
+        Span::styled(title, theme::title()),
+        &mut app.explain_state,
+    );
+}
+
 /// Pulse dashboard: cluster-health tiles.
 fn draw_pulse(frame: &mut Frame, app: &App, area: Rect) {
     let p = &app.pulse;
@@ -2331,6 +2401,10 @@ fn draw_prompt(frame: &mut Frame, app: &App, area: Rect) {
             Line::from(Span::styled(hint, theme::dim()))
         }
         Mode::Help => Line::from(Span::styled("  /:search  ?/esc:back", theme::dim())),
+        Mode::Explain => Line::from(Span::styled(
+            "  j/k: move   r: refresh   esc: back",
+            theme::dim(),
+        )),
         Mode::FluxMenu => Line::from(Span::styled(
             "  j/k: move   enter: confirm   esc: cancel",
             theme::dim(),
