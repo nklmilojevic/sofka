@@ -113,6 +113,8 @@ impl App {
         let Some(kind) = self.kind.clone() else {
             return;
         };
+        let label = self.action_label(&targets);
+        self.note_action(if force { "force-delete" } else { "delete" }, label);
         let client = self.cluster.client.clone();
         let tx = self.tx.clone();
         let genr = self.generation;
@@ -167,6 +169,10 @@ impl App {
         let Some(kind) = self.kind.clone() else {
             return;
         };
+        self.note_action(
+            if unschedulable { "cordon" } else { "uncordon" },
+            node_targets_label(&targets),
+        );
         let verb = if unschedulable {
             "cordoning"
         } else {
@@ -228,6 +234,7 @@ impl App {
         let Some(kind) = self.kind.clone() else {
             return;
         };
+        self.note_action("drain", node_targets_label(&targets));
         let client = self.cluster.client.clone();
         let tx = self.tx.clone();
         let genr = self.generation;
@@ -552,6 +559,7 @@ impl App {
         let name = obj.metadata.name.clone().unwrap_or_default();
         let ns = obj.metadata.namespace.clone().unwrap_or_default();
         let now = k8s_openapi::jiff::Timestamp::now().to_string();
+        self.note_action("restart", format!("{name} in {ns}"));
         self.flash = format!("restarting {name}…");
         self.flash_err = false;
         self.spawn_patch_action(
@@ -661,6 +669,10 @@ impl App {
         let Some(kind) = self.kind.clone() else {
             return;
         };
+        self.note_action(
+            format!("set-image {container}={image}"),
+            format!("{name} in {ns}"),
+        );
         self.flash = format!("setting image: {container} → {image}");
         self.flash_err = false;
         self.spawn_patch_action(
@@ -679,14 +691,20 @@ impl App {
             return;
         };
         let name = obj.metadata.name.clone().unwrap_or_default();
+        let ns = obj.metadata.namespace.clone().unwrap_or_default();
+        let edit_label = if ns.is_empty() {
+            name.clone()
+        } else {
+            format!("{name} in {ns}")
+        };
         // A Flux-managed object gets its spec reverted on the next reconcile —
         // warn (and confirm) before opening the editor.
         let flux = flux_managed_by(obj);
         let mut argv = self.kubectl_base();
         argv.extend(["edit".into(), self.kind_plural.clone(), name]);
-        if let Some(ns) = &obj.metadata.namespace {
+        if !ns.is_empty() {
             argv.push("-n".into());
-            argv.push(ns.clone());
+            argv.push(ns);
         }
         match flux {
             Some(owner) => {
@@ -696,7 +714,10 @@ impl App {
                 self.confirm_action = Some(ConfirmAction::Edit { argv });
                 self.mode = Mode::Confirm;
             }
-            None => self.pending = Some(Suspend::Shell(argv)),
+            None => {
+                self.note_action("edit", edit_label);
+                self.pending = Some(Suspend::Shell(argv));
+            }
         }
     }
 
@@ -736,6 +757,7 @@ impl App {
         if self.deny_readonly() {
             return;
         }
+        self.note_action("shell", format!("{pod} in {ns}"));
         let mut argv = self.kubectl_base();
         argv.extend(["exec".into(), "-it".into(), "-n".into(), ns, pod]);
         if let Some(c) = container {
@@ -1082,6 +1104,7 @@ impl App {
         let Some(kind) = self.kind.clone() else {
             return;
         };
+        self.note_action(format!("scale to {replicas}"), format!("{name} in {ns}"));
         self.flash = format!("scaling {name} → {replicas}");
         self.flash_err = false;
         self.spawn_patch_action(
@@ -1148,6 +1171,8 @@ impl App {
         let Some(kind) = self.kind.clone() else {
             return;
         };
+        let label = self.action_label(&targets);
+        self.note_action(if suspend { "suspend" } else { "resume" }, label);
         let verb = if suspend { "suspending" } else { "resuming" };
         self.flash = if targets.len() == 1 {
             format!("{verb} {}…", targets[0].0)
@@ -1172,6 +1197,8 @@ impl App {
             return;
         };
         let now = k8s_openapi::jiff::Timestamp::now().to_string();
+        let label = self.action_label(&targets);
+        self.note_action("reconcile", label);
         self.flash = if targets.len() == 1 {
             format!("reconciling {}…", targets[0].0)
         } else {
@@ -1214,6 +1241,8 @@ impl App {
             return;
         };
         let now = k8s_openapi::jiff::Timestamp::now().as_second().to_string();
+        let label = self.action_label(&targets);
+        self.note_action("refresh", label);
         self.flash = if targets.len() == 1 {
             format!("refreshing {}…", targets[0].0)
         } else {
@@ -1301,6 +1330,10 @@ impl App {
     }
 
     pub(super) fn do_helm_rollback(&mut self, ns: String, name: String, revision: String) {
+        self.note_action(
+            format!("helm rollback to {revision}"),
+            format!("{name} in {ns}"),
+        );
         let mut argv = self.helm_base();
         argv.extend([
             "rollback".to_string(),
@@ -1353,6 +1386,11 @@ impl App {
     }
 
     pub(super) fn do_helm_uninstall(&mut self, targets: Vec<(String, String)>) {
+        let label = match targets.as_slice() {
+            [(name, ns)] => format!("{name} in {ns}"),
+            many => format!("{} Helm releases", many.len()),
+        };
+        self.note_action("helm uninstall", label);
         self.flash = if targets.len() == 1 {
             format!("uninstalling {}…", targets[0].0)
         } else {

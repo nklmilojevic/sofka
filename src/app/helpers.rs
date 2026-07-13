@@ -43,6 +43,15 @@ pub(super) fn node_unschedulable_patch(unschedulable: bool) -> Value {
     json!({ "spec": { "unschedulable": unschedulable } })
 }
 
+/// A compact journal label for a set of node names.
+pub(super) fn node_targets_label(targets: &[String]) -> String {
+    match targets {
+        [] => "—".into(),
+        [one] => one.clone(),
+        many => format!("{} nodes", many.len()),
+    }
+}
+
 /// What manages `obj`, if anything: its Flux owner (from the toolkit labels)
 /// preferred, else its controller/owner reference. Used to warn that a delete
 /// will be recreated.

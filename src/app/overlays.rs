@@ -73,6 +73,21 @@ impl App {
                 self.marked.clear();
             }
             ConfirmAction::Edit { argv } => {
+                // argv is `<kubectl> edit <kind> <name> [-n <ns>]`; recover the
+                // name (and namespace) that follow `edit` for the journal entry.
+                let label = argv
+                    .iter()
+                    .position(|a| a == "edit")
+                    .and_then(|i| argv.get(i + 2))
+                    .map(|name| match argv.iter().position(|a| a == "-n") {
+                        Some(j) => match argv.get(j + 1) {
+                            Some(ns) => format!("{name} in {ns}"),
+                            None => name.clone(),
+                        },
+                        None => name.clone(),
+                    })
+                    .unwrap_or_default();
+                self.note_action("edit", label);
                 self.pending = Some(Suspend::Shell(argv));
             }
             ConfirmAction::Exec { ns, name } => {

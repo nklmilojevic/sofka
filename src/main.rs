@@ -9,6 +9,7 @@ mod explain;
 mod filter;
 mod gitops;
 mod helm;
+mod journal;
 mod k8s;
 mod keys;
 mod providers;
