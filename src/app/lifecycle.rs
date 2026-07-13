@@ -669,6 +669,23 @@ impl App {
                     ));
                 }
             }
+            Msg::DebuggersCleaned {
+                generation,
+                deleted,
+                failed,
+            } if generation == self.generation => {
+                if failed.is_empty() {
+                    self.flash = format!("removed {deleted} node debugger pod(s)");
+                    self.flash_err = false;
+                } else {
+                    let shown: Vec<&str> = failed.iter().take(3).map(String::as_str).collect();
+                    self.flash_warn(&format!(
+                        "debug-clean: removed {deleted}, {} failed — {}",
+                        failed.len(),
+                        shown.join("; ")
+                    ));
+                }
+            }
             Msg::Detail {
                 generation,
                 title,

@@ -115,6 +115,17 @@ impl App {
                 self.do_helm_uninstall(targets);
                 self.marked.clear();
             }
+            ConfirmAction::NodeDebug {
+                node,
+                image,
+                namespace,
+                profile,
+            } => {
+                self.do_node_debug(node, image, namespace, profile);
+            }
+            ConfirmAction::CleanupDebuggers => {
+                self.do_cleanup_debuggers();
+            }
             ConfirmAction::Plugin {
                 jobs,
                 name,

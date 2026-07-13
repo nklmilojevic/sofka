@@ -2493,6 +2493,7 @@ async fn debug_prompt_prefills_image_then_shells_out_to_kubectl_debug() {
     app.debug = crate::config::DebugConfig {
         image: "nicolaka/netshoot:latest".into(),
         command: Vec::new(),
+        ..Default::default()
     };
     app.request_debug(None);
     assert_eq!(app.mode, Mode::Prompt);
@@ -2531,6 +2532,103 @@ async fn debug_from_container_picker_pins_target() {
         panic!("expected a debug shell");
     };
     assert!(argv.iter().any(|a| a == "--target=app"), "{argv:?}");
+}
+
+/// A one-node table with the cursor on it.
+fn app_with_node() -> (App, Receiver<Msg>) {
+    let (mut app, rx) = test_app();
+    app.switch_kind("nodes");
+    apply(
+        &mut app,
+        json!({"apiVersion": "v1", "kind": "Node", "metadata": {"name": "node-a"}}),
+    );
+    app.table_state.select(Some(0));
+    (app, rx)
+}
+
+#[tokio::test]
+async fn node_debug_previews_host_access_then_launches_debug_pod() {
+    let (mut app, _rx) = app_with_node();
+    app.debug = crate::config::DebugConfig {
+        node_image: "busybox:latest".into(),
+        node_namespace: "kube-system".into(),
+        node_profile: Some("sysadmin".into()),
+        ..Default::default()
+    };
+    // `:debug` on a node previews the host access and requires confirmation.
+    app.request_debug(None);
+    assert_eq!(app.mode, Mode::Confirm);
+    assert!(
+        app.confirm_label.contains("/host") && app.confirm_label.contains("host PID"),
+        "{}",
+        app.confirm_label
+    );
+    assert!(matches!(
+        app.confirm_action,
+        Some(ConfirmAction::NodeDebug { .. })
+    ));
+
+    // Confirming launches kubectl debug node/… and tracks it for cleanup.
+    app.handle_key(press(KeyCode::Char('y'))).unwrap();
+    let Some(Suspend::Shell(argv)) = app.pending.take() else {
+        panic!("node debug should suspend into a shell");
+    };
+    assert!(argv.iter().any(|a| a == "debug"));
+    assert!(argv.iter().any(|a| a == "node/node-a"), "{argv:?}");
+    assert!(argv.iter().any(|a| a == "--image=busybox:latest"));
+    assert!(argv.iter().any(|a| a == "--profile=sysadmin"));
+    assert!(argv.iter().any(|a| a == "kube-system"));
+    assert_eq!(
+        app.launched_node_debuggers,
+        vec![("kube-system".into(), "node-a".into())]
+    );
+    assert!(
+        app.journal.lines().iter().any(|l| l.contains("node-debug")),
+        "recorded in journal"
+    );
+}
+
+#[tokio::test]
+async fn node_debug_is_gated_by_readonly_and_guardrail() {
+    let (mut app, _rx) = app_with_node();
+    app.readonly = true;
+    app.request_debug(None);
+    assert_ne!(app.mode, Mode::Confirm, "read-only blocks node debug");
+
+    let (mut app, _rx) = app_with_node();
+    app.guardrails = vec![crate::config::Guardrail {
+        actions: vec!["node-debug".into()],
+        deny: true,
+        ..Default::default()
+    }];
+    app.request_debug(None);
+    assert_ne!(app.mode, Mode::Confirm);
+    assert!(app.flash.contains("blocked by guardrail"), "{}", app.flash);
+}
+
+#[tokio::test]
+async fn debug_clean_without_launches_warns() {
+    let (mut app, _rx) = app_with_node();
+    app.request_debug_cleanup();
+    assert_ne!(app.mode, Mode::Confirm);
+    assert!(app.flash.contains("no node debuggers"), "{}", app.flash);
+}
+
+#[tokio::test]
+async fn debug_clean_confirms_when_debuggers_were_launched() {
+    let (mut app, _rx) = app_with_node();
+    app.launched_node_debuggers = vec![("default".into(), "node-a".into())];
+    app.request_debug_cleanup();
+    assert_eq!(app.mode, Mode::Confirm);
+    assert!(
+        app.confirm_label.contains("node-a"),
+        "{}",
+        app.confirm_label
+    );
+    assert!(matches!(
+        app.confirm_action,
+        Some(ConfirmAction::CleanupDebuggers)
+    ));
 }
 
 #[tokio::test]

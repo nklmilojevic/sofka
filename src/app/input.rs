@@ -518,6 +518,7 @@ impl App {
             PaletteAction::CanI => self.open_can_i(),
             PaletteAction::Journal => self.open_journal(),
             PaletteAction::Debug => self.request_debug(None),
+            PaletteAction::DebugClean => self.request_debug_cleanup(),
             PaletteAction::Diff => self.open_diff(),
             PaletteAction::Events => self.open_events(),
             PaletteAction::PortForwards => self.open_port_forwards(),

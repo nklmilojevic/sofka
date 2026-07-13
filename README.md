@@ -190,7 +190,7 @@ Not a marketing number - these are specific, checkable design choices:
   it - the same answer `kubectl auth can-i` gives, without leaving the TUI.
 - **Declarative guardrails** (`[[guardrails]]`) - config-defined rules that
   match on context/namespace/resource/action globs to **deny** a destructive
-  action outright (`delete`/`force-delete`/`drain`/`shell`/`debug`), force
+  action outright (`delete`/`force-delete`/`drain`/`shell`/`debug`/`node-debug`), force
   **type-to-confirm** (resource name or `context/name`), or cap **bulk**
   operations - so "never delete in prod", "always confirm a prod shell", and
   "no more than one at once" are enforced, not remembered.
@@ -203,6 +203,12 @@ Not a marketing number - these are specific, checkable design choices:
   (prefilled with the `[debug]` default). `d` in the container picker targets
   a specific container's process namespace (`--target`). Gated by read-only
   mode and the `debug` guardrail; recorded in the journal.
+- **Node debug pods** (`:debug` on a node) - launch a privileged diagnostic
+  pod on the selected node (`kubectl debug node/…`) that mounts the host
+  filesystem at `/host` and joins the host namespaces. sofka previews exactly
+  that access and requires confirmation before creating it, gates it behind
+  read-only mode and the `node-debug` guardrail, and tracks what it launched
+  so `:debug-clean` can remove the debugger pods afterwards.
 - **RBAC-aware palette** - hides resource kinds you can't `list`.
 - **Namespace switcher** (`n`) with pinned **favourites** (`favorite_namespaces`,
   ★) and per-context session **recents** (·) above the rest, and **context
@@ -474,8 +480,8 @@ remember. Each rule matches on `contexts`, `namespaces`, `resources`, and
 the strictest of: `deny` (block outright), `confirmation` (type to confirm),
 and `max_bulk` (cap how many rows one action may touch). The gated `actions`
 are the destructive verbs sofka takes directly — `delete`, `force-delete`,
-`drain`, `shell` (exec), and `debug`. The first matching rule wins; `reason`
-is shown when it fires.
+`drain`, `shell` (exec), `debug`, and `node-debug`. The first matching rule
+wins; `reason` is shown when it fires.
 
 ```toml
 [[guardrails]]
@@ -497,24 +503,36 @@ actions = ["delete"]
 max_bulk = 1                     # no bulk deletes in kube-system
 ```
 
-### Ephemeral debug containers
+### Debug containers and pods
 
-`:debug` attaches a throwaway debug container to the selected pod through
-`kubectl debug`, prompting for the image (prefilled with the default below).
+`:debug` on a **pod** attaches a throwaway ephemeral debug container through
+`kubectl debug`, prompting for the image (prefilled with `image` below).
 Leaving `command` empty launches an interactive shell (bash if the image ships
 it, else sh), mirroring the pod shell. `d` in the container picker pins
 `--target=<container>` so the debug container shares that container's process
 namespace. The ephemeral container persists on the pod until it's recreated —
 Kubernetes can't remove it — so there's nothing for sofka to clean up.
 
+`:debug` on a **node** launches a privileged diagnostic pod on it
+(`kubectl debug node/<node>`, image `node_image` in `node_namespace`, optional
+`node_profile`). Because that pod mounts the host filesystem at `/host` and
+joins the host PID/network/IPC namespaces, sofka previews exactly that access
+and makes you confirm before creating it. sofka tracks the node debuggers it
+launches this session; `:debug-clean` deletes them (matched by the
+`node-debugger-*` name and the node they run on). kubectl leaves the pod
+running after you exit, so clean up when you're done.
+
 ```toml
 [debug]
-image = "nicolaka/netshoot:latest"   # default image the prompt is prefilled with
-command = ["bash"]                   # entrypoint; omit for an interactive shell
+image = "nicolaka/netshoot:latest"       # ephemeral (in-pod) debug image
+command = ["bash"]                       # entrypoint; omit for an interactive shell
+node_image = "nicolaka/netshoot:latest"  # node debug pod image
+node_namespace = "default"               # namespace the node debugger lands in
+node_profile = "sysadmin"                # kubectl debug --profile (optional)
 ```
 
-Debug creation is disabled in read-only mode and gated by the `debug`
-guardrail action.
+Both are disabled in read-only mode and gated by guardrails — the `debug`
+action for pods, `node-debug` for nodes.
 
 ### Log provider (VictoriaLogs)
 
@@ -643,7 +661,8 @@ header) and switching away restores write mode.
 | `e`                                        | edit in `$EDITOR` (`kubectl edit`)                                                                                                    |
 | `s`                                        | shell into pod / scale a workload (context-dependent)                                                                                 |
 | `a`                                        | attach to pod                                                                                                                         |
-| `:debug`                                   | attach an ephemeral debug container to the pod (`kubectl debug`; `d` in the container picker targets one)                             |
+| `:debug`                                   | pod: ephemeral debug container (`d` in the picker targets one) · node: privileged debug pod (previewed + confirmed)                   |
+| `:debug-clean`                             | delete the node debugger pods launched this session                                                                                   |
 | `i`                                        | set container image                                                                                                                   |
 | `r`                                        | rollout restart (workloads) / refresh (elsewhere)                                                                                     |
 | `f` / `shift-f`                            | port-forward (pods/services) - runs in the background                                                                                 |
