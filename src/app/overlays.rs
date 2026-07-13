@@ -55,6 +55,17 @@ impl App {
                     self.launch_provider_container_logs(ns, name, c);
                 }
             }
+            // Debug an ephemeral container targeting this container's namespace
+            // (`kubectl debug --target`). The picker's pod is the selected row,
+            // so request_debug reads it back from the table selection.
+            KeyCode::Char('d') => {
+                if let Some(i) = self.container_state.selected()
+                    && let Some(c) = self.container_list.get(i).cloned()
+                {
+                    self.mode = Mode::Table;
+                    self.request_debug(Some(c));
+                }
+            }
             _ => {}
         }
     }
@@ -222,6 +233,13 @@ impl App {
                             self.flash_warn("no image given");
                         } else {
                             self.do_set_image(ns, name, plural, container, input);
+                        }
+                    }
+                    Some(PromptKind::Debug { ns, pod, target }) => {
+                        if input.is_empty() {
+                            self.flash_warn("no debug image given");
+                        } else {
+                            self.do_debug(ns, pod, target, input);
                         }
                     }
                     // Empty input = cancel, keep the current period.

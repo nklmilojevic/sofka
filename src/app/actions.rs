@@ -1,5 +1,9 @@
 use super::*;
 
+/// Interactive-shell entrypoint for `exec`/`debug`: prefer bash when the image
+/// ships it, otherwise fall back to sh, in a single `sh -c` invocation.
+const SHELL_FALLBACK: &str = "command -v bash >/dev/null 2>&1 && exec bash || exec sh";
+
 impl App {
     // ----- actions -------------------------------------------------------
 
@@ -763,12 +767,85 @@ impl App {
             argv.push("-c".into());
             argv.push(c);
         }
+        argv.extend(["--".into(), "sh".into(), "-c".into(), SHELL_FALLBACK.into()]);
+        self.pending = Some(Suspend::Shell(argv));
+    }
+
+    /// `:debug` — attach an ephemeral debug container to the selected pod via
+    /// `kubectl debug`, prompting for the image (prefilled with the configured
+    /// default). `target` pins `--target=<container>` when launched from the
+    /// container picker. Gated by read-only mode and the `debug` guardrail.
+    pub(super) fn request_debug(&mut self, target: Option<String>) {
+        if self.deny_readonly() {
+            return;
+        }
+        if self.kind_plural != "pods" {
+            self.flash_warn("debug attaches an ephemeral container to a pod");
+            return;
+        }
+        let Some(obj) = self.selected_ref() else {
+            return;
+        };
+        let name = obj.metadata.name.clone().unwrap_or_default();
+        let ns = obj.metadata.namespace.clone().unwrap_or_default();
+        // A debug container is a mutation of the pod — let guardrails gate it,
+        // with no default confirmation (like shell).
+        let targets = [(name.clone(), ns.clone())];
+        if self
+            .guard("debug", "pods", &targets, ConfirmLevel::None)
+            .is_none()
+        {
+            return;
+        }
+        self.prompt_label = match &target {
+            Some(c) => format!("Debug image for {name} (--target {c}, ⏎ to accept):"),
+            None => format!("Debug image for {name} (⏎ to accept):"),
+        };
+        self.prompt_input = self.debug.image.clone();
+        self.prompt_kind = Some(PromptKind::Debug {
+            ns,
+            pod: name,
+            target,
+        });
+        self.mode = Mode::Prompt;
+    }
+
+    /// Launch `kubectl debug` for the ephemeral container: suspends the TUI and
+    /// shells out interactively, exactly like exec/attach. The ephemeral
+    /// container persists on the pod (Kubernetes can't remove it) until the pod
+    /// is recreated — so there's nothing for sofka to clean up afterwards.
+    pub(super) fn do_debug(
+        &mut self,
+        ns: String,
+        pod: String,
+        target: Option<String>,
+        image: String,
+    ) {
+        let tgt = target
+            .as_deref()
+            .map(|c| format!(" --target {c}"))
+            .unwrap_or_default();
+        self.note_action(format!("debug ({image}){tgt}"), format!("{pod} in {ns}"));
+        let mut argv = self.kubectl_base();
         argv.extend([
-            "--".into(),
-            "sh".into(),
-            "-c".into(),
-            "command -v bash >/dev/null 2>&1 && exec bash || exec sh".into(),
+            "debug".into(),
+            "-it".into(),
+            "-n".into(),
+            ns,
+            pod,
+            format!("--image={image}"),
         ]);
+        if let Some(c) = target {
+            argv.push(format!("--target={c}"));
+        }
+        // No configured command = an interactive shell (bash if the image has
+        // it, else sh), mirroring the pod shell; otherwise the configured argv.
+        if self.debug.command.is_empty() {
+            argv.extend(["--".into(), "sh".into(), "-c".into(), SHELL_FALLBACK.into()]);
+        } else {
+            argv.push("--".into());
+            argv.extend(self.debug.command.clone());
+        }
         self.pending = Some(Suspend::Shell(argv));
     }
 
@@ -977,6 +1054,7 @@ impl App {
         self.bookmarks = resolved.config.bookmarks;
         self.workspaces = resolved.config.workspaces;
         self.guardrails = resolved.config.guardrails;
+        self.debug = resolved.config.debug;
         warnings.extend(crate::config::plugin_warnings(&self.plugins));
         warnings.extend(crate::config::bookmark_warnings(&self.bookmarks));
         warnings.extend(crate::config::workspace_warnings(&self.workspaces));

@@ -76,6 +76,38 @@ pub struct Config {
     /// Warning/critical thresholds for value-based cell coloring — see
     /// [`Thresholds`]. Compiled and validated by [`crate::thresholds::compile`].
     pub thresholds: Thresholds,
+    /// Defaults for the ephemeral-debug-container workflow (`:debug`) — see
+    /// [`DebugConfig`].
+    pub debug: DebugConfig,
+}
+
+/// Defaults for `:debug`, which attaches an ephemeral debug container to the
+/// selected pod via `kubectl debug`. The image prompt is prefilled with
+/// [`Self::image`]; leaving [`Self::command`] empty launches an interactive
+/// shell (bash if the debug image has it, else sh), mirroring the pod shell.
+///
+/// ```toml
+/// [debug]
+/// image = "nicolaka/netshoot:latest"   # default debug image
+/// command = ["bash"]                   # entrypoint; omit for a shell
+/// ```
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct DebugConfig {
+    /// Image the `:debug` prompt is prefilled with.
+    pub image: String,
+    /// Entrypoint for the ephemeral container. Empty = an interactive shell.
+    pub command: Vec<String>,
+}
+
+impl Default for DebugConfig {
+    fn default() -> Self {
+        // busybox is tiny and always pulls; a good least-surprise default.
+        Self {
+            image: "busybox:latest".into(),
+            command: Vec::new(),
+        }
+    }
 }
 
 /// Warning/critical thresholds that decide when a RESTARTS/CPU/MEM cell (or the
@@ -490,8 +522,8 @@ pub fn workspace_warnings(workspaces: &[Workspace]) -> Vec<String> {
 
 /// A declarative safety policy: match dangerous actions by context, namespace,
 /// resource, and action, then require extra confirmation, deny them, or cap a
-/// bulk selection. Gates `delete`, `force-delete`, `drain`, and `shell` today.
-/// Empty match lists mean "any"; glob `*` is supported in the patterns.
+/// bulk selection. Gates `delete`, `force-delete`, `drain`, `shell`, and
+/// `debug` today. Empty match lists mean "any"; glob `*` supported in patterns.
 ///
 /// ```toml
 /// [[guardrails]]
@@ -519,8 +551,8 @@ pub struct Guardrail {
     pub namespaces: Vec<String>,
     /// Resource plurals/kinds this applies to (globs). Empty = any.
     pub resources: Vec<String>,
-    /// Actions this applies to: `delete`, `force-delete`, `drain`, `shell`.
-    /// Empty = any.
+    /// Actions this applies to: `delete`, `force-delete`, `drain`, `shell`,
+    /// `debug`. Empty = any.
     pub actions: Vec<String>,
     /// Block the action outright.
     pub deny: bool,

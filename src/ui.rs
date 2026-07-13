@@ -1587,6 +1587,10 @@ fn draw_help(frame: &mut Frame, app: &App, area: Rect) {
         bind("e", "edit in $EDITOR (kubectl edit)"),
         bind("s", "shell into pod / scale workload"),
         bind("a", "attach to pod"),
+        bind(
+            ":debug",
+            "attach an ephemeral debug container to the pod (kubectl debug; d in the container picker targets one)",
+        ),
         bind("i", "set container image"),
         bind(
             "r",
@@ -2000,7 +2004,7 @@ fn draw_containers(frame: &mut Frame, app: &mut App, area: Rect) {
         format!(" · {}", app.container_qos)
     };
     let title = format!(" Containers{qos} ");
-    let footer = " ⏎ logs · p previous · s shell · L provider ";
+    let footer = " ⏎ logs · p previous · s shell · d debug · L provider ";
 
     // Size the box to its contents: header + rows + borders, and wide enough
     // for the columns, the title, or the footer — whichever needs the most.

@@ -2488,6 +2488,74 @@ async fn guardrail_type_resource_name_confirmation() {
 }
 
 #[tokio::test]
+async fn debug_prompt_prefills_image_then_shells_out_to_kubectl_debug() {
+    let (mut app, _rx) = app_with_pod();
+    app.debug = crate::config::DebugConfig {
+        image: "nicolaka/netshoot:latest".into(),
+        command: Vec::new(),
+    };
+    app.request_debug(None);
+    assert_eq!(app.mode, Mode::Prompt);
+    // The prompt is prefilled with the configured default image.
+    assert_eq!(app.prompt_input, "nicolaka/netshoot:latest");
+    assert!(matches!(app.prompt_kind, Some(PromptKind::Debug { .. })));
+
+    app.handle_key(press(KeyCode::Enter)).unwrap();
+    let Some(Suspend::Shell(argv)) = app.pending.take() else {
+        panic!("debug should suspend into a kubectl debug shell");
+    };
+    assert!(argv.iter().any(|a| a == "debug"));
+    assert!(argv.iter().any(|a| a == "-it"));
+    assert!(
+        argv.iter().any(|a| a == "--image=nicolaka/netshoot:latest"),
+        "{argv:?}"
+    );
+    assert!(
+        !argv.iter().any(|a| a.starts_with("--target")),
+        "no target when launched from the pod row: {argv:?}"
+    );
+    // Recorded in the journal as a debug action.
+    assert!(app.journal.lines().iter().any(|l| l.contains("debug")));
+}
+
+#[tokio::test]
+async fn debug_from_container_picker_pins_target() {
+    let (mut app, _rx) = app_with_pod();
+    app.do_debug(
+        "default".into(),
+        "a".into(),
+        Some("app".into()),
+        "busybox:latest".into(),
+    );
+    let Some(Suspend::Shell(argv)) = app.pending.take() else {
+        panic!("expected a debug shell");
+    };
+    assert!(argv.iter().any(|a| a == "--target=app"), "{argv:?}");
+}
+
+#[tokio::test]
+async fn debug_is_blocked_in_readonly_and_by_guardrail() {
+    // Read-only mode.
+    let (mut app, _rx) = app_with_pod();
+    app.readonly = true;
+    app.request_debug(None);
+    assert_ne!(app.mode, Mode::Prompt, "read-only blocks debug");
+    assert!(app.flash.contains("read-only"));
+
+    // A guardrail denying the `debug` action.
+    let (mut app, _rx) = app_with_pod();
+    app.guardrails = vec![crate::config::Guardrail {
+        actions: vec!["debug".into()],
+        deny: true,
+        reason: Some("no debug on prod".into()),
+        ..Default::default()
+    }];
+    app.request_debug(None);
+    assert_ne!(app.mode, Mode::Prompt);
+    assert!(app.flash.contains("blocked by guardrail"), "{}", app.flash);
+}
+
+#[tokio::test]
 async fn readonly_gates_mutating_plugins_only() {
     let (mut app, _rx) = app_with_pod();
     app.readonly = true;
