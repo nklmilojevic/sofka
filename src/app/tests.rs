@@ -2397,6 +2397,29 @@ async fn editing_unmanaged_object_skips_the_warning() {
 }
 
 #[tokio::test]
+async fn mutating_action_is_recorded_in_the_journal() {
+    let (mut app, _rx) = app_with_pod();
+    assert!(app.journal.is_empty(), "journal starts empty");
+    app.request_edit(); // unmanaged edit records straight away
+    assert_eq!(app.journal.len(), 1);
+    // The palette command opens it as a scrollable document.
+    app.open_journal();
+    assert_eq!(app.mode, Mode::Detail);
+    let body = app
+        .detail
+        .lines
+        .iter()
+        .cloned()
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(body.contains("edit"), "{body}");
+    assert!(
+        body.contains(&app.cluster.context),
+        "context column: {body}"
+    );
+}
+
+#[tokio::test]
 async fn deleting_managed_object_warns_it_will_be_recreated() {
     let (mut app, _rx) = test_app();
     flux_managed_pod(&mut app);

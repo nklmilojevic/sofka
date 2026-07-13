@@ -341,6 +341,7 @@ enum PaletteAction {
     Timeline,
     Gitops,
     CanI,
+    Journal,
     Diff,
     Events,
     PortForwards,
@@ -383,6 +384,10 @@ const PALETTE_COMMANDS: &[PaletteCommand] = &[
     PaletteCommand {
         action: PaletteAction::CanI,
         names: &["can-i", "cani", "can"],
+    },
+    PaletteCommand {
+        action: PaletteAction::Journal,
+        names: &["journal", "audit", "actions"],
     },
     PaletteCommand {
         action: PaletteAction::Diff,
@@ -677,6 +682,8 @@ pub struct App {
     /// Declarative guardrails (`[[guardrails]]`), re-applied on context switch
     /// and `:reload`.
     pub guardrails: Vec<crate::config::Guardrail>,
+    /// Session-local log of mutating actions taken (`:journal`).
+    pub journal: crate::journal::Journal,
     /// A workspace waiting for an in-flight context switch before it opens.
     pub pending_workspace: Option<crate::config::Workspace>,
     /// The workspace currently being cycled with `Tab`/`Shift-Tab`, if any.
@@ -858,6 +865,7 @@ impl App {
             pending_workspace: None,
             active_workspace: None,
             guardrails: Vec::new(),
+            journal: crate::journal::Journal::default(),
             rbac_allowed: None,
             last_rbac_ns: None,
             container_list: Vec::new(),
@@ -954,6 +962,7 @@ mod gitops;
 mod guardrails;
 mod helpers;
 mod input;
+mod journal;
 mod lifecycle;
 mod logs;
 mod navigation;

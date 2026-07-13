@@ -345,6 +345,14 @@ impl App {
             return;
         }
         let n = jobs.len();
+        self.note_action(
+            format!("plugin: {name}"),
+            if n == 1 {
+                "1 target".to_string()
+            } else {
+                format!("{n} targets")
+            },
+        );
         match mode {
             PluginMode::Terminal => {
                 // Terminal runs are single (enforced in run_plugin).
@@ -508,6 +516,7 @@ impl App {
             PaletteAction::Timeline => self.open_timeline(),
             PaletteAction::Gitops => self.open_gitops(),
             PaletteAction::CanI => self.open_can_i(),
+            PaletteAction::Journal => self.open_journal(),
             PaletteAction::Diff => self.open_diff(),
             PaletteAction::Events => self.open_events(),
             PaletteAction::PortForwards => self.open_port_forwards(),

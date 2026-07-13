@@ -1572,6 +1572,10 @@ fn draw_help(frame: &mut Frame, app: &App, area: Rect) {
             ":gitops · :flux",
             "Flux owner, source, revisions & reconciliation chain (⏎ to jump)",
         ),
+        bind(
+            ":journal · :audit",
+            "session-local log of the mutating actions you've taken",
+        ),
         Line::from(""),
         Line::from(Span::styled("  Act", theme::title())),
         bind("e", "edit in $EDITOR (kubectl edit)"),
