@@ -184,10 +184,21 @@ impl Cluster {
     /// Walk the discovery API and index every recommended resource by its
     /// plural and kind. Built-in aliases are layered on top.
     async fn discover(&mut self) -> Result<()> {
-        let discovery = Discovery::new(self.client.clone())
-            .run()
-            .await
-            .context("running API discovery")?;
+        // Prefer the Aggregated Discovery API (K8s ≥1.26): two requests total,
+        // and the apiserver serves cached data for groups whose backing
+        // APIService is down. The per-group walk instead 503s on the first
+        // broken aggregated API (e.g. a dead metrics-server), which would make
+        // the whole cluster unconnectable. Servers without aggregated
+        // discovery answer the request with the legacy document, which
+        // deserializes as *empty* rather than failing — so fall back to the
+        // per-group walk on empty as well as on error.
+        let discovery = match Discovery::new(self.client.clone()).run_aggregated().await {
+            Ok(d) if d.groups().next().is_some() => d,
+            _ => Discovery::new(self.client.clone())
+                .run()
+                .await
+                .context("running API discovery")?,
+        };
 
         // Collect everything first, then insert bare keys in priority order so
         // that e.g. core `pods` wins over `pods.metrics.k8s.io`.
@@ -542,5 +553,161 @@ mod tests {
             assert!(!target.is_empty());
             assert_ne!(alias, target);
         }
+    }
+
+    /// A minimal mock apiserver for discovery tests: `apps` (healthy, serves
+    /// deployments), `broken.example.com` (its APIService backend is down —
+    /// the per-group walk gets a 503, aggregated discovery gets a stale
+    /// entry), and the core group (pods). When `supports_aggregated` is
+    /// false it behaves like a pre-1.26 server and answers the aggregated
+    /// request with the legacy document.
+    async fn mock_apiserver(supports_aggregated: bool, include_broken: bool) -> String {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind mock apiserver");
+        let addr = listener.local_addr().expect("local addr");
+
+        fn route(path: &str, aggregated: bool, include_broken: bool) -> (&'static str, String) {
+            let broken_legacy = r#",{"name":"broken.example.com","versions":[{"groupVersion":"broken.example.com/v1beta1","version":"v1beta1"}],"preferredVersion":{"groupVersion":"broken.example.com/v1beta1","version":"v1beta1"}}"#;
+            let broken_v2 = r#",{"metadata":{"name":"broken.example.com"},"versions":[{"version":"v1beta1","resources":[],"freshness":"Stale"}]}"#;
+            match (path, aggregated) {
+                ("/apis", true) => (
+                    "200 OK",
+                    format!(
+                        r#"{{"kind":"APIGroupDiscoveryList","apiVersion":"apidiscovery.k8s.io/v2","metadata":{{}},"items":[{{"metadata":{{"name":"apps"}},"versions":[{{"version":"v1","resources":[{{"resource":"deployments","responseKind":{{"group":"apps","version":"v1","kind":"Deployment"}},"scope":"Namespaced","singularResource":"deployment","verbs":["get","list","watch"]}}],"freshness":"Current"}}]}}{}]}}"#,
+                        if include_broken { broken_v2 } else { "" }
+                    ),
+                ),
+                ("/api", true) => (
+                    "200 OK",
+                    r#"{"kind":"APIGroupDiscoveryList","apiVersion":"apidiscovery.k8s.io/v2","metadata":{},"items":[{"metadata":{"name":""},"versions":[{"version":"v1","resources":[{"resource":"pods","responseKind":{"group":"","version":"v1","kind":"Pod"},"scope":"Namespaced","singularResource":"pod","verbs":["get","list","watch"]}],"freshness":"Current"}]}]}"#.into(),
+                ),
+                ("/apis", false) => (
+                    "200 OK",
+                    format!(
+                        r#"{{"kind":"APIGroupList","apiVersion":"v1","groups":[{{"name":"apps","versions":[{{"groupVersion":"apps/v1","version":"v1"}}],"preferredVersion":{{"groupVersion":"apps/v1","version":"v1"}}}}{}]}}"#,
+                        if include_broken { broken_legacy } else { "" }
+                    ),
+                ),
+                ("/api", false) => (
+                    "200 OK",
+                    r#"{"kind":"APIVersions","versions":["v1"],"serverAddressByClientCIDRs":[]}"#.into(),
+                ),
+                ("/apis/apps/v1", _) => (
+                    "200 OK",
+                    r#"{"kind":"APIResourceList","apiVersion":"v1","groupVersion":"apps/v1","resources":[{"name":"deployments","singularName":"deployment","namespaced":true,"kind":"Deployment","verbs":["get","list","watch"]}]}"#.into(),
+                ),
+                ("/api/v1", _) => (
+                    "200 OK",
+                    r#"{"kind":"APIResourceList","apiVersion":"v1","groupVersion":"v1","resources":[{"name":"pods","singularName":"pod","namespaced":true,"kind":"Pod","verbs":["get","list","watch"]}]}"#.into(),
+                ),
+                ("/apis/broken.example.com/v1beta1", _) => (
+                    "503 Service Unavailable",
+                    r#"{"kind":"Status","apiVersion":"v1","status":"Failure","message":"service unavailable","reason":"ServiceUnavailable","code":503}"#.into(),
+                ),
+                _ => ("404 Not Found", r#"{"kind":"Status","apiVersion":"v1","status":"Failure","reason":"NotFound","code":404}"#.into()),
+            }
+        }
+
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut sock, _)) = listener.accept().await else {
+                    break;
+                };
+                tokio::spawn(async move {
+                    let (r, mut w) = sock.split();
+                    let mut reader = BufReader::new(r);
+                    // Serve sequential keep-alive requests on the connection.
+                    loop {
+                        let mut request_line = String::new();
+                        if reader.read_line(&mut request_line).await.unwrap_or(0) == 0 {
+                            return;
+                        }
+                        let path = request_line
+                            .split_whitespace()
+                            .nth(1)
+                            .unwrap_or("")
+                            .to_string();
+                        let mut wants_aggregated = false;
+                        loop {
+                            let mut header = String::new();
+                            if reader.read_line(&mut header).await.unwrap_or(0) == 0 {
+                                return;
+                            }
+                            if header == "\r\n" {
+                                break;
+                            }
+                            let header = header.to_ascii_lowercase();
+                            if header.starts_with("accept:")
+                                && header.contains("apidiscovery.k8s.io")
+                            {
+                                wants_aggregated = true;
+                            }
+                        }
+                        let (status, body) = route(
+                            &path,
+                            wants_aggregated && supports_aggregated,
+                            include_broken,
+                        );
+                        let response = format!(
+                            "HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{body}",
+                            body.len()
+                        );
+                        if w.write_all(response.as_bytes()).await.is_err() {
+                            return;
+                        }
+                    }
+                });
+            }
+        });
+        format!("http://{addr}")
+    }
+
+    async fn connect_mock(url: String) -> Result<Cluster> {
+        let mut config = Config::new(url.parse().expect("mock url"));
+        // The client's default retry policy (15 attempts, exponential
+        // backoff) turns the mock's deliberate 503 into a ~4-minute stall;
+        // retrying is not what these tests exercise.
+        config.default_retry = false;
+        Cluster::from_config(config, "test".into(), None).await
+    }
+
+    #[tokio::test]
+    async fn discovery_tolerates_broken_apiservice() {
+        // A dead aggregated API backend (e.g. metrics-server) must not make
+        // the whole cluster unconnectable: aggregated discovery serves the
+        // broken group as stale instead of 503ing.
+        let url = mock_apiserver(true, true).await;
+        let cluster = connect_mock(url)
+            .await
+            .expect("connect with broken APIService");
+        assert!(cluster.resolve("deployments").is_some());
+        assert!(cluster.resolve("pods").is_some());
+    }
+
+    #[tokio::test]
+    async fn discovery_falls_back_without_aggregated_support() {
+        // Pre-1.26 servers answer the aggregated request with the legacy
+        // document, which deserializes as an *empty* group list (not an
+        // error) — discovery must detect that and take the per-group walk.
+        let url = mock_apiserver(false, false).await;
+        let cluster = connect_mock(url)
+            .await
+            .expect("connect via legacy discovery walk");
+        assert!(cluster.resolve("deployments").is_some());
+        assert!(cluster.resolve("pods").is_some());
+    }
+
+    #[tokio::test]
+    async fn legacy_walk_still_fails_on_broken_apiservice() {
+        // Documents the failure mode the aggregated path exists to avoid:
+        // the per-group walk hits the broken group's 503 and discovery fails
+        // (after ~4 minutes of client-side 503 retries with the default
+        // config). If kube-rs ever makes run() tolerant, this starts failing
+        // and the aggregated workaround can be simplified.
+        let url = mock_apiserver(false, true).await;
+        assert!(connect_mock(url).await.is_err());
     }
 }
