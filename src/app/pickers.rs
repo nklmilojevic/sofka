@@ -277,6 +277,8 @@ impl App {
         self.log_provider = log_provider;
         // Printer-column fallbacks came from the old cluster's CRDs.
         self.crd_views.clear();
+        // The timeline recorded the old cluster's objects.
+        self.timeline.clear();
         self.skin_colors = resolved.config.skin.colors;
         self.readonly = self.readonly_override.unwrap_or(resolved.config.readonly);
         cluster.add_aliases(&self.user_aliases);

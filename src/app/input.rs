@@ -44,6 +44,7 @@ impl App {
             Mode::Pulse => self.key_pulse(key),
             Mode::Xray => self.key_xray(key),
             Mode::Explain => self.key_explain(key),
+            Mode::Timeline => self.key_timeline(key),
             Mode::FluxMenu => self.key_flux_menu(key),
             Mode::PortForwards => self.key_port_forwards(key),
             Mode::Skins => self.key_skins(key),
@@ -118,6 +119,8 @@ impl App {
             KeyCode::Char('J') => self.jump_owner(),
             // `X` — explain why the selection is unhealthy (evidence-backed).
             KeyCode::Char('X') => self.open_explain(),
+            // `T` — session-local state-change timeline for the selection.
+            KeyCode::Char('T') => self.open_timeline(),
             KeyCode::Char('C') => self.request_cordon(true),
             KeyCode::Char('U') => self.request_cordon(false),
             KeyCode::Char('D') => self.request_drain(),
@@ -290,6 +293,7 @@ impl App {
             PaletteAction::Pulse => self.open_pulse(),
             PaletteAction::Xray => self.open_xray(),
             PaletteAction::Explain => self.open_explain(),
+            PaletteAction::Timeline => self.open_timeline(),
             PaletteAction::Diff => self.open_diff(),
             PaletteAction::Events => self.open_events(),
             PaletteAction::PortForwards => self.open_port_forwards(),

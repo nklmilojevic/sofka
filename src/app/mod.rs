@@ -100,6 +100,8 @@ pub enum Mode {
     Xray,
     /// Deterministic "why is this unhealthy?" explanation for the selection.
     Explain,
+    /// Session-local state-change history for the selection.
+    Timeline,
     Diff,
     Events,
     FluxMenu,
@@ -288,6 +290,7 @@ enum PaletteAction {
     Pulse,
     Xray,
     Explain,
+    Timeline,
     Diff,
     Events,
     PortForwards,
@@ -318,6 +321,10 @@ const PALETTE_COMMANDS: &[PaletteCommand] = &[
     PaletteCommand {
         action: PaletteAction::Explain,
         names: &["explain", "why", "diagnose"],
+    },
+    PaletteCommand {
+        action: PaletteAction::Timeline,
+        names: &["timeline", "tl", "history"],
     },
     PaletteCommand {
         action: PaletteAction::Diff,
@@ -659,6 +666,11 @@ pub struct App {
     pub explain_title: String,
     /// The object the explain view is investigating, kept so `r` can re-gather.
     pub explain_source: Option<DynamicObject>,
+    /// Session-local per-object state-change history, fed by the table watch.
+    pub timeline: crate::timeline::Timeline,
+    /// The `(plural, row_key)` the timeline view is showing, and its cursor.
+    pub timeline_target: Option<(String, String)>,
+    pub timeline_state: ListState,
 
     pub confirm_label: String,
     confirm_action: Option<ConfirmAction>,
@@ -786,6 +798,9 @@ impl App {
             explain_state: ListState::default(),
             explain_title: String::new(),
             explain_source: None,
+            timeline: crate::timeline::Timeline::default(),
+            timeline_target: None,
+            timeline_state: ListState::default(),
             confirm_label: String::new(),
             confirm_action: None,
             prompt_label: String::new(),
@@ -844,6 +859,7 @@ mod navigation;
 mod overlays;
 mod pickers;
 mod rows;
+mod timeline;
 
 use helpers::*;
 
