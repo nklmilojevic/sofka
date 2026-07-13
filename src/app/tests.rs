@@ -1537,6 +1537,38 @@ async fn shellouts_pin_to_active_context() {
 }
 
 #[tokio::test]
+async fn snapshot_rejects_unknown_format() {
+    let (mut app, _rx) = app_with_pod();
+    app.take_snapshot("xml");
+    assert!(
+        app.flash.contains("unknown snapshot format"),
+        "{}",
+        app.flash
+    );
+    assert!(app.flash_err);
+}
+
+#[tokio::test]
+async fn snapshot_captures_current_columns_and_rows() {
+    let (mut app, _rx) = test_app();
+    app.switch_kind("pods");
+    for n in ["api-1", "api-2"] {
+        apply(
+            &mut app,
+            json!({"apiVersion": "v1", "kind": "Pod",
+                   "metadata": {"name": n, "namespace": "default"}}),
+        );
+    }
+    app.table_state.select(Some(0));
+    let (columns, rows) = app.snapshot_table();
+    assert!(columns.iter().any(|c| c == "NAME"));
+    assert_eq!(rows.len(), 2);
+    // Every captured row carries a cell per column.
+    assert!(rows.iter().all(|r| r.len() == columns.len()));
+    assert!(rows.iter().any(|r| r.contains(&"api-1".to_string())));
+}
+
+#[tokio::test]
 async fn bundle_save_without_a_pending_bundle_warns() {
     let (mut app, _rx) = app_with_pod();
     app.save_bundle();

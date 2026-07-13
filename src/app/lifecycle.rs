@@ -712,6 +712,15 @@ impl App {
                     Err(e) => self.flash_warn(&format!("bundle save failed: {e}")),
                 }
             }
+            Msg::SnapshotSaved { generation, result } if generation == self.generation => {
+                match result {
+                    Ok(path) => {
+                        self.flash = format!("saved snapshot → {}", path.display());
+                        self.flash_err = false;
+                    }
+                    Err(e) => self.flash_warn(&format!("snapshot save failed: {e}")),
+                }
+            }
             Msg::Detail {
                 generation,
                 title,

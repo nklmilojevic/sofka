@@ -111,6 +111,8 @@ pub enum Mode {
     FluxMenu,
     PortForwards,
     Skins,
+    /// Browsing saved snapshots (`:snapshots`).
+    Snapshots,
 }
 
 /// A request for the run loop to suspend the TUI and run an interactive
@@ -368,6 +370,8 @@ enum PaletteAction {
     DebugClean,
     Bundle,
     BundleSave,
+    Snapshot,
+    Snapshots,
     Diff,
     Events,
     PortForwards,
@@ -430,6 +434,14 @@ const PALETTE_COMMANDS: &[PaletteCommand] = &[
     PaletteCommand {
         action: PaletteAction::BundleSave,
         names: &["bundle-save", "bundle-write"],
+    },
+    PaletteCommand {
+        action: PaletteAction::Snapshot,
+        names: &["snapshot", "snap", "dump"],
+    },
+    PaletteCommand {
+        action: PaletteAction::Snapshots,
+        names: &["snapshots", "dumps"],
     },
     PaletteCommand {
         action: PaletteAction::Diff,
@@ -810,6 +822,10 @@ pub struct App {
 
     pub skin_list: Vec<String>,
     pub skin_state: ListState,
+    /// Saved snapshots for the `:snapshots` browser: `(path, display label)`,
+    /// newest first. Rebuilt each time the browser opens.
+    pub snapshot_list: Vec<(std::path::PathBuf, String)>,
+    pub snapshot_state: ListState,
     /// Per-swatch color overrides from config, re-applied when switching skins.
     pub skin_colors: HashMap<String, String>,
     /// Config loader kept for the session so `:ctx` switches can re-resolve
@@ -984,6 +1000,8 @@ impl App {
                 .map(|name| (*name).to_string())
                 .collect(),
             skin_state: ListState::default(),
+            snapshot_list: Vec::new(),
+            snapshot_state: ListState::default(),
             skin_colors: HashMap::new(),
             config: crate::config::ConfigLoader::default(),
             session_skin: None,
@@ -1073,6 +1091,7 @@ mod navigation;
 mod overlays;
 mod pickers;
 mod rows;
+mod snapshot;
 mod timeline;
 mod workspaces;
 
