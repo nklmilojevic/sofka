@@ -1614,6 +1614,23 @@ fn draw_help(frame: &mut Frame, app: &App, area: Rect) {
             lines.push(bind(&key, &format!("{} ({scope})", p.name)));
         }
     }
+    // Saved bookmarks: their chord (if any) and where they jump.
+    if !app.bookmarks.is_empty() {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled("  Bookmarks", theme::title())));
+        for b in &app.bookmarks {
+            let key = b
+                .key
+                .as_deref()
+                .map(|k| {
+                    crate::keys::KeyChord::parse(k)
+                        .map(|c| c.label())
+                        .unwrap_or_else(|_| format!("{k}?"))
+                })
+                .unwrap_or_else(|| ":".to_string());
+            lines.push(bind(&key, &format!("★ {}", b.name)));
+        }
+    }
     // `/` search: keep only matching binding lines (section headers and
     // spacers match like any other text), highlighting the matched runs.
     let needle = app.help_filter.to_lowercase();
@@ -2099,6 +2116,14 @@ fn draw_palette(frame: &mut Frame, app: &mut App, area: Rect) {
             SuggestKind::Context => ListItem::new(Line::from(vec![
                 Span::styled(s.label.clone(), Style::default().fg(theme::mauve())),
                 Span::styled("  ctx", theme::dim()),
+            ])),
+            // Saved bookmarks read as a distinct, high-value jump (a ★ tag).
+            SuggestKind::Bookmark => ListItem::new(Line::from(vec![
+                Span::styled(
+                    format!("★ {}", s.label),
+                    Style::default().fg(theme::yellow()),
+                ),
+                Span::styled("  bookmark", theme::dim()),
             ])),
         })
         .collect();

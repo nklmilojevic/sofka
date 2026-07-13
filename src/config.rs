@@ -53,6 +53,9 @@ pub struct Config {
     pub aliases: HashMap<String, String>,
     /// User-defined shell-out plugins bound to keys.
     pub plugins: Vec<Plugin>,
+    /// Saved navigation commands bound to keys and the palette — see
+    /// [`Bookmark`]. Validated by [`bookmark_warnings`].
+    pub bookmarks: Vec<Bookmark>,
     /// Custom table views keyed by resource — see [`ViewConfig`]. Compiled
     /// and validated by [`crate::views::compile`].
     pub views: HashMap<String, ViewConfig>,
@@ -338,6 +341,74 @@ pub struct Plugin {
     /// Timeout for `popup`/`background` runs (`"30s"`, `"2m"`). Default 30s.
     /// Ignored for `terminal` (interactive) plugins.
     pub timeout: Option<String>,
+}
+
+/// A saved navigation command: jump to a resource (optionally in another
+/// context/namespace) with a filter, sort, and view applied in one keystroke.
+/// Bound to an optional key chord and always available in the command palette.
+///
+/// ```toml
+/// [[bookmarks]]
+/// key = "shift-1"
+/// name = "Prod API failures"
+/// resource = "pods"
+/// context = "prod-eu"          # optional: switch context first
+/// namespace = "checkout"       # optional; "all"/"*" = all namespaces
+/// filter = "status!=Running -l app=api"   # optional: same syntax as `/`
+/// sort = "RESTARTS:desc"       # optional: COLUMN[:asc|:desc]
+/// view = "xray"                # optional: xray | pulse
+/// ```
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct Bookmark {
+    /// Optional key chord (see [`crate::keys::KeyChord`]) to trigger it.
+    pub key: Option<String>,
+    /// Display name, shown in the palette and help, and used by `:` selection.
+    pub name: String,
+    /// Resource to open (alias/plural/kind).
+    pub resource: String,
+    /// Namespace to scope to, or `all`/`*` for all namespaces. Absent keeps
+    /// the current namespace.
+    pub namespace: Option<String>,
+    /// Kubeconfig context to switch to first. Absent stays on the current one.
+    pub context: Option<String>,
+    /// Row filter to apply, same syntax as the interactive `/` filter.
+    pub filter: Option<String>,
+    /// Initial sort: a column header, optionally suffixed `:asc`/`:desc`.
+    pub sort: Option<String>,
+    /// A view to open after landing: `xray` or `pulse`.
+    pub view: Option<String>,
+}
+
+/// Validation warnings for bookmarks: an unparseable key chord, a missing
+/// name/resource, or an unknown `view`. A broken bookmark is skipped, not fatal.
+pub fn bookmark_warnings(bookmarks: &[Bookmark]) -> Vec<String> {
+    let mut warns = Vec::new();
+    for b in bookmarks {
+        let label = if b.name.is_empty() {
+            "<unnamed>"
+        } else {
+            &b.name
+        };
+        if b.name.trim().is_empty() {
+            warns.push("bookmark: missing `name`".into());
+        }
+        if b.resource.trim().is_empty() {
+            warns.push(format!("bookmark {label:?}: missing `resource`"));
+        }
+        if let Some(k) = &b.key
+            && let Err(e) = crate::keys::KeyChord::parse(k)
+        {
+            warns.push(format!("bookmark {label:?}: invalid key — {e}"));
+        }
+        if let Some(v) = &b.view
+            && !matches!(v.as_str(), "xray" | "pulse")
+        {
+            warns.push(format!(
+                "bookmark {label:?}: unknown view {v:?} (expected xray/pulse) — ignored"
+            ));
+        }
+    }
+    warns
 }
 
 /// Validation warnings for plugins: an unparseable key chord (see
@@ -658,6 +729,48 @@ mod tests {
         assert_eq!(p.mutating, None);
         assert!(!p.confirm && !p.dangerous && !p.shell);
         assert!(p.output.is_none());
+    }
+
+    #[test]
+    fn parses_bookmarks_and_flags_problems() {
+        let cfg: Config = toml::from_str(
+            r#"
+            [[bookmarks]]
+            key = "shift-1"
+            name = "Prod API failures"
+            resource = "pods"
+            context = "prod-eu"
+            namespace = "checkout"
+            filter = "status!=Running -l app=api"
+            sort = "RESTARTS:desc"
+            view = "xray"
+        "#,
+        )
+        .unwrap();
+        let b = &cfg.bookmarks[0];
+        assert_eq!(b.name, "Prod API failures");
+        assert_eq!(b.resource, "pods");
+        assert_eq!(b.context.as_deref(), Some("prod-eu"));
+        assert_eq!(b.namespace.as_deref(), Some("checkout"));
+        assert_eq!(b.sort.as_deref(), Some("RESTARTS:desc"));
+        assert_eq!(b.view.as_deref(), Some("xray"));
+        assert!(bookmark_warnings(&cfg.bookmarks).is_empty());
+
+        let bad: Config = toml::from_str(
+            r#"
+            [[bookmarks]]
+            name = ""
+            resource = ""
+            key = "hyper-x"
+            view = "sidebar"
+        "#,
+        )
+        .unwrap();
+        let w = bookmark_warnings(&bad.bookmarks);
+        assert!(w.iter().any(|s| s.contains("missing `name`")), "{w:?}");
+        assert!(w.iter().any(|s| s.contains("missing `resource`")), "{w:?}");
+        assert!(w.iter().any(|s| s.contains("invalid key")), "{w:?}");
+        assert!(w.iter().any(|s| s.contains("unknown view")), "{w:?}");
     }
 
     #[test]

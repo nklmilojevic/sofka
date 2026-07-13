@@ -152,7 +152,11 @@ async fn main() -> Result<()> {
     app.all_contexts = Cluster::list_contexts();
     app.user_aliases = cfg.aliases.clone();
     app.plugins = cfg.plugins.clone();
-    for w in config::plugin_warnings(&app.plugins) {
+    app.bookmarks = cfg.bookmarks.clone();
+    for w in config::plugin_warnings(&app.plugins)
+        .into_iter()
+        .chain(config::bookmark_warnings(&app.bookmarks))
+    {
         eprintln!("warning: {w}");
         config_warnings.push(w);
     }

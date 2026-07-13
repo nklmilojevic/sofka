@@ -267,7 +267,9 @@ impl App {
         let resolved = self.config.resolve(&name, &cluster.cluster_name);
         self.user_aliases = resolved.config.aliases;
         self.plugins = resolved.config.plugins;
-        let plugin_warnings = crate::config::plugin_warnings(&self.plugins);
+        self.bookmarks = resolved.config.bookmarks;
+        let mut plugin_warnings = crate::config::plugin_warnings(&self.plugins);
+        plugin_warnings.extend(crate::config::bookmark_warnings(&self.bookmarks));
         let (views, view_warnings) = crate::views::compile(&resolved.config.views);
         self.user_views = views;
         let (thresholds, threshold_warnings) =
@@ -323,10 +325,16 @@ impl App {
         self.config_warnings = resolved.warnings;
         self.config_warnings.extend(plugin_warnings);
         self.config_warnings.extend(threshold_warnings);
-        let kind = resolved
-            .config
-            .default_resource
-            .unwrap_or_else(|| "pods".into());
-        self.switch_kind(&kind);
+        // A bookmark that requested this context lands on its own view; a plain
+        // switch lands on the context's default resource.
+        if self.pending_bookmark.is_some() {
+            self.apply_pending_bookmark();
+        } else {
+            let kind = resolved
+                .config
+                .default_resource
+                .unwrap_or_else(|| "pods".into());
+            self.switch_kind(&kind);
+        }
     }
 }

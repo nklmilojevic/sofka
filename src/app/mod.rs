@@ -291,6 +291,8 @@ pub enum SuggestKind {
     Namespace,
     /// Context argument for `:ctx <name>` — Enter switches context.
     Context,
+    /// A saved bookmark — Enter applies its full navigation command.
+    Bookmark,
 }
 
 /// A built-in palette action, plus the names/aliases that select it. The first
@@ -621,6 +623,12 @@ pub struct App {
     pub user_aliases: HashMap<String, String>,
     /// User-defined shell-out plugins.
     pub plugins: Vec<crate::config::Plugin>,
+    /// Saved navigation commands (`[[bookmarks]]`), re-applied on context
+    /// switch and `:reload`.
+    pub bookmarks: Vec<crate::config::Bookmark>,
+    /// A bookmark waiting for an in-flight context switch to land before its
+    /// resource/namespace/filter/sort are applied.
+    pub pending_bookmark: Option<crate::config::Bookmark>,
     /// Resource plurals the user may list (None = unknown/all). "*" = all.
     rbac_allowed: Option<HashSet<String>>,
     last_rbac_ns: Option<String>,
@@ -784,6 +792,8 @@ impl App {
             all_contexts: Vec::new(),
             user_aliases: HashMap::new(),
             plugins: Vec::new(),
+            bookmarks: Vec::new(),
+            pending_bookmark: None,
             rbac_allowed: None,
             last_rbac_ns: None,
             container_list: Vec::new(),
@@ -867,6 +877,7 @@ impl App {
 }
 
 mod actions;
+mod bookmarks;
 mod dashboards;
 mod details;
 mod explain;
