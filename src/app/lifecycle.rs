@@ -518,6 +518,8 @@ impl App {
             }
             Msg::Synced { generation } if generation == self.generation => self.store.synced = true,
             Msg::Error { generation, error } if generation == self.generation => {
+                self.watch_errors = self.watch_errors.saturating_add(1);
+                self.last_error = Some(error.clone());
                 self.flash = format!("error: {error}");
                 self.flash_err = true;
             }
@@ -551,6 +553,9 @@ impl App {
                         headers.get(i).cloned()
                     })
                     .is_some_and(|h| matches!(h.as_str(), "CPU" | "MEM"));
+                if !data.is_empty() || !containers.is_empty() {
+                    self.metrics_seen = true;
+                }
                 self.metrics = data;
                 self.container_metrics = containers;
                 if sort_uses_metrics {

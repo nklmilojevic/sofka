@@ -1530,8 +1530,8 @@ fn draw_help(frame: &mut Frame, app: &App, area: Rect) {
         bind(":pf", "view/stop background port-forwards"),
         bind(":skin", "switch color skin live"),
         bind(
-            ":reload · :config",
-            "reload config from disk · config sources + warnings",
+            ":reload · :config · :info",
+            "reload config · config sources + warnings · runtime diagnostics",
         ),
         bind(
             ":can-i",
