@@ -66,17 +66,41 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         frame.buffer_mut().set_style(area, Style::default().bg(bg));
     }
 
+    // Compact mode (ctrl-e) trades the 7-line header + footer for a single
+    // header line, so a small tiled pane is almost all table. The prompt line
+    // still appears while typing a command/filter; the status line and hint
+    // crumbs are folded away (a flash + sync dot ride in the compact header).
+    let compact = app.compact;
+    let needs_prompt = matches!(
+        app.mode,
+        Mode::Command | Mode::Filter | Mode::LogFilter | Mode::DocFilter
+    );
+    let mut constraints = vec![
+        Constraint::Length(if compact { 1 } else { 7 }), // header
+        Constraint::Min(3),                              // body
+    ];
+    let prompt_idx = if !compact || needs_prompt {
+        constraints.push(Constraint::Length(1));
+        Some(constraints.len() - 1)
+    } else {
+        None
+    };
+    let status_idx = if !compact {
+        constraints.push(Constraint::Length(1));
+        Some(constraints.len() - 1)
+    } else {
+        None
+    };
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(7), // header
-            Constraint::Min(3),    // body
-            Constraint::Length(1), // prompt
-            Constraint::Length(1), // status
-        ])
+        .constraints(constraints)
         .split(frame.area());
 
-    draw_header(frame, app, chunks[0]);
+    if compact {
+        draw_compact_header(frame, app, chunks[0]);
+    } else {
+        draw_header(frame, app, chunks[0]);
+    }
 
     match app.mode {
         Mode::Detail => draw_scrollable(frame, &app.detail, chunks[1], theme::sky()),
@@ -117,8 +141,12 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         _ => {}
     }
 
-    draw_prompt(frame, app, chunks[2]);
-    draw_status(frame, app, chunks[3]);
+    if let Some(i) = prompt_idx {
+        draw_prompt(frame, app, chunks[i]);
+    }
+    if let Some(i) = status_idx {
+        draw_status(frame, app, chunks[i]);
+    }
 }
 
 /// Width reserved for the per-kind key-hint column inside the header box:
@@ -226,6 +254,70 @@ fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
         Line::from(Span::styled(format!("   sofka v{VERSION}"), theme::dim())),
     ];
     frame.render_widget(Paragraph::new(logo).alignment(Alignment::Right), cols[1]);
+}
+
+/// The single-line header for compact mode (`ctrl-e`): kind · count ·
+/// namespace · context on the left; a transient flash and the live/sync dot on
+/// the right. Everything the full header shows that still matters when you've
+/// traded it for screen space.
+fn draw_compact_header(frame: &mut Frame, app: &App, area: Rect) {
+    let ns = if app.all_namespaces() {
+        "<all>".to_string()
+    } else if app.namespace.is_empty() {
+        "<none>".to_string()
+    } else {
+        app.namespace.clone()
+    };
+    let mut kind = app.resource_title();
+    if let Some(scope) = &app.scope_label {
+        kind = format!("{kind} ‹ {scope}");
+    }
+
+    let mut spans = vec![
+        Span::styled(" sofka ", theme::title()),
+        Span::styled(kind, Style::default().fg(theme::peach())),
+        Span::styled(format!(" [{}]", app.store.len()), theme::dim()),
+        Span::styled("  ns:", theme::dim()),
+        Span::styled(ns, Style::default().fg(theme::green())),
+        Span::styled("  ", theme::dim()),
+        Span::styled(
+            app.cluster.context.clone(),
+            Style::default().fg(theme::mauve()),
+        ),
+    ];
+    if app.readonly {
+        spans.push(Span::styled(" [ro]", Style::default().fg(theme::red())));
+    }
+    // A flash is transient but can carry errors — surface it inline since the
+    // status line is hidden in compact mode.
+    if !app.flash.is_empty() {
+        let style = if app.flash_err {
+            Style::default().fg(theme::red())
+        } else {
+            Style::default().fg(theme::subtext0())
+        };
+        spans.push(Span::styled("  — ", theme::dim()));
+        spans.push(Span::styled(app.flash.clone(), style));
+    }
+
+    let (synced, sync_color) = if app.store.synced {
+        ("● live", theme::green())
+    } else {
+        ("○ syncing", theme::yellow())
+    };
+    let cols = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Min(10), Constraint::Length(10)])
+        .split(area);
+    frame.render_widget(Paragraph::new(Line::from(spans)), cols[0]);
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            synced,
+            Style::default().fg(sync_color),
+        )))
+        .alignment(Alignment::Right),
+        cols[1],
+    );
 }
 
 /// Whether the frame is wide enough for the header's key-hint column:
@@ -1560,6 +1652,10 @@ fn draw_help(frame: &mut Frame, app: &App, area: Rect) {
         bind("j/k g/G", "move · top/bottom"),
         bind("S · I", "sort by column (cycle) · invert direction"),
         bind("w", "toggle wide columns (kubectl -o wide)"),
+        bind(
+            "ctrl-e",
+            "compact mode: collapse header + footer (for tiled panes)",
+        ),
         bind(
             "/",
             "filter: fuzzy · !inverse · -l/-f selectors (server-side on ⏎) · col=val cpu>500m age<2h",

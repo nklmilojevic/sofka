@@ -16,6 +16,10 @@ fn press(code: KeyCode) -> KeyEvent {
     KeyEvent::new(code, KeyModifiers::NONE)
 }
 
+fn ctrl(code: KeyCode) -> KeyEvent {
+    KeyEvent::new(code, KeyModifiers::CONTROL)
+}
+
 /// Inject a watched object as the current generation would.
 fn apply(app: &mut App, v: serde_json::Value) {
     let o = obj(v);
@@ -3593,6 +3597,24 @@ async fn wide_toggle_reveals_pod_columns_and_keeps_sort() {
     app.sort_column = Some(4); // IP
     app.handle_key(press(KeyCode::Char('w'))).unwrap();
     assert_eq!(app.sort_column, None);
+}
+
+#[tokio::test]
+async fn ctrl_e_toggles_compact_mode_from_any_mode() {
+    let (mut app, _rx) = test_app();
+    app.switch_kind("pods");
+    assert!(!app.compact);
+
+    // Toggles on from the table…
+    app.handle_key(ctrl(KeyCode::Char('e'))).unwrap();
+    assert!(app.compact);
+    assert_eq!(app.mode, Mode::Table, "compact toggle doesn't change mode");
+
+    // …and off again from a doc view (it's global, not table-only).
+    app.mode = Mode::Detail;
+    app.handle_key(ctrl(KeyCode::Char('e'))).unwrap();
+    assert!(!app.compact);
+    assert_eq!(app.mode, Mode::Detail);
 }
 
 #[tokio::test]

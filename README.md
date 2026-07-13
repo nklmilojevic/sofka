@@ -239,6 +239,9 @@ Not a marketing number - these are specific, checkable design choices:
   cluster and reaches it through the API-server proxy; or point
   `[providers.logs]` at an external URL. Covers restarted and deleted pods —
   the backend remembers what the kubelet no longer has.
+- **Compact mode** (`ctrl-e`) - collapse the seven-line header and the footer
+  into a single info line (kind · count · namespace · context, plus a flash and
+  the live indicator), so a tiled or multiplexed pane is almost all table.
 - **Skinnable** - built-in Catppuccin, Gruvbox, Solarized, Nord, Dracula,
   Tokyo Night, One Dark, Rosé Pine, and Monokai palettes, auto-detected
   dark/light default, plus per-swatch overrides in config.
@@ -716,6 +719,7 @@ header) and switching away restores write mode.
 | `esc`                                         | go back / pop the view stack / clear filter / clear marks                                                                             |
 | `j`/`k`, `↓`/`↑`, `g`/`G`                     | navigate                                                                                                                              |
 | `S` / `I`                                     | cycle sort column / invert sort direction                                                                                             |
+| `ctrl-e`                                      | compact mode: collapse the header + footer (for tiled/multiplexed panes)                                                              |
 | `space`                                       | mark/unmark row for bulk actions                                                                                                      |
 | `/`                                           | filter: fuzzy text · `!inverse` · `-l`/`-f` selectors (server-side on ⏎) · `status=X` `cpu>500m` `age<2h`                             |
 | `n` / `0`                                     | namespace switcher / all namespaces                                                                                                   |

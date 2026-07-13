@@ -11,6 +11,13 @@ impl App {
                     self.should_quit = true;
                     return Ok(());
                 }
+                // Compact mode: collapse the header to one line and hide the
+                // footer (k9s ctrl-e/ctrl-g, folded into one toggle). Works in
+                // every mode, so it never reaches the plain-key bindings.
+                KeyCode::Char('e') => {
+                    self.compact = !self.compact;
+                    return Ok(());
+                }
                 KeyCode::Char('d') if self.mode == Mode::Table => {
                     self.request_delete(false);
                     return Ok(());
