@@ -64,7 +64,19 @@ per resource kind.
   rows, errors, pending, completed all read as one color), _plus_ a
   distinct STATUS badge and outlier coloring on RESTARTS/CPU/MEM so a
   crash-looping or resource-hungry pod still pops out of an otherwise
-  uniform row.
+  uniform row. The RESTARTS/CPU/MEM (and container request/limit) warning
+  and critical thresholds are **configurable** per resource and per context.
+- **It explains _why_ something is broken.** `X` opens a deterministic,
+  evidence-backed incident view for the selection: rollout state, degraded
+  conditions, the blocking pods and their container failure reasons
+  (ImagePullBackOff, CrashLoopBackOff, OOMKilled, unschedulable, failing
+  probes), and recent Warning events — no AI, no external service. `⏎`/`E`/`l`
+  jump straight from a finding to the offending pod, its events, or its logs.
+- **A session-local timeline.** `T` shows the state changes sofka has
+  observed for an object while watching — generation bumps, replica/readiness
+  shifts, pod phase/restart/waiting-reason changes, condition transitions —
+  as a causal, timestamped log, derived from the watch stream with nothing
+  stored on disk.
 
 ## Why it's faster
 
@@ -113,11 +125,24 @@ Not a marketing number - these are specific, checkable design choices:
   memory, each container's usage as a percentage of its request and limit
   (`-` marks an unset request/limit), and the pod's QoS class; all of it
   degrades gracefully when metrics-server is absent.
+- **Configurable thresholds** (`[thresholds]`) — the warning/critical cutoffs
+  for RESTARTS, CPU, memory, and container request/limit utilization coloring,
+  with global defaults plus per-resource and per-context overrides.
+- **Explain-unhealthy view** (`X` / `:explain`) — a deterministic,
+  evidence-backed explanation of why the selected object is unhealthy
+  (rollout state, degraded conditions, blocking pods and their container
+  failure reasons, recent Warning events), with `⏎`/`E`/`l` to jump to the
+  resource, its events, or its logs.
+- **Session-local timeline** (`T` / `:timeline`) — a per-object, timestamped
+  log of the state changes sofka has observed while watching (generation
+  bumps, readiness shifts, phase/restart/condition changes), bounded and
+  kept only in memory.
 - **Drill-down navigation** with a breadcrumb stack: workload/service →
   pods, node → its pods, pod → containers, namespace → re-scope, CRD → its
   custom resources. `esc` pops back.
 - **Command palette** (`:`) - fuzzy over the full resource catalog _and_
-  built-in commands (`ctx`, `pulse`, `xray`, `diff`, `events`, `pf`) together, plus
+  built-in commands (`ctx`, `pulse`, `xray`, `explain`, `timeline`, `diff`,
+  `events`, `pf`) together, plus
   row **filtering** (`/`) with matched-character highlighting: fuzzy text,
   `!text` inverse match, `-l`/`-f` label & field selectors (evaluated by the
   API server on ⏎), and typed column comparisons (`status=CrashLoopBackOff`,
@@ -154,7 +179,8 @@ Not a marketing number - these are specific, checkable design choices:
   Tokyo Night, One Dark, Rosé Pine, and Monokai palettes, auto-detected
   dark/light default, plus per-swatch overrides in config.
 - **Config file** (TOML): aliases, default namespace/resource, plugins,
-  views, log provider, skin.
+  views, thresholds, log provider, skin — with per-cluster/per-context
+  overrides and live `:reload`.
 
 ## Installation
 
@@ -267,6 +293,30 @@ take the TUI down.
 Custom resources without an explicit view automatically use their CRD's
 `additionalPrinterColumns` (columns with `priority > 0` become wide-only),
 so most CRs get useful columns with zero configuration.
+
+### Thresholds
+
+The warning/critical cutoffs behind RESTARTS/CPU/MEM cell coloring (and the
+container picker's request/limit utilization) are configurable. Anything left
+unset keeps sofka's built-in defaults, so an empty config colors exactly as
+before. Global `[thresholds]` apply everywhere; `[thresholds.resources.<key>]`
+overrides them per resource (keyed like `[views]`), and — like every section —
+a per-cluster/per-context override file can retune them for one context.
+Thresholds also re-apply live on `:reload`.
+
+```toml
+[thresholds]
+restarts    = { warn = 3, critical = 10 }      # count
+cpu         = { warn = "200m", critical = "1" } # absolute usage
+memory      = { warn = "256Mi", critical = "1Gi" }
+utilization = { warn = 75, critical = 90 }     # percent of request/limit
+
+[thresholds.resources.pods]                    # per-kind override
+restarts = { warn = 5, critical = 20 }
+```
+
+Either bound of a band may be omitted to disable that level; `warn` is peach,
+`critical` is red.
 
 ### Log provider (VictoriaLogs)
 
@@ -383,6 +433,7 @@ header) and switching away restores write mode.
 | `o`                       | show the node hosting the selected pod                                                                                                |
 | `ctrl-r`                  | refresh the watch                                                                                                                     |
 | `y` / `d` / `E`           | view YAML / describe (`kubectl`) / live events                                                                                        |
+| `X` / `T`                 | explain why the selection is unhealthy / session-local state-change timeline                                                          |
 | `:ctx` / `:ctx <name>`    | context switcher popup / switch directly (the name tab-completes)                                                                     |
 | `:skin`                   | switch the color skin live (`:skin gruvbox-dark` applies directly)                                                                    |
 | `l` / `p`                 | logs (workload = all matching pods) / previous-container logs                                                                         |
@@ -403,6 +454,10 @@ header) and switching away restores write mode.
 timestamps · `x` stop/resume stream · `c` copy buffer · `ctrl-s` save to file
 · `esc` back. The newest line anchors to the bottom of the viewport.
 
+**Explain view** (`X`): `j`/`k` move · `⏎` jump to the resource behind a
+finding (a blocking pod) · `E` its events · `l` its logs · `r` re-gather ·
+`esc` back. Findings that can be jumped into are marked with a trailing `→`.
+
 Interactive actions (`e`, `s`-shell, `a`) suspend the TUI and shell out to
 `kubectl`; delete/scale/restart/set-image/suspend/resume/reconcile/
 port-forward go through the kube API (or a backgrounded process) directly.
@@ -422,6 +477,12 @@ store.rs     In-memory resource store + the Msg enum that watch tasks send to
              the UI (generation-tagged so stale streams are dropped).
 columns.rs   Per-kind column definitions and cell extraction from
              DynamicObjects (the "render" layer), with unit tests.
+thresholds.rs Configurable RESTARTS/CPU/MEM/utilization coloring bands
+             (global + per-resource), compiled from config, with unit tests.
+explain.rs   Deterministic "why is this unhealthy?" analysis — pure, turns
+             an object + its pods + events into ranked findings, unit-tested.
+timeline.rs  Session-local per-object state-change history diffed from the
+             watch stream (pure transition logic, unit-tested).
 ui.rs        All ratatui rendering: header, table, scrollable views, popups,
              status bar.
 theme.rs     Palette + semantic styles, skin resolution.
@@ -471,10 +532,10 @@ platform binaries, publishes crates.io, and warms the Nix cache.
 
 - [x] Container metrics.
 - [x] Request/limit percentages and QoS.
-- [ ] Configurable thresholds.
-- [ ] Explain-unhealthy view.
-- [ ] Direct evidence navigation.
-- [ ] Initial session-local timeline.
+- [x] Configurable thresholds.
+- [x] Explain-unhealthy view.
+- [x] Direct evidence navigation.
+- [x] Initial session-local timeline.
 
 ### Milestone 3: extensibility and repeatable workflows
 
@@ -507,7 +568,8 @@ platform binaries, publishes crates.io, and warms the Nix cache.
 
 - [ ] Opt-in cross-context health dashboard.
 - [ ] Historical metrics provider interface.
-- [ ] Log and trace provider interfaces.
+- [x] Log provider interface (VictoriaLogs: autodiscovery or configured URL).
+- [ ] Trace provider interface.
 - [ ] Extended relationship graph.
 - [ ] Vulnerability scanner integration.
 - [ ] Historical right-sizing recommendations.
