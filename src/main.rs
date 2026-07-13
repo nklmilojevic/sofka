@@ -156,10 +156,12 @@ async fn main() -> Result<()> {
     app.plugins = cfg.plugins.clone();
     app.bookmarks = cfg.bookmarks.clone();
     app.workspaces = cfg.workspaces.clone();
+    app.guardrails = cfg.guardrails.clone();
     for w in config::plugin_warnings(&app.plugins)
         .into_iter()
         .chain(config::bookmark_warnings(&app.bookmarks))
         .chain(config::workspace_warnings(&app.workspaces))
+        .chain(config::guardrail_warnings(&app.guardrails))
     {
         eprintln!("warning: {w}");
         config_warnings.push(w);

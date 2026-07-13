@@ -335,9 +335,11 @@ impl App {
         self.plugins = resolved.config.plugins;
         self.bookmarks = resolved.config.bookmarks;
         self.workspaces = resolved.config.workspaces;
+        self.guardrails = resolved.config.guardrails;
         let mut plugin_warnings = crate::config::plugin_warnings(&self.plugins);
         plugin_warnings.extend(crate::config::bookmark_warnings(&self.bookmarks));
         plugin_warnings.extend(crate::config::workspace_warnings(&self.workspaces));
+        plugin_warnings.extend(crate::config::guardrail_warnings(&self.guardrails));
         let (views, view_warnings) = crate::views::compile(&resolved.config.views);
         self.user_views = views;
         let (thresholds, threshold_warnings) =

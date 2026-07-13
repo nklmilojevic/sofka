@@ -59,43 +59,52 @@ impl App {
         }
     }
 
+    /// Execute a confirmed action. Shared by the y/n confirm dialog and the
+    /// guardrail typed-confirmation prompt.
+    pub(super) fn run_confirm_action(&mut self, action: ConfirmAction) {
+        match action {
+            ConfirmAction::Delete {
+                targets,
+                force,
+                cascade,
+                ..
+            } => {
+                self.do_delete(targets, force, cascade);
+                self.marked.clear();
+            }
+            ConfirmAction::Edit { argv } => {
+                self.pending = Some(Suspend::Shell(argv));
+            }
+            ConfirmAction::Exec { ns, name } => {
+                self.exec_into(ns, name, None);
+            }
+            ConfirmAction::Drain { targets } => {
+                self.do_drain_nodes(targets);
+                self.marked.clear();
+            }
+            ConfirmAction::HelmRollback { ns, name, revision } => {
+                self.do_helm_rollback(ns, name, revision);
+            }
+            ConfirmAction::HelmUninstall { targets } => {
+                self.do_helm_uninstall(targets);
+                self.marked.clear();
+            }
+            ConfirmAction::Plugin {
+                jobs,
+                name,
+                mode,
+                timeout,
+            } => {
+                self.launch_plugin(jobs, name, mode, timeout);
+            }
+        }
+    }
+
     pub(super) fn key_confirm(&mut self, key: KeyEvent) {
         match key.code {
             KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
                 if let Some(action) = self.confirm_action.take() {
-                    match action {
-                        ConfirmAction::Delete {
-                            targets,
-                            force,
-                            cascade,
-                            ..
-                        } => {
-                            self.do_delete(targets, force, cascade);
-                            self.marked.clear();
-                        }
-                        ConfirmAction::Edit { argv } => {
-                            self.pending = Some(Suspend::Shell(argv));
-                        }
-                        ConfirmAction::Drain { targets } => {
-                            self.do_drain_nodes(targets);
-                            self.marked.clear();
-                        }
-                        ConfirmAction::HelmRollback { ns, name, revision } => {
-                            self.do_helm_rollback(ns, name, revision);
-                        }
-                        ConfirmAction::HelmUninstall { targets } => {
-                            self.do_helm_uninstall(targets);
-                            self.marked.clear();
-                        }
-                        ConfirmAction::Plugin {
-                            jobs,
-                            name,
-                            mode,
-                            timeout,
-                        } => {
-                            self.launch_plugin(jobs, name, mode, timeout);
-                        }
-                    }
+                    self.run_confirm_action(action);
                 }
                 self.mode = Mode::Table;
             }
@@ -205,6 +214,13 @@ impl App {
                         self.apply_provider_lookback(&input)
                     }
                     Some(PromptKind::ProviderLookback) => {}
+                    Some(PromptKind::GuardConfirm { expected, action }) => {
+                        if input == expected {
+                            self.run_confirm_action(*action);
+                        } else {
+                            self.flash_warn("guardrail: input did not match — cancelled");
+                        }
+                    }
                     None => {}
                 }
             }
