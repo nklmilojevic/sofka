@@ -17,6 +17,7 @@ mod k8s;
 mod keys;
 mod logfilter;
 mod providers;
+mod rightsize;
 mod snapshot;
 mod store;
 mod theme;
@@ -203,6 +204,12 @@ async fn main() -> Result<()> {
         eprintln!("warning: {w}");
     }
     app.log_provider = log_provider;
+    let (metrics_provider, metrics_warnings) =
+        providers::compile_metrics(cfg.providers.metrics.as_ref());
+    for w in &metrics_warnings {
+        eprintln!("warning: {w}");
+    }
+    app.metrics_provider = metrics_provider;
     app.skin_colors = cfg.skin.colors.clone();
     app.config = loader;
     app.session_skin = Some(session_skin);

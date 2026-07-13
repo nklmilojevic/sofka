@@ -3600,6 +3600,51 @@ async fn wide_toggle_reveals_pod_columns_and_keeps_sort() {
 }
 
 #[tokio::test]
+async fn rightsize_rejects_non_workload_kinds() {
+    let (mut app, _rx) = test_app();
+    app.switch_kind("configmaps");
+    apply(
+        &mut app,
+        json!({"apiVersion": "v1", "kind": "ConfigMap",
+               "metadata": {"name": "cm", "namespace": "default"}}),
+    );
+    app.table_state.select(Some(0));
+    app.open_rightsize();
+    assert_ne!(app.mode, Mode::Detail);
+    assert!(app.flash.contains("right-size applies"), "{}", app.flash);
+}
+
+#[tokio::test]
+async fn rightsize_report_renders_verdicts_and_patch() {
+    // The report + patch are pure; exercise them directly with known numbers.
+    use crate::rightsize::{ContainerRec, Quantiles};
+    let recs = vec![ContainerRec {
+        container: "app".into(),
+        cpu: Quantiles {
+            p50: 40.0,
+            p95: 100.0,
+            p99: 130.0,
+        },
+        mem: Quantiles {
+            p50: 100_000_000.0,
+            p95: 130_000_000.0,
+            p99: 140_000_000.0,
+        },
+        cpu_request: Some(500.0),        // way over P95 → over-provisioned
+        mem_request: Some(64_000_000.0), // under P95 → under-provisioned
+        oom: 0.0,
+        throttle: 0.0,
+        suggested_cpu: crate::rightsize::suggest(100.0, 15),
+        suggested_mem: crate::rightsize::suggest(130_000_000.0, 15),
+    }];
+    assert_eq!(recs[0].cpu_verdict(), crate::rightsize::Verdict::Over);
+    assert_eq!(recs[0].mem_verdict(), crate::rightsize::Verdict::Under);
+    let patch = crate::rightsize::patch_preview(&recs).unwrap();
+    assert!(patch.contains("\"name\": \"app\""));
+    assert!(patch.contains("cpu") && patch.contains("memory"));
+}
+
+#[tokio::test]
 async fn fleet_without_configured_contexts_warns() {
     let (mut app, _rx) = test_app();
     app.open_fleet();

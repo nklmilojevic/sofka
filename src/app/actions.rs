@@ -1217,6 +1217,10 @@ impl App {
             crate::providers::compile(resolved.config.providers.logs.as_ref());
         self.log_provider = log_provider;
         warnings.extend(provider_warnings);
+        let (metrics_provider, metrics_warnings) =
+            crate::providers::compile_metrics(resolved.config.providers.metrics.as_ref());
+        self.metrics_provider = metrics_provider;
+        warnings.extend(metrics_warnings);
         self.skin_colors = resolved.config.skin.colors;
         self.readonly = self.readonly_override.unwrap_or(resolved.config.readonly);
         self.cluster.add_aliases(&self.user_aliases);

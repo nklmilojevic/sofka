@@ -371,6 +371,7 @@ enum PaletteAction {
     Snapshots,
     Info,
     Fleet,
+    Rightsize,
     Diff,
     Events,
     PortForwards,
@@ -477,6 +478,10 @@ const PALETTE_COMMANDS: &[PaletteCommand] = &[
     PaletteCommand {
         action: PaletteAction::Fleet,
         names: &["fleet", "clusters", "multi"],
+    },
+    PaletteCommand {
+        action: PaletteAction::Rightsize,
+        names: &["rightsize", "sizing", "vpa"],
     },
     PaletteCommand {
         action: PaletteAction::Quit,
@@ -946,6 +951,9 @@ pub struct App {
     /// Compiled log provider from `[providers.logs]`, re-resolved on context
     /// switch and `:reload` so each cluster can point at its own backend.
     pub log_provider: Option<crate::providers::LogProvider>,
+    /// Prometheus/VictoriaMetrics backend for right-sizing (`:rightsize`),
+    /// resolved to the API-server proxy on first use when autodiscovered.
+    pub metrics_provider: Option<crate::providers::MetricsProvider>,
     /// Compiled custom views from config, re-resolved on context switch.
     pub user_views: HashMap<String, crate::views::View>,
     /// Compiled warning/critical coloring thresholds from config, re-resolved
@@ -1097,6 +1105,7 @@ impl App {
                 cells: HashMap::new(),
             }),
             log_provider: None,
+            metrics_provider: None,
             user_views: HashMap::new(),
             thresholds: crate::thresholds::Compiled::default(),
             crd_views: HashMap::new(),
@@ -1142,6 +1151,7 @@ mod logs;
 mod navigation;
 mod overlays;
 mod pickers;
+mod rightsize;
 mod rows;
 mod snapshot;
 mod timeline;

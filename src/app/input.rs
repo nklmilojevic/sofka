@@ -534,6 +534,7 @@ impl App {
             PaletteAction::Snapshots => self.open_snapshots(),
             PaletteAction::Info => self.open_info(),
             PaletteAction::Fleet => self.open_fleet(),
+            PaletteAction::Rightsize => self.open_rightsize(),
             PaletteAction::Diff => self.open_diff(),
             PaletteAction::Events => self.open_events(),
             PaletteAction::PortForwards => self.open_port_forwards(),
