@@ -945,13 +945,14 @@ platform binaries, publishes crates.io, and warms the Nix cache.
 
 ### Milestone 6: fleet and integrations
 
-- [ ] Opt-in cross-context health dashboard.
-- [ ] Historical metrics provider interface.
+- [x] Opt-in cross-context health dashboard (`:fleet`).
+- [x] Historical metrics provider interface (Prometheus/VictoriaMetrics:
+      autodiscovery or configured URL).
 - [x] Log provider interface (VictoriaLogs: autodiscovery or configured URL).
 - [ ] Trace provider interface.
 - [ ] Extended relationship graph.
 - [ ] Vulnerability scanner integration.
-- [ ] Historical right-sizing recommendations.
+- [x] Historical right-sizing recommendations (`:rightsize`).
 
 ### Milestone 7: distribution polish
 
