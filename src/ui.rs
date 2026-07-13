@@ -1589,7 +1589,11 @@ fn draw_help(frame: &mut Frame, app: &App, area: Rect) {
         bind("a", "attach to pod"),
         bind(
             ":debug",
-            "attach an ephemeral debug container to the pod (kubectl debug; d in the container picker targets one)",
+            "pod: ephemeral debug container (d in picker targets one) · node: privileged debug pod",
+        ),
+        bind(
+            ":debug-clean",
+            "delete the node debugger pods launched this session",
         ),
         bind("i", "set container image"),
         bind(

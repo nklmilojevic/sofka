@@ -86,18 +86,36 @@ pub struct Config {
 /// [`Self::image`]; leaving [`Self::command`] empty launches an interactive
 /// shell (bash if the debug image has it, else sh), mirroring the pod shell.
 ///
+/// On a **node** (`:debug` on a node row) it instead runs
+/// `kubectl debug node/<node>`, which schedules a privileged diagnostic pod
+/// that mounts the host filesystem at `/host` and joins the host namespaces —
+/// so sofka previews exactly that access and requires confirmation first.
+/// Node debuggers sofka launches this session can be removed with
+/// `:debug-clean`.
+///
 /// ```toml
 /// [debug]
-/// image = "nicolaka/netshoot:latest"   # default debug image
+/// image = "nicolaka/netshoot:latest"   # ephemeral (in-pod) debug image
 /// command = ["bash"]                   # entrypoint; omit for a shell
+/// node_image = "nicolaka/netshoot:latest"  # node debug pod image
+/// node_namespace = "default"           # namespace the node debugger lands in
+/// node_profile = "sysadmin"            # kubectl debug --profile (optional)
 /// ```
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct DebugConfig {
-    /// Image the `:debug` prompt is prefilled with.
+    /// Image the `:debug` prompt is prefilled with (ephemeral container).
     pub image: String,
     /// Entrypoint for the ephemeral container. Empty = an interactive shell.
     pub command: Vec<String>,
+    /// Image for a node debug pod (`kubectl debug node/<node>`).
+    pub node_image: String,
+    /// Namespace the node debugger pod is created in (so `:debug-clean` knows
+    /// where to find it).
+    pub node_namespace: String,
+    /// `kubectl debug --profile` for node debuggers (`legacy`, `sysadmin`,
+    /// `netadmin`, …). `None` = kubectl's default (`legacy`).
+    pub node_profile: Option<String>,
 }
 
 impl Default for DebugConfig {
@@ -106,6 +124,9 @@ impl Default for DebugConfig {
         Self {
             image: "busybox:latest".into(),
             command: Vec::new(),
+            node_image: "busybox:latest".into(),
+            node_namespace: "default".into(),
+            node_profile: None,
         }
     }
 }
@@ -522,8 +543,8 @@ pub fn workspace_warnings(workspaces: &[Workspace]) -> Vec<String> {
 
 /// A declarative safety policy: match dangerous actions by context, namespace,
 /// resource, and action, then require extra confirmation, deny them, or cap a
-/// bulk selection. Gates `delete`, `force-delete`, `drain`, `shell`, and
-/// `debug` today. Empty match lists mean "any"; glob `*` supported in patterns.
+/// bulk selection. Gates `delete`, `force-delete`, `drain`, `shell`, `debug`,
+/// and `node-debug` today. Empty match lists mean "any"; glob `*` supported.
 ///
 /// ```toml
 /// [[guardrails]]
@@ -552,7 +573,7 @@ pub struct Guardrail {
     /// Resource plurals/kinds this applies to (globs). Empty = any.
     pub resources: Vec<String>,
     /// Actions this applies to: `delete`, `force-delete`, `drain`, `shell`,
-    /// `debug`. Empty = any.
+    /// `debug`, `node-debug`. Empty = any.
     pub actions: Vec<String>,
     /// Block the action outright.
     pub deny: bool,

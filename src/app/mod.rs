@@ -198,6 +198,16 @@ enum ConfirmAction {
     /// Uninstall one or more Helm releases (`helm uninstall`), `(name, ns)`
     /// per release — bulk when marked, like [`ConfirmAction::Delete`].
     HelmUninstall { targets: Vec<(String, String)> },
+    /// Launch a privileged node debug pod (`kubectl debug node/<node>`) after
+    /// previewing the host access it grants.
+    NodeDebug {
+        node: String,
+        image: String,
+        namespace: String,
+        profile: Option<String>,
+    },
+    /// Delete the node debugger pods sofka launched this session (`:debug-clean`).
+    CleanupDebuggers,
     /// Run a confirmed plugin (`confirm`/`dangerous`) once accepted — one job
     /// (label, argv) per target, so a bulk run confirms once.
     Plugin {
@@ -355,6 +365,7 @@ enum PaletteAction {
     CanI,
     Journal,
     Debug,
+    DebugClean,
     Diff,
     Events,
     PortForwards,
@@ -405,6 +416,10 @@ const PALETTE_COMMANDS: &[PaletteCommand] = &[
     PaletteCommand {
         action: PaletteAction::Debug,
         names: &["debug", "ephemeral", "dbg"],
+    },
+    PaletteCommand {
+        action: PaletteAction::DebugClean,
+        names: &["debug-clean", "debug-cleanup", "dbgclean"],
     },
     PaletteCommand {
         action: PaletteAction::Diff,
@@ -747,6 +762,9 @@ pub struct App {
     /// Ephemeral-debug-container defaults (`[debug]`) for `:debug`, re-applied
     /// on context switch and `:reload`.
     pub debug: crate::config::DebugConfig,
+    /// Node debugger pods launched this session, as `(namespace, node)`, so
+    /// `:debug-clean` can find and delete them. Cleared on context switch.
+    pub launched_node_debuggers: Vec<(String, String)>,
     /// Session-local log of mutating actions taken (`:journal`).
     pub journal: crate::journal::Journal,
     /// A workspace waiting for an in-flight context switch before it opens.
@@ -931,6 +949,7 @@ impl App {
             active_workspace: None,
             guardrails: Vec::new(),
             debug: crate::config::DebugConfig::default(),
+            launched_node_debuggers: Vec::new(),
             journal: crate::journal::Journal::default(),
             rbac_allowed: None,
             last_rbac_ns: None,

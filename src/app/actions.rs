@@ -779,8 +779,14 @@ impl App {
         if self.deny_readonly() {
             return;
         }
+        // On a node, `:debug` launches a privileged node debug pod instead of
+        // an in-pod ephemeral container.
+        if self.kind_plural == "nodes" {
+            self.request_node_debug();
+            return;
+        }
         if self.kind_plural != "pods" {
-            self.flash_warn("debug attaches an ephemeral container to a pod");
+            self.flash_warn("debug: select a pod (ephemeral container) or node (debug pod)");
             return;
         }
         let Some(obj) = self.selected_ref() else {
@@ -847,6 +853,145 @@ impl App {
             argv.extend(self.debug.command.clone());
         }
         self.pending = Some(Suspend::Shell(argv));
+    }
+
+    /// `:debug` on a node — preview and confirm the host access a node debug
+    /// pod grants, then launch it. A node debugger is privileged by design
+    /// (host filesystem at `/host`, host PID/network/IPC), so this always
+    /// confirms, on top of any `node-debug` guardrail.
+    pub(super) fn request_node_debug(&mut self) {
+        let Some(obj) = self.selected_ref() else {
+            return;
+        };
+        let node = obj.metadata.name.clone().unwrap_or_default();
+        let targets = [(node.clone(), String::new())];
+        let Some(level) = self.guard("node-debug", "nodes", &targets, ConfirmLevel::Plain) else {
+            return;
+        };
+        let image = self.debug.node_image.clone();
+        let namespace = self.debug.node_namespace.clone();
+        let profile = self.debug.node_profile.clone();
+        let profile_note = profile
+            .as_deref()
+            .map(|p| format!(", profile {p}"))
+            .unwrap_or_default();
+        let label = format!(
+            "⚠ Node debug pod on {node} (image {image} in {namespace}{profile_note}) — \
+             grants the host filesystem (/host) and host PID/network/IPC namespaces. Launch?"
+        );
+        self.begin_guarded(
+            ConfirmAction::NodeDebug {
+                node: node.clone(),
+                image,
+                namespace,
+                profile,
+            },
+            label,
+            level,
+            node,
+        );
+    }
+
+    /// Launch `kubectl debug node/<node>` and suspend into it, tracking the
+    /// `(namespace, node)` so `:debug-clean` can delete the debugger pod later
+    /// (kubectl leaves it running after the session).
+    pub(super) fn do_node_debug(
+        &mut self,
+        node: String,
+        image: String,
+        namespace: String,
+        profile: Option<String>,
+    ) {
+        self.note_action(format!("node-debug ({image})"), format!("node/{node}"));
+        let entry = (namespace.clone(), node.clone());
+        if !self.launched_node_debuggers.contains(&entry) {
+            self.launched_node_debuggers.push(entry);
+        }
+        let mut argv = self.kubectl_base();
+        argv.extend([
+            "debug".into(),
+            format!("node/{node}"),
+            "-it".into(),
+            "-n".into(),
+            namespace,
+            format!("--image={image}"),
+        ]);
+        if let Some(p) = profile {
+            argv.push(format!("--profile={p}"));
+        }
+        argv.extend(["--".into(), "sh".into(), "-c".into(), SHELL_FALLBACK.into()]);
+        self.pending = Some(Suspend::Shell(argv));
+    }
+
+    /// `:debug-clean` — delete the node debugger pods sofka launched this
+    /// session (after a confirm). No-op with a flash when none were launched.
+    pub(super) fn request_debug_cleanup(&mut self) {
+        if self.deny_readonly() {
+            return;
+        }
+        if self.launched_node_debuggers.is_empty() {
+            self.flash_warn("no node debuggers launched this session");
+            return;
+        }
+        let nodes: Vec<&str> = self
+            .launched_node_debuggers
+            .iter()
+            .map(|(_, node)| node.as_str())
+            .collect();
+        self.confirm_label = format!(
+            "Delete node debugger pod(s) on {} launched this session?",
+            nodes.join(", ")
+        );
+        self.confirm_action = Some(ConfirmAction::CleanupDebuggers);
+        self.mode = Mode::Confirm;
+    }
+
+    /// Delete every `node-debugger-*` pod scheduled on a tracked node, in its
+    /// tracked namespace — the pods `kubectl debug node` creates. Matching on
+    /// the name prefix *and* `spec.nodeName` avoids touching unrelated pods.
+    pub(super) fn do_cleanup_debuggers(&mut self) {
+        let targets = std::mem::take(&mut self.launched_node_debuggers);
+        self.flash = format!("cleaning up {} node debugger(s)…", targets.len());
+        self.flash_err = false;
+        let client = self.cluster.client.clone();
+        let tx = self.tx.clone();
+        let genr = self.generation;
+        tokio::spawn(async move {
+            let mut deleted = 0usize;
+            let mut failed: Vec<String> = Vec::new();
+            for (ns, node) in targets {
+                let pods: Api<Pod> = Api::namespaced(client.clone(), &ns);
+                let listed = pods
+                    .list(&ListParams::default().fields(&format!("spec.nodeName={node}")))
+                    .await;
+                let list = match listed {
+                    Ok(l) => l,
+                    Err(e) => {
+                        failed.push(format!("{ns} (node {node}): list failed: {e}"));
+                        continue;
+                    }
+                };
+                for pod in list.items {
+                    let Some(name) = pod.metadata.name.as_deref() else {
+                        continue;
+                    };
+                    if !name.starts_with("node-debugger-") {
+                        continue;
+                    }
+                    match pods.delete(name, &DeleteParams::default()).await {
+                        Ok(_) => deleted += 1,
+                        Err(e) => failed.push(format!("{ns}/{name}: {e}")),
+                    }
+                }
+            }
+            let _ = tx
+                .send(Msg::DebuggersCleaned {
+                    generation: genr,
+                    deleted,
+                    failed,
+                })
+                .await;
+        });
     }
 
     pub(super) fn request_scale(&mut self) {

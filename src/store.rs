@@ -140,6 +140,13 @@ pub enum Msg {
         generation: u64,
         provider: Box<crate::providers::LogProvider>,
     },
+    /// Result of a `:debug-clean` node-debugger cleanup: how many pods were
+    /// deleted and any per-pod failures (`ns/name: reason`).
+    DebuggersCleaned {
+        generation: u64,
+        deleted: usize,
+        failed: Vec<String>,
+    },
     Error {
         generation: u64,
         error: String,
