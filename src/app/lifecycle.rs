@@ -578,6 +578,23 @@ impl App {
                 self.xray_state
                     .select(Some(keep.min(self.xray_items.len().saturating_sub(1))));
             }
+            Msg::Explain {
+                generation,
+                title,
+                findings,
+            } if generation == self.generation => {
+                self.explain_items = findings;
+                self.explain_title = title;
+                // Land the cursor on the first navigable finding, else the top.
+                let first = self
+                    .explain_items
+                    .iter()
+                    .position(|f| f.target.is_some())
+                    .unwrap_or(0);
+                self.explain_state
+                    .select((!self.explain_items.is_empty()).then_some(first));
+                self.mode = Mode::Explain;
+            }
             Msg::Detail {
                 generation,
                 title,

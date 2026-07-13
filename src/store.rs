@@ -49,6 +49,12 @@ pub enum Msg {
         generation: u64,
         items: Vec<XrayItem>,
     },
+    /// Findings for the explain-unhealthy view, gathered off-thread.
+    Explain {
+        generation: u64,
+        title: String,
+        findings: Vec<crate::explain::Finding>,
+    },
     /// Result of an off-thread `kubectl describe` (or its YAML fallback).
     Detail {
         generation: u64,
