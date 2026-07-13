@@ -113,6 +113,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         Mode::Command => draw_palette(frame, app, chunks[1]),
         Mode::FluxMenu => draw_flux_menu(frame, app, chunks[1]),
         Mode::Skins => draw_skins(frame, app, chunks[1]),
+        Mode::Snapshots => draw_snapshots(frame, app, chunks[1]),
         _ => {}
     }
 
@@ -1599,6 +1600,10 @@ fn draw_help(frame: &mut Frame, app: &App, area: Rect) {
             ":bundle · :bundle-save",
             "assemble a redacted diagnostic bundle for the selection · write it to a file",
         ),
+        bind(
+            ":snapshot [fmt] · :snapshots",
+            "capture the current view (text/json/yaml) · browse saved snapshots",
+        ),
         bind("i", "set container image"),
         bind(
             "r",
@@ -1863,6 +1868,31 @@ fn draw_skins(frame: &mut Frame, app: &mut App, area: Rect) {
         items,
         Span::styled(" Skins (enter apply · esc close) ", theme::title()),
         &mut app.skin_state,
+    );
+}
+
+fn draw_snapshots(frame: &mut Frame, app: &mut App, area: Rect) {
+    let items: Vec<ListItem> = app
+        .snapshot_list
+        .iter()
+        .map(|(_, label)| {
+            ListItem::new(Span::styled(
+                label.clone(),
+                Style::default().fg(theme::text()),
+            ))
+        })
+        .collect();
+    render_popup_list(
+        frame,
+        area,
+        70,
+        70,
+        items,
+        Span::styled(
+            " Snapshots (⏎ open · d delete · esc close) ",
+            theme::title(),
+        ),
+        &mut app.snapshot_state,
     );
 }
 
@@ -2610,6 +2640,10 @@ fn draw_prompt(frame: &mut Frame, app: &App, area: Rect) {
         )),
         Mode::PortForwards => Line::from(Span::styled(
             "  j/k: move   x/s: stop   esc: close (others keep running)",
+            theme::dim(),
+        )),
+        Mode::Snapshots => Line::from(Span::styled(
+            "  j/k: move   ⏎: open   d: delete   esc: close",
             theme::dim(),
         )),
         _ => {

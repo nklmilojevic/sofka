@@ -14,6 +14,7 @@ mod journal;
 mod k8s;
 mod keys;
 mod providers;
+mod snapshot;
 mod store;
 mod theme;
 mod thresholds;

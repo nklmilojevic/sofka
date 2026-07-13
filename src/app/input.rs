@@ -64,6 +64,7 @@ impl App {
             Mode::FluxMenu => self.key_flux_menu(key),
             Mode::PortForwards => self.key_port_forwards(key),
             Mode::Skins => self.key_skins(key),
+            Mode::Snapshots => self.key_snapshots(key),
         }
         Ok(())
     }
@@ -521,6 +522,8 @@ impl App {
             PaletteAction::DebugClean => self.request_debug_cleanup(),
             PaletteAction::Bundle => self.open_bundle(),
             PaletteAction::BundleSave => self.save_bundle(),
+            PaletteAction::Snapshot => self.take_snapshot(""),
+            PaletteAction::Snapshots => self.open_snapshots(),
             PaletteAction::Diff => self.open_diff(),
             PaletteAction::Events => self.open_events(),
             PaletteAction::PortForwards => self.open_port_forwards(),
@@ -549,6 +552,19 @@ impl App {
             } else {
                 self.apply_skin(&rest);
             }
+            return true;
+        }
+        // `:snapshot [format]` captures the current view; the optional arg is
+        // the output format (text/json/yaml).
+        let mut parts = cmd.split_whitespace();
+        if let Some(first) = parts.next()
+            && matches!(
+                first.to_ascii_lowercase().as_str(),
+                "snapshot" | "snap" | "dump"
+            )
+        {
+            let rest = parts.collect::<Vec<_>>().join(" ");
+            self.take_snapshot(&rest);
             return true;
         }
         // `:can-i <verb> <resource> [ns]` checks one action; bare `:can-i`

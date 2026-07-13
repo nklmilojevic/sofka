@@ -160,6 +160,11 @@ pub enum Msg {
         generation: u64,
         result: Result<std::path::PathBuf, String>,
     },
+    /// Result of writing a snapshot to disk (`:snapshot`).
+    SnapshotSaved {
+        generation: u64,
+        result: Result<std::path::PathBuf, String>,
+    },
     Error {
         generation: u64,
         error: String,
