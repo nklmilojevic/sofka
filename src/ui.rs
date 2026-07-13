@@ -709,20 +709,20 @@ fn draw_scrollable(
     accent: ratatui::style::Color,
 ) {
     let inner_h = area.height.saturating_sub(2) as usize;
-    let shown = doc_filtered_lines(view);
-    // The scroll offset is clamped against the unfiltered length by the key
-    // handlers; re-clamp against the (shorter) filtered list.
-    let scroll = view.scroll.min(shown.len().saturating_sub(1));
-    let (start, end) = visible_line_window(shown.len(), scroll, inner_h);
-    let text: Vec<Line> = shown[start..end]
+    let scroll = view.scroll.min(view.lines.len().saturating_sub(1));
+    let (start, end) = visible_line_window(view.lines.len(), scroll, inner_h);
+    let text: Vec<Line> = view
+        .lines
         .iter()
+        .skip(start)
+        .take(end - start)
         .map(|l| highlight_matches(Line::from(highlight_yaml(l)), &view.filter))
         .collect();
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(accent))
-        .title(Span::styled(doc_title(view, shown.len()), theme::title()));
+        .title(Span::styled(doc_title(view), theme::title()));
     let p = Paragraph::new(text).block(block);
     // Wrap folds long lines; otherwise honor the horizontal offset so content
     // past the right edge can be scrolled into view.
@@ -1345,18 +1345,20 @@ fn klog_level(l: &str, level: char) -> bool {
 /// Unified-diff view with +/- line coloring.
 fn draw_diff(frame: &mut Frame, view: &crate::app::Scrollable, area: Rect) {
     let inner_h = area.height.saturating_sub(2) as usize;
-    let shown = doc_filtered_lines(view);
-    let scroll = view.scroll.min(shown.len().saturating_sub(1));
-    let (start, end) = visible_line_window(shown.len(), scroll, inner_h);
-    let lines: Vec<Line> = shown[start..end]
+    let scroll = view.scroll.min(view.lines.len().saturating_sub(1));
+    let (start, end) = visible_line_window(view.lines.len(), scroll, inner_h);
+    let lines: Vec<Line> = view
+        .lines
         .iter()
+        .skip(start)
+        .take(end - start)
         .map(|l| {
             let color = match l.chars().next() {
                 Some('+') => theme::green(),
                 Some('-') => theme::red(),
                 _ => theme::overlay1(),
             };
-            let line = Line::from(Span::styled((*l).clone(), Style::default().fg(color)));
+            let line = Line::from(Span::styled(l.clone(), Style::default().fg(color)));
             highlight_matches(line, &view.filter)
         })
         .collect();
@@ -1364,7 +1366,7 @@ fn draw_diff(frame: &mut Frame, view: &crate::app::Scrollable, area: Rect) {
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(theme::peach()))
-        .title(Span::styled(doc_title(view, shown.len()), theme::title()));
+        .title(Span::styled(doc_title(view), theme::title()));
     let p = Paragraph::new(lines).block(block);
     let p = if view.wrap {
         p.wrap(Wrap { trim: false })
@@ -1380,23 +1382,24 @@ fn visible_line_window(len: usize, scroll: usize, height: usize) -> (usize, usiz
     (start, end)
 }
 
-/// The lines a doc view shows: all of them, or only those matching the active
-/// `/` search (case-insensitive substring, like the logs filter).
-fn doc_filtered_lines(view: &crate::app::Scrollable) -> Vec<&String> {
-    let filter = view.filter.to_lowercase();
-    view.lines
-        .iter()
-        .filter(|l| filter.is_empty() || l.to_lowercase().contains(&filter))
-        .collect()
-}
-
-/// Doc-view title, extended with the active search query and its match count
-/// (` title · /query [n] `), mirroring the logs title.
-fn doc_title(view: &crate::app::Scrollable, shown: usize) -> String {
+/// Doc-view title, extended with the active search query and the current
+/// match position (` title · /query [2/5] `, or `[no matches]`), vim-style.
+fn doc_title(view: &crate::app::Scrollable) -> String {
     if view.filter.is_empty() {
-        format!(" {} ", view.title)
+        return format!(" {} ", view.title);
+    }
+    let matches = view.match_lines();
+    if matches.is_empty() {
+        format!(" {} · /{} [no matches] ", view.title, view.filter)
     } else {
-        format!(" {} · /{} [{}] ", view.title, view.filter, shown)
+        let cur = view.match_idx.min(matches.len() - 1) + 1;
+        format!(
+            " {} · /{} [{}/{}] ",
+            view.title,
+            view.filter,
+            cur,
+            matches.len()
+        )
     }
 }
 
@@ -1558,7 +1561,10 @@ fn draw_help(frame: &mut Frame, app: &App, area: Rect) {
             "VictoriaLogs history (autodiscovered or [providers.logs]) — pods/workloads/ns",
         ),
         bind("c", "copy resource name · in doc views: copy the document"),
-        bind("/", "search within YAML/describe/diff/events/help"),
+        bind(
+            "/ · n/N",
+            "search within YAML/describe/diff/events (highlight in place, n/N to jump); filters help",
+        ),
         bind("x", "secrets: show data base64-decoded"),
         bind(
             "shift-x · :explain",
@@ -2570,7 +2576,7 @@ fn draw_prompt(frame: &mut Frame, app: &App, area: Rect) {
             Line::from(Span::styled(hint, theme::dim()))
         }
         Mode::Detail | Mode::Events | Mode::Diff => {
-            let hint = "  j/k:scroll  h/l:← →  g/G:top/bottom  /:search  w:wrap  c:copy  esc:back";
+            let hint = "  j/k:scroll  h/l:← →  g/G:top/bottom  /:search  n/N:next/prev  w:wrap  c:copy  esc:back";
             Line::from(Span::styled(hint, theme::dim()))
         }
         Mode::Help => Line::from(Span::styled("  /:search  ?/esc:back", theme::dim())),

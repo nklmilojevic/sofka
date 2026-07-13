@@ -633,6 +633,12 @@ header) and switching away restores write mode.
 timestamps · `x` stop/resume stream · `c` copy buffer · `ctrl-s` save to file
 · `esc` back. The newest line anchors to the bottom of the viewport.
 
+**Document views** (YAML, describe, diff, events): `/` searches vim-style —
+the whole document stays on screen with every match highlighted, and `n` / `N`
+jump to the next / previous match. `w` wraps, `c` copies the document, `esc`
+backs out (first press clears an active search). The `?` help panel's `/`
+filters instead, narrowing to matching keybinds.
+
 **Explain view** (`X`): `j`/`k` move · `⏎` jump to the resource behind a
 finding (a blocking pod) · `E` its events · `l` its logs · `r` re-gather ·
 `esc` back. Findings that can be jumped into are marked with a trailing `→`.
