@@ -2286,14 +2286,17 @@ async fn readonly_blocks_mutating_actions() {
     assert!(app.flash.contains("read-only"));
 
     app.plugins = vec![crate::config::Plugin {
-        key: 'g',
+        key: "g".into(),
         name: "argocd-sync".into(),
         command: "argocd".into(),
         args: vec![],
         scopes: vec![],
     }];
     app.flash.clear();
-    app.try_plugin('g');
+    assert!(
+        app.try_plugin_key(press(KeyCode::Char('g'))),
+        "plugin chord matched"
+    );
     assert!(app.pending.is_none(), "plugin must not run");
     assert!(app.flash.contains("read-only"));
 
@@ -2301,6 +2304,47 @@ async fn readonly_blocks_mutating_actions() {
     app.flash.clear();
     app.handle_key(press(KeyCode::Char('d'))).unwrap();
     assert!(!app.flash.contains("read-only"));
+}
+
+#[tokio::test]
+async fn modifier_plugin_chord_does_not_trigger_plain_key_builtin() {
+    let (mut app, _rx) = test_app();
+    app.switch_kind("pods");
+    for n in ["a", "b", "c"] {
+        apply(
+            &mut app,
+            json!({"apiVersion": "v1", "kind": "Pod",
+                   "metadata": {"name": n, "namespace": "default"}}),
+        );
+    }
+    app.plugins = vec![crate::config::Plugin {
+        key: "ctrl-g".into(),
+        name: "gen".into(),
+        command: "true".into(),
+        args: vec![],
+        scopes: vec![],
+    }];
+    app.table_state.select(Some(2));
+
+    // ctrl-g runs the plugin (write mode) — and must NOT fire the built-in `g`
+    // (go to top), which would move the cursor to row 0.
+    let ctrl_g = KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL);
+    app.handle_key(ctrl_g).unwrap();
+    assert_eq!(
+        app.table_state.selected(),
+        Some(2),
+        "ctrl-g must not jump to top"
+    );
+    assert!(
+        matches!(app.pending, Some(Suspend::Shell(_))),
+        "ctrl-g should run the plugin"
+    );
+    app.pending = None;
+
+    // Plain `g` still triggers the built-in go-to-top.
+    app.handle_key(press(KeyCode::Char('g'))).unwrap();
+    assert_eq!(app.table_state.selected(), Some(0), "plain g goes to top");
+    assert!(app.pending.is_none(), "plain g is not the plugin");
 }
 
 #[tokio::test]

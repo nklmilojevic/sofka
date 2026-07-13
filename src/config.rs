@@ -277,9 +277,15 @@ pub struct Skin {
 /// `scopes` (plural names; empty = all). Placeholders `$NAME`, `$NAMESPACE`,
 /// `$NS`, `$CONTEXT`, `$RESOURCE` are substituted in `command`/`args`.
 ///
+/// `key` is a [key chord](crate::keys::KeyChord): a single character (`"g"`),
+/// or a modifier combination (`"ctrl-g"`, `"alt-x"`, `"shift-b"`), or a
+/// function/named key (`"f5"`, `"ctrl-f2"`). A single lowercase char keeps the
+/// original single-key behaviour, so existing configs are unchanged. Built-in
+/// keys win over a plugin bound to the same chord.
+///
 /// ```toml
 /// [[plugins]]
-/// key = "g"
+/// key = "ctrl-g"
 /// name = "argocd-sync"
 /// command = "argocd"
 /// args = ["app", "sync", "$NAME"]
@@ -287,13 +293,28 @@ pub struct Skin {
 /// ```
 #[derive(Debug, Clone, Deserialize)]
 pub struct Plugin {
-    pub key: char,
+    /// Key chord that triggers the plugin (see [`crate::keys::KeyChord`]).
+    pub key: String,
     pub name: String,
     pub command: String,
     #[serde(default)]
     pub args: Vec<String>,
     #[serde(default)]
     pub scopes: Vec<String>,
+}
+
+/// Validation warnings for plugin key chords that don't parse (see
+/// [`crate::keys::KeyChord::parse`]). A bad chord disables just that plugin —
+/// it can never match a keypress — so it's reported, not fatal.
+pub fn plugin_key_warnings(plugins: &[Plugin]) -> Vec<String> {
+    plugins
+        .iter()
+        .filter_map(|p| {
+            crate::keys::KeyChord::parse(&p.key)
+                .err()
+                .map(|e| format!("plugin {:?}: invalid key — {e}", p.name))
+        })
+        .collect()
 }
 
 /// Config resolved for one (cluster, context) pair: the base config with any
@@ -553,7 +574,7 @@ mod tests {
         );
         assert_eq!(cfg.plugins.len(), 1);
         let p = &cfg.plugins[0];
-        assert_eq!(p.key, 'g');
+        assert_eq!(p.key, "g");
         assert_eq!(p.args, vec!["app", "sync", "$NAME"]);
         assert_eq!(p.scopes, vec!["deployments"]);
     }
