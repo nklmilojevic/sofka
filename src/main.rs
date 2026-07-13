@@ -9,6 +9,7 @@ mod config;
 mod diagnostics;
 mod explain;
 mod filter;
+mod fleet;
 mod gitops;
 mod helm;
 mod journal;
@@ -177,6 +178,7 @@ async fn main() -> Result<()> {
     app.debug = cfg.debug.clone();
     app.bundle_cfg = cfg.bundle.clone();
     app.logs_cfg = cfg.logs.clone();
+    app.fleet_cfg = cfg.fleet.clone();
     for w in config::plugin_warnings(&app.plugins)
         .into_iter()
         .chain(config::bookmark_warnings(&app.bookmarks))

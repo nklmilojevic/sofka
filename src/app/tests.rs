@@ -3600,6 +3600,62 @@ async fn wide_toggle_reveals_pod_columns_and_keeps_sort() {
 }
 
 #[tokio::test]
+async fn fleet_without_configured_contexts_warns() {
+    let (mut app, _rx) = test_app();
+    app.open_fleet();
+    assert_ne!(
+        app.mode,
+        Mode::Fleet,
+        "no contexts → dashboard stays closed"
+    );
+    assert!(app.flash.contains("no fleet contexts"), "{}", app.flash);
+}
+
+#[tokio::test]
+async fn fleet_seeds_connecting_rows_and_applies_summaries() {
+    let (mut app, _rx) = test_app();
+    app.fleet_cfg = crate::config::FleetConfig {
+        contexts: vec!["prod".into(), "staging".into()],
+    };
+    app.open_fleet();
+    assert_eq!(app.mode, Mode::Fleet);
+    // One connecting row per configured context, up front.
+    assert_eq!(app.fleet_rows.len(), 2);
+    assert!(
+        app.fleet_rows
+            .iter()
+            .all(|r| r.status == crate::fleet::FleetStatus::Connecting)
+    );
+
+    // A gathered summary lands and replaces the matching row by context name.
+    let mut row = crate::fleet::FleetRow::connecting("staging".into(), false);
+    row.status = crate::fleet::FleetStatus::Ok;
+    row.version = "v1.31.0".into();
+    row.nodes_ready = 3;
+    row.nodes_total = 3;
+    app.handle_msg(Msg::FleetRow {
+        generation: app.generation,
+        row: Box::new(row),
+    });
+    let staging = app
+        .fleet_rows
+        .iter()
+        .find(|r| r.context == "staging")
+        .unwrap();
+    assert_eq!(staging.status, crate::fleet::FleetStatus::Ok);
+    assert_eq!(staging.version, "v1.31.0");
+    // The other context is untouched.
+    assert_eq!(
+        app.fleet_rows
+            .iter()
+            .find(|r| r.context == "prod")
+            .unwrap()
+            .status,
+        crate::fleet::FleetStatus::Connecting
+    );
+}
+
+#[tokio::test]
 async fn ctrl_e_toggles_compact_mode_from_any_mode() {
     let (mut app, _rx) = test_app();
     app.switch_kind("pods");

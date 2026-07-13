@@ -124,6 +124,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         Mode::Gitops => draw_gitops(frame, app, chunks[1]),
         Mode::Timeline => draw_timeline(frame, app, chunks[1]),
         Mode::PortForwards => draw_port_forwards(frame, app, chunks[1]),
+        Mode::Fleet => draw_fleet(frame, app, chunks[1]),
         _ => draw_table(frame, app, chunks[1]),
     }
 
@@ -1628,6 +1629,10 @@ fn draw_help(frame: &mut Frame, app: &App, area: Rect) {
         bind("[ · ]", "view history — back · forward"),
         bind(":ctx · :pulse", "switch context · cluster-health dashboard"),
         bind(
+            ":fleet",
+            "cross-context health dashboard (opt-in [fleet] contexts; ⏎ switches)",
+        ),
+        bind(
             ":xray · :diff",
             "hierarchical tree · live-vs-last-applied diff",
         ),
@@ -2398,6 +2403,93 @@ fn draw_xray(frame: &mut Frame, app: &mut App, area: Rect) {
     );
 }
 
+fn draw_fleet(frame: &mut Frame, app: &mut App, area: Rect) {
+    use crate::fleet::FleetStatus;
+    let items: Vec<ListItem> = app
+        .fleet_rows
+        .iter()
+        .map(|r| {
+            let (glyph, gcolor) = match &r.status {
+                FleetStatus::Connecting => ("◐", theme::overlay1()),
+                FleetStatus::Error(_) => ("●", theme::red()),
+                FleetStatus::Ok if r.is_healthy() => ("●", theme::green()),
+                FleetStatus::Ok => ("●", theme::yellow()),
+            };
+            let mut spans = vec![
+                Span::styled(format!("{glyph} "), Style::default().fg(gcolor)),
+                Span::styled(
+                    format!("{:<26}", truncate_cols(&r.context, 26)),
+                    Style::default().fg(theme::text()),
+                ),
+            ];
+            match &r.status {
+                FleetStatus::Connecting => {
+                    spans.push(Span::styled("connecting…", theme::dim()));
+                }
+                FleetStatus::Error(e) => {
+                    spans.push(Span::styled(
+                        format!("error: {e}"),
+                        Style::default().fg(theme::red()),
+                    ));
+                }
+                FleetStatus::Ok => {
+                    let nodes_color = if r.nodes_ready == r.nodes_total {
+                        theme::green()
+                    } else {
+                        theme::red()
+                    };
+                    let pods_color = if r.pods_unhealthy == 0 {
+                        theme::subtext0()
+                    } else {
+                        theme::red()
+                    };
+                    spans.push(Span::styled(
+                        format!("{:<12}", truncate_cols(&r.version, 12)),
+                        theme::dim(),
+                    ));
+                    spans.push(Span::styled(
+                        format!("nodes {}/{}", r.nodes_ready, r.nodes_total),
+                        Style::default().fg(nodes_color),
+                    ));
+                    spans.push(Span::styled(
+                        format!("   pods {}✗/{}", r.pods_unhealthy, r.pods_total),
+                        Style::default().fg(pods_color),
+                    ));
+                    match r.flux_failed {
+                        Some(0) => spans.push(Span::styled(
+                            "   flux ok".to_string(),
+                            Style::default().fg(theme::green()),
+                        )),
+                        Some(n) => spans.push(Span::styled(
+                            format!("   flux {n}✗"),
+                            Style::default().fg(theme::red()),
+                        )),
+                        None => spans.push(Span::styled("   flux —".to_string(), theme::dim())),
+                    }
+                    let (pol, pc) = if r.readonly {
+                        ("   read-only", theme::yellow())
+                    } else {
+                        ("   write", theme::overlay1())
+                    };
+                    spans.push(Span::styled(pol.to_string(), Style::default().fg(pc)));
+                }
+            }
+            ListItem::new(Line::from(spans))
+        })
+        .collect();
+    let title = format!(
+        " Fleet [{}]  (⏎ switch · r refresh · esc back) ",
+        app.fleet_rows.len()
+    );
+    render_framed_list(
+        frame,
+        area,
+        items,
+        Span::styled(title, theme::title()),
+        &mut app.fleet_state,
+    );
+}
+
 /// Explain-unhealthy view: a ranked, evidence-backed list of findings for the
 /// selected object. Lines carrying a navigation target are marked with a `→`.
 /// Render a list of [`crate::explain::Finding`]s (shared by the explain and
@@ -2759,6 +2851,10 @@ fn draw_prompt(frame: &mut Frame, app: &App, area: Rect) {
         )),
         Mode::Snapshots => Line::from(Span::styled(
             "  j/k: move   ⏎: open   d: delete   esc: close",
+            theme::dim(),
+        )),
+        Mode::Fleet => Line::from(Span::styled(
+            "  j/k: move   ⏎: switch to context   r: refresh   esc: back",
             theme::dim(),
         )),
         _ => {

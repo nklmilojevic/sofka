@@ -239,6 +239,12 @@ Not a marketing number - these are specific, checkable design choices:
   cluster and reaches it through the API-server proxy; or point
   `[providers.logs]` at an external URL. Covers restarted and deleted pods —
   the backend remembers what the kubelet no longer has.
+- **Fleet dashboard** (`:fleet`) - an opt-in cross-context health summary:
+  connectivity, Kubernetes version, node readiness, unhealthy pods, Flux
+  failures, and the read-only policy for each configured context, side by side.
+  Only the contexts listed in `[fleet]` are queried, each gathered concurrently
+  with its own timeout so one slow cluster never blocks the rest; `⏎` switches
+  to a context, `r` refreshes.
 - **Compact mode** (`ctrl-e`) - collapse the seven-line header and the footer
   into a single info line (kind · count · namespace · context, plus a flash and
   the live indicator), so a tiled or multiplexed pane is almost all table.
@@ -608,6 +614,24 @@ leading `!` to invert (keep non-matching lines); a malformed regex is flagged
 rather than hiding everything. `z` clears the on-screen buffer (the live stream
 keeps appending). A pod's logs already stream every container at once.
 
+### Fleet dashboard
+
+`:fleet` summarizes several clusters side by side without switching through
+them. It is **opt-in**: only the kubeconfig contexts you list are ever queried.
+
+```toml
+[fleet]
+contexts = ["prod-eu", "prod-us", "staging"]
+```
+
+Each context is gathered concurrently (bounded, with a per-context timeout), so
+an unreachable or slow cluster shows an error on its own row instead of
+blocking the others. Rows show connectivity, Kubernetes version, node
+readiness, unhealthy pod count, Flux `Ready=False` failures, and the resolved
+read-only policy. `⏎` switches to the highlighted context (via the normal
+context-switch path); `r` re-gathers. Only these non-sensitive summaries are
+held in memory.
+
 ### Log provider (VictoriaLogs)
 
 `L` (or `:vlogs`) opens log history for the selection from a VictoriaLogs
@@ -732,6 +756,7 @@ header) and switching away restores write mode.
 | `:can-i` / `:can-i <verb> <resource> [ns]`    | what you can do here / check a single action (`SelfSubjectAccessReview`)                                                              |
 | `:journal` / `:audit`                         | session-local log of the mutating actions you've taken                                                                                |
 | `:ctx` / `:ctx <name>`                        | context switcher popup / switch directly (the name tab-completes)                                                                     |
+| `:fleet`                                      | cross-context health dashboard (opt-in `[fleet]` contexts; `⏎` switches, `r` refreshes)                                               |
 | `:skin`                                       | switch the color skin live (`:skin gruvbox-dark` applies directly)                                                                    |
 | `:reload` / `:config` / `:info`               | reload config from disk · config sources + warnings · runtime diagnostics                                                             |
 | `l` / `p`                                     | logs (workload = all matching pods) / previous-container logs                                                                         |

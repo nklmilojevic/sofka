@@ -1201,6 +1201,7 @@ impl App {
         self.debug = resolved.config.debug;
         self.bundle_cfg = resolved.config.bundle;
         self.logs_cfg = resolved.config.logs;
+        self.fleet_cfg = resolved.config.fleet;
         warnings.extend(crate::config::plugin_warnings(&self.plugins));
         warnings.extend(crate::config::bookmark_warnings(&self.bookmarks));
         warnings.extend(crate::config::workspace_warnings(&self.workspaces));

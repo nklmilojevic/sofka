@@ -165,6 +165,12 @@ pub enum Msg {
         generation: u64,
         result: Result<std::path::PathBuf, String>,
     },
+    /// One context's summary for the fleet dashboard (`:fleet`), arriving
+    /// independently so a slow context never blocks the rest.
+    FleetRow {
+        generation: u64,
+        row: Box<crate::fleet::FleetRow>,
+    },
     Error {
         generation: u64,
         error: String,

@@ -72,6 +72,7 @@ impl App {
             Mode::PortForwards => self.key_port_forwards(key),
             Mode::Skins => self.key_skins(key),
             Mode::Snapshots => self.key_snapshots(key),
+            Mode::Fleet => self.key_fleet(key),
         }
         Ok(())
     }
@@ -532,6 +533,7 @@ impl App {
             PaletteAction::Snapshot => self.take_snapshot(""),
             PaletteAction::Snapshots => self.open_snapshots(),
             PaletteAction::Info => self.open_info(),
+            PaletteAction::Fleet => self.open_fleet(),
             PaletteAction::Diff => self.open_diff(),
             PaletteAction::Events => self.open_events(),
             PaletteAction::PortForwards => self.open_port_forwards(),

@@ -717,6 +717,9 @@ impl App {
                     Err(e) => self.flash_warn(&format!("bundle save failed: {e}")),
                 }
             }
+            Msg::FleetRow { generation, row } if generation == self.generation => {
+                self.apply_fleet_row(*row);
+            }
             Msg::SnapshotSaved { generation, result } if generation == self.generation => {
                 match result {
                     Ok(path) => {
