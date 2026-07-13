@@ -871,7 +871,9 @@ impl App {
         let mut warnings = resolved.warnings;
         self.user_aliases = resolved.config.aliases;
         self.plugins = resolved.config.plugins;
+        self.bookmarks = resolved.config.bookmarks;
         warnings.extend(crate::config::plugin_warnings(&self.plugins));
+        warnings.extend(crate::config::bookmark_warnings(&self.bookmarks));
         // Thresholds only change cell coloring (never the column layout), so —
         // unlike custom views — they're safe to re-apply live without yanking
         // the current view.

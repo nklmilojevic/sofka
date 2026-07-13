@@ -35,7 +35,9 @@ impl App {
             && (key.modifiers.contains(KeyModifiers::CONTROL)
                 || key.modifiers.contains(KeyModifiers::ALT))
         {
-            self.try_plugin_key(key);
+            if !self.try_bookmark_key(key) {
+                self.try_plugin_key(key);
+            }
             return Ok(());
         }
 
@@ -180,12 +182,15 @@ impl App {
                 self.help_filter.clear();
                 self.mode = Mode::Help;
             }
-            // User-defined plugins fall through here (built-ins take priority).
-            // Any unhandled key — a bare char, a function key — is offered to
-            // the plugin chords. Ctrl/alt combos are routed earlier, in
-            // `handle_key`, before the plain-key bindings above can claim them.
+            // User-defined bindings fall through here (built-ins take
+            // priority): bookmarks first, then plugins. Any unhandled key — a
+            // bare char, a function key — is offered to them. Ctrl/alt combos
+            // are routed earlier, in `handle_key`, before the plain-key
+            // bindings above can claim them.
             _ => {
-                self.try_plugin_key(key);
+                if !self.try_bookmark_key(key) {
+                    self.try_plugin_key(key);
+                }
             }
         }
     }
@@ -439,6 +444,11 @@ impl App {
                             self.switch_context(s.label);
                         }
                     }
+                    Some(SuggestKind::Bookmark) => {
+                        if let Some(s) = picked {
+                            self.apply_bookmark_named(&s.label);
+                        }
+                    }
                     // An exact typed built-in wins (stable muscle memory), then
                     // the highlighted suggestion, then the raw text as a resource.
                     _ => {
@@ -450,7 +460,10 @@ impl App {
                                     self.run_palette_command(&s.label);
                                 }
                                 SuggestKind::Resource => self.switch_kind_ns(&s.label, ns_arg),
-                                SuggestKind::Namespace | SuggestKind::Context => {}
+                                // Handled by the outer match arms above.
+                                SuggestKind::Namespace
+                                | SuggestKind::Context
+                                | SuggestKind::Bookmark => {}
                             }
                         } else if !head.is_empty() {
                             self.switch_kind_ns(&head, ns_arg);
@@ -569,6 +582,26 @@ impl App {
                         },
                     ));
                 }
+            }
+        }
+
+        // Saved bookmarks, matched by name. They rank above resources so a
+        // curated jump wins over an incidental catalog match, and they show on
+        // an empty `:` so they're discoverable.
+        for b in &self.bookmarks {
+            let score = if q.is_empty() {
+                Some(i64::MAX)
+            } else {
+                self.matcher.fuzzy_match(&b.name, q).map(|s| s + 1_000)
+            };
+            if let Some(score) = score {
+                scored.push((
+                    score,
+                    Suggestion {
+                        label: b.name.clone(),
+                        kind: SuggestKind::Bookmark,
+                    },
+                ));
             }
         }
 

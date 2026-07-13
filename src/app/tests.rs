@@ -2479,6 +2479,63 @@ async fn bulk_terminal_plugin_is_refused() {
 }
 
 #[tokio::test]
+async fn bookmark_applies_resource_namespace_filter_and_sort() {
+    let (mut app, _rx) = test_app();
+    app.bookmarks = vec![crate::config::Bookmark {
+        name: "api fails".into(),
+        resource: "pods".into(),
+        namespace: Some("prod".into()),
+        filter: Some("status!=Running".into()),
+        sort: Some("NAME:desc".into()),
+        ..Default::default()
+    }];
+    assert!(app.apply_bookmark_named("api fails"));
+    assert_eq!(app.kind_plural, "pods");
+    assert_eq!(app.namespace, "prod");
+    assert_eq!(app.filter, "status!=Running");
+    // NAME is the first column; sort landed on it, descending.
+    assert_eq!(app.sort_column, Some(0));
+    assert!(app.sort_desc);
+    assert!(app.flash.contains("api fails"));
+
+    // Unknown bookmark name is a no-op.
+    assert!(!app.apply_bookmark_named("nope"));
+}
+
+#[tokio::test]
+async fn bookmark_key_chord_triggers_it() {
+    let (mut app, _rx) = test_app();
+    app.bookmarks = vec![crate::config::Bookmark {
+        key: Some("z".into()),
+        name: "go pods".into(),
+        resource: "pods".into(),
+        ..Default::default()
+    }];
+    assert!(app.try_bookmark_key(press(KeyCode::Char('z'))));
+    assert_eq!(app.kind_plural, "pods");
+    // A key with no bookmark bound is not claimed.
+    assert!(!app.try_bookmark_key(press(KeyCode::Char('q'))));
+}
+
+#[tokio::test]
+async fn bookmarks_appear_in_command_palette() {
+    let (mut app, _rx) = test_app();
+    app.bookmarks = vec![crate::config::Bookmark {
+        name: "Prod API".into(),
+        resource: "pods".into(),
+        ..Default::default()
+    }];
+    app.command = "prod".into();
+    app.update_suggestions();
+    assert!(
+        app.cmd_suggestions
+            .iter()
+            .any(|s| s.kind == SuggestKind::Bookmark && s.label == "Prod API"),
+        "bookmark missing from palette suggestions"
+    );
+}
+
+#[tokio::test]
 async fn bulk_background_plugin_runs_over_all_marked() {
     let (mut app, _rx) = app_with_two_marked_pods();
     app.plugins = vec![crate::config::Plugin {
