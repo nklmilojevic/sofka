@@ -458,6 +458,9 @@ fn header_hints(app: &App) -> Vec<Line<'static>> {
     if app.flux_suspendable() {
         lines.push(hint_line(&[("t", "flux menu")]));
     }
+    if app.cronjob_kind() {
+        lines.push(hint_line(&[("t", "trigger/suspend")]));
+    }
     if app.external_secret_kind() {
         lines.push(hint_line(&[("r", "force-sync")]));
     }
@@ -1780,7 +1783,7 @@ fn draw_help(frame: &mut Frame, app: &App, area: Rect) {
         ),
         bind(
             "t",
-            "flux: suspend/resume/reconcile menu (ks/hr/repos/buckets…)",
+            "flux: suspend/resume/reconcile menu (ks/hr/repos/buckets…) · cronjobs: trigger/suspend/resume",
         ),
         bind("C · U · D", "nodes: cordon · uncordon · drain"),
         bind("space", "mark/unmark row for bulk actions (esc clears)"),
@@ -1967,9 +1970,9 @@ fn draw_contexts(frame: &mut Frame, app: &mut App, area: Rect) {
     );
 }
 
-/// Flux suspend/resume action menu (`t`). Deliberately a menu rather than a
-/// single-key toggle, so acting on a live resource always takes an explicit,
-/// visible choice.
+/// Flux suspend/resume / CronJob trigger action menu (`t`). Deliberately a
+/// menu rather than a single-key toggle, so acting on a live resource always
+/// takes an explicit, visible choice.
 fn draw_flux_menu(frame: &mut Frame, app: &mut App, area: Rect) {
     let count = app.marked.len().max(1);
     let target = if count == 1 {
@@ -1977,24 +1980,30 @@ fn draw_flux_menu(frame: &mut Frame, app: &mut App, area: Rect) {
     } else {
         format!("{count} marked {}", app.kind_plural)
     };
-    let items: Vec<ListItem> = crate::app::FLUX_MENU_ITEMS
+    let items: Vec<ListItem> = app
+        .action_menu_items()
         .iter()
         .map(|label| {
             let color = match *label {
                 "Suspend" => theme::peach(),
-                "Resume" => theme::green(),
+                "Resume" | "Trigger now" => theme::green(),
                 _ => theme::overlay1(),
             };
             ListItem::new(Span::styled(*label, Style::default().fg(color)))
         })
         .collect();
+    let subject = if app.cronjob_kind() {
+        "CronJob"
+    } else {
+        "Flux"
+    };
     render_popup_list(
         frame,
         area,
         36,
         24,
         items,
-        Span::styled(format!(" Flux: {target} "), theme::title()),
+        Span::styled(format!(" {subject}: {target} "), theme::title()),
         &mut app.flux_menu_state,
     );
 }

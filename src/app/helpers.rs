@@ -43,6 +43,54 @@ pub(super) fn node_unschedulable_patch(unschedulable: bool) -> Value {
     json!({ "spec": { "unschedulable": unschedulable } })
 }
 
+/// A Job manifest that runs `cj`'s jobTemplate immediately — what `kubectl
+/// create job --from=cronjob/…` builds: the template's spec and labels, its
+/// annotations plus `cronjob.kubernetes.io/instantiate: manual`, and a
+/// non-controller owner reference back to the CronJob. `None` when `cj` has
+/// no jobTemplate spec (not actually a CronJob).
+pub(super) fn cronjob_manual_job(cj: &DynamicObject, suffix: &str) -> Option<Value> {
+    let name = cj.metadata.name.clone()?;
+    let spec = cj.data.pointer("/spec/jobTemplate/spec")?.clone();
+    let mut annotations = cj
+        .data
+        .pointer("/spec/jobTemplate/metadata/annotations")
+        .cloned()
+        .unwrap_or_else(|| json!({}));
+    annotations["cronjob.kubernetes.io/instantiate"] = json!("manual");
+    let mut metadata = json!({
+        "name": manual_job_name(&name, suffix),
+        "annotations": annotations,
+    });
+    if let Some(ns) = &cj.metadata.namespace {
+        metadata["namespace"] = json!(ns);
+    }
+    if let Some(labels) = cj.data.pointer("/spec/jobTemplate/metadata/labels") {
+        metadata["labels"] = labels.clone();
+    }
+    if let Some(uid) = &cj.metadata.uid {
+        metadata["ownerReferences"] = json!([{
+            "apiVersion": "batch/v1",
+            "kind": "CronJob",
+            "name": name,
+            "uid": uid,
+        }]);
+    }
+    Some(json!({
+        "apiVersion": "batch/v1",
+        "kind": "Job",
+        "metadata": metadata,
+        "spec": spec,
+    }))
+}
+
+/// `<cronjob>-manual-<suffix>`, with the CronJob name truncated so the Job
+/// name stays well under the 63-char label-value limit its pods inherit
+/// (k9s truncates at 42 for the same reason).
+pub(super) fn manual_job_name(cronjob: &str, suffix: &str) -> String {
+    let base: String = cronjob.chars().take(42).collect();
+    format!("{base}-manual-{suffix}")
+}
+
 /// A compact journal label for a set of node names.
 pub(super) fn node_targets_label(targets: &[String]) -> String {
     match targets {
@@ -240,6 +288,21 @@ impl App {
     /// Whether the current kind supports the Flux suspend/resume menu (`t`).
     pub fn flux_suspendable(&self) -> bool {
         FLUX_SUSPENDABLE_KINDS.contains(&self.kind_plural.as_str())
+    }
+
+    /// Whether the current kind is CronJobs, which get their own `t` menu
+    /// (trigger/suspend/resume).
+    pub fn cronjob_kind(&self) -> bool {
+        self.kind_plural == "cronjobs"
+    }
+
+    /// The items shown in the `t` action menu for the current kind.
+    pub fn action_menu_items(&self) -> &'static [&'static str] {
+        if self.cronjob_kind() {
+            CRONJOB_MENU_ITEMS
+        } else {
+            FLUX_MENU_ITEMS
+        }
     }
 
     /// Whether the current kind is an External Secrets resource that honours

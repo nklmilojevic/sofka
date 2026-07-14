@@ -825,6 +825,133 @@ async fn flux_menu_reconcile_now() {
     assert!(app.flash.contains("reconciling infra"), "{}", app.flash);
 }
 
+fn cronjob(name: &str) -> serde_json::Value {
+    json!({
+        "apiVersion": "batch/v1", "kind": "CronJob",
+        "metadata": {"name": name, "namespace": "default", "uid": "cj-uid-1"},
+        "spec": {
+            "schedule": "0 * * * *",
+            "suspend": false,
+            "jobTemplate": {
+                "metadata": {
+                    "labels": {"app": name},
+                    "annotations": {"team": "platform"}
+                },
+                "spec": {
+                    "template": {"spec": {
+                        "containers": [{"name": "main", "image": "busybox"}],
+                        "restartPolicy": "Never"
+                    }}
+                }
+            }
+        }
+    })
+}
+
+#[tokio::test]
+async fn cronjob_menu_opens_with_trigger_first() {
+    let (mut app, _rx) = test_app();
+    app.switch_kind("cronjobs");
+    apply(&mut app, cronjob("backup"));
+
+    app.handle_key(press(KeyCode::Char('t'))).unwrap();
+    assert_eq!(app.mode, Mode::FluxMenu);
+    assert_eq!(app.action_menu_items(), CRONJOB_MENU_ITEMS);
+    assert_eq!(app.flux_menu_state.selected(), Some(0)); // "Trigger now"
+
+    app.handle_key(press(KeyCode::Enter)).unwrap();
+    assert_eq!(app.mode, Mode::Table);
+    assert!(app.flash.contains("triggering backup"), "{}", app.flash);
+    assert!(!app.flash_err);
+}
+
+#[tokio::test]
+async fn cronjob_menu_suspend_and_resume() {
+    let (mut app, _rx) = test_app();
+    app.switch_kind("cronjobs");
+    apply(&mut app, cronjob("backup"));
+
+    app.handle_key(press(KeyCode::Char('t'))).unwrap();
+    let idx = CRONJOB_MENU_ITEMS
+        .iter()
+        .position(|s| *s == "Suspend")
+        .unwrap();
+    app.flux_menu_state.select(Some(idx));
+    app.handle_key(press(KeyCode::Enter)).unwrap();
+    assert!(app.flash.contains("suspending backup"), "{}", app.flash);
+
+    app.handle_key(press(KeyCode::Char('t'))).unwrap();
+    let idx = CRONJOB_MENU_ITEMS
+        .iter()
+        .position(|s| *s == "Resume")
+        .unwrap();
+    app.flux_menu_state.select(Some(idx));
+    app.handle_key(press(KeyCode::Enter)).unwrap();
+    assert!(app.flash.contains("resuming backup"), "{}", app.flash);
+}
+
+#[tokio::test]
+async fn cronjob_trigger_acts_on_marked_rows() {
+    let (mut app, _rx) = test_app();
+    app.switch_kind("cronjobs");
+    apply(&mut app, cronjob("backup"));
+    let mut second = cronjob("cleanup");
+    second["metadata"]["uid"] = json!("cj-uid-2");
+    apply(&mut app, second);
+    app.marked.insert("default/backup".into());
+    app.marked.insert("default/cleanup".into());
+
+    app.handle_key(press(KeyCode::Char('t'))).unwrap();
+    app.handle_key(press(KeyCode::Enter)).unwrap(); // "Trigger now"
+    assert!(app.flash.contains("triggering 2 cronjobs"), "{}", app.flash);
+    assert!(app.marked.is_empty()); // cleared after the bulk action
+}
+
+#[test]
+fn cronjob_manual_job_matches_kubectl_create_job_from() {
+    let cj: DynamicObject = serde_json::from_value(cronjob("backup")).unwrap();
+    let job = cronjob_manual_job(&cj, "abc12").unwrap();
+    assert_eq!(job["apiVersion"], "batch/v1");
+    assert_eq!(job["kind"], "Job");
+    assert_eq!(job["metadata"]["name"], "backup-manual-abc12");
+    assert_eq!(job["metadata"]["namespace"], "default");
+    assert_eq!(
+        job["metadata"]["annotations"]["cronjob.kubernetes.io/instantiate"],
+        "manual"
+    );
+    // jobTemplate metadata carries over alongside the instantiate marker.
+    assert_eq!(job["metadata"]["annotations"]["team"], "platform");
+    assert_eq!(job["metadata"]["labels"]["app"], "backup");
+    // Owner reference points back at the CronJob (non-controller, like kubectl).
+    assert_eq!(job["metadata"]["ownerReferences"][0]["kind"], "CronJob");
+    assert_eq!(job["metadata"]["ownerReferences"][0]["name"], "backup");
+    assert_eq!(job["metadata"]["ownerReferences"][0]["uid"], "cj-uid-1");
+    // The Job spec is the jobTemplate's spec, verbatim.
+    assert_eq!(
+        job["spec"]["template"]["spec"]["containers"][0]["image"],
+        "busybox"
+    );
+}
+
+#[test]
+fn cronjob_manual_job_requires_a_job_template() {
+    let not_a_cj: DynamicObject = serde_json::from_value(json!({
+        "apiVersion": "v1", "kind": "Pod",
+        "metadata": {"name": "p", "namespace": "default"}
+    }))
+    .unwrap();
+    assert!(cronjob_manual_job(&not_a_cj, "x").is_none());
+}
+
+#[test]
+fn manual_job_name_stays_within_limits() {
+    assert_eq!(manual_job_name("backup", "abc12"), "backup-manual-abc12");
+    let long = "x".repeat(80);
+    let name = manual_job_name(&long, "abc12");
+    assert_eq!(name.len(), 42 + "-manual-abc12".len());
+    assert!(name.len() <= 63);
+}
+
 #[tokio::test]
 async fn r_force_syncs_external_secrets() {
     let (mut app, _rx) = test_app();

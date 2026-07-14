@@ -467,6 +467,11 @@ impl Cluster {
             "namespaces".to_string(),
             mk("", "Namespace", "namespaces", false),
         );
+        registry.insert("jobs".to_string(), mk("batch", "Job", "jobs", true));
+        registry.insert(
+            "cronjobs".to_string(),
+            mk("batch", "CronJob", "cronjobs", true),
+        );
         registry.insert(
             "kustomizations".to_string(),
             mk(

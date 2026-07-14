@@ -18,7 +18,8 @@ use fuzzy_matcher::skim::SkimMatcherV2;
 use k8s_openapi::api::core::v1::Pod;
 use kube::Client;
 use kube::api::{
-    Api, DeleteParams, EvictParams, ListParams, LogParams, Patch, PatchParams, PropagationPolicy,
+    Api, DeleteParams, EvictParams, ListParams, LogParams, Patch, PatchParams, PostParams,
+    PropagationPolicy,
 };
 use kube::core::{DynamicObject, TypeMeta};
 use kube::discovery::ApiResource;
@@ -68,6 +69,12 @@ const FLUX_SUSPENDABLE_KINDS: &[&str] = &[
 /// now" patches the same `reconcile.fluxcd.io/requestedAt` annotation the
 /// `flux reconcile` CLI uses, shared by every controller in the toolkit.
 pub const FLUX_MENU_ITEMS: &[&str] = &["Suspend", "Resume", "Reconcile now", "Cancel"];
+
+/// Items in the CronJob action menu (`t`), in display order. "Trigger now"
+/// creates a Job from the CronJob's jobTemplate the same way `kubectl create
+/// job --from=cronjob/…` does; Suspend/Resume patch `spec.suspend` exactly
+/// like the Flux menu (CronJobs share the field).
+pub const CRONJOB_MENU_ITEMS: &[&str] = &["Trigger now", "Suspend", "Resume", "Cancel"];
 
 /// External Secrets Operator kinds that honour the `force-sync` annotation to
 /// trigger an immediate secret refresh. Both are namespaced; the cluster-scoped
@@ -879,7 +886,8 @@ pub struct App {
     /// QoS class of the pod shown by the container picker (empty if unknown).
     pub container_qos: String,
 
-    /// Cursor into [`FLUX_MENU_ITEMS`] for the Flux suspend/resume menu.
+    /// Cursor into [`FLUX_MENU_ITEMS`] / [`CRONJOB_MENU_ITEMS`] for the `t`
+    /// action menu (Flux suspend/resume, CronJob trigger/suspend/resume).
     pub flux_menu_state: ListState,
 
     /// Background `kubectl port-forward` processes started with `f`/`F`.

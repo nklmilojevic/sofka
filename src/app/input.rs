@@ -193,7 +193,8 @@ impl App {
                     self.start_watch();
                 }
             }
-            // Flux CD: toggle suspend/resume on the marked rows, or current.
+            // Action menu on the marked rows, or current: Flux
+            // suspend/resume/reconcile, CronJob trigger/suspend/resume.
             KeyCode::Char('t') => self.request_flux_menu(),
             KeyCode::Char('?') => {
                 self.help_filter.clear();
