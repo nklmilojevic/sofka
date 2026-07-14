@@ -137,6 +137,10 @@ impl App {
     }
 
     pub(super) fn key_namespaces(&mut self, key: KeyEvent) {
+        if edit_chord(&key, &mut self.ns_filter) {
+            self.select_best_namespace_match();
+            return;
+        }
         let len = self.filtered_namespaces().len();
         match key.code {
             KeyCode::Esc => {
@@ -257,6 +261,10 @@ impl App {
     }
 
     pub(super) fn key_contexts(&mut self, key: KeyEvent) {
+        if edit_chord(&key, &mut self.ctx_filter) {
+            self.ctx_state.select(Some(0));
+            return;
+        }
         let len = self.filtered_contexts().len();
         match key.code {
             KeyCode::Esc => {
