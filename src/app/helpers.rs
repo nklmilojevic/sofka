@@ -91,6 +91,35 @@ pub(super) fn manual_job_name(cronjob: &str, suffix: &str) -> String {
     format!("{base}-manual-{suffix}")
 }
 
+/// Readline-style line edits shared by every text input (command palette,
+/// filters, prompts, pickers). These are what terminals send for the macOS
+/// editing chords: cmd+delete arrives as ctrl-u (kill line) and
+/// option+delete as alt-backspace or ctrl-w (kill word). Returns whether the
+/// key was handled, so callers run their post-edit refresh and skip the
+/// plain-key arms.
+pub(super) fn edit_chord(key: &KeyEvent, buf: &mut String) -> bool {
+    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+    let alt = key.modifiers.contains(KeyModifiers::ALT);
+    match key.code {
+        KeyCode::Char('u') if ctrl => buf.clear(),
+        KeyCode::Char('w') if ctrl => pop_word(buf),
+        KeyCode::Backspace if alt || ctrl => pop_word(buf),
+        _ => return false,
+    }
+    true
+}
+
+/// Delete the trailing word: trailing whitespace first, then the run of
+/// non-whitespace before it (readline's unix-word-rubout).
+fn pop_word(buf: &mut String) {
+    while buf.chars().next_back().is_some_and(char::is_whitespace) {
+        buf.pop();
+    }
+    while buf.chars().next_back().is_some_and(|c| !c.is_whitespace()) {
+        buf.pop();
+    }
+}
+
 /// A compact journal label for a set of node names.
 pub(super) fn node_targets_label(targets: &[String]) -> String {
     match targets {

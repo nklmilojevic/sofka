@@ -1715,6 +1715,10 @@ fn draw_help(frame: &mut Frame, app: &App, area: Rect) {
             "/",
             "filter: fuzzy · !inverse · -l/-f selectors (server-side on ⏎) · col=val cpu>500m age<2h",
         ),
+        bind(
+            "ctrl-u · ctrl-w",
+            "text inputs: clear line (cmd-⌫) · delete word (opt-⌫)",
+        ),
         bind("n · 0-9", "namespace switcher · 0 = all namespaces"),
         bind("ctrl-r", "refresh watch"),
         Line::from(""),

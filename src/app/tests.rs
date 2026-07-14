@@ -20,6 +20,10 @@ fn ctrl(code: KeyCode) -> KeyEvent {
     KeyEvent::new(code, KeyModifiers::CONTROL)
 }
 
+fn alt(code: KeyCode) -> KeyEvent {
+    KeyEvent::new(code, KeyModifiers::ALT)
+}
+
 /// Inject a watched object as the current generation would.
 fn apply(app: &mut App, v: serde_json::Value) {
     let o = obj(v);
@@ -941,6 +945,72 @@ fn cronjob_manual_job_requires_a_job_template() {
     }))
     .unwrap();
     assert!(cronjob_manual_job(&not_a_cj, "x").is_none());
+}
+
+#[tokio::test]
+async fn filter_edit_chords_delete_word_and_clear_line() {
+    let (mut app, _rx) = test_app();
+    app.switch_kind("pods");
+    app.handle_key(press(KeyCode::Char('/'))).unwrap();
+    assert_eq!(app.mode, Mode::Filter);
+    for c in "hello world".chars() {
+        app.handle_key(press(KeyCode::Char(c))).unwrap();
+    }
+
+    // option+delete (alt-backspace) kills the last word…
+    app.handle_key(alt(KeyCode::Backspace)).unwrap();
+    assert_eq!(app.filter, "hello ");
+    // …ctrl-w does the same, eating the separator first…
+    app.handle_key(ctrl(KeyCode::Char('w'))).unwrap();
+    assert_eq!(app.filter, "");
+
+    // …and cmd+delete (ctrl-u) clears the whole line.
+    for c in "app=nginx running".chars() {
+        app.handle_key(press(KeyCode::Char(c))).unwrap();
+    }
+    app.handle_key(ctrl(KeyCode::Char('u'))).unwrap();
+    assert_eq!(app.filter, "");
+    assert_eq!(app.mode, Mode::Filter); // still typing, not kicked out
+}
+
+#[tokio::test]
+async fn command_palette_edit_chords() {
+    let (mut app, _rx) = test_app();
+    app.switch_kind("pods");
+    app.handle_key(press(KeyCode::Char(':'))).unwrap();
+    for c in "cronjobs kube-system".chars() {
+        app.handle_key(press(KeyCode::Char(c))).unwrap();
+    }
+    app.handle_key(ctrl(KeyCode::Char('w'))).unwrap();
+    assert_eq!(app.command, "cronjobs ");
+    app.handle_key(ctrl(KeyCode::Char('u'))).unwrap();
+    assert_eq!(app.command, "");
+}
+
+#[tokio::test]
+async fn namespace_picker_edit_chords() {
+    let (mut app, _rx) = test_app();
+    app.switch_kind("pods");
+    app.handle_key(press(KeyCode::Char('n'))).unwrap();
+    assert_eq!(app.mode, Mode::Namespaces);
+    for c in "monitoring".chars() {
+        app.handle_key(press(KeyCode::Char(c))).unwrap();
+    }
+    app.handle_key(ctrl(KeyCode::Char('u'))).unwrap();
+    assert_eq!(app.ns_filter, "");
+    assert_eq!(app.mode, Mode::Namespaces);
+}
+
+#[test]
+fn edit_chord_leaves_plain_keys_alone() {
+    let mut buf = "abc".to_string();
+    assert!(!edit_chord(&press(KeyCode::Char('u')), &mut buf));
+    assert!(!edit_chord(&press(KeyCode::Backspace), &mut buf));
+    assert_eq!(buf, "abc");
+    // Word rubout trims trailing spaces before the word, readline-style.
+    let mut buf = "one two   ".to_string();
+    assert!(edit_chord(&alt(KeyCode::Backspace), &mut buf));
+    assert_eq!(buf, "one ");
 }
 
 #[test]

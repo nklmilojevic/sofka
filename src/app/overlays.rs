@@ -199,6 +199,9 @@ impl App {
     }
 
     pub(super) fn key_prompt(&mut self, key: KeyEvent) {
+        if edit_chord(&key, &mut self.prompt_input) {
+            return;
+        }
         match key.code {
             KeyCode::Esc => {
                 // The lookback prompt is the one prompt opened from the logs

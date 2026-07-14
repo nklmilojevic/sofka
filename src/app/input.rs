@@ -430,6 +430,10 @@ impl App {
     }
 
     pub(super) fn key_command(&mut self, key: KeyEvent) {
+        if edit_chord(&key, &mut self.command) {
+            self.update_suggestions();
+            return;
+        }
         match key.code {
             KeyCode::Esc => self.mode = Mode::Table,
             KeyCode::Down | KeyCode::Tab => {
@@ -797,6 +801,11 @@ impl App {
     /// apply live per keystroke; `-l`/`-f` selectors are sent to the API on
     /// ⏎, since that restarts the watch (see `sync_filter_selectors`).
     pub(super) fn key_filter(&mut self, key: KeyEvent) {
+        if edit_chord(&key, &mut self.filter) {
+            self.invalidate_rows();
+            self.table_state.select(Some(0));
+            return;
+        }
         match key.code {
             KeyCode::Esc => {
                 self.filter.clear();
@@ -1046,6 +1055,11 @@ impl App {
     }
 
     pub(super) fn key_log_filter(&mut self, key: KeyEvent) {
+        let mut edited = self.logs.filter.clone();
+        if edit_chord(&key, &mut edited) {
+            self.logs.set_filter(edited);
+            return;
+        }
         match key.code {
             KeyCode::Esc => {
                 self.logs.set_filter(String::new());
@@ -1083,6 +1097,9 @@ impl App {
     /// events, help). Mirrors [`Self::key_log_filter`]: enter keeps the query,
     /// esc clears it; either returns to the view it was opened from.
     pub(super) fn key_doc_filter(&mut self, key: KeyEvent) {
+        if edit_chord(&key, self.doc_filter_mut()) {
+            return;
+        }
         match key.code {
             KeyCode::Esc => {
                 self.doc_filter_mut().clear();
