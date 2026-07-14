@@ -1,0 +1,91 @@
+name: Bug report
+description: Something in sofka isn't working as expected
+title: "bug: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report a bug. The more detail you can
+        give, the faster it gets fixed.
+  - type: textarea
+    id: description
+    attributes:
+      label: What happened?
+      description: A clear description of the bug, including any error messages or visual glitches.
+      placeholder: When I press `t` on a HelmRelease, sofka panics with...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What did you expect to happen?
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Start sofka against a cluster with Flux installed
+        2. Navigate to `:helmreleases`
+        3. Press `t` on a suspended release
+        4. ...
+    validations:
+      required: true
+  - type: textarea
+    id: info
+    attributes:
+      label: Output of `sofka --info`
+      description: Prints version/build, config sources, and directories without connecting to a cluster.
+      render: text
+    validations:
+      required: true
+  - type: input
+    id: terminal
+    attributes:
+      label: Terminal emulator
+      description: e.g. Ghostty, kitty, WezTerm, iTerm2, Alacritty, tmux inside any of these
+      placeholder: Ghostty 1.1.0
+    validations:
+      required: false
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating system
+      options:
+        - macOS (Apple Silicon)
+        - macOS (Intel)
+        - Linux (x86_64)
+        - Linux (aarch64)
+        - Other
+    validations:
+      required: true
+  - type: dropdown
+    id: install
+    attributes:
+      label: How did you install sofka?
+      options:
+        - Homebrew
+        - Nix
+        - cargo install / built from source
+        - GitHub release binary
+        - Other
+    validations:
+      required: false
+  - type: input
+    id: cluster
+    attributes:
+      label: Kubernetes distribution and version
+      description: If the bug involves cluster interaction
+      placeholder: Talos v1.10 / k3s 1.33 / EKS 1.32...
+    validations:
+      required: false
+  - type: textarea
+    id: config
+    attributes:
+      label: Relevant config
+      description: Any parts of your `~/.config/sofka/config.toml` (or per-cluster overrides) that might be involved. Redact anything sensitive.
+      render: toml
+    validations:
+      required: false
