@@ -1343,16 +1343,17 @@ impl App {
         );
     }
 
-    /// Open the Flux suspend/resume menu (`t`) for the marked rows, or the
-    /// current selection if none are marked. A menu, not a single-key
-    /// toggle — suspending something always takes an explicit, visible
-    /// choice (`j`/`k` + Enter) rather than one accidental keystroke.
+    /// Open the `t` action menu (Flux suspend/resume, CronJob
+    /// trigger/suspend/resume) for the marked rows, or the current selection
+    /// if none are marked. A menu, not a single-key toggle — suspending
+    /// something always takes an explicit, visible choice (`j`/`k` + Enter)
+    /// rather than one accidental keystroke.
     pub(super) fn request_flux_menu(&mut self) {
         if self.deny_readonly() {
             return;
         }
-        if !self.flux_suspendable() {
-            self.flash_warn("suspend/resume only applies to Flux resources (ks/hr/git-, helm-, oci-repos, buckets, image automation, alerts, receivers)");
+        if !self.flux_suspendable() && !self.cronjob_kind() {
+            self.flash_warn("suspend/resume only applies to CronJobs and Flux resources (ks/hr/git-, helm-, oci-repos, buckets, image automation, alerts, receivers)");
             return;
         }
         if self.action_targets().is_empty() {
@@ -1363,7 +1364,8 @@ impl App {
     }
 
     pub(super) fn key_flux_menu(&mut self, key: KeyEvent) {
-        let len = FLUX_MENU_ITEMS.len();
+        let items = self.action_menu_items();
+        let len = items.len();
         match key.code {
             KeyCode::Esc | KeyCode::Char('q') => self.mode = Mode::Table,
             KeyCode::Char('j') | KeyCode::Down => list_step(&mut self.flux_menu_state, len, true),
@@ -1372,7 +1374,7 @@ impl App {
                 let choice = self
                     .flux_menu_state
                     .selected()
-                    .and_then(|i| FLUX_MENU_ITEMS.get(i))
+                    .and_then(|i| items.get(i))
                     .copied();
                 self.mode = Mode::Table;
                 match choice {
@@ -1388,6 +1390,7 @@ impl App {
                         let targets = self.action_targets();
                         self.do_reconcile(targets);
                     }
+                    Some("Trigger now") => self.do_trigger_cronjobs(),
                     _ => {} // "Cancel" or nothing selected — do nothing.
                 }
             }
@@ -1440,6 +1443,79 @@ impl App {
             Patch::Merge(reconcile_patch(&now)),
             |name, e| format!("reconcile {name} failed: {e}"),
         );
+    }
+
+    /// Run the marked CronJobs (or the current selection) immediately by
+    /// creating a Job from each one's jobTemplate — what `kubectl create job
+    /// --from=cronjob/…` does, manual-instantiate annotation and owner
+    /// reference included. Works on suspended CronJobs too (the suspend flag
+    /// only gates the schedule, not manually created Jobs).
+    pub(super) fn do_trigger_cronjobs(&mut self) {
+        let objs = self.action_target_objects();
+        // Seconds-resolution suffix: unique enough for a manual action, and a
+        // repeat trigger of the same CronJob within a second fails loudly
+        // with AlreadyExists rather than silently double-running.
+        let suffix = format!("{:x}", k8s_openapi::jiff::Timestamp::now().as_second());
+        let jobs: Vec<(String, String, Value)> = objs
+            .iter()
+            .filter_map(|o| {
+                let name = o.metadata.name.clone()?;
+                let ns = o.metadata.namespace.clone().unwrap_or_default();
+                let job = cronjob_manual_job(o, &suffix)?;
+                Some((name, ns, job))
+            })
+            .collect();
+        if jobs.is_empty() {
+            return;
+        }
+        let targets: Vec<(String, String)> = jobs
+            .iter()
+            .map(|(name, ns, _)| (name.clone(), ns.clone()))
+            .collect();
+        let label = self.action_label(&targets);
+        self.note_action("trigger", label);
+        self.flash = if jobs.len() == 1 {
+            format!("triggering {}…", jobs[0].0)
+        } else {
+            format!("triggering {} {}…", jobs.len(), self.kind_plural)
+        };
+        self.flash_err = false;
+        self.marked.clear();
+        let job_ar = ApiResource {
+            group: "batch".into(),
+            version: "v1".into(),
+            api_version: "batch/v1".into(),
+            kind: "Job".into(),
+            plural: "jobs".into(),
+        };
+        let client = self.cluster.client.clone();
+        let tx = self.tx.clone();
+        let genr = self.generation;
+        tokio::spawn(async move {
+            for (name, ns, job) in jobs {
+                let api: Api<DynamicObject> = Api::namespaced_with(client.clone(), &ns, &job_ar);
+                let job: DynamicObject = match serde_json::from_value(job) {
+                    Ok(j) => j,
+                    Err(e) => {
+                        let _ = tx
+                            .send(Msg::Error {
+                                generation: genr,
+                                error: format!("trigger {name} failed: {e}"),
+                            })
+                            .await;
+                        continue;
+                    }
+                };
+                if let Err(e) = api.create(&PostParams::default(), &job).await {
+                    let _ = tx
+                        .send(Msg::Error {
+                            generation: genr,
+                            error: format!("trigger {name} failed: {e}"),
+                        })
+                        .await;
+                }
+            }
+        });
     }
 
     /// Force an immediate External Secrets Operator refresh on the marked rows

@@ -155,6 +155,8 @@ Not a marketing number - these are specific, checkable design choices:
   through owner references to pods and containers.
 - **Flux CD controls** (`t`) - suspend/resume/reconcile menu, native k8s API
   patches.
+- **CronJob controls** (`t`) - trigger now (creates a Job from the
+  jobTemplate, like `kubectl create job --from`), suspend, resume.
 - **Background port-forwards** (`f`/`F` to start, `:pf` to manage).
 - **Plugins** - config-defined shell-out commands bound to keys, scoped per
   resource. Keys are full **chords** (`ctrl-g`, `alt-x`, `shift-b`, `f5`);
@@ -812,7 +814,7 @@ header) and switching away restores write mode.
 | `i`                                           | set container image                                                                                                                   |
 | `r`                                           | rollout restart (workloads) / refresh (elsewhere)                                                                                     |
 | `f` / `shift-f`                               | port-forward (pods/services) - runs in the background                                                                                 |
-| `t`                                           | Flux: suspend/resume/reconcile menu                                                                                                   |
+| `t`                                           | Flux: suspend/resume/reconcile menu · CronJobs: trigger/suspend/resume menu                                                           |
 | `C` / `U` / `D`                               | nodes: cordon / uncordon / drain                                                                                                      |
 | `ctrl-d` / `ctrl-k`                           | delete / force-delete (marked rows, or current); in confirm: `f` toggles force, `c` cycles cascade (background → foreground → orphan) |
 | `:q`, `ctrl-c`                                | quit                                                                                                                                  |
