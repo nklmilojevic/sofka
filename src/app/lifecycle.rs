@@ -757,6 +757,15 @@ impl App {
                     .scroll
                     .min(self.detail.lines.len().saturating_sub(1));
             }
+            Msg::TransferDone { generation, result } if generation == self.generation => {
+                match result {
+                    Ok(summary) => {
+                        self.flash = summary;
+                        self.flash_err = false;
+                    }
+                    Err(e) => self.flash_warn(&format!("cp failed: {e}")),
+                }
+            }
             Msg::LogsSaved { generation, result } if generation == self.log_gen => match result {
                 Ok(path) => {
                     self.flash = format!("saved logs → {}", path.display());

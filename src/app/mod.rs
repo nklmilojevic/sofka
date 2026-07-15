@@ -76,6 +76,11 @@ pub const FLUX_MENU_ITEMS: &[&str] = &["Suspend", "Resume", "Reconcile now", "Ca
 /// like the Flux menu (CronJobs share the field).
 pub const CRONJOB_MENU_ITEMS: &[&str] = &["Trigger now", "Suspend", "Resume", "Cancel"];
 
+/// Items in the pod file-transfer menu (`t` on a pod), in display order. Both
+/// directions shell out to `kubectl cp` (which needs `tar` in the container),
+/// prompting for the source and destination paths.
+pub const TRANSFER_MENU_ITEMS: &[&str] = &["Download from pod", "Upload to pod", "Cancel"];
+
 /// External Secrets Operator kinds that honour the `force-sync` annotation to
 /// trigger an immediate secret refresh. Both are namespaced; the cluster-scoped
 /// `ClusterExternalSecret` is deliberately left out so the namespaced patch
@@ -111,6 +116,8 @@ pub enum Mode {
     Diff,
     Events,
     FluxMenu,
+    /// Download-or-upload choice for a pod file transfer (`t` on a pod).
+    TransferMenu,
     PortForwards,
     Skins,
     /// Browsing saved snapshots (`:snapshots`).
@@ -191,6 +198,16 @@ enum ConfirmAction {
     Edit { argv: Vec<String> },
     /// Shell into a pod, once a guardrail confirmation is satisfied.
     Exec { ns: String, name: String },
+    /// Upload a local file into a pod (`kubectl cp`), once a guardrail
+    /// confirmation is satisfied. Upload only — a download doesn't mutate
+    /// the pod, so it never needs confirming.
+    Transfer {
+        ns: String,
+        pod: String,
+        container: Option<String>,
+        src: String,
+        dest: String,
+    },
     /// One or more node names to cordon and drain.
     Drain { targets: Vec<String> },
     /// Roll a Helm release back to an earlier revision (`helm rollback`) —
@@ -291,6 +308,17 @@ enum PromptKind {
         ns: String,
         pod: String,
         target: Option<String>,
+    },
+    /// File-transfer path prompts (`t` on a pod), asked in two steps: the
+    /// source path first (`src` is `None`), then the destination with the
+    /// answered source carried along. `container` pins `-c` when launched
+    /// from the container picker.
+    Transfer {
+        ns: String,
+        pod: String,
+        container: Option<String>,
+        upload: bool,
+        src: Option<String>,
     },
     /// New lookback period for the provider logs view (`T`) — the only
     /// prompt opened from (and returning to) [`Mode::Logs`].
@@ -890,6 +918,11 @@ pub struct App {
     /// action menu (Flux suspend/resume, CronJob trigger/suspend/resume).
     pub flux_menu_state: ListState,
 
+    /// Cursor into [`TRANSFER_MENU_ITEMS`] for the pod file-transfer menu
+    /// (`t` on a pod), and the `(ns, pod, container)` it acts on.
+    pub transfer_menu_state: ListState,
+    pub transfer_target: Option<(String, String, Option<String>)>,
+
     /// Background `kubectl port-forward` processes started with `f`/`F`.
     /// Viewed/stopped via `:pf`; killed automatically on drop.
     pub port_forwards: Vec<PortForward>,
@@ -1081,6 +1114,8 @@ impl App {
             container_resources: HashMap::new(),
             container_qos: String::new(),
             flux_menu_state: ListState::default(),
+            transfer_menu_state: ListState::default(),
+            transfer_target: None,
             port_forwards: Vec::new(),
             pf_state: ListState::default(),
             skin_list: crate::theme::BUILTIN_NAMES

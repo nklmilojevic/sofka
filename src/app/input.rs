@@ -69,6 +69,7 @@ impl App {
             Mode::Timeline => self.key_timeline(key),
             Mode::Gitops => self.key_gitops(key),
             Mode::FluxMenu => self.key_flux_menu(key),
+            Mode::TransferMenu => self.key_transfer_menu(key),
             Mode::PortForwards => self.key_port_forwards(key),
             Mode::Skins => self.key_skins(key),
             Mode::Snapshots => self.key_snapshots(key),
@@ -194,8 +195,15 @@ impl App {
                 }
             }
             // Action menu on the marked rows, or current: Flux
-            // suspend/resume/reconcile, CronJob trigger/suspend/resume.
-            KeyCode::Char('t') => self.request_flux_menu(),
+            // suspend/resume/reconcile, CronJob trigger/suspend/resume. On
+            // pods, `t` is the file-transfer menu (kubectl cp) instead.
+            KeyCode::Char('t') => {
+                if self.kind_plural == "pods" {
+                    self.request_transfer();
+                } else {
+                    self.request_flux_menu();
+                }
+            }
             KeyCode::Char('?') => {
                 self.help_filter.clear();
                 self.mode = Mode::Help;

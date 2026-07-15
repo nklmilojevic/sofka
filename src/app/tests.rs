@@ -1871,6 +1871,109 @@ async fn container_picker_shell_targets_selected_container() {
 }
 
 #[tokio::test]
+async fn transfer_menu_chains_download_prompts() {
+    let (mut app, _rx) = test_app();
+    app.switch_kind("pods");
+    apply(
+        &mut app,
+        json!({"apiVersion": "v1", "kind": "Pod",
+               "metadata": {"name": "p", "namespace": "default"}}),
+    );
+    app.table_state.select(Some(0));
+    app.handle_key(press(KeyCode::Char('t'))).unwrap();
+    assert_eq!(app.mode, Mode::TransferMenu);
+    // Enter on the default selection ("Download from pod") → source prompt.
+    app.handle_key(press(KeyCode::Enter)).unwrap();
+    assert_eq!(app.mode, Mode::Prompt);
+    assert!(
+        app.prompt_label.contains("remote path"),
+        "{}",
+        app.prompt_label
+    );
+    app.prompt_input = "/var/log/app.log".into();
+    app.handle_key(press(KeyCode::Enter)).unwrap();
+    // Chains into the destination prompt, prefilled with the file name.
+    assert_eq!(app.mode, Mode::Prompt);
+    assert!(
+        app.prompt_label.contains("local path"),
+        "{}",
+        app.prompt_label
+    );
+    assert_eq!(app.prompt_input, "app.log");
+}
+
+#[tokio::test]
+async fn transfer_argv_pins_context_and_direction() {
+    let (app, _rx) = test_app();
+    let argv = app.cp_argv(
+        "default",
+        "p",
+        Some("sidecar"),
+        false,
+        "/var/log/app.log",
+        "app.log",
+    );
+    assert_eq!(&argv[..3], ["kubectl", "--context", "test"]);
+    assert_eq!(argv[3], "cp");
+    let n = argv.iter().position(|a| a == "-n").unwrap();
+    assert_eq!(argv[n + 1], "default");
+    let c = argv.iter().position(|a| a == "-c").unwrap();
+    assert_eq!(argv[c + 1], "sidecar");
+    // Download: remote source, local destination.
+    assert_eq!(argv[argv.len() - 2], "p:/var/log/app.log");
+    assert_eq!(argv[argv.len() - 1], "app.log");
+
+    // Upload flips the direction (and no -c without a container pin).
+    let argv = app.cp_argv("default", "p", None, true, "notes.txt", "/tmp/notes.txt");
+    assert_eq!(argv[argv.len() - 2], "notes.txt");
+    assert_eq!(argv[argv.len() - 1], "p:/tmp/notes.txt");
+    assert!(!argv.contains(&"-c".to_string()));
+}
+
+#[tokio::test]
+async fn transfer_upload_blocked_in_readonly() {
+    let (mut app, _rx) = test_app();
+    app.switch_kind("pods");
+    apply(
+        &mut app,
+        json!({"apiVersion": "v1", "kind": "Pod",
+               "metadata": {"name": "p", "namespace": "default"}}),
+    );
+    app.table_state.select(Some(0));
+    app.readonly = true;
+    // The menu itself opens — download doesn't mutate anything.
+    app.handle_key(press(KeyCode::Char('t'))).unwrap();
+    assert_eq!(app.mode, Mode::TransferMenu);
+    // Choosing "Upload to pod" is refused.
+    app.handle_key(press(KeyCode::Char('j'))).unwrap();
+    app.handle_key(press(KeyCode::Enter)).unwrap();
+    assert!(app.flash.contains("read-only"), "{}", app.flash);
+    assert_ne!(app.mode, Mode::Prompt);
+}
+
+#[tokio::test]
+async fn container_picker_transfer_pins_container() {
+    let (mut app, _rx) = test_app();
+    app.switch_kind("pods");
+    apply(
+        &mut app,
+        json!({"apiVersion": "v1", "kind": "Pod",
+               "metadata": {"name": "p", "namespace": "default"},
+               "spec": {"containers": [{"name": "app"}, {"name": "sidecar"}]}}),
+    );
+    app.table_state.select(Some(0));
+    let obj = app.selected_ref().unwrap().clone();
+    app.open_containers(&obj);
+    app.container_state.select(Some(1)); // "sidecar"
+    app.handle_key(press(KeyCode::Char('t'))).unwrap();
+    assert_eq!(app.mode, Mode::TransferMenu);
+    assert_eq!(
+        app.transfer_target,
+        Some(("default".into(), "p".into(), Some("sidecar".into())))
+    );
+}
+
+#[tokio::test]
 async fn paused_logs_do_not_trim_below_paused_cap() {
     let (mut app, _rx) = test_app();
     let cap = app.logs_cfg.buffer;

@@ -55,6 +55,15 @@ impl App {
                     self.launch_provider_container_logs(ns, name, c);
                 }
             }
+            // Transfer files to/from this container (`kubectl cp -c`).
+            KeyCode::Char('t') => {
+                if let Some(i) = self.container_state.selected()
+                    && let Some(c) = self.container_list.get(i).cloned()
+                    && let Some((ns, name)) = self.container_pod.clone()
+                {
+                    self.open_transfer_menu(ns, name, Some(c));
+                }
+            }
             // Debug an ephemeral container targeting this container's namespace
             // (`kubectl debug --target`). The picker's pod is the selected row,
             // so request_debug reads it back from the table selection.
@@ -103,6 +112,15 @@ impl App {
             }
             ConfirmAction::Exec { ns, name } => {
                 self.exec_into(ns, name, None);
+            }
+            ConfirmAction::Transfer {
+                ns,
+                pod,
+                container,
+                src,
+                dest,
+            } => {
+                self.start_transfer(ns, pod, container, true, src, dest);
             }
             ConfirmAction::Drain { targets } => {
                 self.do_drain_nodes(targets);
@@ -254,6 +272,52 @@ impl App {
                             self.flash_warn("no debug image given");
                         } else {
                             self.do_debug(ns, pod, target, input);
+                        }
+                    }
+                    // The transfer prompts chain: source path first, then the
+                    // destination (prefilled with the source's file name on
+                    // download, since it usually lands in the CWD as-is).
+                    Some(PromptKind::Transfer {
+                        ns,
+                        pod,
+                        container,
+                        upload,
+                        src: None,
+                    }) => {
+                        if input.is_empty() {
+                            self.flash_warn("no path given — transfer cancelled");
+                        } else {
+                            self.prompt_label = if upload {
+                                format!("Upload {input} to {pod} — remote path:")
+                            } else {
+                                format!("Download {pod}:{input} — local path:")
+                            };
+                            self.prompt_input = if upload {
+                                String::new()
+                            } else {
+                                input.rsplit('/').next().unwrap_or_default().to_string()
+                            };
+                            self.prompt_kind = Some(PromptKind::Transfer {
+                                ns,
+                                pod,
+                                container,
+                                upload,
+                                src: Some(input),
+                            });
+                            self.mode = Mode::Prompt;
+                        }
+                    }
+                    Some(PromptKind::Transfer {
+                        ns,
+                        pod,
+                        container,
+                        upload,
+                        src: Some(src),
+                    }) => {
+                        if input.is_empty() {
+                            self.flash_warn("no path given — transfer cancelled");
+                        } else {
+                            self.do_transfer(ns, pod, container, upload, src, input);
                         }
                     }
                     // Empty input = cancel, keep the current period.

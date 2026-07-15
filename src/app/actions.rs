@@ -1343,6 +1343,227 @@ impl App {
         );
     }
 
+    /// `t` on a pod row: open the file-transfer menu for the selected pod.
+    /// No container pin — `kubectl cp` targets the pod's default container;
+    /// the container picker's `t` transfers to/from a specific one.
+    pub(super) fn request_transfer(&mut self) {
+        let Some(obj) = self.selected_ref() else {
+            return;
+        };
+        let name = obj.metadata.name.clone().unwrap_or_default();
+        let ns = obj.metadata.namespace.clone().unwrap_or_default();
+        self.open_transfer_menu(ns, name, None);
+    }
+
+    /// Open the download/upload choice for `pod`. A menu rather than a prompt
+    /// straight away, so the direction is always an explicit, visible choice.
+    pub(super) fn open_transfer_menu(
+        &mut self,
+        ns: String,
+        pod: String,
+        container: Option<String>,
+    ) {
+        self.transfer_target = Some((ns, pod, container));
+        self.transfer_menu_state.select(Some(0));
+        self.mode = Mode::TransferMenu;
+    }
+
+    pub(super) fn key_transfer_menu(&mut self, key: KeyEvent) {
+        let len = TRANSFER_MENU_ITEMS.len();
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('q') => {
+                self.transfer_target = None;
+                self.mode = Mode::Table;
+            }
+            KeyCode::Char('j') | KeyCode::Down => {
+                list_step(&mut self.transfer_menu_state, len, true)
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                list_step(&mut self.transfer_menu_state, len, false)
+            }
+            KeyCode::Enter => {
+                let choice = self
+                    .transfer_menu_state
+                    .selected()
+                    .and_then(|i| TRANSFER_MENU_ITEMS.get(i))
+                    .copied();
+                self.mode = Mode::Table;
+                let Some((ns, pod, container)) = self.transfer_target.take() else {
+                    return;
+                };
+                match choice {
+                    Some("Download from pod") => self.prompt_transfer(ns, pod, container, false),
+                    // Upload writes into the container's filesystem — a
+                    // mutation, unlike download.
+                    Some("Upload to pod") if !self.deny_readonly() => {
+                        self.prompt_transfer(ns, pod, container, true);
+                    }
+                    _ => {} // "Cancel" or nothing selected — do nothing.
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// First of the two transfer prompts: the source path (remote for a
+    /// download, local for an upload). `key_prompt` chains into the
+    /// destination prompt with the answer.
+    pub(super) fn prompt_transfer(
+        &mut self,
+        ns: String,
+        pod: String,
+        container: Option<String>,
+        upload: bool,
+    ) {
+        let target = match &container {
+            Some(c) => format!("{pod}:{c}"),
+            None => pod.clone(),
+        };
+        self.prompt_label = if upload {
+            format!("Upload to {target} — local file:")
+        } else {
+            format!("Download from {target} — remote path:")
+        };
+        self.prompt_input.clear();
+        self.prompt_kind = Some(PromptKind::Transfer {
+            ns,
+            pod,
+            container,
+            upload,
+            src: None,
+        });
+        self.mode = Mode::Prompt;
+    }
+
+    /// Run the fully-specified transfer. Downloads start straight away; an
+    /// upload writes into the pod, so it passes through the `transfer`
+    /// guardrail first (no default confirmation, like shell).
+    pub(super) fn do_transfer(
+        &mut self,
+        ns: String,
+        pod: String,
+        container: Option<String>,
+        upload: bool,
+        src: String,
+        dest: String,
+    ) {
+        if !upload {
+            self.start_transfer(ns, pod, container, false, src, dest);
+            return;
+        }
+        let targets = [(pod.clone(), ns.clone())];
+        let Some(level) = self.guard("transfer", "pods", &targets, ConfirmLevel::None) else {
+            return;
+        };
+        let label = format!("Upload {src} to {pod}:{dest}?");
+        let hint = pod.clone();
+        self.begin_guarded(
+            ConfirmAction::Transfer {
+                ns,
+                pod,
+                container,
+                src,
+                dest,
+            },
+            label,
+            level,
+            hint,
+        );
+    }
+
+    /// The `kubectl cp` argv for a transfer, pinned to the active context.
+    pub(super) fn cp_argv(
+        &self,
+        ns: &str,
+        pod: &str,
+        container: Option<&str>,
+        upload: bool,
+        src: &str,
+        dest: &str,
+    ) -> Vec<String> {
+        let (from, to) = if upload {
+            (src.to_string(), format!("{pod}:{dest}"))
+        } else {
+            (format!("{pod}:{src}"), dest.to_string())
+        };
+        let mut argv = self.kubectl_base();
+        argv.extend(["cp".into(), "-n".into(), ns.to_string()]);
+        if let Some(c) = container {
+            argv.extend(["-c".into(), c.to_string()]);
+        }
+        argv.push(from);
+        argv.push(to);
+        argv
+    }
+
+    /// Run `kubectl cp` off-thread and flash the outcome. Not a foreground
+    /// `Suspend::Shell` — cp is non-interactive (and silent on success), and
+    /// a large copy would otherwise freeze the UI for its whole duration.
+    pub(super) fn start_transfer(
+        &mut self,
+        ns: String,
+        pod: String,
+        container: Option<String>,
+        upload: bool,
+        src: String,
+        dest: String,
+    ) {
+        let argv = self.cp_argv(&ns, &pod, container.as_deref(), upload, &src, &dest);
+        let from = argv[argv.len() - 2].clone();
+        let to = argv[argv.len() - 1].clone();
+        self.note_action(
+            if upload { "cp upload" } else { "cp download" },
+            format!("{pod} in {ns}"),
+        );
+        self.flash = format!("copying {from} → {to}…");
+        self.flash_err = false;
+        let tx = self.tx.clone();
+        let genr = self.generation;
+        tokio::spawn(async move {
+            let out = tokio::process::Command::new(&argv[0])
+                .args(&argv[1..])
+                .output()
+                .await;
+            let result = match out {
+                Ok(o) if o.status.success() => Ok(format!("copied {from} → {to}")),
+                Ok(o) => {
+                    let stderr = String::from_utf8_lossy(&o.stderr);
+                    // The actual cause (a tar/exec error) comes before
+                    // kubectl's generic "command terminated with exit code"
+                    // trailer — flash the last line that says something.
+                    let line = |skip_trailer: bool| {
+                        stderr
+                            .lines()
+                            .rev()
+                            .map(str::trim)
+                            .find(|l| {
+                                !l.is_empty()
+                                    && !(skip_trailer && l.starts_with("command terminated"))
+                            })
+                            .unwrap_or_default()
+                            .to_string()
+                    };
+                    let err = match line(true) {
+                        e if e.is_empty() => line(false),
+                        e => e,
+                    };
+                    Err(if err.is_empty() {
+                        format!("kubectl cp exited with {}", o.status)
+                    } else {
+                        err
+                    })
+                }
+                Err(e) => Err(format!("kubectl cp failed to start: {e}")),
+            };
+            let _ = tx
+                .send(Msg::TransferDone {
+                    generation: genr,
+                    result,
+                })
+                .await;
+        });
+    }
+
     /// Open the `t` action menu (Flux suspend/resume, CronJob
     /// trigger/suspend/resume) for the marked rows, or the current selection
     /// if none are marked. A menu, not a single-key toggle — suspending
