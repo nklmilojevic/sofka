@@ -682,6 +682,32 @@ async fn node_drain_key_opens_confirm_for_marked_nodes() {
 }
 
 #[tokio::test]
+async fn restart_key_opens_confirm() {
+    let (mut app, _rx) = test_app();
+    app.switch_kind("deployments");
+    apply(
+        &mut app,
+        json!({"apiVersion": "apps/v1", "kind": "Deployment",
+               "metadata": {"name": "web", "namespace": "default"}}),
+    );
+
+    app.handle_key(press(KeyCode::Char('r'))).unwrap();
+    assert_eq!(app.mode, Mode::Confirm);
+    assert_eq!(app.confirm_label, "Restart web in default?");
+    assert!(!app.confirm_allows_force_toggle());
+    assert!(matches!(
+        app.confirm_action,
+        Some(ConfirmAction::Restart { ref name, ref ns, .. })
+            if name == "web" && ns == "default"
+    ));
+
+    // Cancelling leaves the workload untouched.
+    app.handle_key(press(KeyCode::Char('n'))).unwrap();
+    assert_eq!(app.mode, Mode::Table);
+    assert!(app.confirm_action.is_none());
+}
+
+#[tokio::test]
 async fn esc_clears_marks_before_popping() {
     let (mut app, _rx) = test_app();
     app.switch_kind("pods");

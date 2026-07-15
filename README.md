@@ -192,7 +192,7 @@ Not a marketing number - these are specific, checkable design choices:
   it - the same answer `kubectl auth can-i` gives, without leaving the TUI.
 - **Declarative guardrails** (`[[guardrails]]`) - config-defined rules that
   match on context/namespace/resource/action globs to **deny** a destructive
-  action outright (`delete`/`force-delete`/`drain`/`shell`/`debug`/`node-debug`), force
+  action outright (`delete`/`force-delete`/`drain`/`restart`/`shell`/`debug`/`node-debug`), force
   **type-to-confirm** (resource name or `context/name`), or cap **bulk**
   operations - so "never delete in prod", "always confirm a prod shell", and
   "no more than one at once" are enforced, not remembered.
@@ -515,7 +515,7 @@ remember. Each rule matches on `contexts`, `namespaces`, `resources`, and
 the strictest of: `deny` (block outright), `confirmation` (type to confirm),
 and `max_bulk` (cap how many rows one action may touch). The gated `actions`
 are the destructive verbs sofka takes directly — `delete`, `force-delete`,
-`drain`, `shell` (exec), `debug`, and `node-debug`. The first matching rule
+`drain`, `restart`, `shell` (exec), `debug`, and `node-debug`. The first matching rule
 wins; `reason` is shown when it fires.
 
 ```toml

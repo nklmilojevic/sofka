@@ -666,8 +666,9 @@ pub fn workspace_warnings(workspaces: &[Workspace]) -> Vec<String> {
 
 /// A declarative safety policy: match dangerous actions by context, namespace,
 /// resource, and action, then require extra confirmation, deny them, or cap a
-/// bulk selection. Gates `delete`, `force-delete`, `drain`, `shell`, `debug`,
-/// and `node-debug` today. Empty match lists mean "any"; glob `*` supported.
+/// bulk selection. Gates `delete`, `force-delete`, `drain`, `restart`,
+/// `shell`, `debug`, and `node-debug` today. Empty match lists mean "any";
+/// glob `*` supported.
 ///
 /// ```toml
 /// [[guardrails]]
