@@ -97,6 +97,12 @@ pub enum Msg {
         title: String,
         lines: Vec<String>,
     },
+    /// Result of a background `kubectl cp` transfer (`t` on a pod): a
+    /// "copied …" summary, or kubectl's error.
+    TransferDone {
+        generation: u64,
+        result: Result<String, String>,
+    },
     /// Result of an off-thread log save.
     LogsSaved {
         generation: u64,

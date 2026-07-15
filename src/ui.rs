@@ -10,7 +10,7 @@ use ratatui::widgets::{
 };
 use unicode_width::UnicodeWidthChar;
 
-use crate::app::{App, Mode, SuggestKind};
+use crate::app::{App, Mode, SuggestKind, TRANSFER_MENU_ITEMS};
 use crate::{columns, theme};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -163,6 +163,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         Mode::Prompt => draw_prompt_popup(frame, app, chunks[1]),
         Mode::Command => draw_palette(frame, app, chunks[1]),
         Mode::FluxMenu => draw_flux_menu(frame, app, chunks[1]),
+        Mode::TransferMenu => draw_transfer_menu(frame, app, chunks[1]),
         Mode::Skins => draw_skins(frame, app, chunks[1]),
         Mode::Snapshots => draw_snapshots(frame, app, chunks[1]),
         _ => {}
@@ -396,7 +397,7 @@ fn header_hints(app: &App) -> Vec<Line<'static>> {
     let mut lines = match app.kind_plural.as_str() {
         "pods" => vec![
             hint_line(&[("⏎", "containers"), ("l", "logs"), ("p", "prev logs")]),
-            hint_line(&[("s", "shell"), ("a", "attach"), ("f", "port-fwd")]),
+            hint_line(&[("s", "shell"), ("t", "transfer"), ("f", "port-fwd")]),
             hint_line(&[("y", "yaml"), ("d", "describe"), ("E", "events")]),
             hint_line(&[("e", "edit"), ("o", "node"), ("J", "owner")]),
             hint_line(&[("X", "explain"), ("T", "timeline"), ("^d", "delete")]),
@@ -1787,7 +1788,7 @@ fn draw_help(frame: &mut Frame, app: &App, area: Rect) {
         ),
         bind(
             "t",
-            "flux: suspend/resume/reconcile menu (ks/hr/repos/buckets…) · cronjobs: trigger/suspend/resume",
+            "pods: file transfer (kubectl cp, in picker targets a container) · flux: suspend/resume/reconcile · cronjobs: trigger/suspend/resume",
         ),
         bind("C · U · D", "nodes: cordon · uncordon · drain"),
         bind("space", "mark/unmark row for bulk actions (esc clears)"),
@@ -2012,6 +2013,36 @@ fn draw_flux_menu(frame: &mut Frame, app: &mut App, area: Rect) {
     );
 }
 
+/// Pod file-transfer menu (`t` on a pod): download from or upload to the pod
+/// via `kubectl cp`, then two prompts for the source and destination paths.
+fn draw_transfer_menu(frame: &mut Frame, app: &mut App, area: Rect) {
+    let target = match &app.transfer_target {
+        Some((_, pod, Some(c))) => format!("{pod}:{c}"),
+        Some((_, pod, None)) => pod.clone(),
+        None => String::new(),
+    };
+    let items: Vec<ListItem> = TRANSFER_MENU_ITEMS
+        .iter()
+        .map(|label| {
+            let color = match *label {
+                "Download from pod" => theme::green(),
+                "Upload to pod" => theme::peach(),
+                _ => theme::overlay1(),
+            };
+            ListItem::new(Span::styled(*label, Style::default().fg(color)))
+        })
+        .collect();
+    render_popup_list(
+        frame,
+        area,
+        36,
+        24,
+        items,
+        Span::styled(format!(" Transfer: {target} "), theme::title()),
+        &mut app.transfer_menu_state,
+    );
+}
+
 /// Background port-forwards (`:pf`). A full-width view, not a popup — closing
 /// it (`esc`) does not stop the forwards; only `x`/`s` on a row does.
 fn draw_port_forwards(frame: &mut Frame, app: &mut App, area: Rect) {
@@ -2231,7 +2262,7 @@ fn draw_containers(frame: &mut Frame, app: &mut App, area: Rect) {
         format!(" · {}", app.container_qos)
     };
     let title = format!(" Containers{qos} ");
-    let footer = " ⏎ logs · p previous · s shell · d debug · L provider ";
+    let footer = " ⏎ logs · p previous · s shell · t transfer · d debug · L provider ";
 
     // Size the box to its contents: header + rows + borders, and wide enough
     // for the columns, the title, or the footer — whichever needs the most.
