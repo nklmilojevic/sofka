@@ -548,6 +548,8 @@ impl App {
     }
 
     /// Rollout-restart a workload by stamping the template annotation (k9s `r`).
+    /// Confirmed (y/n) before running, so an accidental keypress can't restart
+    /// a workload — and configurable via `restart` guardrails.
     pub(super) fn request_restart(&mut self) {
         if self.deny_readonly() {
             return;
@@ -560,6 +562,31 @@ impl App {
         };
         let name = obj.metadata.name.clone().unwrap_or_default();
         let ns = obj.metadata.namespace.clone().unwrap_or_default();
+        let plural = self.kind_plural.clone();
+        let Some(level) = self.guard(
+            "restart",
+            &plural,
+            &[(name.clone(), ns.clone())],
+            ConfirmLevel::Plain,
+        ) else {
+            return;
+        };
+        let label = format!("Restart {name} in {ns}?");
+        self.begin_guarded(
+            ConfirmAction::Restart {
+                kind,
+                name: name.clone(),
+                ns,
+            },
+            label,
+            level,
+            name,
+        );
+    }
+
+    /// Stamp the pod template's `restartedAt` annotation to trigger a rollout
+    /// restart. Runs once the [`request_restart`] confirmation is satisfied.
+    pub(super) fn do_restart(&mut self, kind: Kind, name: String, ns: String) {
         let now = k8s_openapi::jiff::Timestamp::now().to_string();
         self.note_action("restart", format!("{name} in {ns}"));
         self.flash = format!("restarting {name}…");
