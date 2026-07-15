@@ -2414,7 +2414,7 @@ dependencies = [
 
 [[package]]
 name = "sofka"
-version = "0.12.4"
+version = "0.13.0"
 dependencies = [
  "anyhow",
  "base64",
