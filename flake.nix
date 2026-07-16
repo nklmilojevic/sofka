@@ -29,21 +29,60 @@
             inherit system;
             overlays = [ overlay ];
           };
+          # On Linux, ship the fully-static musl build: the same binary works
+          # inside Nix and on any distro, so the release tarballs are just
+          # this package's output (one build per platform, no separate cargo
+          # matrix). macOS can't link static executables; its regular build
+          # links system libraries plus Nix's libiconv (via Rust std) — see
+          # `sofka-dist` below for the portable variant.
+          sofka = if pkgs.stdenv.hostPlatform.isLinux then pkgs.pkgsStatic.sofka else pkgs.sofka;
+          # The distributable binary for release tarballs. On Linux it's the
+          # static build unchanged. On macOS, rewrite the one Nix store
+          # reference (libiconv) to the copy every macOS ships in /usr/lib,
+          # then re-sign (install_name_tool invalidates the ad-hoc signature,
+          # which arm64 macOS refuses to run). Impure by Nix standards, so
+          # it's a separate output — flake consumers keep the pure `sofka`.
+          sofka-dist =
+            if pkgs.stdenv.hostPlatform.isLinux then
+              sofka
+            else
+              pkgs.runCommand "sofka-dist-${sofka.version}"
+                {
+                  nativeBuildInputs = with pkgs; [
+                    darwin.cctools
+                    darwin.sigtool
+                  ];
+                }
+                ''
+                  mkdir -p $out/bin
+                  cp ${sofka}/bin/sofka $out/bin/sofka
+                  chmod +w $out/bin/sofka
+                  old="$(otool -L $out/bin/sofka | awk '/\/nix\/store\/.*libiconv/ { print $1 }')"
+                  [ -n "$old" ] || { echo "no store libiconv reference found"; exit 1; }
+                  install_name_tool -change "$old" /usr/lib/libiconv.2.dylib $out/bin/sofka
+                  codesign -f -s - $out/bin/sofka
+                  chmod -w $out/bin/sofka
+                  # otool's first line is the binary's own (store) path — only
+                  # the dylib lines after it must be store-free.
+                  if otool -L $out/bin/sofka | tail -n +2 | grep -q /nix/store; then
+                    echo "binary still references /nix/store:"; otool -L $out/bin/sofka; exit 1
+                  fi
+                '';
         in
         {
           packages = {
-            default = pkgs.sofka;
-            sofka = pkgs.sofka;
+            default = sofka;
+            inherit sofka sofka-dist;
           };
 
           apps = {
             default = {
               type = "app";
-              program = "${pkgs.sofka}/bin/sofka";
+              program = "${sofka}/bin/sofka";
             };
             sofka = {
               type = "app";
-              program = "${pkgs.sofka}/bin/sofka";
+              program = "${sofka}/bin/sofka";
             };
           };
 

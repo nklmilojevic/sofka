@@ -37,9 +37,10 @@ jobs:
             exit 1
           fi
 
-  # Cross-platform release binaries, one native build per target — every
-  # target below is the runner's own host, so no cross-compilation toolchain
-  # is needed.
+  # One native Nix build per platform produces both the Cachix-cached store
+  # path for flake consumers and the release tarball — the same binary. On
+  # Linux the flake's package is fully static (musl), so it runs on any
+  # distro; the macOS builds link only system libraries.
   build:
     needs: validate
     strategy:
@@ -47,15 +48,16 @@ jobs:
       matrix:
         include:
           - os: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
+            target: x86_64-unknown-linux-musl
           - os: ubuntu-24.04-arm
-            target: aarch64-unknown-linux-gnu
+            target: aarch64-unknown-linux-musl
           - os: macos-latest
             target: aarch64-apple-darwin
           - os: macos-15-intel
             target: x86_64-apple-darwin
     runs-on: ${{ matrix.os }}
     env:
+      CACHIX_AUTH_TOKEN: ${{ secrets.CACHIX_AUTH_TOKEN }}
       RELEASE_TAG: ${{ github.event.release.tag_name }}
     steps:
       - name: Checkout release tag
@@ -64,25 +66,32 @@ jobs:
           ref: ${{ env.RELEASE_TAG }}
           persist-credentials: false
 
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
-        with:
-          targets: ${{ matrix.target }}
+      - name: Setup Nix
+        uses: ./.github/actions/setup-nix
 
-      - name: Cache cargo registry/build
-        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
-        with:
-          key: ${{ matrix.target }}
+      # CI runs no Nix job on ordinary changes, so a release is where flake
+      # or packaging breakage surfaces.
+      - name: Flake check
+        run: nix flake check --no-build
 
-      - name: Build
-        run: cargo build --release --locked --target ${{ matrix.target }}
+      # sofka-dist is the portable variant: the static musl build on Linux,
+      # and on macOS the regular build with its one Nix store reference
+      # (libiconv) rewritten to the system copy. Building it also builds
+      # (and Cachix-pushes) the plain `sofka` package it derives from.
+      - name: Build and cache
+        run: nix build .#sofka-dist --print-build-logs
+
+      - name: Smoke-test the built binary
+        run: ./result/bin/sofka --version
+
+      - name: Verify the Linux binary is static
+        if: runner.os == 'Linux'
+        run: file result/bin/sofka | grep -E 'statically linked|static-pie linked'
 
       - name: Package
         run: |
-          bin="target/${{ matrix.target }}/release/sofka"
-          strip "$bin"
           out="sofka-${RELEASE_TAG}-${{ matrix.target }}.tar.gz"
-          tar -czf "$out" -C "$(dirname "$bin")" sofka
+          tar -czf "$out" -C result/bin sofka
           echo "ASSET=$out" >> "$GITHUB_ENV"
 
       - name: Upload artifact
@@ -127,37 +136,3 @@ jobs:
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
         run: cargo publish --locked
-
-  # Warms the nkl-sofka Cachix cache for the tagged rev, so `nix build
-  # github:nklmilojevic/sofka?ref=vX.Y.Z` is instant for anyone consuming
-  # this tag afterward.
-  nix-cache:
-    needs: validate
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: ubuntu-latest
-          - os: ubuntu-24.04-arm
-          - os: macos-latest
-          - os: macos-15-intel
-    runs-on: ${{ matrix.os }}
-    env:
-      CACHIX_AUTH_TOKEN: ${{ secrets.CACHIX_AUTH_TOKEN }}
-    steps:
-      - name: Checkout release tag
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-        with:
-          ref: ${{ github.event.release.tag_name }}
-          persist-credentials: false
-
-      - name: Setup Nix
-        uses: ./.github/actions/setup-nix
-
-      # CI no longer runs any Nix job, so this is where flake/packaging
-      # breakage surfaces.
-      - name: Flake check
-        run: nix flake check --no-build
-
-      - name: Build and cache
-        run: nix build .#sofka --print-build-logs
