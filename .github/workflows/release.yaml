@@ -154,5 +154,10 @@ jobs:
       - name: Setup Nix
         uses: ./.github/actions/setup-nix
 
+      # CI no longer runs any Nix job, so this is where flake/packaging
+      # breakage surfaces.
+      - name: Flake check
+        run: nix flake check --no-build
+
       - name: Build and cache
         run: nix build .#sofka --print-build-logs
