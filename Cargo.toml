@@ -34,6 +34,8 @@ toml = "1.1.2"
 unicode-width = "0.2.2"
 
 [profile.release]
-lto = true
-codegen-units = 1
+# Thin LTO: within ~1-3% of fat LTO's runtime at a fraction of the build
+# time — this profile is built cold on every release (4 targets + 4 Nix
+# builds), so compile time matters more than the last percent.
+lto = "thin"
 strip = true

@@ -1,8 +1,9 @@
 name: CI
 
+# PRs only — pushes to main run no CI. The Nix packaging is exercised (and
+# Cachix warmed, for all four platforms) by the release workflow's nix-cache
+# job, so packaging breakage surfaces at tag time instead of on every merge.
 on:
-  push:
-    branches: [main]
   pull_request:
 
 permissions:
@@ -33,41 +34,3 @@ jobs:
 
       - name: Test
         run: cargo test
-
-  nix:
-    # The multi-platform Nix build is slow and expensive; skip it on pull
-    # requests (the `rust` job still runs fmt/clippy/test there) and run the
-    # full matrix only on pushes to main, after merge.
-    if: github.event_name == 'push'
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: ubuntu-latest
-            system: x86_64-linux
-          - os: ubuntu-24.04-arm
-            system: aarch64-linux
-          - os: macos-latest
-            system: aarch64-darwin
-          - os: macos-15-intel
-            system: x86_64-darwin
-    runs-on: ${{ matrix.os }}
-    env:
-      CACHIX_AUTH_TOKEN: ${{ secrets.CACHIX_AUTH_TOKEN }}
-    steps:
-      - name: Checkout
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-        with:
-          persist-credentials: false
-
-      - name: Setup Nix
-        uses: ./.github/actions/setup-nix
-
-      - name: Flake check
-        run: nix flake check --no-build
-
-      - name: Build sofka
-        run: nix build .#sofka --print-build-logs
-
-      - name: Smoke-test the built binary
-        run: ./result/bin/sofka --version
