@@ -232,21 +232,89 @@ pub fn row_key(obj: &DynamicObject) -> String {
 #[derive(Default)]
 pub struct Store {
     items: HashMap<String, DynamicObject>,
+    /// Fresh rows accumulating during a (re)list while `items` still shows the
+    /// previous set — a cached view snapshot or the pre-relist state. Swapped
+    /// in wholesale on `Synced`, so stale rows are replaced atomically instead
+    /// of the table blanking out while the initial list streams in.
+    pending: Option<HashMap<String, DynamicObject>>,
     pub synced: bool,
 }
 
 impl Store {
     pub fn clear(&mut self) {
         self.items.clear();
+        self.pending = None;
         self.synced = false;
     }
 
+    /// Replace the contents with a cached snapshot from a previous visit to
+    /// this view — shown (unsynced) until the new watch's initial list lands.
+    pub fn seed(&mut self, items: HashMap<String, DynamicObject>) {
+        self.items = items;
+        self.pending = None;
+        self.synced = false;
+    }
+
+    /// Move the items out (for stashing in the view cache), leaving the store
+    /// empty.
+    pub fn take_items(&mut self) -> HashMap<String, DynamicObject> {
+        self.pending = None;
+        self.synced = false;
+        std::mem::take(&mut self.items)
+    }
+
+    /// Handle a watch (re)list starting. With rows on screen (a seeded cache
+    /// snapshot, or an established watch relisting) the incoming list is
+    /// buffered so they stay visible until `finish_sync` swaps it in; an empty
+    /// store keeps the old behavior of applying rows as they stream in.
+    /// Returns whether the visible items were cleared.
+    pub fn begin_reset(&mut self) -> bool {
+        self.synced = false;
+        if self.items.is_empty() {
+            self.pending = None;
+            true
+        } else {
+            self.pending = Some(HashMap::new());
+            false
+        }
+    }
+
+    /// Mark the initial list complete, swapping in the buffered rows if a
+    /// reset was in progress. Returns whether a swap replaced the visible set.
+    pub fn finish_sync(&mut self) -> bool {
+        self.synced = true;
+        match self.pending.take() {
+            Some(fresh) => {
+                self.items = fresh;
+                true
+            }
+            None => false,
+        }
+    }
+
     pub fn apply(&mut self, key: String, obj: DynamicObject) {
-        self.items.insert(key, obj);
+        match &mut self.pending {
+            Some(pending) => pending.insert(key, obj),
+            None => self.items.insert(key, obj),
+        };
     }
 
     pub fn remove(&mut self, key: &str) {
-        self.items.remove(key);
+        match &mut self.pending {
+            Some(pending) => pending.remove(key),
+            None => self.items.remove(key),
+        };
+    }
+
+    /// The newest known version of `key`: the in-flight buffered one during a
+    /// reset, else the visible one. Used as the "previous version" for
+    /// timeline diffs, where [`Self::get`]'s stale visible copy would be wrong
+    /// if the same object came through the buffer twice.
+    pub fn latest(&self, key: &str) -> Option<&DynamicObject> {
+        self.pending
+            .as_ref()
+            .and_then(|p| p.get(key))
+            .or_else(|| self.items.get(key))
     }
 
     pub fn len(&self) -> usize {

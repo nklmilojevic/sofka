@@ -18,8 +18,10 @@ impl App {
             self.flash_warn("no fleet contexts — set [fleet] contexts = [\"ctx-a\", …]");
             return;
         }
-        // Leaving the table view: stop its watches (like the pulse dashboard).
+        // Leaving the table view: stop its watches (like the pulse dashboard),
+        // stashing its rows so returning to it renders instantly.
         self.bump_generation();
+        self.stash_view_snapshot();
         self.store.clear();
         self.invalidate_rows();
 

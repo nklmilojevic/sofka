@@ -252,11 +252,27 @@ impl App {
         for t in self.tasks.drain(..) {
             t.abort();
         }
+        // Stash the outgoing view's rows, then show the incoming view's
+        // cached snapshot (if it was visited recently) so navigation renders
+        // instantly — the fresh watch relists behind it and swaps in on sync.
+        self.stash_view_snapshot();
+        let watch_labels = join_selectors(&self.labels, &self.applied_filter_labels);
+        let watch_fields = join_selectors(&self.fields, &self.applied_filter_fields);
+        let key = ViewKey {
+            kind_plural: self.kind_plural.clone(),
+            namespace: self.namespace.clone(),
+            labels: watch_labels.clone(),
+            fields: watch_fields.clone(),
+        };
         self.store.clear();
+        if let Some(cached) = self.view_cache.get(&key) {
+            self.store.seed(cached.clone());
+        }
+        self.watch_key = Some(key);
         self.metrics.clear();
         self.container_metrics.clear();
         self.marked.clear();
-        self.invalidate_rows();
+        self.clear_rows_cache();
         if self.table_state.selected().is_none() {
             self.table_state.select(Some(0));
         }
@@ -266,8 +282,8 @@ impl App {
         let handle = self.cluster.spawn_watch(
             &kind,
             &self.namespace,
-            join_selectors(&self.labels, &self.applied_filter_labels),
-            join_selectors(&self.fields, &self.applied_filter_fields),
+            watch_labels,
+            watch_fields,
             self.generation,
             self.tx.clone(),
         );
@@ -282,6 +298,35 @@ impl App {
             self.last_rbac_ns = Some(self.namespace.clone());
             self.refresh_rbac();
         }
+    }
+
+    /// Stash the current store contents in the view cache under the running
+    /// watch's key, so navigating back to this view renders it instantly.
+    /// Only a fully-synced set is kept — a partial initial list would read as
+    /// "resources disappeared" when redisplayed later.
+    pub(super) fn stash_view_snapshot(&mut self) {
+        let Some(key) = self.watch_key.take() else {
+            return;
+        };
+        if !self.store.synced || self.store.len() == 0 {
+            return;
+        }
+        self.view_cache_order.retain(|k| *k != key);
+        self.view_cache_order.push_back(key.clone());
+        self.view_cache.insert(key, self.store.take_items());
+        while self.view_cache_order.len() > VIEW_CACHE_MAX {
+            if let Some(oldest) = self.view_cache_order.pop_front() {
+                self.view_cache.remove(&oldest);
+            }
+        }
+    }
+
+    /// Drop every cached view snapshot (context switch: another cluster's
+    /// resources, and possibly different RBAC, must never be redisplayed).
+    pub(super) fn clear_view_cache(&mut self) {
+        self.watch_key = None;
+        self.view_cache.clear();
+        self.view_cache_order.clear();
     }
 
     /// For a custom resource with neither curated columns nor a user view,
@@ -496,8 +541,12 @@ impl App {
     pub fn handle_msg(&mut self, msg: Msg) {
         match msg {
             Msg::Reset { generation } if generation == self.generation => {
-                self.store.clear();
-                self.clear_rows_cache();
+                // With rows on screen (cached snapshot or established watch)
+                // the store buffers the relist and keeps showing them; only a
+                // genuine clear invalidates what's rendered.
+                if self.store.begin_reset() {
+                    self.clear_rows_cache();
+                }
             }
             Msg::Applied {
                 generation,
@@ -507,7 +556,7 @@ impl App {
                 // Record state changes against the previous version before it's
                 // overwritten (session-local timeline).
                 self.timeline
-                    .observe(&self.kind_plural, &key, self.store.get(&key), &obj);
+                    .observe(&self.kind_plural, &key, self.store.latest(&key), &obj);
                 self.store.apply(key.clone(), *obj);
                 self.invalidate_row(&key);
             }
@@ -516,7 +565,11 @@ impl App {
                 self.store.remove(&key);
                 self.invalidate_row(&key);
             }
-            Msg::Synced { generation } if generation == self.generation => self.store.synced = true,
+            Msg::Synced { generation } if generation == self.generation => {
+                if self.store.finish_sync() {
+                    self.clear_rows_cache();
+                }
+            }
             Msg::Error { generation, error } if generation == self.generation => {
                 self.watch_errors = self.watch_errors.saturating_add(1);
                 self.last_error = Some(error.clone());

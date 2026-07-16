@@ -762,6 +762,23 @@ impl TableCellCache<'_> {
 /// Maximum root views kept in the `[`/`]` history.
 const HISTORY_MAX: usize = 50;
 
+/// Maximum view snapshots kept for instant redisplay when navigating back to
+/// a recently-watched view (least-recently-used beyond this).
+const VIEW_CACHE_MAX: usize = 8;
+
+/// Identity of a watch scope, used to key cached view snapshots. Two visits
+/// with the same key list exactly the same server-side set, so the previous
+/// rows are safe to show while the fresh watch syncs. `labels`/`fields` are
+/// the *merged* selectors the watch was started with (drill-down + `-l`/`-f`
+/// filter terms).
+#[derive(Clone, PartialEq, Eq, Hash)]
+struct ViewKey {
+    kind_plural: String,
+    namespace: String,
+    labels: Option<String>,
+    fields: Option<String>,
+}
+
 /// One root view for the `[`/`]` history: which kind was listed in which
 /// namespace. Drill-down state (selectors, filter, scope) is deliberately not
 /// kept — history replays root views; the breadcrumb stack handles drills.
@@ -800,6 +817,15 @@ pub struct App {
     pub tasks: Vec<JoinHandle<()>>,
     pub tx: Sender<Msg>,
     stack: Vec<Frame>,
+    /// Scope of the running watch, so its rows can be stashed under the right
+    /// key when the user navigates away.
+    watch_key: Option<ViewKey>,
+    /// Snapshots of recently-left views: shown instantly (marked syncing) when
+    /// the user navigates back, while the fresh watch relists in the
+    /// background. Bounded by [`VIEW_CACHE_MAX`]; cleared on context switch.
+    view_cache: HashMap<ViewKey, HashMap<String, DynamicObject>>,
+    /// LRU order for [`Self::view_cache`] (front = oldest).
+    view_cache_order: VecDeque<ViewKey>,
     /// Browser-style history of root views for `[`/`]`: every root switch
     /// (kind and/or namespace) is recorded; navigating with `[`/`]` moves the
     /// cursor without re-recording, and a fresh switch truncates the forward
@@ -1061,6 +1087,9 @@ impl App {
             tasks: Vec::new(),
             tx,
             stack: Vec::new(),
+            watch_key: None,
+            view_cache: HashMap::new(),
+            view_cache_order: VecDeque::new(),
             history: Vec::new(),
             history_pos: 0,
             mode: Mode::Table,
