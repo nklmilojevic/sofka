@@ -312,8 +312,11 @@ impl App {
         self.flash = format!("switching to {name}…");
         self.flash_err = false;
         // Stop the current context's watches and clear stale rows while we
-        // reconnect; the new watch starts when the connection lands.
+        // reconnect; the new watch starts when the connection lands. The rows
+        // are stashed first — if the switch fails we stay on this context,
+        // where they're still valid (a successful switch drops the cache).
         self.bump_generation();
+        self.stash_view_snapshot();
         self.store.clear();
         self.invalidate_rows();
         let tx = self.tx.clone();
@@ -367,6 +370,8 @@ impl App {
         self.metrics_provider = metrics_provider;
         // Printer-column fallbacks came from the old cluster's CRDs.
         self.crd_views.clear();
+        // Cached view snapshots hold the old cluster's resources.
+        self.clear_view_cache();
         // The timeline recorded the old cluster's objects.
         self.timeline.clear();
         self.skin_colors = resolved.config.skin.colors;

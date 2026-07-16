@@ -4966,3 +4966,152 @@ async fn logs_time_anchors_set_provider_lookback() {
         crate::providers::DEFAULT_LOOKBACK
     );
 }
+
+// ----- view cache (instant redisplay on navigation) -------------------------
+
+fn pod(name: &str) -> serde_json::Value {
+    json!({"apiVersion": "v1", "kind": "Pod",
+           "metadata": {"name": name, "namespace": "default"}})
+}
+
+/// Drive the current view through a full initial sync with the given pods.
+fn sync_view(app: &mut App, names: &[&str]) {
+    app.handle_msg(Msg::Reset {
+        generation: app.generation,
+    });
+    for n in names {
+        apply(app, pod(n));
+    }
+    app.handle_msg(Msg::Synced {
+        generation: app.generation,
+    });
+}
+
+#[tokio::test]
+async fn returning_to_a_view_shows_cached_rows_instantly() {
+    let (mut app, _rx) = test_app();
+    app.switch_kind("pods");
+    sync_view(&mut app, &["a", "b"]);
+
+    app.switch_kind("deployments");
+    assert_eq!(app.store.len(), 0, "no cache for a first visit");
+
+    app.switch_kind("pods");
+    assert_eq!(
+        app.store.len(),
+        2,
+        "cached rows shown before the watch syncs"
+    );
+    assert!(app.store.get("default/a").is_some());
+    assert!(
+        !app.store.synced,
+        "cached rows must be marked syncing, not live"
+    );
+}
+
+#[tokio::test]
+async fn relist_over_cached_rows_swaps_atomically_on_sync() {
+    let (mut app, _rx) = test_app();
+    app.switch_kind("pods");
+    sync_view(&mut app, &["a"]);
+    app.switch_kind("deployments");
+    app.switch_kind("pods"); // seeded with cached "a"
+
+    // The fresh watch relists: the stale row stays visible while the new
+    // set streams in, then the sync swaps it in wholesale.
+    app.handle_msg(Msg::Reset {
+        generation: app.generation,
+    });
+    apply(&mut app, pod("b"));
+    assert!(
+        app.store.get("default/a").is_some(),
+        "stale row still shown mid-relist"
+    );
+    assert!(
+        app.store.get("default/b").is_none(),
+        "incoming rows buffer until the sync"
+    );
+
+    app.handle_msg(Msg::Synced {
+        generation: app.generation,
+    });
+    assert!(app.store.synced);
+    assert!(
+        app.store.get("default/a").is_none(),
+        "stale row swapped out"
+    );
+    assert!(app.store.get("default/b").is_some());
+    assert_eq!(app.store.len(), 1);
+}
+
+#[tokio::test]
+async fn first_visit_still_streams_rows_progressively() {
+    let (mut app, _rx) = test_app();
+    app.switch_kind("pods");
+    app.handle_msg(Msg::Reset {
+        generation: app.generation,
+    });
+    apply(&mut app, pod("a"));
+    assert_eq!(
+        app.store.len(),
+        1,
+        "with nothing on screen, rows appear as they stream in"
+    );
+    assert!(!app.store.synced);
+}
+
+#[tokio::test]
+async fn unsynced_view_is_not_cached() {
+    let (mut app, _rx) = test_app();
+    app.switch_kind("pods");
+    app.handle_msg(Msg::Reset {
+        generation: app.generation,
+    });
+    apply(&mut app, pod("a")); // partial list, never synced
+
+    app.switch_kind("deployments");
+    app.switch_kind("pods");
+    assert_eq!(
+        app.store.len(),
+        0,
+        "a partial list must not be redisplayed as if complete"
+    );
+}
+
+#[tokio::test]
+async fn context_switch_drops_cached_views() {
+    let (mut app, _rx) = test_app();
+    app.switch_kind("pods");
+    sync_view(&mut app, &["a"]);
+    app.switch_kind("deployments");
+
+    app.apply_context_switch("prod".into(), Box::new(Cluster::fake()));
+    app.switch_kind("pods");
+    assert_eq!(
+        app.store.len(),
+        0,
+        "another cluster's rows must never be redisplayed"
+    );
+}
+
+#[tokio::test]
+async fn view_cache_evicts_least_recently_used() {
+    let (mut app, _rx) = test_app();
+    // Fill the cache beyond its cap with distinct (kind, namespace) views.
+    app.switch_kind("pods");
+    sync_view(&mut app, &["a"]);
+    for i in 0..VIEW_CACHE_MAX {
+        app.switch_kind_ns("pods", Some(&format!("ns{i}")));
+        sync_view(&mut app, &["x"]);
+    }
+    app.switch_kind_ns("pods", Some("default"));
+    assert_eq!(
+        app.store.len(),
+        0,
+        "the oldest snapshot is evicted once the cache is full"
+    );
+    // The most recent one is still cached.
+    sync_view(&mut app, &["y"]);
+    app.switch_kind_ns("pods", Some(&format!("ns{}", VIEW_CACHE_MAX - 1)));
+    assert_eq!(app.store.len(), 1);
+}
