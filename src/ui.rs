@@ -10,7 +10,7 @@ use ratatui::widgets::{
 };
 use unicode_width::UnicodeWidthChar;
 
-use crate::app::{App, Mode, SuggestKind, TRANSFER_MENU_ITEMS};
+use crate::app::{App, DEFAULT_SORT_LABEL, Mode, SuggestKind, TRANSFER_MENU_ITEMS};
 use crate::{columns, theme};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -157,6 +157,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     match app.mode {
         Mode::Namespaces => draw_namespaces(frame, app, chunks[1]),
         Mode::Contexts => draw_contexts(frame, app, chunks[1]),
+        Mode::SortPicker => draw_sort_picker(frame, app, chunks[1]),
         Mode::Containers => draw_containers(frame, app, chunks[1]),
         Mode::SetImage => draw_set_image(frame, app, chunks[1]),
         Mode::Confirm => draw_confirm(frame, app, chunks[1]),
@@ -1706,7 +1707,7 @@ fn draw_help(frame: &mut Frame, app: &App, area: Rect) {
         bind("o", "show node hosting the pod"),
         bind("esc", "go back / pop view / clear filter"),
         bind("j/k g/G", "move · top/bottom"),
-        bind("S · I", "sort by column (cycle) · invert direction"),
+        bind("S · I", "sort by column (fuzzy picker) · invert direction"),
         bind("w", "toggle wide columns (kubectl -o wide)"),
         bind(
             "ctrl-e",
@@ -1972,6 +1973,49 @@ fn draw_contexts(frame: &mut Frame, app: &mut App, area: Rect) {
         items,
         Span::styled(title, theme::title()),
         &mut app.ctx_state,
+    );
+}
+
+/// Sort-column picker (`S`): the default ordering pinned first, then the
+/// displayed columns in table order (so it doubles as a column reference).
+/// The active sort is marked with its direction arrow in the sorter color.
+fn draw_sort_picker(frame: &mut Frame, app: &mut App, area: Rect) {
+    let active = app.sort_column.and_then(|i| {
+        app.display_headers()
+            .get(i)
+            .cloned()
+            .map(|h| (h, app.sort_desc))
+    });
+    let items: Vec<ListItem> = app
+        .filtered_sort_entries()
+        .iter()
+        .map(|e| {
+            if e == DEFAULT_SORT_LABEL {
+                return ListItem::new(Span::styled(e.clone(), Style::default().fg(theme::teal())));
+            }
+            match &active {
+                Some((h, desc)) if h == e => ListItem::new(Span::styled(
+                    format!("{e}{}", if *desc { " ↓" } else { " ↑" }),
+                    Style::default().fg(theme::sorter()),
+                )),
+                _ => ListItem::new(Span::styled(e.clone(), Style::default().fg(theme::text()))),
+            }
+        })
+        .collect();
+    // Show the type-to-filter buffer in the title so it reads like an input.
+    let title = if app.sort_picker_filter.is_empty() {
+        " Sort by (⏎ again inverts) ".to_string()
+    } else {
+        format!(" Sort by · /{}_ ", app.sort_picker_filter)
+    };
+    render_popup_list(
+        frame,
+        area,
+        40,
+        60,
+        items,
+        Span::styled(title, theme::title()),
+        &mut app.sort_picker_state,
     );
 }
 

@@ -784,7 +784,7 @@ header) and switching away restores write mode.
 | `enter`                                       | drill down (workload/svc → pods, node → its pods, pod → containers, ns → re-scope, CRD → its resources)                               |
 | `esc`                                         | go back / pop the view stack / clear filter / clear marks                                                                             |
 | `j`/`k`, `↓`/`↑`, `g`/`G`                     | navigate                                                                                                                              |
-| `S` / `I`                                     | cycle sort column / invert sort direction                                                                                             |
+| `S` / `I`                                     | sort-column picker (fuzzy; ⏎ on the active column inverts) / invert sort direction                                                    |
 | `ctrl-e`                                      | compact mode: collapse the header + footer (for tiled/multiplexed panes)                                                              |
 | `space`                                       | mark/unmark row for bulk actions                                                                                                      |
 | `/`                                           | filter: fuzzy text · `!inverse` · `-l`/`-f` selectors (server-side on ⏎) · `status=X` `cpu>500m` `age<2h`                             |

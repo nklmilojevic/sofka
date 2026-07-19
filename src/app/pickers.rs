@@ -3,6 +3,10 @@ use super::*;
 /// How many recent namespaces to keep per context in the switcher.
 const MAX_RECENT_NAMESPACES: usize = 8;
 
+/// The sort picker's pinned first entry: clears the sort back to the default
+/// (namespace, name) ordering.
+pub const DEFAULT_SORT_LABEL: &str = "default (ns/name)";
+
 impl App {
     /// Open the namespace switcher immediately with a loading placeholder, then
     /// fetch the list off-thread (it arrives as `Msg::Namespaces`).
@@ -134,6 +138,129 @@ impl App {
         while dq.len() > MAX_RECENT_NAMESPACES {
             dq.pop_back();
         }
+    }
+
+    /// Open the sort-column picker (k9s cycles with `S`; sofka jumps straight
+    /// to a column instead, which scales to wide mode and custom views). The
+    /// cursor starts on the active sort so enter-without-typing re-selects it,
+    /// which toggles direction.
+    pub(super) fn open_sort_picker(&mut self) {
+        if self.display_headers().is_empty() {
+            self.flash_warn("no columns to sort by");
+            return;
+        }
+        self.sort_picker_filter.clear();
+        // Entry 0 is the pinned default ordering; columns follow in display
+        // order, so the active sort column sits at index + 1.
+        self.sort_picker_state
+            .select(Some(self.sort_column.map_or(0, |i| i + 1)));
+        self.mode = Mode::SortPicker;
+    }
+
+    /// Entries for the sort picker: the default ordering is always pinned
+    /// first; column headers are fuzzy-matched against the type-to-filter
+    /// buffer (see `filtered_namespaces` for the same pattern).
+    pub fn filtered_sort_entries(&self) -> Vec<String> {
+        let mut out = vec![DEFAULT_SORT_LABEL.to_string()];
+        let headers = self.display_headers();
+        if self.sort_picker_filter.is_empty() {
+            out.extend(headers);
+            return out;
+        }
+        let mut scored: Vec<(i64, String)> = headers
+            .into_iter()
+            .filter_map(|h| {
+                self.matcher
+                    .fuzzy_match(&h, &self.sort_picker_filter)
+                    .map(|s| (s, h))
+            })
+            .collect();
+        scored.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+        out.extend(scored.into_iter().map(|(_, h)| h));
+        out
+    }
+
+    pub(super) fn key_sort_picker(&mut self, key: KeyEvent) {
+        if edit_chord(&key, &mut self.sort_picker_filter) {
+            self.select_best_sort_match();
+            return;
+        }
+        let len = self.filtered_sort_entries().len();
+        match key.code {
+            KeyCode::Esc => {
+                // First esc clears the filter, second closes the picker.
+                if self.sort_picker_filter.is_empty() {
+                    self.mode = Mode::Table;
+                } else {
+                    self.sort_picker_filter.clear();
+                    self.select_best_sort_match();
+                }
+            }
+            KeyCode::Down => list_step(&mut self.sort_picker_state, len, true),
+            KeyCode::Up => list_step(&mut self.sort_picker_state, len, false),
+            KeyCode::Enter => {
+                if let Some(entry) = self
+                    .sort_picker_state
+                    .selected()
+                    .and_then(|i| self.filtered_sort_entries().get(i).cloned())
+                {
+                    self.apply_sort_choice(&entry);
+                }
+            }
+            KeyCode::Backspace => {
+                self.sort_picker_filter.pop();
+                self.select_best_sort_match();
+            }
+            KeyCode::Char(c) => {
+                self.sort_picker_filter.push(c);
+                self.select_best_sort_match();
+            }
+            _ => {}
+        }
+    }
+
+    /// Jump the sort-picker cursor to the best fuzzy match after the filter
+    /// buffer changes (the pinned default at index 0 should only hold the
+    /// cursor while browsing — see `select_best_namespace_match`).
+    fn select_best_sort_match(&mut self) {
+        let idx = if self.sort_picker_filter.is_empty() {
+            self.sort_column.map_or(0, |i| i + 1)
+        } else if self.filtered_sort_entries().len() > 1 {
+            1 // right after the pinned default — the top-scored column
+        } else {
+            0
+        };
+        self.sort_picker_state.select(Some(idx));
+    }
+
+    /// Sort by a picked entry: the default entry clears the sort, a new column
+    /// sorts ascending, and re-picking the active column toggles direction
+    /// (the spreadsheet idiom).
+    fn apply_sort_choice(&mut self, entry: &str) {
+        self.mode = Mode::Table;
+        self.sort_picker_filter.clear();
+        if entry == DEFAULT_SORT_LABEL {
+            self.reset_sort();
+            self.invalidate_rows();
+            self.flash = format!("sort by {DEFAULT_SORT_LABEL}");
+            self.flash_err = false;
+            return;
+        }
+        let Some(idx) = self.display_headers().iter().position(|h| h == entry) else {
+            return;
+        };
+        self.sort_desc = self.sort_column == Some(idx) && !self.sort_desc;
+        self.sort_column = Some(idx);
+        self.invalidate_rows();
+        self.flash = format!(
+            "sort by {entry} {}",
+            if self.sort_desc {
+                "↓ desc"
+            } else {
+                "↑ asc"
+            }
+        );
+        self.flash_err = false;
     }
 
     pub(super) fn key_namespaces(&mut self, key: KeyEvent) {

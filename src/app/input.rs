@@ -59,6 +59,7 @@ impl App {
             Mode::Help => self.key_help(key),
             Mode::Namespaces => self.key_namespaces(key),
             Mode::Contexts => self.key_contexts(key),
+            Mode::SortPicker => self.key_sort_picker(key),
             Mode::Containers => self.key_containers(key),
             Mode::SetImage => self.key_set_image(key),
             Mode::Confirm => self.key_confirm(key),
@@ -150,8 +151,8 @@ impl App {
             KeyCode::Char('C') => self.request_cordon(true),
             KeyCode::Char('U') => self.request_cordon(false),
             KeyCode::Char('D') => self.request_drain(),
-            // Sorting: S cycles the column, I inverts the direction.
-            KeyCode::Char('S') => self.cycle_sort(),
+            // Sorting: S opens the column picker, I inverts the direction.
+            KeyCode::Char('S') => self.open_sort_picker(),
             KeyCode::Char('I') => self.toggle_sort_dir(),
             // Wide mode: show wide-only columns (kubectl `-o wide`).
             KeyCode::Char('w') => self.toggle_wide(),

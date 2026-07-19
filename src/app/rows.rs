@@ -434,27 +434,6 @@ impl App {
         self.sort_desc = false;
     }
 
-    /// Cycle the sort column: none → first → … → last → none (k9s `S`).
-    pub(super) fn cycle_sort(&mut self) {
-        let n = self.display_headers().len();
-        if n == 0 {
-            return;
-        }
-        self.sort_column = match self.sort_column {
-            None => Some(0),
-            Some(i) if i + 1 < n => Some(i + 1),
-            Some(_) => None,
-        };
-        self.sort_desc = false;
-        self.invalidate_rows();
-        let label = match self.sort_column {
-            Some(i) => self.display_headers().get(i).cloned().unwrap_or_default(),
-            None => "default (ns/name)".to_string(),
-        };
-        self.flash = format!("sort by {label}");
-        self.flash_err = false;
-    }
-
     /// Toggle ascending/descending for the active sort column (k9s `I`).
     pub(super) fn toggle_sort_dir(&mut self) {
         let Some(i) = self.sort_column else {
