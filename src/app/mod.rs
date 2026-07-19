@@ -101,6 +101,8 @@ pub enum Mode {
     Help,
     Namespaces,
     Contexts,
+    /// Fuzzy sort-column picker (`S`).
+    SortPicker,
     Containers,
     SetImage,
     Confirm,
@@ -884,6 +886,9 @@ pub struct App {
     pub ctx_state: ListState,
     /// Type-to-filter buffer for the context switcher.
     pub ctx_filter: String,
+    pub sort_picker_state: ListState,
+    /// Type-to-filter buffer for the sort-column picker.
+    pub sort_picker_filter: String,
     /// All kubeconfig context names, cached once at startup for `:ctx <name>`
     /// palette completion (the switcher popup uses `ctx_list`).
     pub all_contexts: Vec<String>,
@@ -1122,6 +1127,8 @@ impl App {
             ctx_list: Vec::new(),
             ctx_state: ListState::default(),
             ctx_filter: String::new(),
+            sort_picker_state: ListState::default(),
+            sort_picker_filter: String::new(),
             all_contexts: Vec::new(),
             user_aliases: HashMap::new(),
             plugins: Vec::new(),
@@ -1261,6 +1268,7 @@ mod timeline;
 mod workspaces;
 
 use helpers::*;
+pub use pickers::DEFAULT_SORT_LABEL;
 
 #[cfg(test)]
 mod tests;

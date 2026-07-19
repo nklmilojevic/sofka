@@ -1448,6 +1448,72 @@ async fn sort_by_numeric_column_and_invert() {
 }
 
 #[tokio::test]
+async fn sort_picker_picks_toggles_and_clears() {
+    let (mut app, _rx) = test_app();
+    app.switch_kind("pods");
+
+    // `S` opens the picker: default entry pinned first and selected (no sort).
+    app.handle_key(press(KeyCode::Char('S'))).unwrap();
+    assert_eq!(app.mode, Mode::SortPicker);
+    assert_eq!(app.filtered_sort_entries()[0], DEFAULT_SORT_LABEL);
+    assert_eq!(app.sort_picker_state.selected(), Some(0));
+
+    // Type-to-filter fuzzy-matches columns; the cursor lands on the best
+    // match (right after the pinned default) and enter selects it, ascending.
+    for c in "rst".chars() {
+        app.handle_key(press(KeyCode::Char(c))).unwrap();
+    }
+    assert_eq!(app.filtered_sort_entries()[1], "RESTARTS");
+    assert_eq!(app.sort_picker_state.selected(), Some(1));
+    app.handle_key(press(KeyCode::Enter)).unwrap();
+    assert_eq!(app.mode, Mode::Table);
+    let restarts = app.display_headers().iter().position(|h| h == "RESTARTS");
+    assert!(restarts.is_some());
+    assert_eq!(app.sort_column, restarts);
+    assert!(!app.sort_desc);
+    assert!(app.flash.contains("RESTARTS") && app.flash.contains("asc"));
+
+    // Reopening lands on the active column; re-picking it inverts direction.
+    app.handle_key(press(KeyCode::Char('S'))).unwrap();
+    assert_eq!(app.sort_picker_state.selected(), restarts.map(|i| i + 1));
+    app.handle_key(press(KeyCode::Enter)).unwrap();
+    assert_eq!(app.sort_column, restarts);
+    assert!(app.sort_desc);
+
+    // Picking a different column resets to ascending.
+    app.handle_key(press(KeyCode::Char('S'))).unwrap();
+    app.sort_picker_state.select(Some(1)); // NAME (first column)
+    app.handle_key(press(KeyCode::Enter)).unwrap();
+    assert_eq!(app.sort_column, Some(0));
+    assert!(!app.sort_desc);
+
+    // The pinned default entry clears the sort.
+    app.handle_key(press(KeyCode::Char('S'))).unwrap();
+    app.sort_picker_state.select(Some(0));
+    app.handle_key(press(KeyCode::Enter)).unwrap();
+    assert_eq!(app.sort_column, None);
+    assert!(!app.sort_desc);
+}
+
+#[tokio::test]
+async fn sort_picker_esc_clears_filter_then_closes() {
+    let (mut app, _rx) = test_app();
+    app.switch_kind("pods");
+    app.handle_key(press(KeyCode::Char('S'))).unwrap();
+    app.handle_key(press(KeyCode::Char('x'))).unwrap();
+    assert_eq!(app.sort_picker_filter, "x");
+
+    // First esc clears the filter and stays open; second esc closes without
+    // touching the sort.
+    app.handle_key(press(KeyCode::Esc)).unwrap();
+    assert_eq!(app.mode, Mode::SortPicker);
+    assert!(app.sort_picker_filter.is_empty());
+    app.handle_key(press(KeyCode::Esc)).unwrap();
+    assert_eq!(app.mode, Mode::Table);
+    assert_eq!(app.sort_column, None);
+}
+
+#[tokio::test]
 async fn metrics_update_invalidates_metric_sorted_rows() {
     let (mut app, _rx) = test_app();
     app.switch_kind("pods");
