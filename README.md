@@ -1,7 +1,8 @@
 # sofka
 
-A Kubernetes TUI, reimagined in Rust - built on [`kube-rs`](https://kube.rs) and
-[`ratatui`](https://ratatui.rs), async-first from the ground up.
+sofka is a Kubernetes text user interface (TUI), written in Rust. It is built on
+[`kube-rs`](https://kube.rs) and [`ratatui`](https://ratatui.rs). It uses async
+operations for all tasks.
 
 ## Screenshots
 
@@ -13,270 +14,286 @@ A Kubernetes TUI, reimagined in Rust - built on [`kube-rs`](https://kube.rs) and
 
 <img src="docs/sophie.png" alt="Sophie, a Russian Blue, watching the screen with visible suspicion" align="right" width="220">
 
-That's Sophie. She sits behind the monitor and watches it - not occasionally,
-_constantly_, with the specific narrowed-eye expression of someone who has
-noticed a pod in `CrashLoopBackOff` and is judging you for it. She doesn't
-miss a state change. She doesn't get distracted. She is, functionally, a
-cluster watchman who happens to be a cat.
+That is Sophie. Sophie is a Russian Blue cat. She sits behind the monitor and
+watches the screen. She watches it constantly, not sometimes. She has the
+narrow-eyed look of someone who has seen a pod in `CrashLoopBackOff`. She sees
+each state change. She does not get distracted. She is, in effect, a cluster
+watchman that is a cat.
 
-`sofka` is the Serbian diminutive of Sophia - "wisdom," fittingly, since
-watching things closely and knowing when something's wrong is more or less
-the whole job description of both a good cluster TUI and a good cat.
+`sofka` is the Serbian short form of Sophia. Sophia means "wisdom". A good
+cluster TUI and a good cat both watch things closely. Both know when something
+is wrong.
 
-This is a from-scratch reimagining of [k9s](https://github.com/derailed/k9s)
-(originally ~51k lines of Go), not a line-for-line port. It keeps the spirit -
-a fast, keyboard-driven cluster navigator - but rethinks the architecture
-around a single generic object pipeline instead of one hand-written renderer
-per resource kind.
+sofka is a new version of [k9s](https://github.com/derailed/k9s) (originally
+approximately 51,000 lines of Go). sofka is not a line-by-line copy. It keeps
+the same purpose: a fast cluster navigator that you control with the keyboard.
+But it uses a different architecture. It uses one generic object pipeline
+instead of one renderer for each resource kind.
 
 ## How it differs from k9s
 
-- **One generic render pipeline, not one file per kind.** k9s ships a
-  dedicated Go file (struct + `ColorerFunc`) per resource type it knows about.
-  sofka has one `DynamicObject → cells` function with curated columns for the
-  common kinds and a NAME/AGE fallback for everything else - so a CRD nobody's
-  written a renderer for still lists, sorts, and filters correctly on day one.
-- **Flux CD is a first-class citizen, not a plugin.** `t` opens a
-  Suspend/Resume/Reconcile-now menu for Kustomizations, HelmReleases,
+- **One generic render pipeline, not one file for each kind.** k9s has one Go
+  file (a struct and a `ColorerFunc`) for each resource type that it knows.
+  sofka has one function that changes a `DynamicObject` into cells. It has
+  selected columns for the common kinds and a NAME/AGE fallback for all other
+  kinds. So a CRD that has no renderer still lists, sorts, and filters correctly
+  immediately.
+- **Flux CD has built-in support, not a plugin.** Press `t` to open a
+  Suspend/Resume/Reconcile-now menu. It works for Kustomizations, HelmReleases,
   git/helm/oci repositories, buckets, image automation, and notification
-  alerts/receivers - patching `spec.suspend` and the
-  `reconcile.fluxcd.io/requestedAt` annotation directly via the k8s API. No
-  `flux` binary required, and it composes with bulk multiselect.
-- **Port-forwards run in the background.** Starting one doesn't freeze the
-  TUI for its whole lifetime; `:pf` lists active forwards and stops them
-  individually while others keep running. They're killed automatically on
-  quit rather than left orphaned.
-- **Bulk actions via multiselect.** `space` marks rows for delete, kill, or
-  Flux suspend/resume/reconcile across many resources at once - not
-  one-row-at-a-time.
-- **CRD rows drill into their custom resources**, not their YAML - `enter` on
-  a CustomResourceDefinition resolves its served version and lists the actual
-  objects.
-- **Skins, not a single fixed palette.** Built-in Catppuccin, Gruvbox,
+  alerts and receivers. sofka changes `spec.suspend` and the
+  `reconcile.fluxcd.io/requestedAt` annotation directly with the Kubernetes API.
+  You do not need the `flux` binary. This function also works with bulk
+  multiselect.
+- **Port-forwards run in the background.** A new port-forward does not stop the
+  TUI for its whole lifetime. Type `:pf` to list the active forwards and stop
+  each one while the others continue. sofka stops all forwards automatically on
+  quit and does not leave them orphaned.
+- **Bulk actions with multiselect.** Press `space` to mark rows for delete,
+  kill, or Flux suspend/resume/reconcile across many resources at the same time,
+  not one row at a time.
+- **CRD rows drill into their custom resources**, not their YAML. Press `enter`
+  on a CustomResourceDefinition. sofka finds its served version and lists the
+  actual objects.
+- **Skins, not one fixed palette.** sofka has built-in Catppuccin, Gruvbox,
   Solarized, Nord, Dracula, Tokyo Night, One Dark, Rosé Pine, and Monokai
-  palettes selectable in config, with per-swatch hex overrides. Auto-detects
-  a light or dark terminal background when no skin is configured. Every
-  semantic color (row status, severity badges, headers, borders) is derived
-  from the active palette, so a skin change is consistent everywhere at once.
-  Opt into `background = true` to paint the skin's own background instead of
-  the terminal's — pair it with a light per-context skin to make prod glow.
-- **A combined row colorer.** Whole-row status tinting like k9s (healthy
-  rows, errors, pending, completed all read as one color), _plus_ a
-  distinct STATUS badge and outlier coloring on RESTARTS/CPU/MEM so a
-  crash-looping or resource-hungry pod still pops out of an otherwise
-  uniform row. The RESTARTS/CPU/MEM (and container request/limit) warning
-  and critical thresholds are **configurable** per resource and per context.
-- **It explains _why_ something is broken.** `X` opens a deterministic,
-  evidence-backed incident view for the selection: rollout state, degraded
-  conditions, the blocking pods and their container failure reasons
-  (ImagePullBackOff, CrashLoopBackOff, OOMKilled, unschedulable, failing
-  probes), and recent Warning events — no AI, no external service. `⏎`/`E`/`l`
-  jump straight from a finding to the offending pod, its events, or its logs.
-- **A session-local timeline.** `T` shows the state changes sofka has
-  observed for an object while watching — generation bumps, replica/readiness
-  shifts, pod phase/restart/waiting-reason changes, condition transitions —
-  as a causal, timestamped log, derived from the watch stream with nothing
-  stored on disk.
+  palettes. You select one in the config file, with a hex override for each
+  swatch. If you configure no skin, sofka detects a light or dark terminal
+  background automatically. sofka calculates every semantic color (row status,
+  severity badges, headers, and borders) from the active palette. So one skin
+  change is consistent everywhere at the same time. Set `background = true` to
+  fill the view with the skin background instead of the terminal background.
+  Use a light per-context skin to make production easy to identify.
+- **A combined row colorer.** sofka tints the whole row by status, like k9s
+  (healthy rows, errors, pending, and completed each read as one color). It
+  also shows a separate STATUS badge and colors unusual values in the
+  RESTARTS, CPU, and MEM columns. So a pod that crash-loops or uses too many
+  resources is easy to see in an otherwise uniform row. The warning and
+  critical thresholds for RESTARTS, CPU, MEM (and container request/limit) are
+  **configurable** for each resource and each context.
+- **It explains _why_ something is broken.** Press `X` to open a deterministic
+  incident view for the selection that uses evidence: the rollout state, the
+  degraded conditions, the blocking pods and their container failure reasons
+  (ImagePullBackOff, CrashLoopBackOff, OOMKilled, unschedulable pods, failed
+  probes), and recent Warning events. It uses no AI and no external service.
+  Press `⏎`, `E`, or `l` to go from a finding to the pod, its events, or its
+  logs.
+- **A session-local timeline.** Press `T` to see the state changes that sofka
+  saw for an object during the watch — generation increases, replica and
+  readiness changes, pod phase, restart, and waiting-reason changes, and
+  condition changes — as a timestamped log. sofka calculates it from the watch
+  stream and stores nothing on disk.
 
-## Why it's faster
+## Why it is faster
 
-Not a marketing number - these are specific, checkable design choices:
+These are specific design choices that you can check. They are not marketing
+numbers.
 
-- **No GC.** Rust's ownership model means zero garbage-collector pauses.
-  Watching thousands of pods/CRs across a large cluster grows the in-memory
-  store, but redraw latency doesn't get jittery as that store grows the way a
-  GC'd runtime's can under sustained allocation pressure.
-- **Batched redraws.** The event loop drains every pending watch message
-  before triggering one redraw (`while let Ok(m) = rx.try_recv()`). A rollout
-  touching 50 pods costs one render pass, not fifty.
-- **Cached row computation.** Sorting and fuzzy-filtering the visible rows
-  only reruns when the underlying data or the filter text actually changed (a
-  dirty-flag-guarded cache), not on every frame or every keystroke against the
+- **No garbage collector.** The Rust ownership model has no garbage-collector
+  pauses. When you watch thousands of pods or custom resources across a large
+  cluster, the in-memory store gets larger. But the redraw latency stays
+  smooth. A runtime with a garbage collector can get unsteady under constant
+  allocation load.
+- **Batched redraws.** The event loop reads every pending watch message before
+  it triggers one redraw (`while let Ok(m) = rx.try_recv()`). A rollout that
+  touches 50 pods costs one render pass, not fifty.
+- **Cached row computation.** sofka sorts and fuzzy-filters the visible rows
+  again only when the data or the filter text changes. A dirty flag guards the
+  cache. sofka does not recompute on every frame or every keystroke across the
   full object set.
-- **No subprocess overhead for the hot paths.** Delete, scale, suspend/
-  resume/reconcile, and CRD drill-down are direct kube API calls (JSON
-  merge-patches over the existing client), not a `kubectl`/`flux` process
-  fork+exec per action.
-- **Generation-tagged streams.** Switching views doesn't wait for an old
-  watcher to tear down - stale messages are dropped by generation tag the
-  instant a newer watch takes over, so navigation never stalls behind a
-  slow-to-cancel stream.
+- **No subprocess overhead on the hot paths.** Delete, scale,
+  suspend/resume/reconcile, and CRD drill-down are direct kube API calls (JSON
+  merge-patches over the existing client). They do not fork and run a
+  `kubectl` or `flux` process for each action.
+- **Generation-tagged streams.** When you change views, sofka does not wait for
+  the old watcher to tear down. A generation tag identifies stale messages, and
+  sofka drops them the instant a newer watch takes over. So navigation never
+  stalls behind a slow stream.
 
 ## Features
 
-- **Connect** to the current kubeconfig context, including exec credential
-  plugins (e.g. GKE).
+- **Connect** to the current kubeconfig context. This includes exec credential
+  plugins (for example, GKE).
 - **API discovery** of every resource type on the cluster, with k9s-style
-  short aliases (`po`, `dp`, `svc`, `no`, `cm`, `sts`, `ds`, `ks`, `hr`, …) and
-  correct precedence (core `pods` beats `pods.metrics.k8s.io`).
-- **Live watch** of any kind via `kube::runtime::watcher`, streamed into an
+  short aliases (`po`, `dp`, `svc`, `no`, `cm`, `sts`, `ds`, `ks`, `hr`, and
+  more) and correct precedence (the core `pods` wins over `pods.metrics.k8s.io`).
+- **Live watch** of any kind through `kube::runtime::watcher`, streamed into an
   in-memory store.
-- **Curated columns** for common kinds (pods, deployments, replicasets,
+- **Selected columns** for common kinds (pods, deployments, replicasets,
   statefulsets, daemonsets, services, nodes, namespaces, configmaps, secrets,
-  jobs, cronjobs, PVC/PV, ingresses, endpoints, CustomResourceDefinitions)
-  with a NAME/AGE fallback for everything else.
-- **Custom views** - user-defined columns for any resource in config
-  (`[views]`), extracted via JSON Pointer with typed sorting (quantities,
-  numbers, timestamps sort by value). Unknown custom resources automatically
-  pick up their CRD's `additionalPrinterColumns`. `w` toggles wide-only
-  columns (kubectl `-o wide`).
-- **Live CPU/MEM columns** for pods and nodes from the metrics API, with
-  outlier coloring. The pod container picker also shows per-container CPU and
-  memory, each container's usage as a percentage of its request and limit
-  (`-` marks an unset request/limit), and the pod's QoS class; all of it
-  degrades gracefully when metrics-server is absent.
-- **Configurable thresholds** (`[thresholds]`) — the warning/critical cutoffs
-  for RESTARTS, CPU, memory, and container request/limit utilization coloring,
-  with global defaults plus per-resource and per-context overrides.
-- **Explain-unhealthy view** (`X` / `:explain`) — a deterministic,
-  evidence-backed explanation of why the selected object is unhealthy
-  (rollout state, degraded conditions, blocking pods and their container
-  failure reasons, recent Warning events), with `⏎`/`E`/`l` to jump to the
-  resource, its events, or its logs.
-- **Session-local timeline** (`T` / `:timeline`) — a per-object, timestamped
-  log of the state changes sofka has observed while watching (generation
-  bumps, readiness shifts, phase/restart/condition changes), bounded and
-  kept only in memory.
-- **Drill-down navigation** with a breadcrumb stack: workload/service →
-  pods, node → its pods, pod → containers, namespace → re-scope, CRD → its
-  custom resources. `esc` pops back.
-- **Command palette** (`:`) - fuzzy over the full resource catalog, built-in
-  commands (`ctx`, `pulse`, `xray`, `explain`, `timeline`, `gitops`, `can-i`,
-  `journal`, `diff`, `events`, `pf`), and saved bookmarks/workspaces together,
-  plus
-  row **filtering** (`/`) with matched-character highlighting: fuzzy text,
-  `!text` inverse match, `-l`/`-f` label & field selectors (evaluated by the
-  API server on ⏎), and typed column comparisons (`status=CrashLoopBackOff`,
-  `cpu>500m`, `memory>1Gi`, `restarts>=5`, `age<2h`) — space-separated terms
-  AND together.
+  jobs, cronjobs, PVC/PV, ingresses, endpoints, CustomResourceDefinitions),
+  with a NAME/AGE fallback for all other kinds.
+- **Custom views** — you define columns for any resource in the config file
+  (`[views]`). sofka extracts each column with a JSON Pointer and sorts by type
+  (quantities, numbers, and timestamps sort by value). An unknown custom
+  resource uses its CRD `additionalPrinterColumns` automatically. Press `w` to
+  show or hide the wide-only columns (kubectl `-o wide`).
+- **Live CPU and MEM columns** for pods and nodes from the metrics API, with
+  color for unusual values. The pod container picker also shows CPU and memory
+  for each container, each container usage as a percent of its request and its
+  limit (`-` marks an unset request or limit), and the pod QoS class. All of it
+  works correctly when metrics-server is not present.
+- **Configurable thresholds** (`[thresholds]`) — the warning and critical
+  values for RESTARTS, CPU, memory, and container request/limit color. There
+  are global defaults, plus per-resource and per-context overrides.
+- **Explain-unhealthy view** (`X` / `:explain`) — a deterministic explanation,
+  with evidence, of why the selected object is unhealthy (the rollout state,
+  degraded conditions, blocking pods and their container failure reasons, and
+  recent Warning events). Press `⏎`, `E`, or `l` to go to the resource, its
+  events, or its logs.
+- **Session-local timeline** (`T` / `:timeline`) — a per-object timestamped log
+  of the state changes that sofka saw during the watch (generation increases,
+  readiness changes, and phase, restart, and condition changes). It has a
+  maximum size and stays only in memory.
+- **Drill-down navigation** with a breadcrumb stack: workload/service → pods,
+  node → its pods, pod → containers, namespace → re-scope, CRD → its custom
+  resources. Press `esc` to go back.
+- **Command palette** (`:`) — fuzzy search over the full resource catalog, the
+  built-in commands (`ctx`, `pulse`, `xray`, `explain`, `timeline`, `gitops`,
+  `can-i`, `journal`, `diff`, `events`, `pf`), and your saved
+  bookmarks/workspaces together. It also does row **filtering** (`/`) with
+  matched-character highlighting: fuzzy text, `!text` inverse match, `-l`/`-f`
+  label and field selectors (the API server evaluates them on ⏎), and typed
+  column comparisons (`status=CrashLoopBackOff`, `cpu>500m`, `memory>1Gi`,
+  `restarts>=5`, `age<2h`). Terms with a space between them use AND.
 - **Multiselect** (`space`) for bulk delete/kill/suspend/resume/reconcile.
-- **Pulse dashboard** (`:pulse`) - cluster-health tiles, refreshed every 5s.
-- **Xray tree** (`:xray`) - hierarchical view from the current kind down
+- **Pulse dashboard** (`:pulse`) — cluster-health tiles. sofka refreshes them
+  every 5 seconds.
+- **Xray tree** (`:xray`) — a hierarchical view from the current kind down
   through owner references to pods and containers.
-- **Flux CD controls** (`t`) - suspend/resume/reconcile menu, native k8s API
-  patches.
-- **CronJob controls** (`t`) - trigger now (creates a Job from the
-  jobTemplate, like `kubectl create job --from`), suspend, resume.
+- **Flux CD controls** (`t`) — a suspend/resume/reconcile menu that uses native
+  Kubernetes API patches.
+- **CronJob controls** (`t`) — trigger now (creates a Job from the jobTemplate,
+  like `kubectl create job --from`), suspend, and resume.
 - **Background port-forwards** (`f`/`F` to start, `:pf` to manage).
-- **Plugins** - config-defined shell-out commands bound to keys, scoped per
-  resource. Keys are full **chords** (`ctrl-g`, `alt-x`, `shift-b`, `f5`);
-  commands run in the **terminal**, a captured **popup**, or the **background**
-  (with a timeout and bounded output); can require **confirmation** or be
-  flagged **dangerous**; declare themselves read-only (`mutating = false`) to
-  stay usable in `--readonly`; substitute rich placeholders as separate
+- **Plugins** — shell-out commands that you define in the config file and bind
+  to keys, scoped for each resource. Keys are full **chords** (`ctrl-g`,
+  `alt-x`, `shift-b`, `f5`). Commands run in the **terminal**, in a captured
+  **popup**, or in the **background** (with a timeout and a maximum output
+  size). A command can need **confirmation** or carry a **dangerous** flag. A
+  command can declare itself read-only (`mutating = false`) to stay usable in
+  `--readonly`. A command can substitute rich placeholders as separate
   arguments (`$NAME`/`$NAMESPACE`/`$CONTEXT`/`$CLUSTER`/`$RESOURCE`/`$GROUP`/
-  `$VERSION`/`$KIND`/`$FILTER`); and run over **every marked row** at once,
-  reporting partial failures.
-- **Bookmarks** (`[[bookmarks]]`) - saved navigation commands bound to a chord
-  and the command palette: jump to a resource, optionally in another
-  context/namespace, with a filter, sort, and view applied in one keystroke.
-- **Workspaces** (`[[workspaces]]`) - a named, task-oriented collection of
-  views; open it and cycle its views with `Tab`/`Shift-Tab` without leaving
-  the workspace.
-- **Diff** (`:diff`) - unified diff of the live object vs its
+  `$VERSION`/`$KIND`/`$FILTER`). A command can run over every marked row at the
+  same time and report partial failures.
+- **Bookmarks** (`[[bookmarks]]`) — saved navigation commands that you bind to
+  a chord and the command palette. One keystroke goes to a resource, and can
+  also change the context or namespace and apply a filter, a sort, and a view.
+- **Workspaces** (`[[workspaces]]`) — a named collection of views for one task.
+  Open it, then press `Tab` or `Shift-Tab` to cycle its views. You stay in the
+  workspace.
+- **Diff** (`:diff`) — a unified diff of the live object and its
   `last-applied-configuration`.
-- **Events** (`:events` / `E`) - live Kubernetes Events for the selected
-  object, filtered by UID when available.
-- **GitOps view** (`:gitops` / `:flux`) - for the selected object, the Flux
-  ownership and reconciliation chain: owning Kustomization/HelmRelease, its
-  source (GitRepository/OCIRepository/HelmRepository) and applied vs latest
-  revision, `dependsOn` edges, and ready status - each an evidence-backed
-  finding you can `⏎` to jump straight to.
-- **Managed-resource mutation warnings** - editing, deleting, scaling, or
-  otherwise mutating an object owned by Flux (or another controller) warns
-  first that your change will be reverted or the object recreated on the next
-  reconcile, so you fix the source instead of fighting the controller.
-- **Action-aware authorization** (`:can-i`) - a `SelfSubjectRulesReview`
+- **Events** (`:events` / `E`) — live Kubernetes Events for the selected
+  object. sofka filters by UID when the UID is available.
+- **GitOps view** (`:gitops` / `:flux`) — for the selected object, the Flux
+  ownership and reconciliation chain: the owning Kustomization/HelmRelease, its
+  source (GitRepository/OCIRepository/HelmRepository) and its applied revision
+  and latest revision, the `dependsOn` edges, and the ready status. Each item is
+  a finding with evidence that you can `⏎` to go to.
+- **Managed-resource mutation warnings** — sofka warns you first before you
+  edit, delete, scale, or otherwise change an object that Flux (or another
+  controller) owns. The warning says that the next reconcile will revert your
+  change or recreate the object. So you fix the source instead of fighting the
+  controller.
+- **Action-aware authorization** (`:can-i`) — a `SelfSubjectRulesReview`
   overview of what you can do in the current namespace, plus
-  `:can-i <verb> <resource> [ns]` to check a single action before you attempt
-  it - the same answer `kubectl auth can-i` gives, without leaving the TUI.
-- **Declarative guardrails** (`[[guardrails]]`) - config-defined rules that
-  match on context/namespace/resource/action globs to **deny** a destructive
-  action outright (`delete`/`force-delete`/`drain`/`restart`/`shell`/`debug`/`node-debug`), force
-  **type-to-confirm** (resource name or `context/name`), or cap **bulk**
-  operations - so "never delete in prod", "always confirm a prod shell", and
-  "no more than one at once" are enforced, not remembered.
-- **Action journal** (`:journal` / `:audit`) - a session-local, in-memory log
-  of every mutating action you've taken (what, target, context, when),
-  newest-first. Identifiers only - never secret input or decoded values - and
-  never written to disk.
-- **Ephemeral debug containers** (`:debug`) - attach a throwaway debug
-  container to the selected pod via `kubectl debug`, prompting for the image
-  (prefilled with the `[debug]` default). `d` in the container picker targets
-  a specific container's process namespace (`--target`). Gated by read-only
-  mode and the `debug` guardrail; recorded in the journal.
-- **Node debug pods** (`:debug` on a node) - launch a privileged diagnostic
-  pod on the selected node (`kubectl debug node/…`) that mounts the host
-  filesystem at `/host` and joins the host namespaces. sofka previews exactly
-  that access and requires confirmation before creating it, gates it behind
-  read-only mode and the `node-debug` guardrail, and tracks what it launched
-  so `:debug-clean` can remove the debugger pods afterwards.
-- **Diagnostic bundles** (`:bundle`) - assemble a redacted incident bundle for
-  the selected object into one Markdown document: its (redacted) YAML, owner,
-  the incident explanation, recent events, the session timeline, bounded recent
-  logs, and a metrics snapshot. Secret `data`/`stringData`, credential-looking
-  annotations, and `last-applied-configuration` are stripped unconditionally,
-  and a manifest spells out what was included and what was withheld. You review
-  the bundle in a preview, then `:bundle-save` writes it to a file.
-- **Snapshots** (`:snapshot`) - capture the current table view (its columns and
+  `:can-i <verb> <resource> [ns]` to check a single action before you try it.
+  This is the same answer that `kubectl auth can-i` gives, inside the TUI.
+- **Declarative guardrails** (`[[guardrails]]`) — rules in the config file that
+  match on context/namespace/resource/action globs. A rule can **deny** a
+  destructive action outright
+  (`delete`/`force-delete`/`drain`/`restart`/`shell`/`debug`/`node-debug`),
+  force **type-to-confirm** (the resource name or `context/name`), or cap
+  **bulk** operations. So rules like "never delete in prod", "always confirm a
+  prod shell", and "no more than one at a time" are enforced, not remembered.
+- **Action journal** (`:journal` / `:audit`) — a session-local log in memory of
+  every mutating action you did (the action, the target, the context, and the
+  time), newest first. It records identifiers only, never secret input or
+  decoded values, and never writes to disk.
+- **Ephemeral debug containers** (`:debug`) — attach a temporary debug
+  container to the selected pod with `kubectl debug`. sofka prompts for the
+  image (prefilled with the `[debug]` default). Press `d` in the container
+  picker to target the process namespace of one container (`--target`).
+  Read-only mode and the `debug` guardrail control this action. sofka records
+  it in the journal.
+- **Node debug pods** (`:debug` on a node) — start a privileged diagnostic pod
+  on the selected node (`kubectl debug node/…`) that mounts the host filesystem
+  at `/host` and joins the host namespaces. sofka shows a preview of exactly
+  that access and needs your confirmation before it creates the pod. Read-only
+  mode and the `node-debug` guardrail control this action. sofka records what it
+  started, so `:debug-clean` can remove the debugger pods later.
+- **Diagnostic bundles** (`:bundle`) — sofka assembles a redacted incident
+  bundle for the selected object into one Markdown document: its (redacted)
+  YAML, the owner, the incident explanation, recent events, the session
+  timeline, bounded recent logs, and a metrics snapshot. sofka always strips
+  Secret `data`/`stringData`, credential-like annotations, and
+  `last-applied-configuration`. A manifest lists what the bundle includes and
+  what it withholds. Review the bundle in a preview, then use `:bundle-save` to
+  write it to a file.
+- **Snapshots** (`:snapshot`) — capture the current table view (its columns and
   visible rows, with metadata) to a file as an aligned text table, JSON, or
-  YAML. `:snapshots` browses saved captures (newest first, with age), opens one
-  into a viewer marked stale, and deletes with `d`. Distinct from the one-frame
-  `--snapshot` CI mode — this is an interactive capture-and-review workflow.
-- **RBAC-aware palette** - hides resource kinds you can't `list`.
+  YAML. Use `:snapshots` to browse the saved captures (newest first, with age),
+  open one in a viewer that is marked stale, and delete one with `d`. This is
+  different from the one-frame `--snapshot` CI mode. This is an interactive
+  capture-and-review workflow.
+- **RBAC-aware palette** — sofka hides the resource kinds that you cannot
+  `list`.
 - **Namespace switcher** (`n`) with pinned **favourites** (`favorite_namespaces`,
-  ★) and per-context session **recents** (·) above the rest, and **context
+  ★) and per-context session **recents** (·) above the rest, and a **context
   switcher** (`:ctx`).
-- **YAML view** (`y`) and **describe** (`d`, via `kubectl`).
-- **Logs** (`l`) - per-container on a pod, aggregated across all matching
-  pods on a workload/service. In-logs **filter** (`/`): case-insensitive
-  substring (highlighted), `/regex/`, or `!` to invert; `z` clears the buffer,
-  `p` shows previous-container logs. Configurable initial tail, follow buffer,
-  and `since` lookback (`[logs]`). ANSI color codes from the source app are
-  parsed and mapped onto the active skin, not printed as literal escapes.
-- **VictoriaLogs integration** (`L` / `:vlogs`) - log history for the
-  selected pod, container, workload, service, or whole namespace from a
-  VictoriaLogs backend: a lookback query plus live tail, in the same logs
-  view. Zero-config: sofka autodiscovers the VictoriaLogs service in the
-  cluster and reaches it through the API-server proxy; or point
-  `[providers.logs]` at an external URL. Covers restarted and deleted pods —
-  the backend remembers what the kubelet no longer has.
-- **Right-sizing** (`:rightsize`) - when a Prometheus/VictoriaMetrics backend is
-  reachable, estimate right-sized requests for the selected workload from
-  historical usage: per container, current requests vs P50/P95/P99 CPU & memory
-  over a window, a suggested request (P95 + headroom), OOM/throttle evidence,
-  and a **patch preview** — never a mutation. The backend is **autodiscovered**
-  in-cluster (or set `[providers.metrics]`).
-- **Fleet dashboard** (`:fleet`) - an opt-in cross-context health summary:
+- **YAML view** (`y`) and **describe** (`d`, through `kubectl`).
+- **Logs** (`l`) — per-container on a pod, or aggregated across all matching
+  pods on a workload/service. In the logs view, `/` filters: a case-insensitive
+  substring (highlighted), a `/regex/`, or `!` to invert. Press `z` to clear
+  the buffer. Press `p` to show previous-container logs. The initial tail, the
+  follow buffer, and the `since` lookback are configurable (`[logs]`). sofka
+  parses ANSI color codes from the source app and maps them onto the active
+  skin. It does not print them as literal escapes.
+- **VictoriaLogs integration** (`L` / `:vlogs`) — log history for the selected
+  pod, container, workload, service, or whole namespace from a VictoriaLogs
+  backend: a lookback query and a live tail, in the same logs view. It needs no
+  config: sofka finds the VictoriaLogs service in the cluster automatically and
+  reaches it through the API-server proxy. Or point `[providers.logs]` at an
+  external URL. It covers restarted and deleted pods, because the backend keeps
+  what the kubelet no longer has.
+- **Right-sizing** (`:rightsize`) — when a Prometheus or VictoriaMetrics backend
+  is reachable, sofka estimates right-sized requests for the selected workload
+  from past usage: for each container, the current requests, the P50/P95/P99 CPU
+  and memory over a window, a suggested request (P95 plus headroom), OOM and
+  throttle evidence, and a **patch preview**. It never mutates. sofka finds the
+  backend in the cluster automatically (or set `[providers.metrics]`).
+- **Fleet dashboard** (`:fleet`) — an opt-in health summary across contexts:
   connectivity, Kubernetes version, node readiness, unhealthy pods, Flux
   failures, and the read-only policy for each configured context, side by side.
-  Only the contexts listed in `[fleet]` are queried, each gathered concurrently
-  with its own timeout so one slow cluster never blocks the rest; `⏎` switches
-  to a context, `r` refreshes.
-- **Compact mode** (`ctrl-e`) - collapse the seven-line header and the footer
-  into a single info line (kind · count · namespace · context, plus a flash and
-  the live indicator), so a tiled or multiplexed pane is almost all table.
-- **Skinnable** - built-in Catppuccin, Gruvbox, Solarized, Nord, Dracula,
-  Tokyo Night, One Dark, Rosé Pine, and Monokai palettes, auto-detected
-  dark/light default, plus per-swatch overrides in config.
+  sofka queries only the contexts in `[fleet]`, and gathers each one at the same
+  time with its own timeout, so one slow cluster never blocks the rest. Press
+  `⏎` to switch to a context. Press `r` to refresh.
+- **Compact mode** (`ctrl-e`) — collapse the seven-line header and the footer
+  into one info line (kind · count · namespace · context, with a flash and the
+  live indicator). So a tiled or multiplexed pane is almost all table.
+- **Skinnable** — built-in Catppuccin, Gruvbox, Solarized, Nord, Dracula,
+  Tokyo Night, One Dark, Rosé Pine, and Monokai palettes, an auto-detected
+  dark/light default, and per-swatch overrides in the config file.
 - **Config file** (TOML): aliases, default namespace/resource, favourite
   namespaces, plugins, bookmarks, workspaces, views, thresholds, log provider,
-  skin — with per-cluster/per-context overrides and live `:reload`.
-- **Runtime diagnostics** (`:info`, or `sofka --info`) - version/build, config
-  sources, live context/cluster/API server, discovery and Metrics API status,
-  watch error counts, and the state/snapshot/bundle directories. Prints only
-  identifiers and counts — never credentials, tokens, or Secret values.
+  and skin — with per-cluster and per-context overrides and live `:reload`.
+- **Runtime diagnostics** (`:info`, or `sofka --info`) — the version and build,
+  the config sources, the live context/cluster/API server, the discovery and
+  Metrics API status, the watch error counts, and the state/snapshot/bundle
+  directories. It prints only identifiers and counts, never credentials,
+  tokens, or Secret values.
 
 ## Installation
 
 ### Download from Github
 
-Prebuilt binaries for macOS (aarch64/x86_64) and Linux (aarch64/x86_64) are
-attached to each [GitHub release](https://github.com/nklmilojevic/sofka/releases).
+Each [GitHub release](https://github.com/nklmilojevic/sofka/releases) has
+prebuilt binaries for macOS (aarch64/x86_64) and Linux (aarch64/x86_64).
 
 ### Nix
 
-Nix users can run it directly without installing anything:
+Nix users can run sofka directly. You do not need to install anything:
 
 ```sh
 nix run github:nklmilojevic/sofka
@@ -288,21 +305,21 @@ nix run github:nklmilojevic/sofka
 cargo install sofka
 ```
 
-or build from source (see [Development](#development)).
+Or build from source (see [Development](#development)).
 
 ### macOS: "cannot be opened because the developer cannot be verified"
 
-The release binaries aren't signed/notarized yet, so if you download a
-tarball through a browser and extract it, Gatekeeper will refuse to run it -
-this is expected, not a broken build. Clear the quarantine flag once:
+The release binaries are not signed or notarized yet. So if you download a
+tarball in a browser and extract it, Gatekeeper refuses to run it. This is
+expected. It is not a broken build. Clear the quarantine flag one time:
 
 ```
 xattr -d com.apple.quarantine sofka
 ```
 
-(or right-click the binary in Finder → Open, and confirm through the dialog
-once). **Signing and notarization are planned for the next release**, at
-which point this step won't be necessary.
+(Or right-click the binary in Finder, select Open, and confirm in the dialog
+one time.) **Signing and notarization are planned for the next release.** Then
+this step is not necessary.
 
 ## Configuration
 
@@ -345,15 +362,15 @@ dangerous = true           # confirm (showing the command) before running
 # shell = true             # run via `sh -c` (args stay positional $1, $2, …)
 ```
 
-See [Plugins](#plugins) below for the full plugin surface (output modes,
-placeholders, bulk invocation over marked rows).
+See [Plugins](#plugins) below for all plugin options: output modes,
+placeholders, and bulk operation over marked rows.
 
 ### Custom views
 
-Define table columns for any resource — most usefully for custom resources
-that would otherwise fall back to NAME/AGE. Views are keyed by
-apiVersion/plural (`"cert-manager.io/v1/certificates"`, `"v1/pods"`),
-group/plural, bare plural, or lowercased kind; the most specific key wins.
+Define table columns for any resource. This is most useful for custom resources,
+because they use the NAME/AGE fallback. sofka keys views by apiVersion/plural
+(`"cert-manager.io/v1/certificates"`, `"v1/pods"`), group/plural, bare plural,
+or lowercase kind. The most specific key wins.
 
 ```toml
 [views."cert-manager.io/v1/certificates"]
@@ -376,29 +393,29 @@ path = "/spec/issuerRef/name"
 wide = true               # only shown in wide mode (`w`)
 ```
 
-`path` is a JSON Pointer (RFC 6901) into the object as served by the API —
-`/metadata/…`, `/spec/…`, `/status/…`, array indices like
-`/status/conditions/0/status`. Column `type` is `text` (default), `status`,
-`number`, `quantity` (`500m`, `1Gi`), or `time`; typed columns sort by value,
-not lexically. Optional `width` (fixed columns) and `align`
-(`left`/`center`/`right`) tune the layout. By default columns overlay the
-curated ones: a matching header replaces it in place, new columns land before
-AGE. Invalid entries are skipped with a warning shown in-app — they never
-take the TUI down.
+`path` is a JSON Pointer (RFC 6901) into the object as the API serves it:
+`/metadata/…`, `/spec/…`, `/status/…`, and array indices like
+`/status/conditions/0/status`. The column `type` is `text` (default), `status`,
+`number`, `quantity` (`500m`, `1Gi`), or `time`. Typed columns sort by value,
+not by text. The optional `width` (for fixed columns) and `align`
+(`left`/`center`/`right`) tune the layout. By default, columns overlay the
+selected ones: a header that matches replaces it in place, and new columns go
+before AGE. sofka skips invalid entries and shows a warning in the app. They
+never stop the TUI.
 
-Custom resources without an explicit view automatically use their CRD's
-`additionalPrinterColumns` (columns with `priority > 0` become wide-only),
-so most CRs get useful columns with zero configuration.
+A custom resource that has no explicit view uses its CRD
+`additionalPrinterColumns` automatically (columns with `priority > 0` become
+wide-only). So most custom resources get useful columns with no configuration.
 
 ### Thresholds
 
-The warning/critical cutoffs behind RESTARTS/CPU/MEM cell coloring (and the
-container picker's request/limit utilization) are configurable. Anything left
-unset keeps sofka's built-in defaults, so an empty config colors exactly as
-before. Global `[thresholds]` apply everywhere; `[thresholds.resources.<key>]`
-overrides them per resource (keyed like `[views]`), and — like every section —
-a per-cluster/per-context override file can retune them for one context.
-Thresholds also re-apply live on `:reload`.
+The warning and critical values behind the RESTARTS/CPU/MEM cell color (and the
+request/limit utilization in the container picker) are configurable. Any value
+that you do not set keeps the sofka default, so an empty config colors exactly
+as before. Global `[thresholds]` apply everywhere. `[thresholds.resources.<key>]`
+overrides them for each resource (keyed like `[views]`). Like every section, a
+per-cluster or per-context override file can retune them for one context.
+Thresholds also apply again live on `:reload`.
 
 ```toml
 [thresholds]
@@ -411,15 +428,15 @@ utilization = { warn = 75, critical = 90 }     # percent of request/limit
 restarts = { warn = 5, critical = 20 }
 ```
 
-Either bound of a band may be omitted to disable that level; `warn` is peach,
+You can omit either bound of a band to disable that level. `warn` is peach.
 `critical` is red.
 
 ### Plugins
 
-`[[plugins]]` bind a shell-out command to a key. `key` is a **chord**: a single
+`[[plugins]]` binds a shell-out command to a key. `key` is a **chord**: a single
 character (`"g"`), a modifier combination (`"ctrl-g"`, `"alt-x"`, `"shift-b"`),
-or a function/named key (`"f5"`, `"ctrl-f2"`). Built-in keys win over a plugin
-bound to the same chord.
+or a function or named key (`"f5"`, `"ctrl-f2"`). A built-in key wins over a
+plugin on the same chord.
 
 ```toml
 [[plugins]]
@@ -440,33 +457,34 @@ scopes = ["deployments"]
 dangerous = true          # confirm (showing the exact command) first
 ```
 
-- **Placeholders** are substituted as whole arguments (never spliced into a
-  shell string): `$NAME`, `$NAMESPACE`/`$NS`, `$CONTEXT`, `$CLUSTER`,
-  `$RESOURCE` (plural), `$GROUP`, `$VERSION`, `$KIND`, `$FILTER`.
-- **`output`**: `terminal` (default, interactive — suspends the TUI), `popup`
-  (captured off-thread into a scrollable view), or `background` (detached, a
-  notification flashes on completion). `popup`/`background` honour `timeout`
-  (`"30s"`, default) and bound their captured output.
-- **`mutating`** (default `true`): a mutating plugin is blocked in read-only
-  mode; set `false` to allow a known read-only one.
-- **`confirm`**/**`dangerous`**: prompt before running, showing the exact
-  executable and arguments; `dangerous` is flagged ⚠.
-- **`shell = true`**: opt into `sh -c`; placeholders are still passed as
-  positional parameters (`$1`, `$2`, …), never interpolated into the script.
-- **Bulk**: with rows marked (`space`), a `popup`/`background` plugin runs over
-  every marked row, reporting partial failures. (Interactive `terminal`
-  plugins can't compose over a set and refuse a marked run.)
+- **Placeholders** are substituted as whole arguments. sofka never splices them
+  into a shell string. They are `$NAME`, `$NAMESPACE`/`$NS`, `$CONTEXT`,
+  `$CLUSTER`, `$RESOURCE` (plural), `$GROUP`, `$VERSION`, `$KIND`, `$FILTER`.
+- **`output`**: `terminal` (default, interactive — it suspends the TUI), `popup`
+  (captured off-thread into a scrollable view), or `background` (detached — a
+  notification flashes when it completes). `popup` and `background` obey
+  `timeout` (`"30s"`, default) and bound the captured output.
+- **`mutating`** (default `true`): read-only mode blocks a mutating plugin. Set
+  it to `false` to allow a known read-only one.
+- **`confirm`**/**`dangerous`**: prompt before the command runs, and show the
+  exact executable and arguments. `dangerous` also shows ⚠.
+- **`shell = true`**: opt into `sh -c`. sofka still passes placeholders as
+  positional parameters (`$1`, `$2`, …). It never interpolates them into the
+  script.
+- **Bulk**: with rows marked (`space`), a `popup` or `background` plugin runs
+  over every marked row and reports partial failures. An interactive `terminal`
+  plugin cannot run over a set and refuses a marked run.
 
-Invalid values (bad chord, unknown `output`, malformed `timeout`) disable just
-that plugin / fall back to the default, with a warning shown in `:config`.
-Plugins appear in `?` help with their chord and scope.
+For an invalid value (a bad chord, an unknown `output`, or a malformed
+`timeout`), sofka disables just that plugin or uses the default, and shows a
+warning in `:config`. Plugins appear in `?` help with their chord and scope.
 
 ### Bookmarks
 
-`[[bookmarks]]` are saved navigation commands — jump to a resource, optionally
-in another context/namespace, with a filter, sort, and view applied in one
-keystroke. They're triggered by an optional key chord and always available in
-the command palette (`★`, ranked above resources).
+`[[bookmarks]]` are saved navigation commands. One keystroke goes to a resource,
+and can also change the context or namespace and apply a filter, a sort, and a
+view. An optional key chord triggers a bookmark. Bookmarks are always in the
+command palette (`★`, ranked above resources).
 
 ```toml
 [[bookmarks]]
@@ -482,10 +500,11 @@ view = "xray"                            # optional: xray | pulse
 
 ### Workspaces
 
-`[[workspaces]]` group several views into a named, task-oriented set (checkout
-ops, a cluster upgrade, cert renewal). Opening one (chord or palette, `▦`)
-switches its optional context once and lands on the first view; **`Tab`** /
-**`Shift-Tab`** cycle the rest without leaving the workspace.
+`[[workspaces]]` group several views into a named set for one task (checkout
+ops, a cluster upgrade, or cert renewal). Open one with a chord or the palette
+(`▦`). sofka changes its optional context one time and shows the first view.
+Press **`Tab`** or **`Shift-Tab`** to cycle the other views. You stay in the
+workspace.
 
 ```toml
 [[workspaces]]
@@ -508,15 +527,15 @@ namespace = "checkout"
 
 ### Guardrails
 
-`[[guardrails]]` turn "never delete in prod", "always confirm drains", and
-"no more than 5 at once" into enforced rules instead of things you have to
-remember. Each rule matches on `contexts`, `namespaces`, `resources`, and
-`actions` globs (all optional; omitted = matches everything), then applies
-the strictest of: `deny` (block outright), `confirmation` (type to confirm),
-and `max_bulk` (cap how many rows one action may touch). The gated `actions`
-are the destructive verbs sofka takes directly — `delete`, `force-delete`,
-`drain`, `restart`, `shell` (exec), `debug`, and `node-debug`. The first matching rule
-wins; `reason` is shown when it fires.
+`[[guardrails]]` make rules like "never delete in prod", "always confirm
+drains", and "no more than 5 at a time" into enforced rules. You do not have to
+remember them. Each rule matches on `contexts`, `namespaces`, `resources`, and
+`actions` globs (all optional; an omitted glob matches everything). Then it
+applies the strictest of these: `deny` (block the action), `confirmation` (type
+to confirm), and `max_bulk` (a maximum number of rows for one action). The
+gated `actions` are the destructive verbs that sofka does directly — `delete`,
+`force-delete`, `drain`, `restart`, `shell` (exec), `debug`, and `node-debug`.
+The first rule that matches wins. sofka shows the `reason` when a rule fires.
 
 ```toml
 [[guardrails]]
@@ -540,22 +559,22 @@ max_bulk = 1                     # no bulk deletes in kube-system
 
 ### Debug containers and pods
 
-`:debug` on a **pod** attaches a throwaway ephemeral debug container through
-`kubectl debug`, prompting for the image (prefilled with `image` below).
-Leaving `command` empty launches an interactive shell (bash if the image ships
-it, else sh), mirroring the pod shell. `d` in the container picker pins
-`--target=<container>` so the debug container shares that container's process
-namespace. The ephemeral container persists on the pod until it's recreated —
-Kubernetes can't remove it — so there's nothing for sofka to clean up.
+`:debug` on a **pod** attaches a temporary ephemeral debug container with
+`kubectl debug`. sofka prompts for the image (prefilled with `image` below). An
+empty `command` starts an interactive shell (bash if the image has it, or else
+sh), like the pod shell. Press `d` in the container picker to set
+`--target=<container>`, so the debug container shares the process namespace of
+that container. The ephemeral container stays on the pod until the pod is
+recreated. Kubernetes cannot remove it, so sofka has nothing to clean up.
 
-`:debug` on a **node** launches a privileged diagnostic pod on it
+`:debug` on a **node** starts a privileged diagnostic pod on it
 (`kubectl debug node/<node>`, image `node_image` in `node_namespace`, optional
-`node_profile`). Because that pod mounts the host filesystem at `/host` and
-joins the host PID/network/IPC namespaces, sofka previews exactly that access
-and makes you confirm before creating it. sofka tracks the node debuggers it
-launches this session; `:debug-clean` deletes them (matched by the
-`node-debugger-*` name and the node they run on). kubectl leaves the pod
-running after you exit, so clean up when you're done.
+`node_profile`). This pod mounts the host filesystem at `/host` and joins the
+host PID, network, and IPC namespaces. So sofka shows a preview of exactly that
+access and makes you confirm before it creates the pod. sofka records the node
+debuggers that it starts this session. `:debug-clean` deletes them (matched by
+the `node-debugger-*` name and the node). kubectl leaves the pod after you exit,
+so clean up when you finish.
 
 ```toml
 [debug]
@@ -566,23 +585,24 @@ node_namespace = "default"               # namespace the node debugger lands in
 node_profile = "sysadmin"                # kubectl debug --profile (optional)
 ```
 
-Both are disabled in read-only mode and gated by guardrails — the `debug`
-action for pods, `node-debug` for nodes.
+Read-only mode and guardrails disable both actions: the `debug` action for
+pods, and the `node-debug` action for nodes.
 
 ### Diagnostic bundles
 
 `:bundle` assembles a redacted incident bundle for the selected object — its
-YAML, owner, the incident explanation, recent events, the session timeline,
-bounded recent logs, and a metrics snapshot — into one Markdown document for
-handing off between application and platform teams. It's gathered off-thread
-and shown in a preview; `:bundle-save` then writes it to a temp file.
+YAML, the owner, the incident explanation, recent events, the session timeline,
+bounded recent logs, and a metrics snapshot — into one Markdown document. It
+helps you hand off an incident between application and platform teams. sofka
+gathers it off-thread and shows it in a preview. Then `:bundle-save` writes it
+to a temp file.
 
-Redaction is unconditional: Secret `data`/`stringData` values, any
-credential-looking annotation (keys containing `token`, `password`, `secret`,
-`apikey`, `credential`, …), and `last-applied-configuration` are replaced with
-a placeholder, `managedFields` is dropped, and env vars sourced from Secrets
-are flagged (their values are references, not literals). Every bundle carries a
-manifest of exactly what was included and what was withheld.
+sofka always redacts these items: Secret `data`/`stringData` values, any
+credential-like annotation (a key that contains `token`, `password`, `secret`,
+`apikey`, `credential`, and similar), and `last-applied-configuration`. It
+replaces them with a placeholder. It drops `managedFields`. It flags env vars
+that come from Secrets (their values are references, not literals). Every
+bundle has a manifest of exactly what it includes and what it withholds.
 
 ```toml
 [bundle]
@@ -593,17 +613,17 @@ max_pods = 3        # cap how many pods contribute logs
 
 ### Snapshots
 
-`:snapshot` captures the current table view — its columns and visible rows,
-plus metadata (context, cluster, namespace, resource, filter, timestamp) — to
-a file. An optional argument picks the format: `text` (default; an aligned
-table with a header block), `json`, or `yaml`. Files are written to
-`$XDG_STATE_HOME/sofka/snapshots` (falling back to
-`~/.local/state/sofka/snapshots`).
+`:snapshot` captures the current table view — its columns and visible rows, plus
+metadata (context, cluster, namespace, resource, filter, and timestamp) — to a
+file. An optional argument sets the format: `text` (default; an aligned table
+with a header block), `json`, or `yaml`. sofka writes the files to
+`$XDG_STATE_HOME/sofka/snapshots` (or `~/.local/state/sofka/snapshots`).
 
-`:snapshots` browses saved captures, newest first with their age. `⏎` opens one
-into a viewer with a staleness banner (it's a point-in-time capture), and `d`
-deletes the highlighted file. This is distinct from the one-frame `--snapshot`
-CI flag — it's an interactive capture-and-review workflow.
+`:snapshots` browses the saved captures, newest first with their age. Press `⏎`
+to open one in a viewer with a staleness banner (it is a point-in-time
+capture). Press `d` to delete the highlighted file. This is different from the
+one-frame `--snapshot` CI flag. This is an interactive capture-and-review
+workflow.
 
 ### Log controls
 
@@ -618,43 +638,45 @@ since = "1h"     # optional: only logs newer than this — replaces tail
 ```
 
 In the view, `/` filters with a case-insensitive substring, a `/regex/`, or a
-leading `!` to invert (keep non-matching lines); a malformed regex is flagged
-rather than hiding everything. `z` clears the on-screen buffer (the live stream
-keeps appending). A pod's logs already stream every container at once.
+leading `!` to invert (keep the lines that do not match). sofka flags a
+malformed regex instead of hiding everything. Press `z` to clear the on-screen
+buffer (the live stream continues to append). A pod streams the logs of every
+container at the same time.
 
 ### Fleet dashboard
 
-`:fleet` summarizes several clusters side by side without switching through
-them. It is **opt-in**: only the kubeconfig contexts you list are ever queried.
+`:fleet` summarizes several clusters side by side. You do not switch through
+them. It is **opt-in**: sofka queries only the kubeconfig contexts that you
+list.
 
 ```toml
 [fleet]
 contexts = ["prod-eu", "prod-us", "staging"]
 ```
 
-Each context is gathered concurrently (bounded, with a per-context timeout), so
-an unreachable or slow cluster shows an error on its own row instead of
-blocking the others. Rows show connectivity, Kubernetes version, node
-readiness, unhealthy pod count, Flux `Ready=False` failures, and the resolved
-read-only policy. `⏎` switches to the highlighted context (via the normal
-context-switch path); `r` re-gathers. Only these non-sensitive summaries are
-held in memory.
+sofka gathers each context at the same time (bounded, with a per-context
+timeout). So an unreachable or slow cluster shows an error on its own row and
+does not block the others. Each row shows connectivity, Kubernetes version,
+node readiness, the unhealthy pod count, the Flux `Ready=False` failures, and
+the resolved read-only policy. Press `⏎` to switch to the highlighted context
+(through the normal context-switch path). Press `r` to gather again. sofka
+keeps only these non-sensitive summaries in memory.
 
 ### Right-sizing (metrics provider)
 
-`:rightsize` on a workload (or pod) estimates right-sized requests from
-historical usage in a **Prometheus-compatible** backend — Prometheus _or_
-VictoriaMetrics, which share the query API. For each container it shows current
-requests, P50/P95/P99 CPU & memory over the window, a suggested request (P95 +
-headroom), OOM/throttle evidence, and a **strategic-merge patch preview**
-(copy with `c`). It **never mutates** — apply the patch yourself with
+`:rightsize` on a workload (or pod) estimates right-sized requests from past
+usage in a **Prometheus-compatible** backend — Prometheus or VictoriaMetrics,
+which share the query API. For each container it shows the current requests, the
+P50/P95/P99 CPU and memory over the window, a suggested request (P95 plus
+headroom), OOM and throttle evidence, and a **strategic-merge patch preview**
+(press `c` to copy). It **never mutates**. Apply the patch yourself with
 `kubectl patch` if you agree.
 
-Zero-config by default: with no `[providers.metrics]` section, sofka
-autodiscovers a Prometheus/VictoriaMetrics query `Service` in the cluster (by
-well-known labels) and reaches it through the API-server proxy, exactly like
-the log provider. Configure it only to point at an external endpoint or tune
-the window/headroom:
+It needs no config by default: with no `[providers.metrics]` section, sofka
+finds a Prometheus or VictoriaMetrics query `Service` in the cluster
+automatically (by well-known labels) and reaches it through the API-server
+proxy, like the log provider. Configure it only to point at an external
+endpoint or to tune the window or headroom:
 
 ```toml
 [providers.metrics]
@@ -668,20 +690,21 @@ headroom = 15              # percent added over P95 for the suggestion
 Authorization = "Bearer <token>"
 ```
 
-Uses the standard cAdvisor metric names (`container_cpu_usage_seconds_total`,
-`container_memory_working_set_bytes`, `container_oom_events_total`,
-`container_cpu_cfs_throttled_periods_total`). VictoriaMetrics **cluster** mode
-(vmselect) needs a tenant path in the `url`; single-node VM and Prometheus
-serve the API at the root and autodiscover cleanly.
+It uses the standard cAdvisor metric names
+(`container_cpu_usage_seconds_total`, `container_memory_working_set_bytes`,
+`container_oom_events_total`, `container_cpu_cfs_throttled_periods_total`).
+VictoriaMetrics **cluster** mode (vmselect) needs a tenant path in the `url`.
+Single-node VM and Prometheus serve the API at the root and autodiscover
+correctly.
 
 ### Log provider (VictoriaLogs)
 
 `L` (or `:vlogs`) opens log history for the selection from a VictoriaLogs
-backend instead of the kubelet. With no configuration at all, sofka finds the
-VictoriaLogs `Service` in the cluster by its well-known labels (Helm charts
-and the VictoriaMetrics operator) and queries it through the Kubernetes
-API-server service proxy, reusing your kubeconfig credentials. Configure it
-only to point at an external endpoint or to adjust the defaults:
+backend instead of the kubelet. With no configuration, sofka finds the
+VictoriaLogs `Service` in the cluster by its well-known labels (Helm charts and
+the VictoriaMetrics operator). It queries the service through the Kubernetes
+API-server service proxy and reuses your kubeconfig credentials. Configure it
+only to point at an external endpoint or to change the defaults:
 
 ```toml
 [providers.logs]
@@ -703,13 +726,13 @@ pod = "kubernetes.pod_name"
 container = "kubernetes.container_name"
 ```
 
-Like every section, `[providers.logs]` can live in a per-cluster or
-per-context override file, so each cluster can use its own backend.
+Like every section, `[providers.logs]` can live in a per-cluster or per-context
+override file. So each cluster can use its own backend.
 
 ### Per-cluster / per-context overrides
 
-Any option can be overridden for a specific cluster or kubeconfig context,
-k9s-style. Drop partial config files under `clusters/`:
+You can override any option for a specific cluster or kubeconfig context, like
+k9s. Put partial config files under `clusters/`:
 
 ```
 ~/.config/sofka/
@@ -721,11 +744,11 @@ k9s-style. Drop partial config files under `clusters/`:
             └── config.toml    # that context only
 ```
 
-Overrides merge over the base config (cluster level first, then context
-level): tables like `[aliases]` and `[skin.colors]` merge key-by-key,
-everything else — strings, booleans, arrays like `[[plugins]]` — replaces the
-base value. Directory names are the kubeconfig names with any character other
-than letters, digits, `.`, `_`, `-` replaced by `-`, so an EKS context
+Overrides merge over the base config (the cluster level first, then the context
+level). Tables like `[aliases]` and `[skin.colors]` merge key by key. Everything
+else — strings, booleans, and arrays like `[[plugins]]` — replaces the base
+value. Directory names are the kubeconfig names. sofka replaces any character
+that is not a letter, a digit, `.`, `_`, or `-` with `-`. So an EKS context
 `arn:aws:eks:eu-west-1:123456789:cluster/prod` becomes the directory
 `arn-aws-eks-eu-west-1-123456789-cluster-prod`.
 
@@ -738,10 +761,10 @@ name = "catppuccin-latte"
 background = true
 ```
 
-A skin named in an override pins that context's colors; contexts without one
-keep the session skin (config `skin.name`, the auto-detected default, or your
-last `:skin` choice). Overrides are re-read on every `:ctx` switch, so edits
-apply without restarting.
+A skin in an override sets the colors for that context. A context that has no
+skin keeps the session skin (the config `skin.name`, the auto-detected default,
+or your last `:skin` choice). sofka reads the overrides again on every `:ctx`
+switch. So edits apply without a restart.
 
 ### Headless modes (no TTY required)
 
@@ -752,7 +775,7 @@ sofka dp -A --snapshot       # deployments, all namespaces
 sofka --info                 # version/build, config sources, dirs, kubeconfig context (no connection)
 ```
 
-These double as CI smoke tests. `--info` prints only identifiers and paths —
+These also work as CI smoke tests. `--info` prints only identifiers and paths,
 never credentials, tokens, or Secret values.
 
 ## Usage
@@ -767,11 +790,11 @@ sofka [RESOURCE] [-n NAMESPACE] [-A] [--readonly | --write]
   --write           force write mode, overriding any config `readonly`
 ```
 
-`--readonly`/`--write` pin the mode for the whole session, winning over the
-config `readonly` option — including per-cluster/per-context overrides — on
-every `:ctx` switch. Without a flag, switching into a context whose config
-sets `readonly = true` enables read-only mode (shown as `[read-only]` in the
-header) and switching away restores write mode.
+`--readonly` and `--write` set the mode for the whole session. They win over the
+config `readonly` option — and over per-cluster and per-context overrides — on
+every `:ctx` switch. With no flag, a switch into a context whose config sets
+`readonly = true` enables read-only mode (shown as `[read-only]` in the header).
+A switch away from it restores write mode.
 
 ### Keys
 
@@ -826,18 +849,20 @@ header) and switching away restores write mode.
 copy buffer · `ctrl-s` save to file · `esc` back. The newest line anchors to
 the bottom of the viewport.
 
-**Document views** (YAML, describe, diff, events): `/` searches vim-style —
-the whole document stays on screen with every match highlighted, and `n` / `N`
-jump to the next / previous match. `w` wraps, `c` copies the document, `esc`
-backs out (first press clears an active search). The `?` help panel's `/`
-filters instead, narrowing to matching keybinds.
+**Document views** (YAML, describe, diff, events): `/` searches like vim. The
+whole document stays on screen, and sofka highlights every match. Press `n` or
+`N` to go to the next or previous match. Press `w` to wrap. Press `c` to copy
+the document. Press `esc` to back out (the first press clears an active search).
+In the `?` help panel, `/` filters instead and narrows to the matching
+keybinds.
 
-**Explain view** (`X`): `j`/`k` move · `⏎` jump to the resource behind a
-finding (a blocking pod) · `E` its events · `l` its logs · `r` re-gather ·
-`esc` back. Findings that can be jumped into are marked with a trailing `→`.
+**Explain view** (`X`): press `j` or `k` to move. Press `⏎` to go to the
+resource behind a finding (a blocking pod). Press `E` for its events. Press `l`
+for its logs. Press `r` to gather again. Press `esc` to go back. A finding that
+you can go into has a trailing `→`.
 
-Interactive actions (`e`, `s`-shell, `a`) suspend the TUI and shell out to
-`kubectl`; delete/scale/restart/set-image/suspend/resume/reconcile/
+Interactive actions (`e`, `s` for shell, `a`) suspend the TUI and shell out to
+`kubectl`. Delete, scale, restart, set-image, suspend, resume, reconcile, and
 port-forward go through the kube API (or a backgrounded process) directly.
 
 ## Architecture
@@ -870,10 +895,10 @@ theme.rs     Palette + semantic styles, skin resolution.
 ```
 
 Data flow: `watcher` tasks push generation-tagged `Msg`s over an
-`mpsc::UnboundedSender`; the main `tokio::select!` loop folds them into the
-`Store`, batches any other queued updates before redrawing, and shares that
-same loop with terminal input and a 1s tick (age columns, dead port-forward
-reaping) - so the UI never blocks on the network.
+`mpsc::UnboundedSender`. The main `tokio::select!` loop folds them into the
+`Store`. It batches any other queued updates before it redraws. It shares that
+same loop with terminal input and a 1s tick (age columns and dead port-forward
+reaping). So the UI never blocks on the network.
 
 ## Development
 
@@ -885,7 +910,7 @@ cargo clippy --all-targets   # lints (clean)
 
 ## Release
 
-After merging the release-ready changes to `main`, run one of:
+After you merge the release-ready changes to `main`, run one of:
 
 ```
 just release-patch
@@ -893,10 +918,10 @@ just release-minor
 just release-major
 ```
 
-The recipe switches to a clean, up-to-date `main`, bumps `Cargo.toml` /
-`Cargo.lock`, commits and pushes the version bump, then creates the GitHub
-Release. The release workflow runs from that published release and uploads
-platform binaries, publishes crates.io, and warms the Nix cache.
+The recipe switches to a clean, up-to-date `main`. It bumps `Cargo.toml` and
+`Cargo.lock`. It commits and pushes the version bump. Then it creates the GitHub
+Release. The release workflow runs from that published release. It uploads the
+platform binaries, publishes to crates.io, and warms the Nix cache.
 
 ## Future roadmap
 
@@ -966,5 +991,5 @@ platform binaries, publishes crates.io, and warms the Nix cache.
 
 ## License
 
-Dual-licensed under [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE), at
-your option - the Rust ecosystem standard.
+Dual-licensed under [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE), at your
+option. This is the standard for the Rust ecosystem.
