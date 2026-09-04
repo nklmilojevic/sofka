@@ -228,6 +228,8 @@ pub enum Msg {
         generation: u64,
         error: String,
     },
+    /// A generation-independent persistent UI-state write failed.
+    StateWriteFailed(String),
     /// A background action (delete, restart, scale, drain, helm op, …)
     /// finished; replaces its "…ing" progress flash with a result. Also
     /// carries `:can-i` verdicts, which are the same thing: a one-line answer

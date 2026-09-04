@@ -1366,6 +1366,9 @@ pub struct App {
     gen_flag: Arc<AtomicU64>,
     pub tasks: Vec<JoinHandle<()>>,
     pub tx: Sender<Msg>,
+    /// Ordered off-thread persistence for small UI state files. `None` keeps
+    /// unit tests and degraded startup on the synchronous fallback.
+    pub state_writer: Option<crate::state_writer::StateWriter>,
     stack: Vec<Frame>,
     /// Scope of the running watch, so its rows can be stashed under the right
     /// key when the user navigates away.
@@ -1738,6 +1741,7 @@ impl App {
             gen_flag: Arc::new(AtomicU64::new(0)),
             tasks: Vec::new(),
             tx,
+            state_writer: None,
             stack: Vec::new(),
             watch_key: None,
             view_cache: HashMap::new(),

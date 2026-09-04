@@ -30,6 +30,7 @@ pub mod providers;
 pub mod rightsize;
 pub mod snapshot;
 pub mod sortmem;
+pub mod state_writer;
 pub mod store;
 pub mod text;
 pub mod theme;

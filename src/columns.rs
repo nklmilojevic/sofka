@@ -4,13 +4,17 @@
 //! hand-written renderer per resource, known kinds get curated columns and
 //! everything else falls back to NAME/AGE pulled from metadata.
 
+use std::borrow::Cow;
 use std::cell::OnceCell;
 
 use k8s_openapi::jiff::Timestamp;
 use kube::core::DynamicObject;
 use serde_json::Value;
 
-type CellFn = for<'a> fn(&CellContext<'a>) -> String;
+/// Curated extractors borrow values that already live in the Kubernetes
+/// object and own only derived/formatted values. Cached full rows convert the
+/// result once; one-column filter/sort probes can consume borrowed text.
+type CellFn = for<'a> fn(&CellContext<'a>) -> Cow<'a, str>;
 
 struct Column {
     header: &'static str,
@@ -358,7 +362,10 @@ pub fn headers(plural: &str) -> Vec<&'static str> {
 pub fn cells(obj: &DynamicObject, plural: &str) -> (Vec<String>, Option<usize>) {
     let ctx = CellContext::new(obj);
     let columns = columns_for(plural);
-    let values = columns.iter().map(|c| (c.extract)(&ctx)).collect();
+    let values = columns
+        .iter()
+        .map(|c| (c.extract)(&ctx).into_owned())
+        .collect();
     let status_idx = columns.iter().position(|c| c.is_status);
     (values, status_idx)
 }
@@ -473,7 +480,7 @@ impl ViewSpec {
             .columns
             .iter()
             .map(|c| match &c.source {
-                SpecSource::Curated(extract) => extract(&ctx),
+                SpecSource::Curated(extract) => extract(&ctx).into_owned(),
                 SpecSource::User(uc) => crate::views::render_cell(obj, uc),
             })
             .collect();
@@ -503,11 +510,12 @@ impl ViewSpec {
 
     /// The single cell at `idx` for one object. Filter comparisons read one
     /// column of every object — extracting the full row per object per
-    /// rebuild is what this avoids.
-    pub fn cell_at(&self, obj: &DynamicObject, idx: usize) -> Option<String> {
+    /// rebuild is what this avoids. Curated JSON/name cells borrow from
+    /// `obj`; user columns and computed curated cells remain owned.
+    pub fn cell_at<'a>(&self, obj: &'a DynamicObject, idx: usize) -> Option<Cow<'a, str>> {
         let col = self.columns.get(idx)?;
         Some(match &col.source {
-            SpecSource::User(uc) => crate::views::render_cell(obj, uc),
+            SpecSource::User(uc) => Cow::Owned(crate::views::render_cell(obj, uc)),
             SpecSource::Curated(extract) => {
                 let ctx = CellContext::new(obj);
                 extract(&ctx)
@@ -607,112 +615,124 @@ pub fn volatile_cell(obj: &DynamicObject, plural: &str, header: &str) -> Option<
     }
 }
 
-fn col_name(ctx: &CellContext<'_>) -> String {
-    ctx.name.to_string()
+fn col_name<'a>(ctx: &CellContext<'a>) -> Cow<'a, str> {
+    Cow::Borrowed(ctx.name)
 }
 
-fn col_age(ctx: &CellContext<'_>) -> String {
-    ctx.age().to_string()
+fn col_age<'a>(ctx: &CellContext<'a>) -> Cow<'a, str> {
+    Cow::Owned(ctx.age().to_string())
 }
 
-fn col_pod_ready(ctx: &CellContext<'_>) -> String {
-    ctx.pod().0.clone()
+fn col_pod_ready<'a>(ctx: &CellContext<'a>) -> Cow<'a, str> {
+    Cow::Owned(ctx.pod().0.clone())
 }
 
-fn col_pod_status(ctx: &CellContext<'_>) -> String {
-    ctx.pod().1.clone()
+fn col_pod_status<'a>(ctx: &CellContext<'a>) -> Cow<'a, str> {
+    Cow::Owned(ctx.pod().1.clone())
 }
 
-fn col_pod_restarts(ctx: &CellContext<'_>) -> String {
-    ctx.pod().2.clone()
+fn col_pod_restarts<'a>(ctx: &CellContext<'a>) -> Cow<'a, str> {
+    Cow::Owned(ctx.pod().2.clone())
 }
 
-fn col_pod_ip(ctx: &CellContext<'_>) -> String {
-    sget(ctx.data, &["status", "podIP"]).unwrap_or_else(|| "<none>".into())
+fn col_pod_ip<'a>(ctx: &CellContext<'a>) -> Cow<'a, str> {
+    Cow::Borrowed(sget(ctx.data, &["status", "podIP"]).unwrap_or("<none>"))
 }
 
-fn col_pod_node(ctx: &CellContext<'_>) -> String {
-    sget(ctx.data, &["spec", "nodeName"]).unwrap_or_else(|| "<none>".into())
+fn col_pod_node<'a>(ctx: &CellContext<'a>) -> Cow<'a, str> {
+    Cow::Borrowed(sget(ctx.data, &["spec", "nodeName"]).unwrap_or("<none>"))
 }
 
-fn col_deploy_ready(ctx: &CellContext<'_>) -> String {
-    format!(
+fn col_deploy_ready<'a>(ctx: &CellContext<'a>) -> Cow<'a, str> {
+    Cow::Owned(format!(
         "{}/{}",
         iget(ctx.data, &["status", "readyReplicas"]),
         iget(ctx.data, &["status", "replicas"])
-    )
+    ))
 }
 
-fn col_deploy_updated(ctx: &CellContext<'_>) -> String {
-    iget(ctx.data, &["status", "updatedReplicas"]).to_string()
+fn col_deploy_updated<'a>(ctx: &CellContext<'a>) -> Cow<'a, str> {
+    Cow::Owned(iget(ctx.data, &["status", "updatedReplicas"]).to_string())
 }
 
-fn col_deploy_available(ctx: &CellContext<'_>) -> String {
-    iget(ctx.data, &["status", "availableReplicas"]).to_string()
+fn col_deploy_available<'a>(ctx: &CellContext<'a>) -> Cow<'a, str> {
+    Cow::Owned(iget(ctx.data, &["status", "availableReplicas"]).to_string())
 }
 
-fn col_rs_desired(ctx: &CellContext<'_>) -> String {
-    iget(ctx.data, &["spec", "replicas"]).to_string()
+fn col_rs_desired<'a>(ctx: &CellContext<'a>) -> Cow<'a, str> {
+    Cow::Owned(iget(ctx.data, &["spec", "replicas"]).to_string())
 }
 
-fn col_rs_current(ctx: &CellContext<'_>) -> String {
-    iget(ctx.data, &["status", "replicas"]).to_string()
+fn col_rs_current<'a>(ctx: &CellContext<'a>) -> Cow<'a, str> {
+    Cow::Owned(iget(ctx.data, &["status", "replicas"]).to_string())
 }
 
-fn col_rs_ready(ctx: &CellContext<'_>) -> String {
-    iget(ctx.data, &["status", "readyReplicas"]).to_string()
+fn col_rs_ready<'a>(ctx: &CellContext<'a>) -> Cow<'a, str> {
+    Cow::Owned(iget(ctx.data, &["status", "readyReplicas"]).to_string())
 }
 
-fn col_sts_ready(ctx: &CellContext<'_>) -> String {
-    format!(
+fn col_sts_ready<'a>(ctx: &CellContext<'a>) -> Cow<'a, str> {
+    Cow::Owned(format!(
         "{}/{}",
         iget(ctx.data, &["status", "readyReplicas"]),
         iget(ctx.data, &["spec", "replicas"])
-    )
+    ))
 }
 
-fn col_ds_desired(ctx: &CellContext<'_>) -> String {
-    iget(ctx.data, &["status", "desiredNumberScheduled"]).to_string()
+fn col_ds_desired<'a>(ctx: &CellContext<'a>) -> Cow<'a, str> {
+    Cow::Owned(iget(ctx.data, &["status", "desiredNumberScheduled"]).to_string())
 }
 
-fn col_ds_current(ctx: &CellContext<'_>) -> String {
-    iget(ctx.data, &["status", "currentNumberScheduled"]).to_string()
+fn col_ds_current<'a>(ctx: &CellContext<'a>) -> Cow<'a, str> {
+    Cow::Owned(iget(ctx.data, &["status", "currentNumberScheduled"]).to_string())
 }
 
-fn col_ds_ready(ctx: &CellContext<'_>) -> String {
-    iget(ctx.data, &["status", "numberReady"]).to_string()
+fn col_ds_ready<'a>(ctx: &CellContext<'a>) -> Cow<'a, str> {
+    Cow::Owned(iget(ctx.data, &["status", "numberReady"]).to_string())
 }
 
-fn col_ds_available(ctx: &CellContext<'_>) -> String {
-    iget(ctx.data, &["status", "numberAvailable"]).to_string()
+fn col_ds_available<'a>(ctx: &CellContext<'a>) -> Cow<'a, str> {
+    Cow::Owned(iget(ctx.data, &["status", "numberAvailable"]).to_string())
 }
 
-fn col_deploy_status(ctx: &CellContext<'_>) -> String {
+fn col_deploy_status<'a>(ctx: &CellContext<'a>) -> Cow<'a, str> {
     if ctx.obj.metadata.deletion_timestamp.is_some() {
         return "Terminating".into();
     }
-    workload_status(ctx.data, WorkloadCounts::deployment(ctx.data))
+    Cow::Owned(workload_status(
+        ctx.data,
+        WorkloadCounts::deployment(ctx.data),
+    ))
 }
 
-fn col_sts_status(ctx: &CellContext<'_>) -> String {
+fn col_sts_status<'a>(ctx: &CellContext<'a>) -> Cow<'a, str> {
     if ctx.obj.metadata.deletion_timestamp.is_some() {
         return "Terminating".into();
     }
-    workload_status(ctx.data, WorkloadCounts::statefulset(ctx.data))
+    Cow::Owned(workload_status(
+        ctx.data,
+        WorkloadCounts::statefulset(ctx.data),
+    ))
 }
 
-fn col_rs_status(ctx: &CellContext<'_>) -> String {
+fn col_rs_status<'a>(ctx: &CellContext<'a>) -> Cow<'a, str> {
     if ctx.obj.metadata.deletion_timestamp.is_some() {
         return "Terminating".into();
     }
-    workload_status(ctx.data, WorkloadCounts::replicaset(ctx.data))
+    Cow::Owned(workload_status(
+        ctx.data,
+        WorkloadCounts::replicaset(ctx.data),
+    ))
 }
 
-fn col_ds_status(ctx: &CellContext<'_>) -> String {
+fn col_ds_status<'a>(ctx: &CellContext<'a>) -> Cow<'a, str> {
     if ctx.obj.metadata.deletion_timestamp.is_some() {
         return "Terminating".into();
     }
-    workload_status(ctx.data, WorkloadCounts::daemonset(ctx.data))
+    Cow::Owned(workload_status(
+        ctx.data,
+        WorkloadCounts::daemonset(ctx.data),
+    ))
 }
 
 /// The replica counts a workload's health is judged by, normalized across
@@ -828,210 +848,216 @@ fn condition<'a>(d: &'a Value, ty: &str) -> Option<&'a Value> {
         .find(|c| c.get("type").and_then(Value::as_str) == Some(ty))
 }
 
-fn col_service_type(ctx: &CellContext<'_>) -> String {
-    service_type(ctx.data)
+fn col_service_type<'a>(ctx: &CellContext<'a>) -> Cow<'a, str> {
+    Cow::Borrowed(service_type(ctx.data))
 }
 
-fn col_service_cluster_ip(ctx: &CellContext<'_>) -> String {
-    sget(ctx.data, &["spec", "clusterIP"]).unwrap_or_else(|| "<none>".into())
+fn col_service_cluster_ip<'a>(ctx: &CellContext<'a>) -> Cow<'a, str> {
+    Cow::Borrowed(sget(ctx.data, &["spec", "clusterIP"]).unwrap_or("<none>"))
 }
 
-fn col_service_external_ip(ctx: &CellContext<'_>) -> String {
-    external_ip(ctx.data, &service_type(ctx.data))
+fn col_service_external_ip<'a>(ctx: &CellContext<'a>) -> Cow<'a, str> {
+    Cow::Owned(external_ip(ctx.data, service_type(ctx.data)))
 }
 
-fn col_service_ports(ctx: &CellContext<'_>) -> String {
-    svc_ports(ctx.data)
+fn col_service_ports<'a>(ctx: &CellContext<'a>) -> Cow<'a, str> {
+    Cow::Owned(svc_ports(ctx.data))
 }
 
-fn col_node_status(ctx: &CellContext<'_>) -> String {
-    node_ready(ctx.data)
+fn col_node_status<'a>(ctx: &CellContext<'a>) -> Cow<'a, str> {
+    Cow::Borrowed(node_ready(ctx.data))
 }
 
-fn col_node_roles(ctx: &CellContext<'_>) -> String {
-    node_roles(ctx.obj)
+fn col_node_roles<'a>(ctx: &CellContext<'a>) -> Cow<'a, str> {
+    Cow::Owned(node_roles(ctx.obj))
 }
 
-fn col_node_taints(ctx: &CellContext<'_>) -> String {
-    count_arr(ctx.data, &["spec", "taints"]).to_string()
+fn col_node_taints<'a>(ctx: &CellContext<'a>) -> Cow<'a, str> {
+    Cow::Owned(count_arr(ctx.data, &["spec", "taints"]).to_string())
 }
 
-fn col_node_version(ctx: &CellContext<'_>) -> String {
-    sget(ctx.data, &["status", "nodeInfo", "kubeletVersion"]).unwrap_or_default()
+fn col_node_version<'a>(ctx: &CellContext<'a>) -> Cow<'a, str> {
+    Cow::Borrowed(sget(ctx.data, &["status", "nodeInfo", "kubeletVersion"]).unwrap_or_default())
 }
 
-fn col_namespace_status(ctx: &CellContext<'_>) -> String {
-    sget(ctx.data, &["status", "phase"]).unwrap_or_else(|| "Active".into())
+fn col_namespace_status<'a>(ctx: &CellContext<'a>) -> Cow<'a, str> {
+    Cow::Borrowed(sget(ctx.data, &["status", "phase"]).unwrap_or("Active"))
 }
 
-fn col_configmap_data(ctx: &CellContext<'_>) -> String {
-    (count_obj(ctx.data, &["data"]) + count_obj(ctx.data, &["binaryData"])).to_string()
+fn col_configmap_data<'a>(ctx: &CellContext<'a>) -> Cow<'a, str> {
+    Cow::Owned((count_obj(ctx.data, &["data"]) + count_obj(ctx.data, &["binaryData"])).to_string())
 }
 
-fn col_secret_type(ctx: &CellContext<'_>) -> String {
-    sget(ctx.data, &["type"]).unwrap_or_else(|| "Opaque".into())
+fn col_secret_type<'a>(ctx: &CellContext<'a>) -> Cow<'a, str> {
+    Cow::Borrowed(sget(ctx.data, &["type"]).unwrap_or("Opaque"))
 }
 
-fn col_secret_data(ctx: &CellContext<'_>) -> String {
-    count_obj(ctx.data, &["data"]).to_string()
+fn col_secret_data<'a>(ctx: &CellContext<'a>) -> Cow<'a, str> {
+    Cow::Owned(count_obj(ctx.data, &["data"]).to_string())
 }
 
-fn col_job_completions(ctx: &CellContext<'_>) -> String {
-    format!(
+fn col_job_completions<'a>(ctx: &CellContext<'a>) -> Cow<'a, str> {
+    Cow::Owned(format!(
         "{}/{}",
         iget(ctx.data, &["status", "succeeded"]),
         iget(ctx.data, &["spec", "completions"]).max(1)
-    )
+    ))
 }
 
-fn col_job_duration(ctx: &CellContext<'_>) -> String {
-    job_duration(ctx.data)
+fn col_job_duration<'a>(ctx: &CellContext<'a>) -> Cow<'a, str> {
+    Cow::Owned(job_duration(ctx.data))
 }
 
-fn col_cronjob_schedule(ctx: &CellContext<'_>) -> String {
-    sget(ctx.data, &["spec", "schedule"]).unwrap_or_default()
+fn col_cronjob_schedule<'a>(ctx: &CellContext<'a>) -> Cow<'a, str> {
+    Cow::Borrowed(sget(ctx.data, &["spec", "schedule"]).unwrap_or_default())
 }
 
-fn col_cronjob_suspend(ctx: &CellContext<'_>) -> String {
-    bget(ctx.data, &["spec", "suspend"]).to_string()
+fn col_cronjob_suspend<'a>(ctx: &CellContext<'a>) -> Cow<'a, str> {
+    Cow::Owned(bget(ctx.data, &["spec", "suspend"]).to_string())
 }
 
-fn col_cronjob_active(ctx: &CellContext<'_>) -> String {
-    count_arr(ctx.data, &["status", "active"]).to_string()
+fn col_cronjob_active<'a>(ctx: &CellContext<'a>) -> Cow<'a, str> {
+    Cow::Owned(count_arr(ctx.data, &["status", "active"]).to_string())
 }
 
-fn col_cronjob_last_schedule(ctx: &CellContext<'_>) -> String {
-    time_since(ctx.data, &["status", "lastScheduleTime"])
+fn col_cronjob_last_schedule<'a>(ctx: &CellContext<'a>) -> Cow<'a, str> {
+    Cow::Owned(time_since(ctx.data, &["status", "lastScheduleTime"]))
 }
 
-fn col_event_type(ctx: &CellContext<'_>) -> String {
-    sget(ctx.data, &["type"]).unwrap_or_default()
+fn col_event_type<'a>(ctx: &CellContext<'a>) -> Cow<'a, str> {
+    Cow::Borrowed(sget(ctx.data, &["type"]).unwrap_or_default())
 }
 
-fn col_event_reason(ctx: &CellContext<'_>) -> String {
-    sget(ctx.data, &["reason"]).unwrap_or_default()
+fn col_event_reason<'a>(ctx: &CellContext<'a>) -> Cow<'a, str> {
+    Cow::Borrowed(sget(ctx.data, &["reason"]).unwrap_or_default())
 }
 
-fn col_event_object(ctx: &CellContext<'_>) -> String {
+fn col_event_object<'a>(ctx: &CellContext<'a>) -> Cow<'a, str> {
     event_object(ctx.data)
 }
 
-fn col_event_message(ctx: &CellContext<'_>) -> String {
+fn col_event_message<'a>(ctx: &CellContext<'a>) -> Cow<'a, str> {
     event_message(ctx.data)
 }
 
-fn col_event_count(ctx: &CellContext<'_>) -> String {
-    event_count(ctx.data).to_string()
+fn col_event_count<'a>(ctx: &CellContext<'a>) -> Cow<'a, str> {
+    Cow::Owned(event_count(ctx.data).to_string())
 }
 
-fn col_hpa_reference(ctx: &CellContext<'_>) -> String {
+fn col_hpa_reference<'a>(ctx: &CellContext<'a>) -> Cow<'a, str> {
     hpa_reference(ctx.data)
 }
 
-fn col_hpa_targets(ctx: &CellContext<'_>) -> String {
-    hpa_targets(ctx.data)
+fn col_hpa_targets<'a>(ctx: &CellContext<'a>) -> Cow<'a, str> {
+    Cow::Owned(hpa_targets(ctx.data))
 }
 
-fn col_hpa_minpods(ctx: &CellContext<'_>) -> String {
-    iopt(ctx.data, &["spec", "minReplicas"])
-        .unwrap_or(1)
-        .to_string()
+fn col_hpa_minpods<'a>(ctx: &CellContext<'a>) -> Cow<'a, str> {
+    Cow::Owned(
+        iopt(ctx.data, &["spec", "minReplicas"])
+            .unwrap_or(1)
+            .to_string(),
+    )
 }
 
-fn col_hpa_maxpods(ctx: &CellContext<'_>) -> String {
-    iopt(ctx.data, &["spec", "maxReplicas"])
-        .map(|n| n.to_string())
-        .unwrap_or_default()
+fn col_hpa_maxpods<'a>(ctx: &CellContext<'a>) -> Cow<'a, str> {
+    Cow::Owned(
+        iopt(ctx.data, &["spec", "maxReplicas"])
+            .map(|n| n.to_string())
+            .unwrap_or_default(),
+    )
 }
 
-fn col_hpa_replicas(ctx: &CellContext<'_>) -> String {
-    iopt(ctx.data, &["status", "currentReplicas"])
-        .unwrap_or(0)
-        .to_string()
+fn col_hpa_replicas<'a>(ctx: &CellContext<'a>) -> Cow<'a, str> {
+    Cow::Owned(
+        iopt(ctx.data, &["status", "currentReplicas"])
+            .unwrap_or(0)
+            .to_string(),
+    )
 }
 
-fn col_pvc_status(ctx: &CellContext<'_>) -> String {
-    sget(ctx.data, &["status", "phase"]).unwrap_or_default()
+fn col_pvc_status<'a>(ctx: &CellContext<'a>) -> Cow<'a, str> {
+    Cow::Borrowed(sget(ctx.data, &["status", "phase"]).unwrap_or_default())
 }
 
-fn col_pvc_volume(ctx: &CellContext<'_>) -> String {
-    sget(ctx.data, &["spec", "volumeName"]).unwrap_or_default()
+fn col_pvc_volume<'a>(ctx: &CellContext<'a>) -> Cow<'a, str> {
+    Cow::Borrowed(sget(ctx.data, &["spec", "volumeName"]).unwrap_or_default())
 }
 
-fn col_pvc_capacity(ctx: &CellContext<'_>) -> String {
-    sget(ctx.data, &["status", "capacity", "storage"]).unwrap_or_default()
+fn col_pvc_capacity<'a>(ctx: &CellContext<'a>) -> Cow<'a, str> {
+    Cow::Borrowed(sget(ctx.data, &["status", "capacity", "storage"]).unwrap_or_default())
 }
 
-fn col_pv_capacity(ctx: &CellContext<'_>) -> String {
-    sget(ctx.data, &["spec", "capacity", "storage"]).unwrap_or_default()
+fn col_pv_capacity<'a>(ctx: &CellContext<'a>) -> Cow<'a, str> {
+    Cow::Borrowed(sget(ctx.data, &["spec", "capacity", "storage"]).unwrap_or_default())
 }
 
-fn col_pv_status(ctx: &CellContext<'_>) -> String {
-    sget(ctx.data, &["status", "phase"]).unwrap_or_default()
+fn col_pv_status<'a>(ctx: &CellContext<'a>) -> Cow<'a, str> {
+    Cow::Borrowed(sget(ctx.data, &["status", "phase"]).unwrap_or_default())
 }
 
-fn col_pv_claim(ctx: &CellContext<'_>) -> String {
-    sget(ctx.data, &["spec", "claimRef", "name"]).unwrap_or_default()
+fn col_pv_claim<'a>(ctx: &CellContext<'a>) -> Cow<'a, str> {
+    Cow::Borrowed(sget(ctx.data, &["spec", "claimRef", "name"]).unwrap_or_default())
 }
 
-fn col_ingress_class(ctx: &CellContext<'_>) -> String {
-    sget(ctx.data, &["spec", "ingressClassName"]).unwrap_or_else(|| "<none>".into())
+fn col_ingress_class<'a>(ctx: &CellContext<'a>) -> Cow<'a, str> {
+    Cow::Borrowed(sget(ctx.data, &["spec", "ingressClassName"]).unwrap_or("<none>"))
 }
 
-fn col_ingress_hosts(ctx: &CellContext<'_>) -> String {
-    ingress_hosts(ctx.data)
+fn col_ingress_hosts<'a>(ctx: &CellContext<'a>) -> Cow<'a, str> {
+    Cow::Owned(ingress_hosts(ctx.data))
 }
 
-fn col_ingress_address(ctx: &CellContext<'_>) -> String {
-    ingress_address(ctx.data)
+fn col_ingress_address<'a>(ctx: &CellContext<'a>) -> Cow<'a, str> {
+    Cow::Owned(ingress_address(ctx.data))
 }
 
-fn col_httproute_hostnames(ctx: &CellContext<'_>) -> String {
-    httproute_hostnames(ctx.data)
+fn col_httproute_hostnames<'a>(ctx: &CellContext<'a>) -> Cow<'a, str> {
+    Cow::Owned(httproute_hostnames(ctx.data))
 }
 
-fn col_endpoint_count(ctx: &CellContext<'_>) -> String {
+fn col_endpoint_count<'a>(ctx: &CellContext<'a>) -> Cow<'a, str> {
     count_endpoints(ctx.data)
 }
 
-fn col_crd_group(ctx: &CellContext<'_>) -> String {
-    sget(ctx.data, &["spec", "group"]).unwrap_or_default()
+fn col_crd_group<'a>(ctx: &CellContext<'a>) -> Cow<'a, str> {
+    Cow::Borrowed(sget(ctx.data, &["spec", "group"]).unwrap_or_default())
 }
 
-fn col_crd_kind(ctx: &CellContext<'_>) -> String {
-    sget(ctx.data, &["spec", "names", "kind"]).unwrap_or_default()
+fn col_crd_kind<'a>(ctx: &CellContext<'a>) -> Cow<'a, str> {
+    Cow::Borrowed(sget(ctx.data, &["spec", "names", "kind"]).unwrap_or_default())
 }
 
-fn col_crd_versions(ctx: &CellContext<'_>) -> String {
-    crd_versions(ctx.data)
+fn col_crd_versions<'a>(ctx: &CellContext<'a>) -> Cow<'a, str> {
+    Cow::Owned(crd_versions(ctx.data))
 }
 
-fn col_crd_scope(ctx: &CellContext<'_>) -> String {
-    sget(ctx.data, &["spec", "scope"]).unwrap_or_default()
+fn col_crd_scope<'a>(ctx: &CellContext<'a>) -> Cow<'a, str> {
+    Cow::Borrowed(sget(ctx.data, &["spec", "scope"]).unwrap_or_default())
 }
 
-fn col_flux_ready(ctx: &CellContext<'_>) -> String {
-    ready_condition(ctx.data).0
+fn col_flux_ready<'a>(ctx: &CellContext<'a>) -> Cow<'a, str> {
+    Cow::Borrowed(ready_condition(ctx.data).0)
 }
 
-fn col_flux_message(ctx: &CellContext<'_>) -> String {
-    ready_condition(ctx.data).1
+fn col_flux_message<'a>(ctx: &CellContext<'a>) -> Cow<'a, str> {
+    Cow::Borrowed(ready_condition(ctx.data).1)
 }
 
-fn col_flux_revision(ctx: &CellContext<'_>) -> String {
-    flux_revision(ctx.data)
+fn col_flux_revision<'a>(ctx: &CellContext<'a>) -> Cow<'a, str> {
+    Cow::Borrowed(flux_revision(ctx.data))
 }
 
-fn col_flux_source_revision(ctx: &CellContext<'_>) -> String {
-    flux_source_revision(ctx.data)
+fn col_flux_source_revision<'a>(ctx: &CellContext<'a>) -> Cow<'a, str> {
+    Cow::Borrowed(flux_source_revision(ctx.data))
 }
 
-fn col_flux_source_url(ctx: &CellContext<'_>) -> String {
+fn col_flux_source_url<'a>(ctx: &CellContext<'a>) -> Cow<'a, str> {
     flux_source_url(ctx.data)
 }
 
-fn col_flux_suspended(ctx: &CellContext<'_>) -> String {
-    bget(ctx.data, &["spec", "suspend"]).to_string()
+fn col_flux_suspended<'a>(ctx: &CellContext<'a>) -> Cow<'a, str> {
+    Cow::Owned(bget(ctx.data, &["spec", "suspend"]).to_string())
 }
 
 // A Helm release row's underlying object is the raw storage `Secret`
@@ -1039,54 +1065,60 @@ fn col_flux_suspended(ctx: &CellContext<'_>) -> String {
 // name), never the release itself — every cell here goes through
 // `crate::helm` instead of `ctx.name`/`ctx.data`.
 
-fn col_helm_name(ctx: &CellContext<'_>) -> String {
-    crate::helm::release_name(ctx.obj)
-        .unwrap_or(ctx.name)
-        .to_string()
+fn col_helm_name<'a>(ctx: &CellContext<'a>) -> Cow<'a, str> {
+    Cow::Borrowed(crate::helm::release_name(ctx.obj).unwrap_or(ctx.name))
 }
 
-fn col_helm_revision(ctx: &CellContext<'_>) -> String {
-    crate::helm::revision(ctx.obj)
-        .map(|v| v.to_string())
-        .unwrap_or_else(|| "-".into())
+fn col_helm_revision<'a>(ctx: &CellContext<'a>) -> Cow<'a, str> {
+    Cow::Owned(
+        crate::helm::revision(ctx.obj)
+            .map(|v| v.to_string())
+            .unwrap_or_else(|| "-".into()),
+    )
 }
 
-fn col_helm_status(ctx: &CellContext<'_>) -> String {
-    ctx.helm()
-        .map(|r| r.status.clone())
-        .unwrap_or_else(|| "<invalid>".into())
+fn col_helm_status<'a>(ctx: &CellContext<'a>) -> Cow<'a, str> {
+    Cow::Owned(
+        ctx.helm()
+            .map(|r| r.status.clone())
+            .unwrap_or_else(|| "<invalid>".into()),
+    )
 }
 
-fn col_helm_chart(ctx: &CellContext<'_>) -> String {
-    match ctx.helm() {
+fn col_helm_chart<'a>(ctx: &CellContext<'a>) -> Cow<'a, str> {
+    Cow::Owned(match ctx.helm() {
         Some(r) if !r.chart_name.is_empty() => format!("{}-{}", r.chart_name, r.chart_version),
         _ => "<unknown>".into(),
-    }
+    })
 }
 
-fn col_helm_app_version(ctx: &CellContext<'_>) -> String {
-    ctx.helm()
-        .map(|r| r.app_version.clone())
-        .unwrap_or_default()
+fn col_helm_app_version<'a>(ctx: &CellContext<'a>) -> Cow<'a, str> {
+    Cow::Owned(
+        ctx.helm()
+            .map(|r| r.app_version.clone())
+            .unwrap_or_default(),
+    )
 }
 
-fn col_helm_description(ctx: &CellContext<'_>) -> String {
-    ctx.helm()
-        .map(|r| r.description.clone())
-        .unwrap_or_default()
+fn col_helm_description<'a>(ctx: &CellContext<'a>) -> Cow<'a, str> {
+    Cow::Owned(
+        ctx.helm()
+            .map(|r| r.description.clone())
+            .unwrap_or_default(),
+    )
 }
 
-fn col_helm_updated(ctx: &CellContext<'_>) -> String {
-    match ctx.helm().and_then(|r| r.last_deployed_secs) {
+fn col_helm_updated<'a>(ctx: &CellContext<'a>) -> Cow<'a, str> {
+    Cow::Owned(match ctx.helm().and_then(|r| r.last_deployed_secs) {
         Some(secs) => humanize((Timestamp::now().as_second() - secs).max(0)),
         None => "<unknown>".into(),
-    }
+    })
 }
 
 // ----- helpers ------------------------------------------------------------
 
-fn service_type(d: &Value) -> String {
-    sget(d, &["spec", "type"]).unwrap_or_else(|| "ClusterIP".into())
+fn service_type(d: &Value) -> &str {
+    sget(d, &["spec", "type"]).unwrap_or("ClusterIP")
 }
 
 /// Comma-joined CRD version names (`spec.versions[].name`), e.g. `v1,v1beta1`.
@@ -1110,7 +1142,7 @@ fn crd_versions(d: &Value) -> String {
 /// (status, message) of the `Ready` condition, the health summary Flux (and
 /// most condition-based CRDs) maintain. Missing condition reads as Unknown —
 /// e.g. a Kustomization the controller hasn't reconciled yet.
-fn ready_condition(d: &Value) -> (String, String) {
+fn ready_condition(d: &Value) -> (&str, &str) {
     d.pointer("/status/conditions")
         .and_then(Value::as_array)
         .and_then(|conds| {
@@ -1120,63 +1152,55 @@ fn ready_condition(d: &Value) -> (String, String) {
         })
         .map(|c| {
             (
-                c.get("status")
-                    .and_then(Value::as_str)
-                    .unwrap_or("Unknown")
-                    .to_string(),
-                c.get("message")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default()
-                    .to_string(),
+                c.get("status").and_then(Value::as_str).unwrap_or("Unknown"),
+                c.get("message").and_then(Value::as_str).unwrap_or_default(),
             )
         })
-        .unwrap_or_else(|| ("Unknown".into(), String::new()))
+        .unwrap_or(("Unknown", ""))
 }
 
 /// Last applied revision of a Flux object: Kustomizations (and HelmRelease
 /// v2beta*) expose `lastAppliedRevision`; HelmRelease v2 GA moved it into
 /// `history`, with `lastAttemptedRevision` as the pre-first-success fallback.
-fn flux_revision(d: &Value) -> String {
+fn flux_revision(d: &Value) -> &str {
     sget(d, &["status", "lastAppliedRevision"])
         .or_else(|| {
             d.pointer("/status/history/0/chartVersion")
                 .and_then(Value::as_str)
-                .map(String::from)
         })
         .or_else(|| sget(d, &["status", "lastAttemptedRevision"]))
         .unwrap_or_default()
 }
 
-fn flux_source_revision(d: &Value) -> String {
+fn flux_source_revision(d: &Value) -> &str {
     sget(d, &["status", "artifact", "revision"])
         .or_else(|| sget(d, &["status", "lastAppliedRevision"]))
         .or_else(|| sget(d, &["status", "lastAttemptedRevision"]))
         .unwrap_or_default()
 }
 
-fn flux_source_url(d: &Value) -> String {
-    sget(d, &["spec", "url"])
-        .or_else(|| {
-            let endpoint = sget(d, &["spec", "endpoint"]);
-            let bucket = sget(d, &["spec", "bucketName"]);
-            match (endpoint, bucket) {
-                (Some(endpoint), Some(bucket)) => {
-                    Some(format!("{}/{}", endpoint.trim_end_matches('/'), bucket))
-                }
-                (Some(endpoint), None) => Some(endpoint),
-                (None, Some(bucket)) => Some(bucket),
-                (None, None) => None,
-            }
-        })
-        .unwrap_or_default()
+fn flux_source_url(d: &Value) -> Cow<'_, str> {
+    if let Some(url) = sget(d, &["spec", "url"]) {
+        return Cow::Borrowed(url);
+    }
+    let endpoint = sget(d, &["spec", "endpoint"]);
+    let bucket = sget(d, &["spec", "bucketName"]);
+    match (endpoint, bucket) {
+        (Some(endpoint), Some(bucket)) => {
+            Cow::Owned(format!("{}/{}", endpoint.trim_end_matches('/'), bucket))
+        }
+        (Some(endpoint), None) => Cow::Borrowed(endpoint),
+        (None, Some(bucket)) => Cow::Borrowed(bucket),
+        (None, None) => Cow::Borrowed(""),
+    }
 }
 
-fn sget(v: &Value, path: &[&str]) -> Option<String> {
+fn sget<'a>(v: &'a Value, path: &[&str]) -> Option<&'a str> {
     let mut cur = v;
     for p in path {
         cur = cur.get(p)?;
     }
-    cur.as_str().map(|s| s.to_string())
+    cur.as_str()
 }
 
 fn iopt(v: &Value, path: &[&str]) -> Option<i64> {
@@ -1342,7 +1366,7 @@ fn pod_summary(obj: &DynamicObject) -> (String, String, String) {
         }
     }
 
-    let phase = sget(d, &["status", "phase"]).unwrap_or_else(|| "Unknown".into());
+    let phase = sget(d, &["status", "phase"]).unwrap_or("Unknown");
     let status = if obj.metadata.deletion_timestamp.is_some() {
         "Terminating".to_string()
     } else if let Some(r) = waiting_reason {
@@ -1350,7 +1374,7 @@ fn pod_summary(obj: &DynamicObject) -> (String, String, String) {
     } else if let Some(r) = terminated_reason {
         r
     } else {
-        phase
+        phase.to_string()
     };
 
     (format!("{ready}/{total}"), status, restarts.to_string())
@@ -1398,7 +1422,7 @@ fn svc_ports(d: &Value) -> String {
         .unwrap_or_else(|| "<none>".into())
 }
 
-fn node_ready(d: &Value) -> String {
+fn node_ready(d: &Value) -> &'static str {
     d.pointer("/status/conditions")
         .and_then(Value::as_array)
         .and_then(|conds| {
@@ -1408,12 +1432,12 @@ fn node_ready(d: &Value) -> String {
         })
         .map(|c| {
             if c.get("status").and_then(Value::as_str) == Some("True") {
-                "Ready".to_string()
+                "Ready"
             } else {
-                "NotReady".to_string()
+                "NotReady"
             }
         })
-        .unwrap_or_else(|| "Unknown".into())
+        .unwrap_or("Unknown")
 }
 
 fn node_roles(obj: &DynamicObject) -> String {
@@ -1483,7 +1507,7 @@ fn httproute_hostnames(d: &Value) -> String {
         .unwrap_or_else(|| "*".into())
 }
 
-fn count_endpoints(d: &Value) -> String {
+fn count_endpoints(d: &Value) -> Cow<'_, str> {
     let n: usize = d
         .pointer("/subsets")
         .and_then(Value::as_array)
@@ -1501,31 +1525,35 @@ fn count_endpoints(d: &Value) -> String {
         })
         .unwrap_or(0);
     if n == 0 {
-        "<none>".into()
+        Cow::Borrowed("<none>")
     } else {
-        n.to_string()
+        Cow::Owned(n.to_string())
     }
 }
 
-fn event_object(d: &Value) -> String {
+fn event_object(d: &Value) -> Cow<'_, str> {
     let Some(obj) = d.get("regarding").or_else(|| d.get("involvedObject")) else {
-        return "<none>".into();
+        return Cow::Borrowed("<none>");
     };
     let kind = obj.get("kind").and_then(Value::as_str).unwrap_or_default();
     let name = obj.get("name").and_then(Value::as_str).unwrap_or_default();
     match (kind.is_empty(), name.is_empty()) {
-        (false, false) => format!("{kind}/{name}"),
-        (false, true) => kind.to_string(),
-        (true, false) => name.to_string(),
-        (true, true) => "<none>".into(),
+        (false, false) => Cow::Owned(format!("{kind}/{name}")),
+        (false, true) => Cow::Borrowed(kind),
+        (true, false) => Cow::Borrowed(name),
+        (true, true) => Cow::Borrowed("<none>"),
     }
 }
 
-fn event_message(d: &Value) -> String {
-    sget(d, &["message"])
+fn event_message(d: &Value) -> Cow<'_, str> {
+    let message = sget(d, &["message"])
         .or_else(|| sget(d, &["note"]))
-        .unwrap_or_default()
-        .replace(['\n', '\r'], " ")
+        .unwrap_or_default();
+    if message.contains(['\n', '\r']) {
+        Cow::Owned(message.replace(['\n', '\r'], " "))
+    } else {
+        Cow::Borrowed(message)
+    }
 }
 
 fn event_count(d: &Value) -> i64 {
@@ -1535,14 +1563,14 @@ fn event_count(d: &Value) -> i64 {
         .unwrap_or(1)
 }
 
-fn hpa_reference(d: &Value) -> String {
+fn hpa_reference(d: &Value) -> Cow<'_, str> {
     let kind = sget(d, &["spec", "scaleTargetRef", "kind"]).unwrap_or_default();
     let name = sget(d, &["spec", "scaleTargetRef", "name"]).unwrap_or_default();
     match (kind.is_empty(), name.is_empty()) {
-        (false, false) => format!("{kind}/{name}"),
-        (false, true) => kind,
-        (true, false) => name,
-        (true, true) => "<none>".into(),
+        (false, false) => Cow::Owned(format!("{kind}/{name}")),
+        (false, true) => Cow::Borrowed(kind),
+        (true, false) => Cow::Borrowed(name),
+        (true, true) => Cow::Borrowed("<none>"),
     }
 }
 
@@ -2499,6 +2527,29 @@ mod tests {
             SortValue::Text(t) => panic!("expected numeric sort, got '{t}'"),
         }
         assert!(spec.sort_value(&o, "MISSING").is_none());
+    }
+
+    #[test]
+    fn curated_cell_borrows_existing_object_strings() {
+        let pod = obj(json!({
+            "apiVersion": "v1", "kind": "Pod",
+            "metadata": {"name": "pod-a"},
+            "status": {
+                "podIP": "10.0.0.7",
+                "containerStatuses": []
+            }
+        }));
+        let spec = build_spec("pods", None, None, true);
+
+        assert!(matches!(
+            spec.cell_at(&pod, 0),
+            Some(Cow::Borrowed("pod-a"))
+        ));
+        assert!(matches!(
+            spec.cell_at(&pod, 4),
+            Some(Cow::Borrowed("10.0.0.7"))
+        ));
+        assert!(matches!(spec.cell_at(&pod, 1), Some(Cow::Owned(_))));
     }
 
     #[test]
