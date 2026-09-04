@@ -263,6 +263,72 @@ async fn await_counts(rx: &mut Receiver<Msg>, want: &[(&str, usize)]) {
     assert!(seen.is_ok(), "never saw counts {want:?}");
 }
 
+/// A stand-in API server that gzip-encodes its list response and records the
+/// request headers it was asked with. Enabling the `gzip` cargo feature is the
+/// entire change: kube installs its decompression layer inside
+/// `Client::try_from`, which is what `Cluster::from_config` calls — so nothing
+/// in this repo constructs the middleware. That makes it worth pinning from the
+/// outside rather than trusting the feature flag.
+async fn mock_gzip_api() -> (String, Arc<std::sync::Mutex<Vec<String>>>) {
+    use std::io::Write;
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+    const POD_LIST: &str = concat!(
+        r#"{"kind":"PodList","apiVersion":"v1","metadata":{"resourceVersion":"7"},"items":["#,
+        r#"{"apiVersion":"v1","kind":"Pod","metadata":{"name":"a","namespace":"default","resourceVersion":"1"},"spec":{"nodeName":"node-a"},"status":{"phase":"Running"}},"#,
+        r#"{"apiVersion":"v1","kind":"Pod","metadata":{"name":"b","namespace":"default","resourceVersion":"2"},"spec":{"nodeName":"node-b"},"status":{"phase":"Running"}}"#,
+        r#"]}"#
+    );
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind mock gzip api");
+    let addr = listener.local_addr().expect("local addr");
+    let headers = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let seen = Arc::clone(&headers);
+    tokio::spawn(async move {
+        loop {
+            let Ok((mut sock, _)) = listener.accept().await else {
+                return;
+            };
+            let seen = Arc::clone(&seen);
+            tokio::spawn(async move {
+                let (r, mut w) = sock.split();
+                let mut reader = BufReader::new(r);
+                let mut request_line = String::new();
+                if reader.read_line(&mut request_line).await.unwrap_or(0) == 0 {
+                    return;
+                }
+                loop {
+                    let mut header = String::new();
+                    if reader.read_line(&mut header).await.unwrap_or(0) == 0 || header == "\r\n" {
+                        break;
+                    }
+                    seen.lock()
+                        .unwrap()
+                        .push(header.trim().to_ascii_lowercase());
+                }
+                // A watch would be answered uncompressed by a real apiserver;
+                // this mock only has to serve the list the watcher opens with.
+                if request_line.contains("watch=true") {
+                    std::future::pending::<()>().await;
+                }
+                let mut enc =
+                    flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+                enc.write_all(POD_LIST.as_bytes()).expect("gzip");
+                let body = enc.finish().expect("gzip finish");
+                let head = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-encoding: gzip\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                    body.len()
+                );
+                let _ = w.write_all(head.as_bytes()).await;
+                let _ = w.write_all(&body).await;
+            });
+        }
+    });
+    (format!("http://{addr}"), headers)
+}
+
 /// A `Cluster` whose client talks to `url` instead of a real API server.
 fn mock_cluster(url: &str) -> Cluster {
     let mut config = kube::Config::new(url.parse().expect("mock url"));
@@ -428,6 +494,29 @@ async fn node_pods_backs_off_when_the_initial_list_keeps_failing() {
     assert!(
         gaps[1] > gaps[0],
         "retry interval did not grow, backoff is being reset: {gaps:?}"
+    );
+}
+
+/// Compression is transparent: the `gzip` cargo feature is the only change, and
+/// it has to survive a dependency bump that reshuffles kube's client stack.
+/// Both halves are checked — the request advertises gzip, and a gzip-encoded
+/// body is inflated before deserialization. Without the feature the second
+/// assertion fails first, because serde is handed the raw deflate stream.
+#[tokio::test]
+async fn the_client_negotiates_and_inflates_gzip() {
+    let (url, headers) = mock_gzip_api().await;
+    let (tx, mut rx) = mpsc::channel(1024);
+    let mut app = App::new(mock_cluster(&url), tx);
+
+    app.spawn_node_pods_poll();
+
+    // Counts can only be right if the compressed body round-tripped.
+    await_counts(&mut rx, &[("node-a", 1), ("node-b", 1)]).await;
+
+    let seen = headers.lock().unwrap();
+    assert!(
+        seen.iter().any(|h| h == "accept-encoding: gzip"),
+        "client did not ask for gzip; headers: {seen:?}"
     );
 }
 
