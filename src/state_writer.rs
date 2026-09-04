@@ -11,7 +11,7 @@
 //! stalled network filesystem must not hold the process open after the TUI has
 //! handed the terminal back.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
@@ -215,6 +215,18 @@ impl StateWriter {
         Arc::clone(&self.pending_failures)
     }
 
+    /// The exit summary's lines. Per-occurrence ids keep acknowledgement
+    /// precise, but a user staring at a broken disk wants one line per
+    /// distinct problem, not one per failed keystroke.
+    fn failure_summary(&self) -> BTreeSet<String> {
+        self.pending_failures
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .values()
+            .cloned()
+            .collect()
+    }
+
     #[cfg(test)]
     pub(crate) fn pending_failure_count(&self) -> usize {
         self.pending_failures
@@ -270,11 +282,7 @@ impl Drop for StateWriter {
         // stderr is safe here and only here: `App` is dropped after the TUI
         // has released the terminal, so this lands on the user's shell rather
         // than smearing across a live alternate screen.
-        let pending_failures = self
-            .pending_failures
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        for error in pending_failures.values() {
+        for error in self.failure_summary() {
             eprintln!("warning: state not saved: {error}");
         }
     }
@@ -469,6 +477,31 @@ mod tests {
 
         drop(writer);
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn the_exit_summary_collapses_repeats_of_the_same_problem() {
+        let (ui_tx, _ui_rx) = tokio::sync::mpsc::channel(1);
+        let writer = StateWriter::new(ui_tx).unwrap();
+        // One unreachable state file written repeatedly is one problem, however
+        // many keystrokes hit it.
+        let pending = writer.pending_failures_handle();
+        {
+            let mut pending = pending.lock().unwrap();
+            pending.insert(1, "sort.toml: Permission denied".into());
+            pending.insert(2, "sort.toml: Permission denied".into());
+            pending.insert(3, "namespaces.toml: Permission denied".into());
+        }
+
+        // Acknowledgement still tracks every occurrence separately.
+        assert_eq!(writer.pending_failure_count(), 3);
+        assert_eq!(
+            writer.failure_summary().into_iter().collect::<Vec<_>>(),
+            vec![
+                "namespaces.toml: Permission denied".to_string(),
+                "sort.toml: Permission denied".to_string(),
+            ]
+        );
     }
 
     /// Regression test for the shutdown race: putting a notice in the channel
