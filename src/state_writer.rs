@@ -195,10 +195,12 @@ impl StateWriter {
         self.send(Write::Sort(state, path))
     }
 
-    /// Distinct failures the worker could not put in front of the user yet.
+    /// Shared view of the failures the worker could not put in front of the
+    /// user. A handle rather than a snapshot so a test can still read it after
+    /// teardown, which is when most of them are recorded.
     #[cfg(test)]
-    fn unreported_failures(&self) -> Vec<String> {
-        self.unreported.lock().unwrap().iter().cloned().collect()
+    fn unreported_handle(&self) -> Unreported {
+        Arc::clone(&self.unreported)
     }
 
     #[cfg(test)]
@@ -349,10 +351,10 @@ mod tests {
             .save_sort(crate::sortmem::SortMemory::default(), impossible_path)
             .unwrap();
 
+        let unreported = writer.unreported_handle();
         let deadline = Instant::now() + Duration::from_secs(5);
         loop {
-            let failures = writer.unreported_failures();
-            if let Some(error) = failures.first() {
+            if let Some(error) = unreported.lock().unwrap().first() {
                 assert!(error.contains("sort.toml"), "{error}");
                 break;
             }
@@ -360,6 +362,45 @@ mod tests {
             std::thread::sleep(Duration::from_millis(5));
         }
         drop(writer);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// The case the old `reports_background_write_failures_to_the_ui` was
+    /// accidentally covering: a write that only fails once teardown has begun.
+    /// Nothing drains the event channel by then, so the notice has to end up in
+    /// the exit summary instead of being posted into a channel no one reads.
+    #[test]
+    fn failures_during_the_shutdown_drain_reach_the_exit_summary() {
+        let dir = std::env::temp_dir().join(format!("sofka-state-drain-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let parent_file = dir.join("not-a-directory");
+        std::fs::write(&parent_file, "x").unwrap();
+        let impossible_path = parent_file.join("sort.toml");
+        // Roomy channel and a generous grace: neither a full channel nor an
+        // expired deadline can be what redirects this failure.
+        let (ui_tx, mut ui_rx) = tokio::sync::mpsc::channel(8);
+        let writer = StateWriter::with_grace(ui_tx, Duration::from_secs(5)).unwrap();
+        let unreported = writer.unreported_handle();
+
+        // Hold the worker so the failing write is still queued when `drop`
+        // runs, and therefore only reaches disk during the drain.
+        writer
+            .stall(Duration::from_millis(50), PathBuf::from("/stall"))
+            .unwrap();
+        writer
+            .save_sort(crate::sortmem::SortMemory::default(), impossible_path)
+            .unwrap();
+        drop(writer);
+
+        let failures = unreported.lock().unwrap().clone();
+        assert_eq!(failures.len(), 1, "{failures:?}");
+        let error = failures.first().expect("one recorded failure");
+        assert!(error.contains("sort.toml"), "{error}");
+        assert!(
+            ui_rx.try_recv().is_err(),
+            "posted a notice to a channel nothing is reading"
+        );
         let _ = std::fs::remove_dir_all(dir);
     }
 
