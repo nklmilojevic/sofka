@@ -1201,6 +1201,7 @@ async fn saved_forwards_show_as_stopped_until_running() {
 
     // A live child linked by name moves the entry out of the stopped tail.
     app.port_forwards.push(PortForward {
+        context: app.cluster.context.clone(),
         config_name: Some("argocd".into()),
         ns: "argocd".into(),
         target: "svc/argocd-server".into(),
@@ -3739,6 +3740,7 @@ fn spawn_test_child(argv0: &str, arg: &str) -> tokio::process::Child {
 async fn stopping_a_forward_kills_only_that_one() {
     let (mut app, _rx) = test_app();
     app.port_forwards.push(PortForward {
+        context: app.cluster.context.clone(),
         config_name: None,
         ns: "default".into(),
         target: "pod/a".into(),
@@ -3746,6 +3748,7 @@ async fn stopping_a_forward_kills_only_that_one() {
         child: spawn_test_child("sleep", "30"),
     });
     app.port_forwards.push(PortForward {
+        context: app.cluster.context.clone(),
         config_name: None,
         ns: "default".into(),
         target: "pod/b".into(),
@@ -3772,6 +3775,7 @@ async fn reap_drops_exited_forwards_and_flashes() {
     let mut child = spawn_test_child("true", "");
     child.wait().await.unwrap(); // let it exit before reaping
     app.port_forwards.push(PortForward {
+        context: app.cluster.context.clone(),
         config_name: None,
         ns: "default".into(),
         target: "pod/a".into(),

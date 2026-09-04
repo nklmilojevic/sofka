@@ -1201,6 +1201,7 @@ impl App {
         match cmd.spawn() {
             Ok(child) => {
                 let pf = PortForward {
+                    context: self.cluster.context.clone(),
                     ns,
                     target,
                     ports,
@@ -1226,13 +1227,16 @@ impl App {
             .any(|pf| pf.config_name.as_deref() == Some(name))
     }
 
-    /// Whether any live port-forward targets the given `(namespace, name)`.
-    /// Used by the table renderer to mark forwarded rows. The forward target
-    /// may be prefixed with `svc/` for services.
+    /// Whether any live port-forward targets the given `(namespace, name)` on
+    /// the current context. Used by the table renderer to mark forwarded rows.
+    /// The forward target may be prefixed with `svc/` for services.
     pub fn has_port_forward(&self, ns: &str, name: &str) -> bool {
-        self.port_forwards
-            .iter()
-            .any(|pf| pf.target.strip_prefix("svc/").unwrap_or(&pf.target) == name && pf.ns == ns)
+        let ctx = &self.cluster.context;
+        self.port_forwards.iter().any(|pf| {
+            pf.context == *ctx
+                && pf.ns == ns
+                && pf.target.strip_prefix("svc/").unwrap_or(&pf.target) == name
+        })
     }
 
     /// Start one saved forward by its config index.
@@ -2620,23 +2624,30 @@ fn service_port_labels(data: &Value) -> Vec<String> {
 }
 
 /// Collect declared container ports from a Pod manifest as
-/// `"port:port  (container/portname)"` labels.
+/// `"port:port  (container/portname)"` labels. Scans regular, init, and
+/// ephemeral containers so ports declared in any container type are offered.
 fn pod_port_labels(data: &Value) -> Vec<String> {
     let mut out = Vec::new();
-    let Some(containers) = data.pointer("/spec/containers").and_then(Value::as_array) else {
-        return out;
-    };
-    for c in containers {
-        let cname = c.get("name").and_then(Value::as_str).unwrap_or("");
-        let Some(ports) = c.pointer("/ports").and_then(Value::as_array) else {
+    for path in [
+        "/spec/containers",
+        "/spec/initContainers",
+        "/spec/ephemeralContainers",
+    ] {
+        let Some(containers) = data.pointer(path).and_then(Value::as_array) else {
             continue;
         };
-        for p in ports {
-            let Some(port) = p.get("containerPort").and_then(Value::as_i64) else {
+        for c in containers {
+            let cname = c.get("name").and_then(Value::as_str).unwrap_or("");
+            let Some(ports) = c.pointer("/ports").and_then(Value::as_array) else {
                 continue;
             };
-            let pname = p.get("name").and_then(Value::as_str).unwrap_or("");
-            out.push(port_label(port, &[(cname, pname)]));
+            for p in ports {
+                let Some(port) = p.get("containerPort").and_then(Value::as_i64) else {
+                    continue;
+                };
+                let pname = p.get("name").and_then(Value::as_str).unwrap_or("");
+                out.push(port_label(port, &[(cname, pname)]));
+            }
         }
     }
     out
