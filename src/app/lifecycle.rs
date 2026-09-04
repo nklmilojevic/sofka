@@ -844,7 +844,7 @@ impl App {
                 self.borrow_status(format!("error: {error}"), true);
             }
             Msg::StateWriteFailed(error) => {
-                self.last_error = Some(error.clone());
+                self.last_state_write_error = Some(error.clone());
                 self.borrow_status(format!("state not saved: {error}"), true);
             }
             Msg::Flash {

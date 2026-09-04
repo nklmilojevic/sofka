@@ -116,6 +116,9 @@ impl App {
             "  state:     {}",
             crate::diagnostics::state_dir().display()
         ));
+        if let Some(e) = &self.last_state_write_error {
+            lines.push(format!("  last state write error: {e}"));
+        }
         lines.push(format!(
             "  snapshots: {}",
             crate::snapshot::snapshots_dir().display()

@@ -1962,6 +1962,21 @@ async fn panic_msg_flashes_regardless_of_generation() {
 }
 
 #[tokio::test]
+async fn state_write_failure_stays_out_of_watch_health() {
+    let (mut app, _rx) = test_app();
+    app.handle_msg(Msg::StateWriteFailed("sort.toml: Permission denied".into()));
+    assert!(app.flash_err);
+    assert!(app.flash.contains("state not saved"), "{}", app.flash);
+    assert_eq!(
+        app.last_state_write_error.as_deref(),
+        Some("sort.toml: Permission denied")
+    );
+    // `:info` files `last_error` under watch health; a disk problem there
+    // would read as a broken watch.
+    assert_eq!(app.last_error, None);
+}
+
+#[tokio::test]
 async fn logs_pause_freezes_and_survives_new_lines() {
     let (mut app, _rx) = test_app();
     app.mode = Mode::Logs;

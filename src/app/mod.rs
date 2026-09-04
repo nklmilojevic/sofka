@@ -1548,6 +1548,10 @@ pub struct App {
     pub watch_errors: u64,
     /// The most recent error message, for `:info` diagnostics.
     pub last_error: Option<String>,
+    /// The most recent failure to persist a small UI-state file (namespace,
+    /// sort, fleet marks). Kept apart from [`Self::last_error`], which `:info`
+    /// reports under watch health — a disk problem is not a watch problem.
+    pub last_state_write_error: Option<String>,
     /// Whether the Metrics API has ever returned data this session.
     pub metrics_seen: bool,
     /// The metrics poll's most recent failure (`None` while it works), for
@@ -1824,6 +1828,7 @@ impl App {
             journal: crate::journal::Journal::default(),
             watch_errors: 0,
             last_error: None,
+            last_state_write_error: None,
             metrics_seen: false,
             metrics_error: None,
             rbac_allowed: None,

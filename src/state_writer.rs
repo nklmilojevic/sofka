@@ -43,6 +43,19 @@ impl Write {
     }
 }
 
+/// Perform one write, routing a failure to the status line.
+///
+/// Deliberately never touches stderr. This runs on a background thread for as
+/// long as the session lasts, and by then the TUI owns the alternate screen;
+/// ratatui only repaints cells it sees change, so a stray line would stay
+/// smeared across the table until something else happened to overwrite it.
+/// `Msg` is the one channel that reaches the user safely.
+fn report(write: Write, ui_tx: &UiSender<Msg>) {
+    if let Err(error) = write.run() {
+        let _ = ui_tx.try_send(Msg::StateWriteFailed(error));
+    }
+}
+
 /// Handle to the ordered state-write worker.
 pub struct StateWriter {
     tx: Option<Sender<Write>>,
@@ -57,10 +70,7 @@ impl StateWriter {
             .spawn(move || {
                 while let Ok(first) = rx.recv() {
                     let Ok(second) = rx.try_recv() else {
-                        if let Err(error) = first.run() {
-                            eprintln!("warning: state not saved: {error}");
-                            let _ = ui_tx.try_send(Msg::StateWriteFailed(error));
-                        }
+                        report(first, &ui_tx);
                         continue;
                     };
                     let mut pending = vec![first];
@@ -77,10 +87,7 @@ impl StateWriter {
                         }
                     }
                     for write in pending {
-                        if let Err(error) = write.run() {
-                            eprintln!("warning: state not saved: {error}");
-                            let _ = ui_tx.try_send(Msg::StateWriteFailed(error));
-                        }
+                        report(write, &ui_tx);
                     }
                 }
             })
