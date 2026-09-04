@@ -1964,7 +1964,10 @@ async fn panic_msg_flashes_regardless_of_generation() {
 #[tokio::test]
 async fn state_write_failure_stays_out_of_watch_health() {
     let (mut app, _rx) = test_app();
-    app.handle_msg(Msg::StateWriteFailed("sort.toml: Permission denied".into()));
+    app.handle_msg(Msg::StateWriteFailed {
+        id: 1,
+        error: "sort.toml: Permission denied".into(),
+    });
     assert!(app.flash_err);
     assert!(app.flash.contains("state not saved"), "{}", app.flash);
     assert_eq!(
@@ -1974,6 +1977,41 @@ async fn state_write_failure_stays_out_of_watch_health() {
     // `:info` files `last_error` under watch health; a disk problem there
     // would read as a broken watch.
     assert_eq!(app.last_error, None);
+}
+
+#[tokio::test]
+async fn handled_state_write_failure_is_acknowledged() {
+    let dir = std::env::temp_dir().join(format!("sofka-app-state-ack-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let parent_file = dir.join("not-a-directory");
+    std::fs::write(&parent_file, "x").unwrap();
+    let impossible_path = parent_file.join("sort.toml");
+    let (mut app, mut rx) = test_app();
+    app.state_writer = Some(crate::state_writer::StateWriter::new(app.tx.clone()).unwrap());
+
+    app.state_writer
+        .as_ref()
+        .unwrap()
+        .save_sort(crate::sortmem::SortMemory::default(), impossible_path)
+        .unwrap();
+    let msg = tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
+        .await
+        .expect("state failure notification timed out")
+        .expect("state failure notification channel closed");
+    assert_eq!(
+        app.state_writer.as_ref().unwrap().pending_failure_count(),
+        1
+    );
+
+    app.handle_msg(msg);
+    assert_eq!(
+        app.state_writer.as_ref().unwrap().pending_failure_count(),
+        0
+    );
+
+    app.state_writer.take();
+    let _ = std::fs::remove_dir_all(dir);
 }
 
 #[tokio::test]

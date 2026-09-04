@@ -843,9 +843,12 @@ impl App {
                 self.last_error = Some(error.clone());
                 self.borrow_status(format!("error: {error}"), true);
             }
-            Msg::StateWriteFailed(error) => {
+            Msg::StateWriteFailed { id, error } => {
                 self.last_state_write_error = Some(error.clone());
                 self.borrow_status(format!("state not saved: {error}"), true);
+                if let Some(writer) = &self.state_writer {
+                    writer.acknowledge_failure(id);
+                }
             }
             Msg::Flash {
                 generation,

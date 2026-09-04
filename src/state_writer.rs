@@ -11,9 +11,9 @@
 //! stalled network filesystem must not hold the process open after the TUI has
 //! handed the terminal back.
 
-use std::collections::BTreeSet;
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
@@ -66,9 +66,10 @@ impl Write {
     }
 }
 
-/// Distinct failures the worker could not put in front of the user, for
-/// [`StateWriter::drop`] to print once the terminal is back.
-type Unreported = Arc<Mutex<BTreeSet<String>>>;
+/// Failures the UI has not acknowledged handling, for [`StateWriter::drop`]
+/// to print once the terminal is back. Each occurrence gets its own id so an
+/// acknowledgement for one repeated error cannot hide a later one.
+type PendingFailures = Arc<Mutex<BTreeMap<u64, String>>>;
 
 /// How the worker thread gets a failed write in front of the user.
 struct Reporting {
@@ -76,7 +77,8 @@ struct Reporting {
     /// Set by [`StateWriter::drop`] before the queue closes: past that point
     /// nothing drains the UI channel, so `Msg` would go nowhere.
     draining: Arc<AtomicBool>,
-    unreported: Unreported,
+    pending_failures: PendingFailures,
+    next_failure_id: AtomicU64,
 }
 
 impl Reporting {
@@ -88,23 +90,22 @@ impl Reporting {
     /// something else happened to overwrite it. The status line is the one
     /// channel that reaches the user safely.
     ///
-    /// It can fail to reach even that — a full event channel, or a write that
-    /// only completes after teardown began — and losing the notice would leave
-    /// a discarded namespace, sort, or fleet choice with no trace at all. Those
-    /// are stashed for `Drop` to print after the TUI releases the terminal.
+    /// Enqueue success is not proof of delivery: the event loop may stop before
+    /// handling a queued message. Record the failure first and let the UI
+    /// acknowledge it only when `App::handle_msg` actually processes it. Any
+    /// failure still pending at teardown is printed after the TUI releases the
+    /// terminal.
     fn report(&self, write: Write) {
         let Err(error) = write.run() else { return };
-        // Relaxed: the flag guards nothing but itself. Reading it stale can
-        // only lose the notice for a write that failed in the nanoseconds
-        // between the check and teardown setting it, which the stderr summary
-        // would not have printed any sooner.
-        let delivered = !self.draining.load(Ordering::Relaxed)
-            && self
-                .ui_tx
-                .try_send(Msg::StateWriteFailed(error.clone()))
-                .is_ok();
-        if !delivered && let Ok(mut unreported) = self.unreported.lock() {
-            unreported.insert(error);
+        let id = self.next_failure_id.fetch_add(1, Ordering::Relaxed);
+        self.pending_failures
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(id, error.clone());
+        // This flag only avoids a useless send. A stale read is harmless:
+        // without an acknowledgement the retained failure still survives.
+        if !self.draining.load(Ordering::Relaxed) {
+            let _ = self.ui_tx.try_send(Msg::StateWriteFailed { id, error });
         }
     }
 }
@@ -117,7 +118,7 @@ pub struct StateWriter {
     /// on [`JoinHandle::join`], which has no deadline.
     finished: Receiver<()>,
     draining: Arc<AtomicBool>,
-    unreported: Unreported,
+    pending_failures: PendingFailures,
     grace: Duration,
 }
 
@@ -130,11 +131,12 @@ impl StateWriter {
         let (tx, rx) = mpsc::channel::<Write>();
         let (finished_tx, finished) = mpsc::channel::<()>();
         let draining = Arc::new(AtomicBool::new(false));
-        let unreported: Unreported = Arc::new(Mutex::new(BTreeSet::new()));
+        let pending_failures: PendingFailures = Arc::new(Mutex::new(BTreeMap::new()));
         let reporting = Reporting {
             ui_tx,
             draining: Arc::clone(&draining),
-            unreported: Arc::clone(&unreported),
+            pending_failures: Arc::clone(&pending_failures),
+            next_failure_id: AtomicU64::new(1),
         };
         let worker = std::thread::Builder::new()
             .name("sofka-state-writer".into())
@@ -170,7 +172,7 @@ impl StateWriter {
             worker: Some(worker),
             finished,
             draining,
-            unreported,
+            pending_failures,
             grace,
         })
     }
@@ -195,12 +197,30 @@ impl StateWriter {
         self.send(Write::Sort(state, path))
     }
 
-    /// Shared view of the failures the worker could not put in front of the
-    /// user. A handle rather than a snapshot so a test can still read it after
-    /// teardown, which is when most of them are recorded.
+    /// Mark a failure notice as handled by the live UI. Until this happens the
+    /// worker retains it for the exit summary, even when channel enqueue
+    /// succeeded.
+    pub(crate) fn acknowledge_failure(&self, id: u64) {
+        self.pending_failures
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&id);
+    }
+
+    /// Shared view of failures not yet acknowledged by the UI. A handle rather
+    /// than a snapshot lets tests inspect it after teardown, when shutdown-only
+    /// failures are recorded.
     #[cfg(test)]
-    fn unreported_handle(&self) -> Unreported {
-        Arc::clone(&self.unreported)
+    fn pending_failures_handle(&self) -> PendingFailures {
+        Arc::clone(&self.pending_failures)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn pending_failure_count(&self) -> usize {
+        self.pending_failures
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .len()
     }
 
     #[cfg(test)]
@@ -250,10 +270,12 @@ impl Drop for StateWriter {
         // stderr is safe here and only here: `App` is dropped after the TUI
         // has released the terminal, so this lands on the user's shell rather
         // than smearing across a live alternate screen.
-        if let Ok(unreported) = self.unreported.lock() {
-            for error in unreported.iter() {
-                eprintln!("warning: state not saved: {error}");
-            }
+        let pending_failures = self
+            .pending_failures
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for error in pending_failures.values() {
+            eprintln!("warning: state not saved: {error}");
         }
     }
 }
@@ -343,7 +365,10 @@ mod tests {
         // the failure has nowhere to go but the exit summary.
         let (ui_tx, _ui_rx) = tokio::sync::mpsc::channel(1);
         ui_tx
-            .try_send(Msg::StateWriteFailed("filler".into()))
+            .try_send(Msg::StateWriteFailed {
+                id: 0,
+                error: "filler".into(),
+            })
             .unwrap();
         let writer = StateWriter::new(ui_tx).unwrap();
 
@@ -351,10 +376,10 @@ mod tests {
             .save_sort(crate::sortmem::SortMemory::default(), impossible_path)
             .unwrap();
 
-        let unreported = writer.unreported_handle();
+        let pending_failures = writer.pending_failures_handle();
         let deadline = Instant::now() + Duration::from_secs(5);
         loop {
-            if let Some(error) = unreported.lock().unwrap().first() {
+            if let Some(error) = pending_failures.lock().unwrap().values().next() {
                 assert!(error.contains("sort.toml"), "{error}");
                 break;
             }
@@ -381,7 +406,7 @@ mod tests {
         // expired deadline can be what redirects this failure.
         let (ui_tx, mut ui_rx) = tokio::sync::mpsc::channel(8);
         let writer = StateWriter::with_grace(ui_tx, Duration::from_secs(5)).unwrap();
-        let unreported = writer.unreported_handle();
+        let pending_failures = writer.pending_failures_handle();
 
         // Hold the worker so the failing write is still queued when `drop`
         // runs, and therefore only reaches disk during the drain.
@@ -393,9 +418,9 @@ mod tests {
             .unwrap();
         drop(writer);
 
-        let failures = unreported.lock().unwrap().clone();
+        let failures = pending_failures.lock().unwrap().clone();
         assert_eq!(failures.len(), 1, "{failures:?}");
-        let error = failures.first().expect("one recorded failure");
+        let error = failures.values().next().expect("one recorded failure");
         assert!(error.contains("sort.toml"), "{error}");
         assert!(
             ui_rx.try_recv().is_err(),
@@ -414,6 +439,7 @@ mod tests {
         let impossible_path = parent_file.join("sort.toml");
         let (ui_tx, mut ui_rx) = tokio::sync::mpsc::channel(1);
         let writer = StateWriter::new(ui_tx).unwrap();
+        let pending_failures = writer.pending_failures_handle();
 
         writer
             .save_sort(crate::sortmem::SortMemory::default(), impossible_path)
@@ -423,9 +449,9 @@ mod tests {
         // the opposite path: teardown stops using the UI channel precisely
         // because nothing drains it once the event loop has stopped.
         let deadline = Instant::now() + Duration::from_secs(5);
-        let error = loop {
+        let (id, error) = loop {
             match ui_rx.try_recv() {
-                Ok(Msg::StateWriteFailed(error)) => break error,
+                Ok(Msg::StateWriteFailed { id, error }) => break (id, error),
                 Ok(_) => panic!("expected a state-write failure"),
                 Err(_) => {
                     assert!(Instant::now() < deadline, "no failure reported");
@@ -434,8 +460,56 @@ mod tests {
             }
         };
         assert!(error.contains("sort.toml"), "{error}");
+        assert_eq!(pending_failures.lock().unwrap().get(&id), Some(&error));
+
+        // `App::handle_msg` performs this acknowledgement after it has
+        // actually processed the notice.
+        writer.acknowledge_failure(id);
+        assert!(pending_failures.lock().unwrap().is_empty());
 
         drop(writer);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Regression test for the shutdown race: putting a notice in the channel
+    /// does not mean the event loop handled it. If quit wins the event-loop
+    /// select, the queued notice must remain pending for the exit summary.
+    #[test]
+    fn queued_but_unhandled_failure_is_kept_for_the_exit_summary() {
+        let dir = std::env::temp_dir().join(format!("sofka-state-queued-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let parent_file = dir.join("not-a-directory");
+        std::fs::write(&parent_file, "x").unwrap();
+        let impossible_path = parent_file.join("sort.toml");
+        let (ui_tx, mut ui_rx) = tokio::sync::mpsc::channel(8);
+        let writer = StateWriter::new(ui_tx).unwrap();
+        let pending_failures = writer.pending_failures_handle();
+
+        writer
+            .save_sort(crate::sortmem::SortMemory::default(), impossible_path)
+            .unwrap();
+
+        // Wait until `try_send` has succeeded, but deliberately do not receive
+        // or acknowledge the event, matching an event loop that already quit.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while ui_rx.len() != 1 {
+            assert!(Instant::now() < deadline, "failure notice was not queued");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        drop(writer);
+
+        let failures = pending_failures.lock().unwrap().clone();
+        assert_eq!(failures.len(), 1, "{failures:?}");
+        let (id, error) = failures.first_key_value().expect("one pending failure");
+        assert!(error.contains("sort.toml"), "{error}");
+        assert!(matches!(
+            ui_rx.try_recv(),
+            Ok(Msg::StateWriteFailed {
+                id: queued_id,
+                error: queued_error,
+            }) if queued_id == *id && queued_error.as_str() == error
+        ));
         let _ = std::fs::remove_dir_all(dir);
     }
 }
