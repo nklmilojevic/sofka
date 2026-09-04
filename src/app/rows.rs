@@ -483,7 +483,9 @@ impl App {
     /// The headers as displayed: the active view spec's columns, with
     /// NAMESPACE prepended when listing across namespaces and CPU/MEM appended
     /// for pods/nodes. Kept in one place so sorting and rendering agree on the
-    /// column layout.
+    /// column layout. (The port-forward indicator column is injected at render
+    /// time, not here — it has no header and doesn't participate in sorting or
+    /// copy-pick.)
     pub fn display_headers(&self) -> Vec<String> {
         let mut h = self.spec.headers();
         if self.show_namespace_column() {

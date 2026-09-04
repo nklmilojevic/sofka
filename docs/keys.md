@@ -50,7 +50,7 @@ plugin, bookmark, and workspace chords.
 | `:find <text>`                                | global fuzzy find over object names across common kinds, all namespaces                                                               |
 | `i`                                           | set container image                                                                                                                   |
 | `r`                                           | rollout restart (workloads) / force-sync (ExternalSecrets/PushSecrets) / refresh (elsewhere)                                          |
-| `f` / `shift-f`                               | port-forward (pods/services) - runs in the background                                                                                 |
+| `f` / `shift-f`                               | port-forward (pods/services) — picker shows declared ports, or "Custom…" for manual entry; active forwards show `●` next to the name |
 | `t`                                           | Flux: suspend/resume/reconcile menu · ArgoCD App/AppSet: suspend/resume (App: + sync) · CronJobs: trigger/suspend/resume · pods: file transfer (`kubectl cp`)                           |
 | `C` / `U` / `D`                               | nodes: cordon / uncordon / drain                                                                                                      |
 | `ctrl-d` / `ctrl-k`                           | delete / force-delete (marked rows, or current); in confirm: `f` toggles force, `c` cycles cascade (background → foreground → orphan) |

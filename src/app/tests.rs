@@ -1226,7 +1226,7 @@ async fn saved_forwards_show_as_stopped_until_running() {
 }
 
 #[tokio::test]
-async fn port_forward_prompt_prefills_first_exposed_port() {
+async fn port_forward_picker_lists_service_ports() {
     let (mut app, _rx) = test_app();
     app.switch_kind("services");
     apply(
@@ -1234,32 +1234,43 @@ async fn port_forward_prompt_prefills_first_exposed_port() {
         json!({
             "apiVersion": "v1", "kind": "Service",
             "metadata": {"name": "web", "namespace": "default", "resourceVersion": "1"},
-            "spec": {"ports": [{"port": 8080}, {"port": 9090}]}
+            "spec": {"ports": [{"port": 8080, "name": "http"}, {"port": 9090, "name": "metrics"}]}
         }),
     );
     app.table_state.select(Some(0));
     app.request_port_forward();
-    assert_eq!(app.mode, Mode::Prompt);
-    assert_eq!(
-        app.prompt_input, "8080:8080",
-        "first service port, LOCAL:REMOTE"
-    );
+    assert_eq!(app.mode, Mode::PortForwardPicker);
+    assert_eq!(app.pf_picker_items.len(), 3); // 2 ports + Custom…
+    assert!(app.pf_picker_items[0].contains("8080:8080"));
+    assert!(app.pf_picker_items[0].contains("http"));
+    assert!(app.pf_picker_items[1].contains("9090:9090"));
+    assert!(app.pf_picker_items[1].contains("metrics"));
+    assert_eq!(app.pf_picker_items[2], "Custom…");
+}
 
-    // Pods take the first declared container port.
+#[tokio::test]
+async fn port_forward_picker_lists_pod_container_ports() {
+    let (mut app, _rx) = test_app();
     app.switch_kind("pods");
     apply(
         &mut app,
         json!({
             "apiVersion": "v1", "kind": "Pod",
             "metadata": {"name": "db", "namespace": "default", "resourceVersion": "1"},
-            "spec": {"containers": [{"name": "pg", "ports": [{"containerPort": 5432}]}]}
+            "spec": {"containers": [{"name": "pg", "ports": [{"containerPort": 5432, "name": "pgsql"}]}]}
         }),
     );
     app.table_state.select(Some(0));
     app.request_port_forward();
-    assert_eq!(app.prompt_input, "5432:5432");
+    assert_eq!(app.mode, Mode::PortForwardPicker);
+    assert_eq!(app.pf_picker_items.len(), 2); // 1 port + Custom…
+    assert!(app.pf_picker_items[0].contains("5432:5432"));
+    assert!(app.pf_picker_items[0].contains("pg/pgsql"));
+}
 
-    // No declared ports: the prompt stays empty as before.
+#[tokio::test]
+async fn port_forward_picker_no_ports_only_custom() {
+    let (mut app, _rx) = test_app();
     app.switch_kind("pods");
     apply(
         &mut app,
@@ -1271,7 +1282,72 @@ async fn port_forward_prompt_prefills_first_exposed_port() {
     );
     app.table_state.select(Some(0));
     app.request_port_forward();
-    assert_eq!(app.prompt_input, "");
+    assert_eq!(app.mode, Mode::PortForwardPicker);
+    assert_eq!(app.pf_picker_items, vec!["Custom…"]);
+}
+
+#[tokio::test]
+async fn port_forward_picker_select_port_starts_forward() {
+    let (mut app, _rx) = test_app();
+    app.switch_kind("services");
+    apply(
+        &mut app,
+        json!({
+            "apiVersion": "v1", "kind": "Service",
+            "metadata": {"name": "web", "namespace": "default", "resourceVersion": "1"},
+            "spec": {"ports": [{"port": 8080}]}
+        }),
+    );
+    app.table_state.select(Some(0));
+    app.request_port_forward();
+    // Select first port (already selected) and confirm.
+    app.handle_key(press(KeyCode::Enter)).unwrap();
+    assert_eq!(app.mode, Mode::Table);
+    assert!(app.flash.contains("port-forwarding"), "{}", app.flash);
+    assert_eq!(app.port_forwards.len(), 1);
+    assert_eq!(app.port_forwards[0].ports, "8080:8080");
+}
+
+#[tokio::test]
+async fn port_forward_picker_custom_falls_through_to_prompt() {
+    let (mut app, _rx) = test_app();
+    app.switch_kind("services");
+    apply(
+        &mut app,
+        json!({
+            "apiVersion": "v1", "kind": "Service",
+            "metadata": {"name": "web", "namespace": "default", "resourceVersion": "1"},
+            "spec": {"ports": [{"port": 8080}]}
+        }),
+    );
+    app.table_state.select(Some(0));
+    app.request_port_forward();
+    // Navigate to "Custom…" (last item) and confirm.
+    let custom_idx = app.pf_picker_items.len() - 1;
+    app.pf_picker_state.select(Some(custom_idx));
+    app.handle_key(press(KeyCode::Enter)).unwrap();
+    assert_eq!(app.mode, Mode::Prompt);
+    assert!(app.prompt_label.contains("Port-forward web"));
+    assert!(app.prompt_input.is_empty());
+}
+
+#[tokio::test]
+async fn port_forward_picker_esc_cancels() {
+    let (mut app, _rx) = test_app();
+    app.switch_kind("services");
+    apply(
+        &mut app,
+        json!({
+            "apiVersion": "v1", "kind": "Service",
+            "metadata": {"name": "web", "namespace": "default", "resourceVersion": "1"},
+            "spec": {"ports": [{"port": 8080}]}
+        }),
+    );
+    app.table_state.select(Some(0));
+    app.request_port_forward();
+    app.handle_key(press(KeyCode::Esc)).unwrap();
+    assert_eq!(app.mode, Mode::Table);
+    assert!(app.port_forwards.is_empty());
 }
 
 #[test]
