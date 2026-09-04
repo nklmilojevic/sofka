@@ -1,4 +1,6 @@
-//! UI-latency and end-to-end comparison for asynchronous state persistence.
+//! UI-latency and logical-update burst comparison for asynchronous state
+//! persistence. The async worker may coalesce queued snapshots for the same
+//! file because only the newest UI state needs to reach disk.
 //!
 //! Run with:
 //!   cargo run --release --example state_write_probe --features bench
@@ -68,9 +70,9 @@ fn main() {
     println!("state writes ({WRITES} writes/sample, median of {SAMPLES})");
     println!("sync UI path:       {sync_ui:10.3} us/op");
     println!("async UI submit:    {async_submit:10.3} us/op");
-    println!("async total drain:  {async_total:10.3} us/op");
+    println!("async burst drain:  {async_total:10.3} us/op");
     println!("UI latency speedup: {:10.2}x", sync_ui / async_submit);
-    println!("total throughput:   {:10.2}x", sync_ui / async_total);
+    println!("logical throughput: {:10.2}x", sync_ui / async_total);
 
     let _ = std::fs::remove_dir_all(dir);
 }

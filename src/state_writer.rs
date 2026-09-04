@@ -3,10 +3,11 @@
 //! Namespace, sort, and fleet choices are changed from input handlers on the
 //! render/event-loop thread. Filesystems can stall unpredictably, so the live
 //! app hands snapshots to one ordered worker instead of doing TOML encoding,
-//! directory creation, and writes inline. A single queue also prevents two
-//! rapid changes to the same file from completing out of order.
+//! directory creation, and writes inline. A single queue prevents two rapid
+//! changes to the same file from completing out of order and coalesces a
+//! queued burst to its newest snapshot per destination.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Sender};
 use std::thread::JoinHandle;
 
@@ -21,6 +22,12 @@ enum Write {
 }
 
 impl Write {
+    fn path(&self) -> &Path {
+        match self {
+            Write::Fleet(_, path) | Write::Namespace(_, path) | Write::Sort(_, path) => path,
+        }
+    }
+
     fn run(self) -> Result<(), String> {
         match self {
             Write::Fleet(state, path) => state
@@ -48,10 +55,32 @@ impl StateWriter {
         let worker = std::thread::Builder::new()
             .name("sofka-state-writer".into())
             .spawn(move || {
-                for write in rx {
-                    if let Err(error) = write.run() {
-                        eprintln!("warning: state not saved: {error}");
-                        let _ = ui_tx.try_send(Msg::StateWriteFailed(error));
+                while let Ok(first) = rx.recv() {
+                    let Ok(second) = rx.try_recv() else {
+                        if let Err(error) = first.run() {
+                            eprintln!("warning: state not saved: {error}");
+                            let _ = ui_tx.try_send(Msg::StateWriteFailed(error));
+                        }
+                        continue;
+                    };
+                    let mut pending = vec![first];
+                    // Only the newest snapshot for a file matters. Drain the
+                    // burst already waiting behind `first` before touching
+                    // disk, while retaining independent state files.
+                    for next in std::iter::once(second).chain(rx.try_iter()) {
+                        if let Some(slot) =
+                            pending.iter_mut().find(|write| write.path() == next.path())
+                        {
+                            *slot = next;
+                        } else {
+                            pending.push(next);
+                        }
+                    }
+                    for write in pending {
+                        if let Err(error) = write.run() {
+                            eprintln!("warning: state not saved: {error}");
+                            let _ = ui_tx.try_send(Msg::StateWriteFailed(error));
+                        }
                     }
                 }
             })
@@ -107,7 +136,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn drains_writes_in_submission_order_on_shutdown() {
+    fn coalescing_keeps_the_latest_snapshot_on_shutdown() {
         let dir = std::env::temp_dir().join(format!("sofka-state-writer-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let path = dir.join("namespaces.toml");
@@ -124,6 +153,34 @@ mod tests {
 
         drop(writer);
         assert_eq!(crate::nsmem::NamespaceMemory::load(&path), latest);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn coalescing_retains_independent_destination_files() {
+        let dir = std::env::temp_dir().join(format!("sofka-state-files-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let namespace_path = dir.join("namespaces.toml");
+        let sort_path = dir.join("sort.toml");
+        let (ui_tx, _ui_rx) = tokio::sync::mpsc::channel(1);
+        let writer = StateWriter::new(ui_tx).unwrap();
+
+        let mut namespaces = crate::nsmem::NamespaceMemory::default();
+        namespaces.set("prod", "payments");
+        writer
+            .save_namespace(namespaces.clone(), namespace_path.clone())
+            .unwrap();
+
+        let mut sorts = crate::sortmem::SortMemory::default();
+        sorts.set("pods", "AGE", true);
+        writer.save_sort(sorts.clone(), sort_path.clone()).unwrap();
+
+        drop(writer);
+        assert_eq!(
+            crate::nsmem::NamespaceMemory::load(&namespace_path),
+            namespaces
+        );
+        assert_eq!(crate::sortmem::SortMemory::load(&sort_path), sorts);
         let _ = std::fs::remove_dir_all(dir);
     }
 
