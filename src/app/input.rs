@@ -89,6 +89,7 @@ impl App {
             Mode::Snapshots => self.key_snapshots(key),
             Mode::Fleet => self.key_fleet(key),
             Mode::Find => self.key_find(key),
+            Mode::PortForwardPicker => self.key_port_forward_picker(key),
         }
         Ok(())
     }

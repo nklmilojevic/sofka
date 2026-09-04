@@ -127,7 +127,7 @@ The essentials. `?` in the app shows everything, or see the
 | `l` / `L`            | logs / VictoriaLogs history                                                                       |
 | `X` / `T`            | explain why it's unhealthy / state-change timeline                                                |
 | `s` / `e` / `a`      | shell or scale / edit in `$EDITOR` / attach                                                       |
-| `f`                  | port-forward, in the background (`:pf` manages them)                                              |
+| `f`                  | port-forward — port picker from manifest, `●` marks active forwards (`:pf` manages them)         |
 | `t`                  | Flux/ArgoCD menu · CronJob trigger · pod file transfer                                                   |
 | `r` / `i`            | rollout restart / set container image                                                             |
 | `ctrl-d` / `ctrl-k`  | delete / force-delete (marked rows, or current)                                                   |

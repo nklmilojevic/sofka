@@ -46,6 +46,8 @@ impl App {
     /// The current table as plain (unstyled) columns + rows — the same layout
     /// the table renders (NAMESPACE prepended across namespaces, CPU/MEM
     /// appended for pods/nodes, volatile cells resolved), minus the coloring.
+    /// The port-forward indicator column is not included — it's session state,
+    /// not cluster data.
     pub(super) fn snapshot_table(&self) -> (Vec<String>, Vec<Vec<String>>) {
         let headers = self.display_headers();
         let show_ns = self.show_namespace_column();

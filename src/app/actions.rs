@@ -1160,26 +1160,18 @@ impl App {
         }
         let name = obj.metadata.name.clone().unwrap_or_default();
         let ns = obj.metadata.namespace.clone().unwrap_or_default();
-        // Pre-fill `p:p` from the first exposed port (service `spec.ports`,
-        // pod container ports) so the common case is Enter-only; still
-        // editable, and empty when the object declares no ports.
-        let port = match self.kind_plural.as_str() {
-            "services" => obj
-                .data
-                .pointer("/spec/ports/0/port")
-                .and_then(Value::as_i64),
-            _ => obj
-                .data
-                .pointer("/spec/containers")
-                .and_then(Value::as_array)
-                .into_iter()
-                .flatten()
-                .find_map(|c| c.pointer("/ports/0/containerPort").and_then(Value::as_i64)),
+
+        let mut items = match self.kind_plural.as_str() {
+            "services" => service_port_labels(&obj.data),
+            _ => pod_port_labels(&obj.data),
         };
-        self.prompt_label = format!("Port-forward {name} (LOCAL:REMOTE, e.g. 8080:80):");
-        self.prompt_input = port.map(|p| format!("{p}:{p}")).unwrap_or_default();
-        self.prompt_kind = Some(PromptKind::PortForward { ns, name });
-        self.mode = Mode::Prompt;
+        items.dedup();
+        items.push("Custom…".into());
+
+        self.pf_picker_items = items;
+        self.pf_picker_state.select(Some(0));
+        self.pf_picker_target = Some((ns, name));
+        self.mode = Mode::PortForwardPicker;
     }
 
     /// Start `kubectl port-forward` in the background (not a foreground
@@ -1209,6 +1201,8 @@ impl App {
         match cmd.spawn() {
             Ok(child) => {
                 let pf = PortForward {
+                    context: self.cluster.context.clone(),
+                    cluster_url: self.cluster.cluster_url.clone(),
                     ns,
                     target,
                     ports,
@@ -1232,6 +1226,22 @@ impl App {
         self.port_forwards
             .iter()
             .any(|pf| pf.config_name.as_deref() == Some(name))
+    }
+
+    /// Whether any live port-forward targets the given `(namespace, name)` on
+    /// the current cluster. Used by the table renderer to mark forwarded rows.
+    /// Matched by both context name and cluster URL so neither a context name
+    /// remap nor same-server-different-credentials causes a false marker.
+    /// The forward target may be prefixed with `svc/` for services.
+    pub fn has_port_forward(&self, ns: &str, name: &str) -> bool {
+        let ctx = &self.cluster.context;
+        let url = &self.cluster.cluster_url;
+        self.port_forwards.iter().any(|pf| {
+            pf.context == *ctx
+                && pf.cluster_url == *url
+                && pf.ns == ns
+                && pf.target.strip_prefix("svc/").unwrap_or(&pf.target) == name
+        })
     }
 
     /// Start one saved forward by its config index.
@@ -2603,6 +2613,83 @@ impl App {
     }
 }
 
+/// Collect declared ports from a Service manifest as `"port:port  (name)"` labels.
+fn service_port_labels(data: &Value) -> Vec<String> {
+    let Some(ports) = data.pointer("/spec/ports").and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    ports
+        .iter()
+        .filter_map(|p| {
+            let port = p.get("port")?.as_i64()?;
+            let name = p.get("name").and_then(Value::as_str).unwrap_or("");
+            Some(port_label(port, &[("", name)]))
+        })
+        .collect()
+}
+
+/// Collect declared container ports from a Pod manifest as
+/// `"port:port  (container/portname)"` labels. Scans regular, init, and
+/// ephemeral containers. Init containers that have already terminated are
+/// skipped — their ports are no longer listening.
+fn pod_port_labels(data: &Value) -> Vec<String> {
+    let mut out = Vec::new();
+    for (path, is_init) in [
+        ("/spec/containers", false),
+        ("/spec/initContainers", true),
+        ("/spec/ephemeralContainers", false),
+    ] {
+        let Some(containers) = data.pointer(path).and_then(Value::as_array) else {
+            continue;
+        };
+        for c in containers {
+            let cname = c.get("name").and_then(Value::as_str).unwrap_or("");
+            // Skip init containers that have already terminated — nothing is
+            // listening on their ports.
+            if is_init && container_terminated(data, "/status/initContainerStatuses", cname) {
+                continue;
+            }
+            let Some(ports) = c.pointer("/ports").and_then(Value::as_array) else {
+                continue;
+            };
+            for p in ports {
+                let Some(port) = p.get("containerPort").and_then(Value::as_i64) else {
+                    continue;
+                };
+                let pname = p.get("name").and_then(Value::as_str).unwrap_or("");
+                out.push(port_label(port, &[(cname, pname)]));
+            }
+        }
+    }
+    out
+}
+
+/// Whether the named container in `status_path` has a `terminated` state.
+fn container_terminated(data: &Value, status_path: &str, name: &str) -> bool {
+    let Some(statuses) = data.pointer(status_path).and_then(Value::as_array) else {
+        return false;
+    };
+    statuses.iter().any(|s| {
+        s.get("name").and_then(Value::as_str) == Some(name)
+            && s.pointer("/state/terminated").is_some()
+    })
+}
+
+/// Build a `"port:port"` label, appending `"  (qualifiers)"` joined by `/`
+/// when any qualifier is non-empty.
+fn port_label(port: i64, qualifiers: &[(&str, &str)]) -> String {
+    let mut s = format!("{port}:{port}");
+    let parts: Vec<&str> = qualifiers
+        .iter()
+        .flat_map(|&(k, v)| [k, v].into_iter().filter(|s| !s.is_empty()))
+        .collect();
+    if !parts.is_empty() {
+        s.push_str("  (");
+        s.push_str(&parts.join("/"));
+        s.push(')');
+    }
+    s
+}
 /// Run a `helm` subprocess to completion, following the same
 /// missing-binary/non-zero-exit handling as `describe()`'s `kubectl` shell-out.
 async fn run_helm(argv: &[String]) -> std::result::Result<(), String> {

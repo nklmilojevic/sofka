@@ -355,4 +355,45 @@ impl App {
             _ => {}
         }
     }
+
+    /// Port-forward picker (`f` on a pod/service): single-select over the
+    /// object's declared ports, plus a "Custom…" entry that falls through to
+    /// the typed prompt.
+    pub(super) fn key_port_forward_picker(&mut self, key: KeyEvent) {
+        let len = self.pf_picker_items.len();
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('q') => self.mode = Mode::Table,
+            KeyCode::Char('j') | KeyCode::Down => list_step(&mut self.pf_picker_state, len, true),
+            KeyCode::Char('k') | KeyCode::Up => list_step(&mut self.pf_picker_state, len, false),
+            KeyCode::Enter => {
+                let Some(i) = self.pf_picker_state.selected() else {
+                    return;
+                };
+                let Some(item) = self.pf_picker_items.get(i).cloned() else {
+                    return;
+                };
+                let Some((ns, name)) = self.pf_picker_target.clone() else {
+                    return;
+                };
+                if item == "Custom…" {
+                    self.prompt_label =
+                        format!("Port-forward {name} (LOCAL:REMOTE, e.g. 8080:80):");
+                    self.prompt_input.clear();
+                    self.prompt_kind = Some(PromptKind::PortForward { ns, name });
+                    self.mode = Mode::Prompt;
+                } else {
+                    // Extract the "LOCAL:REMOTE" portion before any "  (name)" suffix.
+                    let ports = item.split_whitespace().next().unwrap_or(&item).to_string();
+                    let target = if self.kind_plural == "services" {
+                        format!("svc/{name}")
+                    } else {
+                        name
+                    };
+                    self.start_port_forward(ns, target, ports);
+                    self.mode = Mode::Table;
+                }
+            }
+            _ => {}
+        }
+    }
 }
