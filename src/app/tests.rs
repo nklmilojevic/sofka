@@ -1201,7 +1201,7 @@ async fn saved_forwards_show_as_stopped_until_running() {
 
     // A live child linked by name moves the entry out of the stopped tail.
     app.port_forwards.push(PortForward {
-        context: app.cluster.context.clone(),
+        cluster_url: app.cluster.cluster_url.clone(),
         config_name: Some("argocd".into()),
         ns: "argocd".into(),
         target: "svc/argocd-server".into(),
@@ -1349,6 +1349,34 @@ async fn port_forward_picker_esc_cancels() {
     app.handle_key(press(KeyCode::Esc)).unwrap();
     assert_eq!(app.mode, Mode::Table);
     assert!(app.port_forwards.is_empty());
+}
+
+#[tokio::test]
+async fn has_port_forward_matches_cluster_url_not_context() {
+    let (mut app, _rx) = test_app();
+    app.cluster.cluster_url = "https://cluster-a".into();
+    app.port_forwards.push(PortForward {
+        cluster_url: "https://cluster-a".into(),
+        config_name: None,
+        ns: "default".into(),
+        target: "svc/web".into(),
+        ports: "8080:80".into(),
+        child: spawn_test_child("sleep", "30"),
+    });
+
+    // Same cluster URL + same ns/name → match.
+    assert!(app.has_port_forward("default", "web"));
+
+    // Same context name but different cluster URL → no match.
+    app.cluster.cluster_url = "https://cluster-b".into();
+    assert!(!app.has_port_forward("default", "web"));
+
+    // Wrong namespace → no match.
+    app.cluster.cluster_url = "https://cluster-a".into();
+    assert!(!app.has_port_forward("other", "web"));
+
+    // Wrong name → no match.
+    assert!(!app.has_port_forward("default", "other"));
 }
 
 #[test]
@@ -3740,7 +3768,7 @@ fn spawn_test_child(argv0: &str, arg: &str) -> tokio::process::Child {
 async fn stopping_a_forward_kills_only_that_one() {
     let (mut app, _rx) = test_app();
     app.port_forwards.push(PortForward {
-        context: app.cluster.context.clone(),
+        cluster_url: app.cluster.cluster_url.clone(),
         config_name: None,
         ns: "default".into(),
         target: "pod/a".into(),
@@ -3748,7 +3776,7 @@ async fn stopping_a_forward_kills_only_that_one() {
         child: spawn_test_child("sleep", "30"),
     });
     app.port_forwards.push(PortForward {
-        context: app.cluster.context.clone(),
+        cluster_url: app.cluster.cluster_url.clone(),
         config_name: None,
         ns: "default".into(),
         target: "pod/b".into(),
@@ -3775,7 +3803,7 @@ async fn reap_drops_exited_forwards_and_flashes() {
     let mut child = spawn_test_child("true", "");
     child.wait().await.unwrap(); // let it exit before reaping
     app.port_forwards.push(PortForward {
-        context: app.cluster.context.clone(),
+        cluster_url: app.cluster.cluster_url.clone(),
         config_name: None,
         ns: "default".into(),
         target: "pod/a".into(),

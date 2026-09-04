@@ -1201,7 +1201,7 @@ impl App {
         match cmd.spawn() {
             Ok(child) => {
                 let pf = PortForward {
-                    context: self.cluster.context.clone(),
+                    cluster_url: self.cluster.cluster_url.clone(),
                     ns,
                     target,
                     ports,
@@ -1228,12 +1228,14 @@ impl App {
     }
 
     /// Whether any live port-forward targets the given `(namespace, name)` on
-    /// the current context. Used by the table renderer to mark forwarded rows.
+    /// the current cluster. Used by the table renderer to mark forwarded rows.
+    /// Matched by cluster URL (not context name) so a kubeconfig reload that
+    /// remaps a context name to a different cluster won't show a stale marker.
     /// The forward target may be prefixed with `svc/` for services.
     pub fn has_port_forward(&self, ns: &str, name: &str) -> bool {
-        let ctx = &self.cluster.context;
+        let url = &self.cluster.cluster_url;
         self.port_forwards.iter().any(|pf| {
-            pf.context == *ctx
+            pf.cluster_url == *url
                 && pf.ns == ns
                 && pf.target.strip_prefix("svc/").unwrap_or(&pf.target) == name
         })

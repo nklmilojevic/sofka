@@ -207,7 +207,7 @@ pub enum Suspend {
 /// a quit (or panic-unwind) never leaves an orphaned `kubectl` holding the
 /// local port open.
 pub struct PortForward {
-    context: String,
+    cluster_url: String,
     ns: String,
     target: String,
     ports: String,
