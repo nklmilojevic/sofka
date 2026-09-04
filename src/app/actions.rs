@@ -1201,6 +1201,7 @@ impl App {
         match cmd.spawn() {
             Ok(child) => {
                 let pf = PortForward {
+                    context: self.cluster.context.clone(),
                     cluster_url: self.cluster.cluster_url.clone(),
                     ns,
                     target,
@@ -1229,13 +1230,15 @@ impl App {
 
     /// Whether any live port-forward targets the given `(namespace, name)` on
     /// the current cluster. Used by the table renderer to mark forwarded rows.
-    /// Matched by cluster URL (not context name) so a kubeconfig reload that
-    /// remaps a context name to a different cluster won't show a stale marker.
+    /// Matched by both context name and cluster URL so neither a context name
+    /// remap nor same-server-different-credentials causes a false marker.
     /// The forward target may be prefixed with `svc/` for services.
     pub fn has_port_forward(&self, ns: &str, name: &str) -> bool {
+        let ctx = &self.cluster.context;
         let url = &self.cluster.cluster_url;
         self.port_forwards.iter().any(|pf| {
-            pf.cluster_url == *url
+            pf.context == *ctx
+                && pf.cluster_url == *url
                 && pf.ns == ns
                 && pf.target.strip_prefix("svc/").unwrap_or(&pf.target) == name
         })
@@ -2627,19 +2630,25 @@ fn service_port_labels(data: &Value) -> Vec<String> {
 
 /// Collect declared container ports from a Pod manifest as
 /// `"port:port  (container/portname)"` labels. Scans regular, init, and
-/// ephemeral containers so ports declared in any container type are offered.
+/// ephemeral containers. Init containers that have already terminated are
+/// skipped — their ports are no longer listening.
 fn pod_port_labels(data: &Value) -> Vec<String> {
     let mut out = Vec::new();
-    for path in [
-        "/spec/containers",
-        "/spec/initContainers",
-        "/spec/ephemeralContainers",
+    for (path, is_init) in [
+        ("/spec/containers", false),
+        ("/spec/initContainers", true),
+        ("/spec/ephemeralContainers", false),
     ] {
         let Some(containers) = data.pointer(path).and_then(Value::as_array) else {
             continue;
         };
         for c in containers {
             let cname = c.get("name").and_then(Value::as_str).unwrap_or("");
+            // Skip init containers that have already terminated — nothing is
+            // listening on their ports.
+            if is_init && container_terminated(data, "/status/initContainerStatuses", cname) {
+                continue;
+            }
             let Some(ports) = c.pointer("/ports").and_then(Value::as_array) else {
                 continue;
             };
@@ -2653,6 +2662,17 @@ fn pod_port_labels(data: &Value) -> Vec<String> {
         }
     }
     out
+}
+
+/// Whether the named container in `status_path` has a `terminated` state.
+fn container_terminated(data: &Value, status_path: &str, name: &str) -> bool {
+    let Some(statuses) = data.pointer(status_path).and_then(Value::as_array) else {
+        return false;
+    };
+    statuses.iter().any(|s| {
+        s.get("name").and_then(Value::as_str) == Some(name)
+            && s.pointer("/state/terminated").is_some()
+    })
 }
 
 /// Build a `"port:port"` label, appending `"  (qualifiers)"` joined by `/`

@@ -1201,6 +1201,7 @@ async fn saved_forwards_show_as_stopped_until_running() {
 
     // A live child linked by name moves the entry out of the stopped tail.
     app.port_forwards.push(PortForward {
+        context: app.cluster.context.clone(),
         cluster_url: app.cluster.cluster_url.clone(),
         config_name: Some("argocd".into()),
         ns: "argocd".into(),
@@ -1352,10 +1353,12 @@ async fn port_forward_picker_esc_cancels() {
 }
 
 #[tokio::test]
-async fn has_port_forward_matches_cluster_url_not_context() {
+async fn has_port_forward_matches_context_and_cluster_url() {
     let (mut app, _rx) = test_app();
+    app.cluster.context = "ctx-a".into();
     app.cluster.cluster_url = "https://cluster-a".into();
     app.port_forwards.push(PortForward {
+        context: "ctx-a".into(),
         cluster_url: "https://cluster-a".into(),
         config_name: None,
         ns: "default".into(),
@@ -1364,15 +1367,20 @@ async fn has_port_forward_matches_cluster_url_not_context() {
         child: spawn_test_child("sleep", "30"),
     });
 
-    // Same cluster URL + same ns/name → match (svc/ prefix stripped).
+    // Same context + cluster URL + ns/name → match (svc/ prefix stripped).
     assert!(app.has_port_forward("default", "web"));
 
-    // Different cluster URL → no match (even with same context name).
+    // Different cluster URL → no match.
     app.cluster.cluster_url = "https://cluster-b".into();
     assert!(!app.has_port_forward("default", "web"));
 
-    // Back to original cluster, wrong namespace → no match.
+    // Same cluster URL but different context name → no match.
     app.cluster.cluster_url = "https://cluster-a".into();
+    app.cluster.context = "ctx-b".into();
+    assert!(!app.has_port_forward("default", "web"));
+
+    // Back to original, wrong namespace → no match.
+    app.cluster.context = "ctx-a".into();
     assert!(!app.has_port_forward("other", "web"));
 
     // Wrong name → no match.
@@ -1406,6 +1414,36 @@ async fn port_forward_picker_includes_init_and_ephemeral_container_ports() {
     assert!(app.pf_picker_items[1].contains("init"));
     assert!(app.pf_picker_items[2].contains("2222:2222"));
     assert!(app.pf_picker_items[2].contains("debug"));
+}
+
+#[tokio::test]
+async fn port_forward_picker_skips_terminated_init_container_ports() {
+    let (mut app, _rx) = test_app();
+    app.switch_kind("pods");
+    apply(
+        &mut app,
+        json!({
+            "apiVersion": "v1", "kind": "Pod",
+            "metadata": {"name": "multi", "namespace": "default", "resourceVersion": "1"},
+            "spec": {
+                "containers": [{"name": "app", "ports": [{"containerPort": 8080}]}],
+                "initContainers": [{"name": "init", "ports": [{"containerPort": 9090}]}]
+            },
+            "status": {
+                "initContainerStatuses": [{
+                    "name": "init",
+                    "state": {"terminated": {"reason": "Completed"}}
+                }]
+            }
+        }),
+    );
+    app.table_state.select(Some(0));
+    app.request_port_forward();
+    assert_eq!(app.mode, Mode::PortForwardPicker);
+    // Init container terminated → only app port + Custom…
+    assert_eq!(app.pf_picker_items.len(), 2);
+    assert!(app.pf_picker_items[0].contains("8080:8080"));
+    assert!(!app.pf_picker_items.iter().any(|i| i.contains("9090")));
 }
 
 #[tokio::test]
@@ -3903,6 +3941,7 @@ fn spawn_test_child(argv0: &str, arg: &str) -> tokio::process::Child {
 async fn stopping_a_forward_kills_only_that_one() {
     let (mut app, _rx) = test_app();
     app.port_forwards.push(PortForward {
+        context: app.cluster.context.clone(),
         cluster_url: app.cluster.cluster_url.clone(),
         config_name: None,
         ns: "default".into(),
@@ -3911,6 +3950,7 @@ async fn stopping_a_forward_kills_only_that_one() {
         child: spawn_test_child("sleep", "30"),
     });
     app.port_forwards.push(PortForward {
+        context: app.cluster.context.clone(),
         cluster_url: app.cluster.cluster_url.clone(),
         config_name: None,
         ns: "default".into(),
@@ -3938,6 +3978,7 @@ async fn reap_drops_exited_forwards_and_flashes() {
     let mut child = spawn_test_child("true", "");
     child.wait().await.unwrap(); // let it exit before reaping
     app.port_forwards.push(PortForward {
+        context: app.cluster.context.clone(),
         cluster_url: app.cluster.cluster_url.clone(),
         config_name: None,
         ns: "default".into(),
