@@ -41,12 +41,12 @@ impl FleetMarks {
             .unwrap_or_default()
     }
 
+    /// Persist to `path`. The file is replaced atomically, so a crash or a
+    /// second sofka writing at the same moment cannot leave a torn file that
+    /// [`Self::load`] would quietly read as empty.
     pub fn save(&self, path: &Path) -> Result<(), String> {
-        if let Some(dir) = path.parent() {
-            std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
-        }
         let text = toml::to_string(self).map_err(|e| e.to_string())?;
-        std::fs::write(path, text).map_err(|e| e.to_string())
+        crate::atomicfile::write(path, &text)
     }
 }
 

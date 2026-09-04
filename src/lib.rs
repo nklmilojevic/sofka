@@ -10,6 +10,7 @@
 
 pub mod altscroll;
 pub mod app;
+pub mod atomicfile;
 #[cfg(feature = "bench")]
 pub mod benchsupport;
 pub mod bundle;
