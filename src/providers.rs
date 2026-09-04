@@ -1074,6 +1074,16 @@ fn pick_metrics_service(services: &[Service]) -> Option<(String, String, i32)> {
     ))
 }
 
+#[cfg(feature = "bench")]
+pub fn bench_pick_log_service(services: &[Service]) -> Option<(String, String, i32)> {
+    pick_service(services)
+}
+
+#[cfg(feature = "bench")]
+pub fn bench_pick_metrics_service(services: &[Service]) -> Option<(String, String, i32)> {
+    pick_metrics_service(services)
+}
+
 impl MetricsProvider {
     /// Whether the transport still needs [`discover_metrics`].
     pub fn needs_discovery(&self) -> bool {

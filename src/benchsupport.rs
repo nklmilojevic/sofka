@@ -11,6 +11,7 @@
 //! `pod_summary` walks that array and a fixture without it would measure an
 //! empty loop.
 
+use k8s_openapi::api::core::v1::Service;
 use kube::core::DynamicObject;
 use serde_json::json;
 use tokio::sync::mpsc::{self, Receiver, Sender};
@@ -316,4 +317,89 @@ pub fn log_lines_wide(n: usize) -> Vec<String> {
 /// Sender factory for benches that need to construct messages directly.
 pub fn channel() -> (Sender<Msg>, Receiver<Msg>) {
     mpsc::channel(4096)
+}
+
+/// Service-discovery input with many usable candidates. Reverse namespaces
+/// ensure the minimum is not an accidental first-item fast path.
+pub fn services(n: usize) -> Vec<Service> {
+    (0..n)
+        .map(|i| {
+            serde_json::from_value(json!({
+                "metadata": {
+                    "name": format!("backend-{i:04}"),
+                    "namespace": format!("ns-{:04}", n - i),
+                },
+                "spec": {
+                    "ports": [
+                        {"name": "metrics", "port": 8080},
+                        {"port": if i.is_multiple_of(2) { 9428 } else { 9090 }},
+                    ]
+                }
+            }))
+            .expect("bench Service fixture is valid")
+        })
+        .collect()
+}
+
+/// Production one-pass VictoriaLogs candidate selection.
+pub fn pick_log_service(services: &[Service]) -> Option<(String, String, i32)> {
+    crate::providers::bench_pick_log_service(services)
+}
+
+/// Production one-pass Prometheus/VictoriaMetrics candidate selection.
+pub fn pick_metrics_service(services: &[Service]) -> Option<(String, String, i32)> {
+    crate::providers::bench_pick_metrics_service(services)
+}
+
+/// The allocation-heavy provider-selection implementation before this
+/// follow-up: materialize every usable candidate, then call `min_by_key`.
+pub fn pick_log_service_collected(services: &[Service]) -> Option<(String, String, i32)> {
+    let candidates: Vec<(&Service, i32)> = services
+        .iter()
+        .filter_map(|service| {
+            let ports = service.spec.as_ref()?.ports.as_ref()?;
+            let port = ports
+                .iter()
+                .find(|port| port.name.as_deref() == Some("http"))
+                .or_else(|| ports.iter().find(|port| port.port == 9428))
+                .or_else(|| ports.first())?;
+            Some((service, port.port))
+        })
+        .collect();
+    finish_collected(candidates)
+}
+
+/// Metrics-provider form of the former collected implementation.
+pub fn pick_metrics_service_collected(services: &[Service]) -> Option<(String, String, i32)> {
+    let candidates: Vec<(&Service, i32)> = services
+        .iter()
+        .filter_map(|service| {
+            let ports = service.spec.as_ref()?.ports.as_ref()?;
+            let port = ports
+                .iter()
+                .find(|port| port.name.as_deref() == Some("http"))
+                .or_else(|| {
+                    ports
+                        .iter()
+                        .find(|port| matches!(port.port, 9090 | 8428 | 8429))
+                })
+                .or_else(|| ports.first())?;
+            Some((service, port.port))
+        })
+        .collect();
+    finish_collected(candidates)
+}
+
+fn finish_collected(candidates: Vec<(&Service, i32)>) -> Option<(String, String, i32)> {
+    let (service, port) = candidates.iter().min_by_key(|(service, _)| {
+        (
+            service.metadata.namespace.as_deref().unwrap_or_default(),
+            service.metadata.name.as_deref().unwrap_or_default(),
+        )
+    })?;
+    Some((
+        service.metadata.namespace.clone().unwrap_or_default(),
+        service.metadata.name.clone().unwrap_or_default(),
+        *port,
+    ))
 }
