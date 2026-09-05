@@ -101,8 +101,8 @@ required-features = ["bench", "dhat-heap"]
 name = "allocator_probe"
 required-features = ["bench"]
 
-# Prices base64's SIMD engine against the scalar one over a whole Helm decode,
-# which is what settled the "no handwritten SIMD target" finding.
+# Prices base64's SIMD engine against the scalar one over a whole Helm decode;
+# this informed the decision not to adopt SIMD base64 for the measured fixture.
 [[example]]
 name = "helm_neon_probe"
 required-features = ["bench"]

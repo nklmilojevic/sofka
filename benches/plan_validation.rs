@@ -1,10 +1,11 @@
 //! Disposable A/B probes for the post-#188 optimization plan.
 //!
-//! Only the options that are still open live here. Probes whose result has
-//! since been implemented were removed rather than kept as a second copy:
+//! Only the options that are still open live here. Probes with implementations
+//! queued in follow-up PRs were removed rather than kept as a second copy:
 //! canonical row identity and the layout hit-test (PR #220), borrowed
-//! highlight runs and in-place provider framing (PR #221). The benchmarks that
-//! now guard those in production are in `benches/hot_paths.rs`.
+//! highlight runs and in-place provider framing (PR #221). Those PRs add
+//! production-path benchmarks to `benches/hot_paths.rs`; this plan can merge
+//! before them without claiming that their changes are already on `main`.
 //!
 //! These deliberately keep the baseline and prototype in one binary so both
 //! see identical codegen, machine load, and thermal conditions.
@@ -27,10 +28,10 @@ use serde::Deserialize;
 use serde_json::Value;
 use sofka::benchsupport as bs;
 
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize, Eq, PartialEq)]
 struct Selected<'a> {
-    #[serde(borrow, rename = "_time")]
-    time: Cow<'a, str>,
+    #[serde(borrow, rename = "_time", default)]
+    time: Option<Cow<'a, str>>,
     #[serde(borrow, rename = "_msg")]
     msg: Cow<'a, str>,
     #[serde(borrow, rename = "kubernetes.pod_name", default)]
@@ -39,6 +40,7 @@ struct Selected<'a> {
     container: Cow<'a, str>,
 }
 
+#[derive(Debug, Eq, PartialEq)]
 struct Retained {
     time: String,
     msg: String,
@@ -48,7 +50,7 @@ struct Retained {
 
 fn retain(selected: Selected<'_>) -> Retained {
     Retained {
-        time: selected.time.into_owned(),
+        time: selected.time.map(Cow::into_owned).unwrap_or_default(),
         msg: selected.msg.trim_end_matches('\n').to_owned(),
         pod: selected.pod.into_owned(),
         container: selected.container.into_owned(),
@@ -58,7 +60,11 @@ fn retain(selected: Selected<'_>) -> Retained {
 fn parse_dom(line: &str) -> Option<Retained> {
     let value: Value = serde_json::from_str(line).ok()?;
     Some(Retained {
-        time: value.get("_time")?.as_str()?.to_owned(),
+        time: value
+            .get("_time")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned(),
         msg: value
             .get("_msg")?
             .as_str()?
@@ -101,10 +107,21 @@ fn provider_lines(n: usize, message_len: usize) -> Vec<String> {
 }
 
 fn provider_parse(c: &mut Criterion) {
-    let mut g = c.benchmark_group("plan/provider_parse");
+    // This prices the default field mapping only. A production visitor must
+    // retain Fields' runtime-configured names, preserve the DOM path's handling
+    // of non-string optional fields, and should be benchmarked again.
+    let mut g = c.benchmark_group("plan/provider_parse_default_fields");
+    let missing_time = r#"{"_msg":"message"}"#;
+    assert_eq!(parse_dom(missing_time), parse_selective(missing_time));
     for (n, message_len) in [(1_000, 32), (1_000, 4_096), (10_000, 32)] {
         let lines = provider_lines(n, message_len);
         let id = format!("{n}x{message_len}");
+        let dom_entries: Vec<_> = lines.iter().filter_map(|line| parse_dom(line)).collect();
+        let selective_entries: Vec<_> = lines
+            .iter()
+            .filter_map(|line| parse_selective(line))
+            .collect();
+        assert_eq!(dom_entries, selective_entries);
         g.bench_with_input(BenchmarkId::new("value_dom", &id), &lines, |b, lines| {
             b.iter(|| {
                 let entries: Vec<_> = lines.iter().filter_map(|line| parse_dom(line)).collect();
@@ -164,17 +181,23 @@ fn per_frame_derived_work(c: &mut Criterion) {
 fn pickers_and_headers(c: &mut Criterion) {
     let (mut app, _rx) = bs::contexts_app(2_000);
     app.ctx_filter = "cluster-1".to_owned();
-    let cached = app.filtered_contexts();
-    let headers = app.display_headers();
-    let mut g = c.benchmark_group("plan/derived_models");
+    let precomputed_contexts = app.filtered_contexts();
+    let precomputed_headers = app.display_headers();
+    // The reference arms show the removable work but are not a production
+    // cache benchmark: they omit cache keys, lookup, and invalidation.
+    let mut g = c.benchmark_group("plan/derived_models_concept");
     g.bench_function("contexts_recompute_2000", |b| {
         b.iter(|| black_box(app.filtered_contexts()))
     });
-    g.bench_function("contexts_cached_2000", |b| b.iter(|| black_box(&cached)));
+    g.bench_function("contexts_precomputed_ref_2000", |b| {
+        b.iter(|| black_box(&precomputed_contexts))
+    });
     g.bench_function("headers_recompute", |b| {
         b.iter(|| black_box(app.display_headers()))
     });
-    g.bench_function("headers_cached", |b| b.iter(|| black_box(&headers)));
+    g.bench_function("headers_precomputed_ref", |b| {
+        b.iter(|| black_box(&precomputed_headers))
+    });
     g.finish();
 }
 
@@ -258,7 +281,9 @@ fn string_representations(c: &mut Criterion) {
             _ => format!("namespace-{}", i % 24),
         })
         .collect();
-    let mut g = c.benchmark_group("plan/string_representation_20000");
+    // These are intentionally short repeated values. They screen storage
+    // representations; they do not model namespace/name row keys.
+    let mut g = c.benchmark_group("plan/string_representation_short_20000");
     g.bench_function("string_clone", |b| b.iter(|| black_box(values.clone())));
     g.bench_function("compact_str", |b| {
         b.iter(|| {
@@ -325,7 +350,9 @@ fn parallel_filter(c: &mut Criterion) {
     let names: Vec<String> = (0..100_000)
         .map(|i| format!("ns-{}/workload-{i:05}-7d9f8b6c5d", i % 24))
         .collect();
-    let mut g = c.benchmark_group("plan/parallel_filter");
+    // A setup-cost screen using a cheap substring predicate, not the
+    // production fuzzy/structured row-filter pipeline.
+    let mut g = c.benchmark_group("plan/parallel_substring");
     for n in [2_000usize, 20_000, 100_000] {
         let slice = &names[..n];
         g.bench_with_input(BenchmarkId::new("sequential", n), &n, |b, _| {
@@ -425,10 +452,13 @@ fn wire_json(c: &mut Criterion) {
         ("table", "/tmp/sofka-table-pods.json"),
     ];
     let mut g = c.benchmark_group("plan/wire_json_771");
+    let mut found = 0usize;
     for (label, path) in inputs {
         let Ok(bytes) = std::fs::read(path) else {
+            eprintln!("plan/wire_json: skipping missing fixture {path}");
             continue;
         };
+        found += 1;
         g.throughput(criterion::Throughput::Bytes(bytes.len() as u64));
         g.bench_function(BenchmarkId::new("serde_value", label), |b| {
             b.iter_batched(
@@ -449,6 +479,11 @@ fn wire_json(c: &mut Criterion) {
             )
         });
     }
+    if found == 0 {
+        eprintln!(
+            "plan/wire_json: no live fixtures found; expected /tmp/sofka-{{full,meta,table}}-pods.json"
+        );
+    }
     g.finish();
 }
 
@@ -461,7 +496,7 @@ impl vte::Perform for VisibleCounter {
     }
 }
 
-fn manual_visible(bytes: &[u8]) -> usize {
+fn byte_scan_visible_len(bytes: &[u8]) -> usize {
     let mut visible = 0usize;
     let mut i = 0usize;
     while i < bytes.len() {
@@ -487,11 +522,13 @@ fn manual_visible(bytes: &[u8]) -> usize {
 
 fn ansi_parser(c: &mut Criterion) {
     let input = bs::log_lines(10_000).join("\n").into_bytes();
-    let mut g = c.benchmark_group("plan/ansi_10000");
-    g.bench_function("specialized_state_machine", |b| {
-        b.iter(|| black_box(manual_visible(&input)))
+    // Parser-overhead screen only: unlike ui::ansi_runs, the arms do not
+    // construct equivalent styled runs.
+    let mut g = c.benchmark_group("plan/ansi_parser_overhead_10000");
+    g.bench_function("byte_scan_visible_len", |b| {
+        b.iter(|| black_box(byte_scan_visible_len(&input)))
     });
-    g.bench_function("vte", |b| {
+    g.bench_function("vte_print_callbacks", |b| {
         b.iter(|| {
             let mut parser = vte::Parser::new();
             let mut performer = VisibleCounter::default();
@@ -500,7 +537,7 @@ fn ansi_parser(c: &mut Criterion) {
         })
     });
     let input_str = std::str::from_utf8(&input).unwrap();
-    g.bench_function("ansitok_borrowed", |b| {
+    g.bench_function("ansitok_text_ranges", |b| {
         b.iter(|| {
             let visible = ansitok::parse_ansi(input_str)
                 .filter(|token| token.kind() == ansitok::ElementKind::Text)
