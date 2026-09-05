@@ -29,7 +29,11 @@ impl App {
         let mut cache = self.rows_cache.borrow_mut();
         cache.cells.remove(key);
         cache.sort_keys.remove(key);
-        if !self.filter.is_empty() || self.sort_column.is_some() || self.kind_plural == "helm" {
+        if !self.filter.is_empty()
+            || self.sort_column.is_some()
+            || self.owner.is_some()
+            || self.kind_plural == "helm"
+        {
             cache.dirty = true;
         }
     }
@@ -307,6 +311,11 @@ impl App {
         for (k, o) in self.store.iter() {
             if let Some(keep) = helm_latest
                 && !keep.contains(k)
+            {
+                continue;
+            }
+            if let Some(owner) = &self.owner
+                && !owner.owns(o)
             {
                 continue;
             }

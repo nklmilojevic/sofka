@@ -189,6 +189,7 @@ impl App {
             // k9s: 0 = all namespaces.
             KeyCode::Char('0') => {
                 self.namespace.clear();
+                self.drop_owner_scope();
                 self.remember_namespace();
                 self.flash = "namespace: all namespaces".into();
                 self.flash_err = false;

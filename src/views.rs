@@ -133,6 +133,7 @@ pub const BUILTIN_DRILLS: &[&str] = &[
     "daemonsets",
     "replicasets",
     "jobs",
+    "cronjobs",
     "services",
     "pods",
     "customresourcedefinitions",

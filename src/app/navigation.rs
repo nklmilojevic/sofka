@@ -35,6 +35,7 @@ impl App {
                 None => self.flash_warn("service has no selector"),
             },
             "pods" => self.open_containers(&obj),
+            "cronjobs" => self.drill_into_cronjob_jobs(&obj),
             // enter on a CRD lists its custom resources, not its YAML.
             "customresourcedefinitions" => self.drill_into_crd(&obj),
             // Helm: release -> every revision, revision -> its values.
@@ -86,6 +87,39 @@ impl App {
         );
     }
 
+    pub(super) fn drop_owner_scope(&mut self) {
+        if self.owner.take().is_some() {
+            self.scope_label = None;
+        }
+    }
+
+    pub(super) fn drill_into_cronjob_jobs(&mut self, obj: &DynamicObject) {
+        let Some(jobs) = self.cluster.resolve("jobs") else {
+            self.flash_warn("jobs kind unavailable");
+            return;
+        };
+        let name = obj.metadata.name.clone().unwrap_or_default();
+        let ns = obj.metadata.namespace.clone().unwrap_or_default();
+        self.push_frame();
+        self.kind = Some(jobs);
+        self.kind_plural = "jobs".into();
+        self.namespace = ns;
+        self.labels = None;
+        self.fields = None;
+        self.owner = Some(OwnerScope {
+            kind: "CronJob".into(),
+            name: name.clone(),
+            uid: obj.metadata.uid.clone(),
+        });
+        self.scope_label = Some(format!("cronjob/{name}"));
+        self.filter.clear();
+        self.reset_sort();
+        self.table_state.select(Some(0));
+        self.flash = format!("↳ jobs of {name}");
+        self.flash_err = false;
+        self.start_watch();
+    }
+
     /// Drill from a Flux `HelmRelease` row into the revision history of the
     /// Helm release it manages — the same view `:helm` → enter reaches, so
     /// values (`⏎`), manifest (`y`), notes (`d`), and rollback (`r`) all work
@@ -107,6 +141,7 @@ impl App {
         self.namespace = ns;
         self.labels = Some(format!("owner=helm,name={release}"));
         self.fields = Some("type=helm.sh/release.v1".into());
+        self.owner = None;
         self.scope_label = Some(format!("helm/{release}"));
         self.filter.clear();
         self.reset_sort();
@@ -132,6 +167,7 @@ impl App {
         self.namespace = ns;
         self.labels = Some(format!("owner=helm,name={release}"));
         self.fields = Some("type=helm.sh/release.v1".into());
+        self.owner = None;
         self.scope_label = Some(format!("helm/{release}"));
         self.filter.clear();
         self.reset_sort();
@@ -224,6 +260,7 @@ impl App {
         self.namespace = String::new(); // list across all namespaces
         self.labels = None;
         self.fields = None;
+        self.owner = None;
         self.scope_label = Some(format!("crd/{crd_name}"));
         self.filter.clear();
         self.reset_sort();
@@ -265,6 +302,7 @@ impl App {
         self.kind_plural = plural.clone();
         self.labels = labels;
         self.fields = fields;
+        self.owner = None;
         self.scope_label = Some(scope);
         self.filter.clear();
         self.reset_sort();
@@ -300,6 +338,7 @@ impl App {
         self.namespace = t.namespace.clone().unwrap_or_default();
         self.labels = None;
         self.fields = Some(format!("metadata.name={}", t.name));
+        self.owner = None;
         self.scope_label = Some(t.name.clone());
         self.filter.clear();
         self.reset_sort();
@@ -325,6 +364,7 @@ impl App {
             self.kind_plural = "pods".into();
             self.labels = None;
             self.fields = None;
+            self.owner = None;
             self.scope_label = None;
             self.filter.clear();
             self.reset_sort();
