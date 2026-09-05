@@ -291,8 +291,84 @@ fn helm_decode(c: &mut Criterion) {
     g.finish();
 }
 
+/// 2.4b — just the viewport half of a frame: the row-key resolution and the
+/// cell-cache warming the renderer does for every visible row, without the
+/// terminal write. Isolates the per-row identity work from the buffer diff.
+fn viewport(c: &mut Criterion) {
+    let mut g = c.benchmark_group("viewport");
+    for n in [500usize, 2_000] {
+        let (app, _rx) = bs::pods_app_with_metrics(n);
+        black_box(app.row_count());
+        g.bench_with_input(BenchmarkId::new("warm_47", n), &n, |b, _| {
+            b.iter(|| black_box(bs::warm_viewport(&app, 0, 47)));
+        });
+    }
+    g.finish();
+}
+
+/// 2.4 — one full table frame: the viewport query, cell-cache warming, the
+/// per-row widget build (volatile cells, metrics, width measurement) and the
+/// column layout + mouse geometry. This is the unit a redraw actually costs,
+/// and the one the render findings (canonical row keys, hidden columns,
+/// per-frame header/layout rebuilds) are about.
+fn frame(c: &mut Criterion) {
+    let mut g = c.benchmark_group("frame");
+
+    for n in [500usize, 2_000] {
+        let (mut app, _rx) = bs::pods_app_with_metrics(n);
+        app.table_state.select(Some(0));
+        let mut term = bs::terminal(200, 50);
+        // A fixture that renders the wrong columns measures the wrong work.
+        assert!(
+            bs::headers(&app).iter().any(|h| h == "STATUS"),
+            "pods fixture must render the real pod columns, got {:?}",
+            bs::headers(&app)
+        );
+        bs::render_frame(&mut term, &mut app);
+        g.bench_with_input(BenchmarkId::new("table", n), &n, |b, _| {
+            b.iter(|| bs::render_frame(&mut term, &mut app));
+        });
+    }
+
+    // Horizontally scrolled: three columns are off the left edge, so their
+    // cells are formatted and measured but never drawn.
+    {
+        let n = 2_000usize;
+        let (mut app, _rx) = bs::pods_app_with_metrics(n);
+        app.table_state.select(Some(0));
+        app.col_offset = 3;
+        let mut term = bs::terminal(200, 50);
+        bs::render_frame(&mut term, &mut app);
+        g.bench_with_input(BenchmarkId::new("table_scrolled", n), &n, |b, _| {
+            b.iter(|| bs::render_frame(&mut term, &mut app));
+        });
+    }
+
+    // A watch event between frames: the row it touched re-renders, the rest of
+    // the viewport comes from the cell cache.
+    {
+        let n = 2_000usize;
+        let (mut app, _rx) = bs::pods_app_with_metrics(n);
+        app.table_state.select(Some(0));
+        let mut term = bs::terminal(200, 50);
+        bs::render_frame(&mut term, &mut app);
+        g.bench_with_input(BenchmarkId::new("event_then_frame", n), &n, |b, _| {
+            let mut i = 0usize;
+            b.iter(|| {
+                bs::touch_one(&mut app, i % n);
+                i += 1;
+                bs::render_frame(&mut term, &mut app);
+            });
+        });
+    }
+
+    g.finish();
+}
+
 criterion_group!(
     benches,
+    frame,
+    viewport,
     rows_cache,
     filter,
     filter_cmp,

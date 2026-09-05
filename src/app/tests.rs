@@ -997,11 +997,10 @@ async fn table_cell_cache_invalidates_on_apply() {
         }),
     );
     {
-        let rows = app.rows();
+        let rows = app.rows_keyed();
         app.ensure_table_cell_cache(&rows);
-        let key = row_key(rows[0]);
         let cache = app.table_cell_cache();
-        let (cells, _) = cache.get(&key).unwrap();
+        let (cells, _) = cache.get(rows[0].0).unwrap();
         assert_eq!(cells[2], "Pending");
     }
 
@@ -1018,11 +1017,10 @@ async fn table_cell_cache_invalidates_on_apply() {
             "status": {"phase": "Running"}
         }),
     );
-    let rows = app.rows();
+    let rows = app.rows_keyed();
     app.ensure_table_cell_cache(&rows);
-    let key = row_key(rows[0]);
     let cache = app.table_cell_cache();
-    let (cells, _) = cache.get(&key).unwrap();
+    let (cells, _) = cache.get(rows[0].0).unwrap();
     assert_eq!(cells[2], "Running");
 }
 
@@ -7906,11 +7904,10 @@ async fn user_view_overlays_columns_and_applies_initial_sort() {
     assert_eq!(rows[0].metadata.name.as_deref(), Some("old"));
 
     // Cells come from the JSON Pointers; the status column drives coloring.
-    let rows = app.rows();
+    let rows = app.rows_keyed();
     app.ensure_table_cell_cache(&rows);
-    let key = row_key(rows[1]);
     let cache = app.table_cell_cache();
-    let (cells, status_idx) = cache.get(&key).unwrap();
+    let (cells, status_idx) = cache.get(rows[1].0).unwrap();
     assert_eq!(cells[0], "new");
     assert_eq!(cells[1], "False");
     // Humanized future timestamp ("in 27000d"-ish, drifting with wall time).
@@ -7971,11 +7968,10 @@ async fn user_view_adds_provider_label_columns_to_curated_nodes() {
         }),
     );
 
-    let rows = app.rows();
+    let rows = app.rows_keyed();
     app.ensure_table_cell_cache(&rows);
-    let key = row_key(rows[0]);
     let cache = app.table_cell_cache();
-    let (cells, _) = cache.get(&key).unwrap();
+    let (cells, _) = cache.get(rows[0].0).unwrap();
     assert_eq!(cells[4], "v1.33.4");
     assert_eq!(&cells[5..9], ["general", "eu-west-1a", "m7i.large", "spot"]);
 }
@@ -8448,6 +8444,62 @@ async fn status_filter_matches_status_column() {
     app.filter = "status!=CrashLoopBackOff".into();
     app.invalidate_rows();
     assert_eq!(row_names(&app), ["healthy"]);
+}
+
+/// A comparison term reads the shared per-revision cell cache, so a row whose
+/// compared column changed has to fall out of the filter on the next rebuild —
+/// this is the case a stale cached cell would silently get wrong.
+#[tokio::test]
+async fn cmp_filter_follows_a_changed_cell() {
+    let (mut app, _rx) = test_app();
+    app.switch_kind("pods");
+    apply(
+        &mut app,
+        json!({"apiVersion": "v1", "kind": "Pod",
+        "metadata": {"name": "web", "namespace": "default", "resourceVersion": "1"},
+        "status": {"phase": "Running", "containerStatuses": [
+            {"ready": true, "restartCount": 0, "state": {"running": {}}}
+        ]}}),
+    );
+    type_filter(&mut app, "status=Running");
+    assert_eq!(row_names(&app), ["web"]);
+
+    apply(
+        &mut app,
+        json!({"apiVersion": "v1", "kind": "Pod",
+        "metadata": {"name": "web", "namespace": "default", "resourceVersion": "2"},
+        "status": {"phase": "Pending", "containerStatuses": [
+            {"ready": false, "restartCount": 0, "state": {"waiting": {"reason": "Pending"}}}
+        ]}}),
+    );
+    assert!(row_names(&app).is_empty(), "{:?}", row_names(&app));
+
+    app.filter = "status=Pending".into();
+    app.invalidate_rows();
+    assert_eq!(row_names(&app), ["web"]);
+}
+
+/// The 1s tick redraws for a reason, not on principle: housekeeping says
+/// whether it changed anything, and a static document view has nothing that
+/// moves with the clock.
+#[tokio::test]
+async fn housekeeping_reports_whether_a_tick_changed_anything() {
+    let (mut app, _rx) = test_app();
+    app.switch_kind("pods");
+    assert!(!app.static_between_events(), "a table shows ages");
+    app.mode = Mode::Detail;
+    assert!(app.static_between_events());
+
+    app.flash = "deleted web".into();
+    app.flash_err = false;
+    // First call only records the new flash — it was already drawn.
+    assert!(!app.expire_flash());
+    app.flash_since = std::time::Instant::now() - std::time::Duration::from_secs(60);
+    // Now it expires, which does change the status line.
+    assert!(app.expire_flash());
+    assert!(app.flash.is_empty());
+    assert!(!app.expire_flash());
+    assert!(!app.reap_port_forwards());
 }
 
 #[tokio::test]
@@ -9340,7 +9392,7 @@ async fn unchanged_row_order_reuses_shared_keys_on_content_updates() {
         })
     };
     apply(&mut app, pod_state("1", "Pending"));
-    let rows = app.rows();
+    let rows = app.rows_keyed();
     app.ensure_table_cell_cache(&rows);
     drop(rows);
 

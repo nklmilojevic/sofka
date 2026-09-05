@@ -41,6 +41,21 @@ impl App {
         });
     }
 
+    /// Whether the current view redraws identically until something actually
+    /// happens — a full-screen document, whose text and title carry no elapsed
+    /// time. Every other view can be showing an age or a duration, and has to
+    /// be redrawn on the 1s tick for that to stay true.
+    ///
+    /// Deliberately a small allowlist rather than a "not a table" test: a view
+    /// wrongly listed here would freeze a clock the user is reading, which is
+    /// worse than the idle frame it saves.
+    pub fn static_between_events(&self) -> bool {
+        matches!(
+            self.mode,
+            Mode::Detail | Mode::Diff | Mode::Events | Mode::Help
+        )
+    }
+
     /// Whether the run loop should keep terminal mouse capture on right now.
     /// Document-style views (YAML/describe, diff, events, logs, help) release
     /// capture so click-drag uses the terminal's native text selection —
