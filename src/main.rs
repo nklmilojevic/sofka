@@ -396,17 +396,29 @@ async fn snapshot(app: &mut App, rx: &mut mpsc::Receiver<store::Msg>) -> Result<
     const SNAPSHOT_DEADLINE: Duration = Duration::from_secs(3);
     const SNAPSHOT_QUIET: Duration = Duration::from_millis(250);
     let deadline = tokio::time::Instant::now() + SNAPSHOT_DEADLINE;
+    // Whether the metrics poll has reported at all — success or failure, empty
+    // map or full one. Read from the messages themselves rather than inferred
+    // from `app.metrics` being nonempty: a namespace with no usage data yet
+    // reports an empty map, and a broken metrics API reports an error and
+    // never fills it, and neither is a reason to sit out the whole window.
+    let mut metrics_reported = false;
     loop {
         let now = tokio::time::Instant::now();
         if now >= deadline {
             break;
         }
         match tokio::time::timeout(SNAPSHOT_QUIET.min(deadline - now), rx.recv()).await {
-            Ok(Some(msg)) => app.handle_msg(msg),
+            Ok(Some(msg)) => {
+                metrics_reported |= matches!(
+                    msg,
+                    store::Msg::Metrics { .. } | store::Msg::MetricsError { .. }
+                );
+                app.handle_msg(msg);
+            }
             Ok(None) => break,
             // A whole quiet window with nothing arriving: stop if what the
             // frame shows has landed, otherwise keep waiting for it.
-            Err(_) if snapshot_ready(app) => break,
+            Err(_) if snapshot_ready(app, metrics_reported) => break,
             Err(_) => {}
         }
     }
@@ -506,14 +518,20 @@ async fn snapshot(app: &mut App, rx: &mut mpsc::Receiver<store::Msg>) -> Result<
 }
 
 /// Whether a headless snapshot has everything it is going to draw: the watch's
-/// initial list, the metrics the CPU/MEM columns show (pods/nodes only), and
-/// the dashboard `PUP_DEMO` asked for. Deliberately narrow — anything not
-/// rendered by the frame must not hold the snapshot open.
-fn snapshot_ready(app: &App) -> bool {
+/// initial list, a report from the metrics poll when the CPU/MEM columns are
+/// shown (pods/nodes only), and the dashboard `PUP_DEMO` asked for.
+/// Deliberately narrow — anything not rendered by the frame must not hold the
+/// snapshot open.
+fn snapshot_ready(app: &App, metrics_reported: bool) -> bool {
     if !app.store.synced {
         return false;
     }
-    if app.metrics_columns() && app.metrics.is_empty() {
+    // Waiting for the poll to *report* is the most this can promise. It cannot
+    // promise a metrics row for every object: the poll runs every 5s, so a
+    // second snapshot can never arrive inside this 3s window, and an object
+    // metrics-server has not reported yet renders here exactly as the live
+    // table renders it at the same moment.
+    if app.metrics_columns() && !metrics_reported {
         return false;
     }
     match app.mode {
