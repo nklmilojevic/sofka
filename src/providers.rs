@@ -421,7 +421,9 @@ pub async fn discover(client: kube::Client, base: &LogProvider) -> Result<LogPro
 /// `http` win, then literal 9428 (the VictoriaLogs default), then the first
 /// declared port.
 fn pick_service(services: &[Service]) -> Option<(String, String, i32)> {
-    let candidates: Vec<(&Service, i32)> = services
+    // Iterated straight into the minimum: the intermediate collection existed
+    // only to be scanned once.
+    let (svc, port) = services
         .iter()
         .filter_map(|s| {
             let ports = s.spec.as_ref()?.ports.as_ref()?;
@@ -432,20 +434,19 @@ fn pick_service(services: &[Service]) -> Option<(String, String, i32)> {
                 .or_else(|| ports.first())?;
             Some((s, port.port))
         })
-        .collect();
-    // Only the first candidate is used, so pick the minimum directly rather
-    // than sorting the whole list — and compare borrowed, instead of cloning
-    // two `String`s per comparison.
-    let (svc, port) = candidates.iter().min_by_key(|(s, _)| {
-        (
-            s.metadata.namespace.as_deref().unwrap_or_default(),
-            s.metadata.name.as_deref().unwrap_or_default(),
-        )
-    })?;
+        // Only the first candidate is used, so pick the minimum directly rather
+        // than sorting the whole list — and compare borrowed, instead of
+        // cloning two `String`s per comparison.
+        .min_by_key(|(s, _): &(&Service, i32)| {
+            (
+                s.metadata.namespace.as_deref().unwrap_or_default(),
+                s.metadata.name.as_deref().unwrap_or_default(),
+            )
+        })?;
     Some((
         svc.metadata.namespace.clone().unwrap_or_default(),
         svc.metadata.name.clone().unwrap_or_default(),
-        *port,
+        port,
     ))
 }
 
@@ -645,7 +646,7 @@ impl LogProvider {
                 }
                 TailSource::Http {
                     body: resp.into_body(),
-                    buf: Vec::new(),
+                    buf: LineBuf::default(),
                 }
             }
             Transport::ServiceProxy { client, .. } => {
@@ -809,7 +810,7 @@ enum TailSource {
     /// Direct transport: raw hyper body, split into lines here.
     Http {
         body: hyper::body::Incoming,
-        buf: Vec<u8>,
+        buf: LineBuf,
     },
     /// API-server proxy transport: the kube client already yields a buffered
     /// reader over the response body.
@@ -828,23 +829,31 @@ impl LogTail {
             if let Some(e) = self.pending.pop_front() {
                 return Ok(Some(e));
             }
-            match &mut self.source {
+            // Split borrows: the framer writes into `pending` while it holds
+            // the buffer, so neither has to be copied out first.
+            let Self {
+                source,
+                pending,
+                fields,
+                ..
+            } = self;
+            match source {
                 TailSource::Http { body, buf } => match body.frame().await {
                     None => {
-                        let rest = std::mem::take(buf);
+                        let rest = buf.take();
                         return Ok(std::str::from_utf8(&rest)
                             .ok()
-                            .and_then(|l| parse_entry(l.trim(), &self.fields)));
+                            .and_then(|l| parse_entry(l.trim(), fields)));
                     }
                     Some(Err(e)) => return Err(e.to_string()),
                     Some(Ok(frame)) => {
                         if let Some(data) = frame.data_ref() {
-                            buf.extend_from_slice(data);
-                            self.pending.extend(
-                                drain_lines(buf)
-                                    .iter()
-                                    .filter_map(|l| parse_entry(l, &self.fields)),
-                            );
+                            buf.extend(data);
+                            buf.drain_lines(|line| {
+                                if let Some(entry) = parse_entry(line, fields) {
+                                    pending.push_back(entry);
+                                }
+                            });
                         }
                     }
                 },
@@ -852,8 +861,8 @@ impl LogTail {
                     None => return Ok(None),
                     Some(Err(e)) => return Err(e.to_string()),
                     Some(Ok(line)) => {
-                        if let Some(e) = parse_entry(&line, &self.fields) {
-                            self.pending.push_back(e);
+                        if let Some(e) = parse_entry(&line, fields) {
+                            pending.push_back(e);
                         }
                     }
                 },
@@ -862,18 +871,100 @@ impl LogTail {
     }
 }
 
-/// Split complete `\n`-terminated lines out of `buf`, leaving any trailing
-/// partial line in place for the next chunk.
-fn drain_lines(buf: &mut Vec<u8>) -> Vec<String> {
-    let Some(last_nl) = buf.iter().rposition(|&b| b == b'\n') else {
-        return Vec::new();
-    };
-    let complete: Vec<u8> = buf.drain(..=last_nl).collect();
-    String::from_utf8_lossy(&complete)
-        .lines()
-        .map(str::to_string)
-        .filter(|l| !l.trim().is_empty())
-        .collect()
+/// The tail's receive buffer: bytes that have arrived, plus how far they have
+/// already been searched for a line ending.
+#[derive(Default)]
+struct LineBuf {
+    bytes: Vec<u8>,
+    /// Length of the prefix already known to hold no newline. Re-scanning it
+    /// on every chunk is what makes framing one long record quadratic in its
+    /// length: a 512 KB record arriving in 4 KB pieces searched ~64 MB.
+    scanned: usize,
+}
+
+impl LineBuf {
+    fn extend(&mut self, data: &[u8]) {
+        self.bytes.extend_from_slice(data);
+    }
+
+    /// Everything received but not yet framed, leaving the buffer empty.
+    fn take(&mut self) -> Vec<u8> {
+        self.scanned = 0;
+        std::mem::take(&mut self.bytes)
+    }
+
+    /// Hand every complete `\n`-terminated line to `f`, then drop them and
+    /// keep the partial tail for the next chunk.
+    ///
+    /// Lines are borrowed out of the buffer rather than collected into owned
+    /// `String`s: the caller parses each one and keeps only a few of its
+    /// fields, so the copy was pure overhead — as was draining the complete
+    /// bytes into a second `Vec` before reading them.
+    fn drain_lines(&mut self, mut f: impl FnMut(&str)) {
+        let from = self.scanned.min(self.bytes.len());
+        let Some(rel) = memchr::memrchr(b'\n', &self.bytes[from..]) else {
+            self.scanned = self.bytes.len();
+            return;
+        };
+        let last_nl = from + rel;
+        let complete = &self.bytes[..=last_nl];
+        // Validate the whole complete region once, then hand out borrowed
+        // slices of it. Validating per line instead cost more than the
+        // per-line `String`s it saved; the lossy path is kept for the
+        // malformed case it exists for.
+        match std::str::from_utf8(complete) {
+            Ok(text) => {
+                for line in text.split('\n') {
+                    let line = line.trim();
+                    if !line.is_empty() {
+                        f(line);
+                    }
+                }
+            }
+            Err(_) => {
+                let text = String::from_utf8_lossy(complete);
+                for line in text.split('\n') {
+                    let line = line.trim();
+                    if !line.is_empty() {
+                        f(line);
+                    }
+                }
+            }
+        }
+        self.bytes.drain(..=last_nl);
+        // What is left starts after the last newline, so it is already known
+        // to contain none.
+        self.scanned = self.bytes.len();
+    }
+}
+
+/// Frame, parse and render one received chunk exactly as the tail loop does:
+/// the ingest cost of a provider log burst. Exposed for `benches/` only.
+#[cfg(feature = "bench")]
+pub fn bench_ingest_chunk(chunk: &[u8]) -> usize {
+    let fields = Fields::default();
+    let mut buf = LineBuf::default();
+    buf.extend(chunk);
+    let mut rendered = 0usize;
+    buf.drain_lines(|line| {
+        if let Some(entry) = parse_entry(line, &fields) {
+            rendered += entry.lines(Prefix::PodContainer, true).len();
+        }
+    });
+    rendered
+}
+
+/// One long record arriving in small chunks, framed the way the tail does it —
+/// the shape that makes the incomplete-buffer rescan quadratic.
+#[cfg(feature = "bench")]
+pub fn bench_ingest_fragmented(record: &[u8], chunk: usize) -> usize {
+    let mut buf = LineBuf::default();
+    let mut framed = 0usize;
+    for part in record.chunks(chunk) {
+        buf.extend(part);
+        buf.drain_lines(|_| framed += 1);
+    }
+    framed
 }
 
 /// Parse one JSON-line record into a [`LogEntry`] using the configured field
@@ -1051,7 +1142,9 @@ pub async fn discover_metrics(
 /// First (by namespace/name) service with a usable port, preferring `http`,
 /// then the well-known query ports (Prometheus 9090, VM single 8428/8429).
 fn pick_metrics_service(services: &[Service]) -> Option<(String, String, i32)> {
-    let candidates: Vec<(&Service, i32)> = services
+    // Iterated straight into the minimum: the intermediate collection existed
+    // only to be scanned once.
+    let (svc, port) = services
         .iter()
         .filter_map(|s| {
             let ports = s.spec.as_ref()?.ports.as_ref()?;
@@ -1062,20 +1155,19 @@ fn pick_metrics_service(services: &[Service]) -> Option<(String, String, i32)> {
                 .or_else(|| ports.first())?;
             Some((s, port.port))
         })
-        .collect();
-    // Only the first candidate is used, so pick the minimum directly rather
-    // than sorting the whole list — and compare borrowed, instead of cloning
-    // two `String`s per comparison.
-    let (svc, port) = candidates.iter().min_by_key(|(s, _)| {
-        (
-            s.metadata.namespace.as_deref().unwrap_or_default(),
-            s.metadata.name.as_deref().unwrap_or_default(),
-        )
-    })?;
+        // Only the first candidate is used, so pick the minimum directly rather
+        // than sorting the whole list — and compare borrowed, instead of
+        // cloning two `String`s per comparison.
+        .min_by_key(|(s, _): &(&Service, i32)| {
+            (
+                s.metadata.namespace.as_deref().unwrap_or_default(),
+                s.metadata.name.as_deref().unwrap_or_default(),
+            )
+        })?;
     Some((
         svc.metadata.namespace.clone().unwrap_or_default(),
         svc.metadata.name.clone().unwrap_or_default(),
-        *port,
+        port,
     ))
 }
 
@@ -1519,14 +1611,21 @@ mod tests {
 
     #[test]
     fn drain_lines_keeps_partial_tail() {
-        let mut buf = b"{\"a\":1}\n{\"b\":2}\n{\"part".to_vec();
-        assert_eq!(drain_lines(&mut buf), vec!["{\"a\":1}", "{\"b\":2}"]);
-        assert_eq!(buf, b"{\"part");
-        // No newline yet — nothing complete.
-        assert!(drain_lines(&mut buf).is_empty());
-        buf.extend_from_slice(b"\":3}\n");
-        assert_eq!(drain_lines(&mut buf), vec!["{\"part\":3}"]);
-        assert!(buf.is_empty());
+        let framed = |buf: &mut LineBuf| {
+            let mut out: Vec<String> = Vec::new();
+            buf.drain_lines(|l| out.push(l.to_string()));
+            out
+        };
+        let mut buf = LineBuf::default();
+        buf.extend(b"{\"a\":1}\n{\"b\":2}\n{\"part");
+        assert_eq!(framed(&mut buf), vec!["{\"a\":1}", "{\"b\":2}"]);
+        assert_eq!(buf.bytes, b"{\"part");
+        // No newline yet — nothing complete, and the tail is not re-scanned.
+        assert!(framed(&mut buf).is_empty());
+        assert_eq!(buf.scanned, buf.bytes.len());
+        buf.extend(b"\":3}\n");
+        assert_eq!(framed(&mut buf), vec!["{\"part\":3}"]);
+        assert!(buf.bytes.is_empty());
     }
 
     /// Live test against a real VictoriaLogs — opt-in:
