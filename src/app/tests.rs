@@ -789,6 +789,38 @@ async fn ctrl_f_and_ctrl_b_page_by_the_drawn_viewport_height() {
 }
 
 #[tokio::test]
+async fn ctrl_f_and_ctrl_b_page_document_views() {
+    let (mut app, _rx) = test_app();
+    app.detail = Scrollable {
+        title: "document".into(),
+        lines: (0..100).map(|i| format!("line {i}")).collect(),
+        ..Default::default()
+    };
+
+    for mode in [Mode::Detail, Mode::Diff, Mode::Events] {
+        app.mode = mode;
+        app.detail.scroll = 0;
+
+        app.handle_key(press(KeyCode::PageDown)).unwrap();
+        assert_eq!(app.detail.scroll, 20);
+        app.handle_key(ctrl(KeyCode::Char('f'))).unwrap();
+        assert_eq!(app.detail.scroll, 40);
+        app.handle_key(press(KeyCode::PageUp)).unwrap();
+        assert_eq!(app.detail.scroll, 20);
+        app.handle_key(ctrl(KeyCode::Char('b'))).unwrap();
+        assert_eq!(app.detail.scroll, 0);
+    }
+
+    // Keep ctrl-alt-f distinct from the exact ctrl-f built-in.
+    let ctrl_alt_f = KeyEvent::new(
+        KeyCode::Char('f'),
+        KeyModifiers::CONTROL | KeyModifiers::ALT,
+    );
+    app.handle_key(ctrl_alt_f).unwrap();
+    assert_eq!(app.detail.scroll, 0);
+}
+
+#[tokio::test]
 async fn switching_kind_resets_stale_selection_to_top() {
     let (mut app, _rx) = test_app();
     app.switch_kind("pods");

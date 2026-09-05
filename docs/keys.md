@@ -73,6 +73,7 @@ viewport.
 
 ## Document views (YAML, describe, diff, events)
 
+`ctrl-f` / `ctrl-b` page forward or back, with `PgDn` / `PgUp` as aliases.
 `/` searches like vim: the whole document stays on screen and every match is
 highlighted. `n` / `N` go to the next or previous match. `w` wraps. `c` copies
 the document. `esc` backs out - the first press clears an active search. In the

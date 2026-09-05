@@ -1041,6 +1041,8 @@ impl App {
             KeyCode::Char('l') | KeyCode::Right => target.scroll_h(5),
             KeyCode::PageDown | KeyCode::Char(' ') => target.scroll_by(20),
             KeyCode::PageUp => target.scroll_by(-20),
+            KeyCode::Char('f') if key.modifiers == KeyModifiers::CONTROL => target.scroll_by(20),
+            KeyCode::Char('b') if key.modifiers == KeyModifiers::CONTROL => target.scroll_by(-20),
             KeyCode::Char('g') | KeyCode::Home => {
                 target.scroll = 0;
                 target.hscroll = 0;

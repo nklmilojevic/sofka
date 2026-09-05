@@ -1980,7 +1980,10 @@ fn draw_help(frame: &mut Frame, app: &App, area: Rect) {
         bind("←/→", "scroll columns (NAMESPACE/NAME stay anchored)"),
         bind("esc", "go back / pop view / clear filter"),
         bind("j/k g/G", "move · top/bottom"),
-        bind("ctrl-f/ctrl-b", "page forward/back (also PgDn/PgUp)"),
+        bind(
+            "ctrl-f/ctrl-b",
+            "page tables and documents forward/back (also PgDn/PgUp)",
+        ),
         bind("S · I", "sort by column (fuzzy picker) · invert direction"),
         bind("w", "toggle wide columns (kubectl -o wide)"),
         bind(
@@ -3354,9 +3357,9 @@ fn draw_prompt(frame: &mut Frame, app: &App, area: Rect) {
         Mode::Detail | Mode::Events | Mode::Diff => {
             // The `x` decode binding only applies to a secret's document view.
             let hint = if app.mode == Mode::Detail && app.kind_plural == "secrets" {
-                "  j/k:scroll  h/l:← →  g/G:top/bottom  /:search  n/N:next/prev  w:wrap  c:copy  x:decode  esc:back"
+                "  j/k:scroll  ^f/^b:page  h/l:← →  g/G:top/bottom  /:search  n/N:next/prev  w:wrap  c:copy  x:decode  esc:back"
             } else {
-                "  j/k:scroll  h/l:← →  g/G:top/bottom  /:search  n/N:next/prev  w:wrap  c:copy  esc:back"
+                "  j/k:scroll  ^f/^b:page  h/l:← →  g/G:top/bottom  /:search  n/N:next/prev  w:wrap  c:copy  esc:back"
             };
             Line::from(Span::styled(hint, theme::dim()))
         }

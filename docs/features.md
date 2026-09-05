@@ -164,7 +164,8 @@ The full list. For how sofka compares to k9s, see [vs k9s](vs-k9s.md).
   side by side. Contexts come from config or `space` in the `:ctx` switcher.
   See [Providers](providers.md#fleet-dashboard).
 - **YAML view** (`y`), **describe** (`d`, via `kubectl`), **events**
-  (`:events` / `E`, filtered by UID when available), and **diff** (`:diff`).
+  (`:events` / `E`, filtered by UID when available), and **diff** (`:diff`), with
+  `ctrl-f` / `ctrl-b` (or `PgDn` / `PgUp`) paging through each document.
 - **Diff on GitOps clusters** - `:diff` shows a unified diff of the live object
   against its `last-applied-configuration`. When that annotation is missing - as
   it is for every Flux- or Helm-managed object, which nothing ever
