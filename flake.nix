@@ -45,11 +45,11 @@
       apps = forAllSystems (pkgs: {
         default = {
           type = "app";
-          program = "${pkgs.sofka}/bin/sofka";
+          program = "${lib.getExe pkgs.sofka}";
         };
         sofka = {
           type = "app";
-          program = "${pkgs.sofka}/bin/sofka";
+          program = "${lib.getExe pkgs.sofka}";
         };
       });
 
