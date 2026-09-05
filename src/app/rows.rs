@@ -310,6 +310,11 @@ impl App {
             {
                 continue;
             }
+            if let Some(owner) = &self.owner
+                && !owner.owns(o)
+            {
+                continue;
+            }
             if !self.matches_filter_cached(o, k, &parsed, cells) {
                 continue;
             }

@@ -486,6 +486,7 @@ impl App {
         self.namespace = ns;
         self.labels = None;
         self.fields = Some(format!("metadata.name={owner_name}"));
+        self.owner = None;
         self.scope_label = Some(format!("owner of {child_name}"));
         self.filter.clear();
         self.reset_sort();

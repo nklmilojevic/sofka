@@ -765,6 +765,7 @@ impl App {
         self.kind_plural.clear();
         self.labels = None;
         self.fields = None;
+        self.owner = None;
         self.scope_label = None;
         self.filter.clear();
         // The old cluster's namespaces don't apply here — drop them so palette

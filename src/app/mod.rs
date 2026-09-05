@@ -1173,6 +1173,35 @@ struct ViewEntry {
     namespace: String,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OwnerScope {
+    pub kind: String,
+    pub name: String,
+    pub uid: Option<String>,
+}
+
+impl OwnerScope {
+    pub fn owns(&self, obj: &DynamicObject) -> bool {
+        let refs = obj.metadata.owner_references.as_deref().unwrap_or_default();
+        if refs.is_empty() {
+            let prefix = format!("{}-", self.name);
+            return obj
+                .metadata
+                .name
+                .as_deref()
+                .is_some_and(|n| n.starts_with(&prefix));
+        }
+        refs.iter().any(|r| {
+            r.kind.eq_ignore_ascii_case(&self.kind)
+                && r.name == self.name
+                && match &self.uid {
+                    Some(uid) if !r.uid.is_empty() => r.uid == *uid,
+                    _ => true,
+                }
+        })
+    }
+}
+
 /// A saved view, pushed onto the stack when drilling down.
 struct Frame {
     kind: Option<Kind>,
@@ -1180,6 +1209,7 @@ struct Frame {
     namespace: String,
     labels: Option<String>,
     fields: Option<String>,
+    owner: Option<OwnerScope>,
     filter: String,
     scope_label: Option<String>,
     selected: Option<usize>,
@@ -1194,6 +1224,7 @@ pub struct App {
     pub namespace: String,
     pub labels: Option<String>,
     pub fields: Option<String>,
+    pub owner: Option<OwnerScope>,
     /// Drill-down breadcrumb shown in the header, e.g. "deploy/foo".
     pub scope_label: Option<String>,
 
@@ -1563,6 +1594,7 @@ impl App {
             namespace,
             labels: None,
             fields: None,
+            owner: None,
             scope_label: None,
             generation: 0,
             gen_flag: Arc::new(AtomicU64::new(0)),

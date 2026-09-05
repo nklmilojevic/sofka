@@ -62,6 +62,7 @@ impl App {
         self.kind = Some(kind);
         self.labels = None;
         self.fields = None;
+        self.owner = None;
         self.scope_label = None;
         self.filter.clear();
         self.reset_sort();
@@ -82,6 +83,7 @@ impl App {
         self.kind_plural = "helm".into();
         self.labels = Some("owner=helm".into());
         self.fields = Some("type=helm.sh/release.v1".into());
+        self.owner = None;
         self.scope_label = None;
         self.filter.clear();
         self.reset_sort();
@@ -217,6 +219,7 @@ impl App {
             namespace: self.namespace.clone(),
             labels: self.labels.clone(),
             fields: self.fields.clone(),
+            owner: self.owner.clone(),
             filter: self.filter.clone(),
             scope_label: self.scope_label.clone(),
             selected: self.table_state.selected(),
@@ -229,6 +232,7 @@ impl App {
         self.namespace = f.namespace;
         self.labels = f.labels;
         self.fields = f.fields;
+        self.owner = f.owner;
         self.filter = f.filter;
         self.scope_label = f.scope_label;
         self.reset_sort();

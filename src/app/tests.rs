@@ -2198,6 +2198,122 @@ async fn configured_drill_wins_over_node_on_enter_but_o_still_jumps() {
 }
 
 #[tokio::test]
+async fn cronjob_enter_drills_into_owned_jobs() {
+    let (mut app, _rx) = test_app();
+    app.switch_kind("cronjobs");
+    apply(
+        &mut app,
+        json!({
+            "apiVersion": "batch/v1", "kind": "CronJob",
+            "metadata": {"name": "backup", "namespace": "ops", "uid": "cj-1"},
+            "spec": {"schedule": "* * * * *", "jobTemplate": {"spec": {}}}
+        }),
+    );
+    app.table_state.select(Some(0));
+
+    app.handle_key(press(KeyCode::Enter)).unwrap();
+    assert_eq!(app.kind_plural, "jobs");
+    assert_eq!(app.namespace, "ops");
+    assert_eq!(app.labels, None);
+    assert_eq!(app.fields, None);
+    assert_eq!(app.scope_label.as_deref(), Some("cronjob/backup"));
+    assert_eq!(
+        app.owner,
+        Some(OwnerScope {
+            kind: "CronJob".into(),
+            name: "backup".into(),
+            uid: Some("cj-1".into()),
+        })
+    );
+    assert_eq!(app.stack.len(), 1);
+
+    let job = |name: &str, owners: serde_json::Value| {
+        json!({
+            "apiVersion": "batch/v1", "kind": "Job",
+            "metadata": {"name": name, "namespace": "ops", "ownerReferences": owners},
+            "spec": {}
+        })
+    };
+    let owned_by = |kind: &str, name: &str, uid: &str| json!([{"apiVersion": "batch/v1", "kind": kind, "name": name, "uid": uid}]);
+    apply(
+        &mut app,
+        job("backup-28900000", owned_by("CronJob", "backup", "cj-1")),
+    );
+    apply(&mut app, job("backup-manual-abc", json!([])));
+    apply(
+        &mut app,
+        job("backup-28900001", owned_by("CronJob", "backup", "cj-old")),
+    );
+    apply(
+        &mut app,
+        job(
+            "backup-full-28900000",
+            owned_by("CronJob", "backup-full", "cj-2"),
+        ),
+    );
+    apply(&mut app, job("backups", json!([])));
+    apply(&mut app, job("cleanup-1", json!([])));
+
+    assert_eq!(
+        row_names(&app),
+        vec!["backup-28900000", "backup-manual-abc"]
+    );
+
+    app.handle_key(press(KeyCode::Esc)).unwrap();
+    assert_eq!(app.kind_plural, "cronjobs");
+    assert_eq!(app.owner, None);
+    assert!(app.stack.is_empty());
+}
+
+#[tokio::test]
+async fn cronjob_jobs_then_job_drills_into_pods_and_pops_back() {
+    let (mut app, _rx) = test_app();
+    app.switch_kind("cronjobs");
+    apply(
+        &mut app,
+        json!({
+            "apiVersion": "batch/v1", "kind": "CronJob",
+            "metadata": {"name": "backup", "namespace": "ops"},
+            "spec": {"schedule": "* * * * *", "jobTemplate": {"spec": {}}}
+        }),
+    );
+    app.table_state.select(Some(0));
+    app.handle_key(press(KeyCode::Enter)).unwrap();
+    assert_eq!(app.kind_plural, "jobs");
+
+    apply(
+        &mut app,
+        json!({
+            "apiVersion": "batch/v1", "kind": "Job",
+            "metadata": {
+                "name": "backup-1", "namespace": "ops",
+                "ownerReferences": [{"apiVersion": "batch/v1", "kind": "CronJob", "name": "backup", "uid": "x"}]
+            },
+            "spec": {"selector": {"matchLabels": {"batch.kubernetes.io/controller-uid": "j1"}}}
+        }),
+    );
+    app.table_state.select(Some(0));
+    app.handle_key(press(KeyCode::Enter)).unwrap();
+    assert_eq!(app.kind_plural, "pods");
+    assert_eq!(app.owner, None);
+    assert_eq!(
+        app.labels.as_deref(),
+        Some("batch.kubernetes.io/controller-uid=j1")
+    );
+    assert_eq!(app.scope_label.as_deref(), Some("job/backup-1"));
+    assert_eq!(app.stack.len(), 2);
+
+    app.handle_key(press(KeyCode::Esc)).unwrap();
+    assert_eq!(app.kind_plural, "jobs");
+    assert_eq!(app.scope_label.as_deref(), Some("cronjob/backup"));
+    assert!(app.owner.is_some());
+
+    app.switch_kind("jobs");
+    assert_eq!(app.owner, None);
+    assert!(app.stack.is_empty());
+}
+
+#[tokio::test]
 async fn root_switch_clears_drill_stack() {
     let (mut app, _rx) = test_app();
     app.switch_kind("pods");
