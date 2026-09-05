@@ -1309,11 +1309,10 @@ fn draw_logs(frame: &mut Frame, app: &mut App, area: Rect) {
 /// [`wrap_line`] performs — the scroll math depends on them agreeing.
 pub(crate) fn wrapped_height(raw: &str, width: usize) -> usize {
     let width = width.max(1);
-    // Fast path: plain ASCII with no escapes wraps at exactly `width` chars.
-    // `memchr` vectorizes the escape scan (SSE2/AVX2 on x86-64, NEON on
-    // aarch64) where `<[u8]>::contains` is a scalar `iter().any()`; this runs
-    // over the whole log buffer, so the difference is not academic.
-    if raw.is_ascii() && memchr::memchr(0x1b, raw.as_bytes()).is_none() {
+    // Fast path: printable ASCII wraps at exactly `width` bytes. Control
+    // characters stay on the general path because ratatui assigns them no
+    // display width; counting a tab as one byte would drift from `wrap_line`.
+    if raw.is_ascii() && !raw.bytes().any(|b| b.is_ascii_control()) {
         return raw.len().div_ceil(width).max(1);
     }
     let mut rows = 1usize;
@@ -3748,6 +3747,8 @@ mod tests {
             "short",
             "exactly-ten",
             "a much longer plain ascii log line that wraps a few times over",
+            // Tabs and other ASCII controls are zero-width.
+            "column\tvalue\tthat wraps near a boundary",
             // ANSI escapes are zero-width.
             "\x1b[33mwarn\x1b[0m something colorful happened in the reconcile loop",
             // Wide CJK glyphs take two columns and never straddle a break.

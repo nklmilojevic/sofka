@@ -893,6 +893,24 @@ async fn document_scroll_keeps_the_last_page_filled() {
         screen.contains("LAST"),
         "last wrapped row missing:\n{screen}"
     );
+
+    app.detail = Scrollable {
+        title: "tabbed document".into(),
+        lines: vec![format!(
+            "{}{}TABS",
+            "\t".repeat(18 * 10),
+            "x".repeat(18 * 19)
+        )]
+        .into(),
+        wrap: true,
+        ..Default::default()
+    };
+    term.draw(|f| crate::ui::draw(f, &mut app)).unwrap();
+    app.handle_key(press(KeyCode::Char('G'))).unwrap();
+    assert_eq!(
+        app.detail.scroll, 7,
+        "tabs must not inflate the wrapped bottom offset"
+    );
 }
 
 #[tokio::test]
