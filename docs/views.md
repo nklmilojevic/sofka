@@ -79,6 +79,68 @@ EKS commonly uses `eks.amazonaws.com~1nodegroup` for `NODEPOOL` and
 `eks.amazonaws.com~1capacityType` for `TYPE`. Add `wide = true` to any custom
 column that should appear only after pressing `w`.
 
+### Navigating between kinds
+
+sofka's drill-downs are relationships between kinds, expressed as a watch
+selector: `enter` on a Deployment lists pods under its `matchLabels`, `enter`
+on a Node lists pods with `spec.nodeName` equal to its name, `o` on a pod opens
+the node named in `spec.nodeName`. Those relationships are built in for core
+kinds. Custom resources relate to each other the same way - an operator's
+parent object owns children it labels, a claim names the node it became - but
+sofka can't know a CRD's field layout in advance. A view can declare the
+relationship, and `enter`/`o` then work exactly as they do for core kinds:
+push the current view, open the target scoped to the row, `esc` to come back.
+
+Two shapes cover most cases.
+
+**A row names one node** - `node` is a JSON Pointer to the field holding the
+node's name. `o` jumps to that node, and so does `enter` for a kind with no
+drill-down of its own. Pods (`/spec/nodeName`) and Karpenter NodeClaims
+(`/status/nodeName`) are built in; `node` adds a kind or overrides a built-in.
+This is what the NodeClaim row amounts to:
+
+```toml
+[views."karpenter.sh/v1/nodeclaims"]
+node = "/status/nodeName"
+```
+
+The nodes list is scoped by `metadata.name`, the only field selector the
+apiserver indexes for nodes, so the pointer has to land on a name. A row whose
+pointer is empty (the node isn't assigned yet) warns instead of opening an empty
+list; a pointer that lands on something other than a string warns that the
+pointer is wrong.
+
+**A row selects other objects** - `drill` names the kind `enter` should open and
+how to scope it: a label selector (`labels`), a field selector (`fields`), or
+both, with `{name}` and `{namespace}` filled in from the row:
+
+```toml
+# children carry the parent's name in a label
+[views."karpenter.sh/v1/nodepools"]
+drill = { kind = "nodeclaims", labels = "karpenter.sh/nodepool={name}" }
+
+# the target is a single object with a known name and nothing labelling it back
+[views.externalsecrets]
+drill = { kind = "secrets", fields = "metadata.name={name}" }
+```
+
+Prefer `labels` when the target carries a label pointing back at the row -
+that's how most operators mark what they own. Use `fields` when it doesn't:
+`metadata.name` and `metadata.namespace` are selectable on every kind, other
+fields only where the apiserver indexes them. `kind` is anything `:` accepts
+(alias, plural, or kind) and is resolved when you press `enter`, so an unknown
+kind warns and stays put. A namespaced target opens in the row's namespace; a
+cluster-scoped one ignores it.
+
+Kinds with a built-in drill-down keep it - a `drill` on pods won't replace the
+container picker, and `:config` warns that the stanza is ignored. When a view
+sets both `drill` and `node`, `enter` drills and `o` still jumps to the node.
+
+Both settings are resolved key by key across the view keys for a kind
+(`apiVersion/plural`, `group/plural`, plural, kind), not off the single most
+specific view the way `columns` and `sort` are. A specific view that only sets
+columns therefore doesn't hide a `node` or `drill` set under a broader key.
+
 ### CRD printer columns
 
 A custom resource with no explicit view picks up its CRD

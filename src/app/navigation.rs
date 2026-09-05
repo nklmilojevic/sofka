@@ -8,6 +8,9 @@ impl App {
         let name = obj.metadata.name.clone().unwrap_or_default();
         let ns = obj.metadata.namespace.clone().unwrap_or_default();
 
+        // The literal arms are listed in `views::BUILTIN_DRILLS`, which is
+        // how `compile` knows to warn about a `drill` configured on one of
+        // them. Add a kind here, add it there.
         match self.kind_plural.as_str() {
             "namespaces" => self.set_namespace_and_return(&name),
             "nodes" => self.drill_to_pods(
@@ -40,8 +43,47 @@ impl App {
             // A Flux HelmRelease bridges into the same native inspector:
             // enter opens the history of the Helm release it manages.
             "helmreleases" => self.drill_into_helmrelease(&obj),
-            _ => self.open_detail(),
+            // Everything else is configuration: a `[views."…"].drill` opens
+            // another kind scoped to this row; failing that, anything that
+            // names a node (`[views."…"].node`) drills into it. Pods name one
+            // too, but they drill into containers above.
+            _ => {
+                if let Some(drill) = self.configured_drill() {
+                    self.drill_configured(&obj, &drill);
+                } else if let Some(pointer) = self.node_pointer() {
+                    self.show_node_at(&pointer);
+                } else {
+                    self.open_detail();
+                }
+            }
         }
+    }
+
+    /// The JSON Pointer holding the current kind's node name, if it has one.
+    pub(super) fn node_pointer(&self) -> Option<String> {
+        let ar = &self.kind.as_ref()?.ar;
+        crate::views::node_pointer(&self.user_views, ar).map(str::to_string)
+    }
+
+    /// The `[views."…"].drill` for the current kind, if one is configured.
+    fn configured_drill(&self) -> Option<crate::views::Drill> {
+        let ar = &self.kind.as_ref()?.ar;
+        crate::views::drill_for(&self.user_views, ar).cloned()
+    }
+
+    /// Drill from a row into the kind its view's `drill` names, scoped by the
+    /// selector the row fills in — a NodePool into its NodeClaims, say.
+    fn drill_configured(&mut self, obj: &DynamicObject, drill: &crate::views::Drill) {
+        let name = obj.metadata.name.clone().unwrap_or_default();
+        let ns = obj.metadata.namespace.clone().unwrap_or_default();
+        let scope = format!("{}/{name}", trim_s(&self.kind_plural));
+        self.drill_to(
+            &drill.kind,
+            ns,
+            drill.labels_for(obj),
+            drill.fields_for(obj),
+            scope,
+        );
     }
 
     /// Drill from a Flux `HelmRelease` row into the revision history of the
@@ -198,23 +240,50 @@ impl App {
         fields: Option<String>,
         scope: String,
     ) {
-        let Some(pods) = self.cluster.resolve("pods") else {
-            self.flash_warn("pods kind unavailable");
+        self.drill_to("pods", ns, labels, fields, scope);
+    }
+
+    /// Push the current view and open `kind` (alias, plural, or kind name)
+    /// under the given selectors — the shared tail of every drill that lands
+    /// on a list. A cluster-scoped target ignores `ns`.
+    pub(super) fn drill_to(
+        &mut self,
+        kind: &str,
+        ns: String,
+        labels: Option<String>,
+        fields: Option<String>,
+        scope: String,
+    ) {
+        let Some(target) = self.cluster.resolve(kind) else {
+            self.flash_warn(&format!("{kind} kind unavailable"));
             return;
         };
+        let plural = target.ar.plural.to_lowercase();
         self.push_frame();
-        self.kind = Some(pods);
-        self.kind_plural = "pods".into();
-        self.namespace = ns;
+        self.namespace = if target.namespaced { ns } else { String::new() };
+        self.kind = Some(target);
+        self.kind_plural = plural.clone();
         self.labels = labels;
         self.fields = fields;
         self.scope_label = Some(scope);
         self.filter.clear();
         self.reset_sort();
         self.table_state.select(Some(0));
-        self.flash = "↳ drilled into pods".into();
+        self.flash = format!("↳ drilled into {plural}");
         self.flash_err = false;
         self.start_watch();
+    }
+
+    /// Scope the nodes list to one node by name — the shared tail of every
+    /// jump to a node, and the same drill as any other so `o` and `enter`
+    /// give the same feedback whichever kind they came from. The name is
+    /// what we scope the watch by because `metadata.name` is the only field
+    /// selector the apiserver indexes for nodes — a resource that pairs with
+    /// its node by some other identifier (Karpenter's `status.providerID`,
+    /// say) can't be selected on that.
+    pub(super) fn goto_node(&mut self, node: &str, scope: String) {
+        let by_name = Some(format!("metadata.name={node}"));
+        self.drill_to("nodes", String::new(), None, by_name, scope);
     }
 
     /// Navigate to a specific object by (plural, namespace, name) — a

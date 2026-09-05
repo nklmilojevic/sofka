@@ -419,36 +419,44 @@ impl App {
         self.pending = Some(Suspend::Shell(argv));
     }
 
-    /// Navigate to the node hosting the selected pod (k9s `o`).
+    /// Navigate to the node the selected row names (k9s `o`). Which field
+    /// holds the name comes from the node-reference table — pods name theirs
+    /// in the spec, and `[views."…"].node` says where for any other kind — so
+    /// this stays one jump rather than a branch per kind.
     pub(super) fn show_node(&mut self) {
-        if self.kind_plural != "pods" {
-            self.flash_warn("'o' shows the node for a pod");
+        let Some(pointer) = self.node_pointer() else {
+            self.flash_warn("this kind names no node (see views.\"…\".node)");
             return;
-        }
+        };
+        self.show_node_at(&pointer);
+    }
+
+    /// The jump itself, for callers that already resolved the pointer (`enter`
+    /// does, to decide between this and the detail view).
+    pub(super) fn show_node_at(&mut self, pointer: &str) {
         let Some(obj) = self.selected_ref() else {
             return;
         };
-        let Some(node) = obj.data.pointer("/spec/nodeName").and_then(Value::as_str) else {
-            self.flash_warn("pod has no node assigned");
-            return;
+        let value = crate::views::extract(obj, pointer);
+        let target = format!(
+            "{}/{}",
+            trim_s(&self.kind_plural),
+            obj.metadata.name.clone().unwrap_or_default()
+        );
+        let node = match value {
+            Some(Value::String(name)) if !name.is_empty() => name,
+            // Landing on something that isn't a name is a bad pointer, not a
+            // row still waiting for a node — say which.
+            Some(_) => {
+                self.flash_warn(&format!("{pointer} on {target} is not a node name"));
+                return;
+            }
+            None => {
+                self.flash_warn(&format!("{target} has no node assigned"));
+                return;
+            }
         };
-        let node = node.to_string();
-        let pod_name = obj.metadata.name.clone().unwrap_or_default();
-        let Some(nodes) = self.cluster.resolve("nodes") else {
-            self.flash_warn("nodes kind unavailable");
-            return;
-        };
-        self.push_frame();
-        self.kind = Some(nodes);
-        self.kind_plural = "nodes".into();
-        self.namespace = String::new();
-        self.labels = None;
-        self.fields = Some(format!("metadata.name={node}"));
-        self.scope_label = Some(format!("host of {pod_name}"));
-        self.filter.clear();
-        self.reset_sort();
-        self.table_state.select(Some(0));
-        self.start_watch();
+        self.goto_node(&node, format!("node of {target}"));
     }
 
     /// Jump to the selected object's controller/owner (k9s Shift-J).

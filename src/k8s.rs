@@ -581,7 +581,94 @@ impl Cluster {
     pub fn fake() -> Self {
         let config = Config::new("https://127.0.0.1:6443".parse().unwrap());
         let client = Client::try_from(config).expect("build test client");
-        let mk = |group: &str, kind: &str, plural: &str, namespaced: bool| Kind {
+        let mut cluster = Self {
+            client,
+            context: "test".into(),
+            cluster_name: "test-cluster".into(),
+            cluster_url: "https://127.0.0.1:6443".into(),
+            server_version: String::new(),
+            default_namespace: "default".into(),
+            cli_context: Some("test".into()),
+            connected: true,
+            registry: HashMap::new(),
+            catalog: Vec::new(),
+            streaming_lists: Arc::new(AtomicU8::new(STREAMING_UNKNOWN)),
+        };
+        cluster.register_kind("", "Pod", "pods", true);
+        cluster.register_kind("apps", "Deployment", "deployments", true);
+        cluster.register_kind("", "Service", "services", true);
+        cluster.register_kind("", "Secret", "secrets", true);
+        cluster.register_kind("", "Node", "nodes", false);
+        cluster.register_kind("", "Namespace", "namespaces", false);
+        cluster.register_kind("", "Event", "events", true);
+        cluster.register_kind("batch", "Job", "jobs", true);
+        cluster.register_kind("batch", "CronJob", "cronjobs", true);
+        cluster.register_kind(
+            "kustomize.toolkit.fluxcd.io",
+            "Kustomization",
+            "kustomizations",
+            true,
+        );
+        // An alias/plural pair that collide on fuzzy matching (`hr` is a
+        // subsequence of horizontalpodautoscalers), for suggestion-priority
+        // tests.
+        cluster.register_kind(
+            "helm.toolkit.fluxcd.io",
+            "HelmRelease",
+            "helmreleases",
+            true,
+        );
+        let hr = cluster.registry["helmreleases"].clone();
+        cluster.registry.insert("hr".to_string(), hr);
+        cluster.register_kind(
+            "autoscaling",
+            "HorizontalPodAutoscaler",
+            "horizontalpodautoscalers",
+            true,
+        );
+        cluster.register_kind(
+            "external-secrets.io",
+            "ExternalSecret",
+            "externalsecrets",
+            true,
+        );
+        // A CR without curated columns, for custom-view tests.
+        cluster.register_kind("cert-manager.io", "Certificate", "certificates", true);
+        // A CRD whose plural collides with the `:snapshots` built-in command,
+        // for palette-priority tests (CRD names outrank built-ins).
+        cluster.register_kind("kopiur.home-operations.com", "Snapshot", "snapshots", true);
+        // ArgoCD CRDs, for the `t` suspend/resume/sync menu.
+        cluster.register_kind("argoproj.io", "Application", "applications", true);
+        cluster.register_kind("argoproj.io", "ApplicationSet", "applicationsets", true);
+        // A second `events` kind, reachable only by its qualified name — the
+        // bare plural stays with core, as `discover` would leave it.
+        let events_k8s_io = Kind {
+            ar: ApiResource {
+                group: "events.k8s.io".to_string(),
+                version: "v1".to_string(),
+                api_version: "events.k8s.io/v1".to_string(),
+                kind: "Event".to_string(),
+                plural: "events".to_string(),
+            },
+            namespaced: true,
+        };
+        cluster
+            .registry
+            .insert("events.events.k8s.io".to_string(), events_k8s_io);
+        cluster
+    }
+
+    /// Add one kind to a test cluster, indexed the way [`Cluster::discover`]
+    /// indexes a discovered one: by bare plural, lowercased kind, and — for a
+    /// grouped kind — `plural.group`, with the plural (and qualified name)
+    /// joining the catalog. Lets a test that needs a specific CRD declare it
+    /// itself, rather than parking every such kind in [`Cluster::fake`].
+    ///
+    /// Every kind is registered at version `v1`; the fixture has no need for
+    /// anything else.
+    pub fn register_kind(&mut self, group: &str, kind: &str, plural: &str, namespaced: bool) {
+        let plural = plural.to_lowercase();
+        let k = Kind {
             ar: ApiResource {
                 group: group.to_string(),
                 version: "v1".to_string(),
@@ -591,134 +678,19 @@ impl Cluster {
                     format!("{group}/v1")
                 },
                 kind: kind.to_string(),
-                plural: plural.to_string(),
+                plural: plural.clone(),
             },
             namespaced,
         };
-        let mut registry = HashMap::new();
-        registry.insert("pods".to_string(), mk("", "Pod", "pods", true));
-        registry.insert(
-            "deployments".to_string(),
-            mk("apps", "Deployment", "deployments", true),
-        );
-        registry.insert("services".to_string(), mk("", "Service", "services", true));
-        registry.insert("secrets".to_string(), mk("", "Secret", "secrets", true));
-        registry.insert("nodes".to_string(), mk("", "Node", "nodes", false));
-        registry.insert(
-            "namespaces".to_string(),
-            mk("", "Namespace", "namespaces", false),
-        );
-        registry.insert("events".to_string(), mk("", "Event", "events", true));
-        registry.insert("jobs".to_string(), mk("batch", "Job", "jobs", true));
-        registry.insert(
-            "cronjobs".to_string(),
-            mk("batch", "CronJob", "cronjobs", true),
-        );
-        registry.insert(
-            "kustomizations".to_string(),
-            mk(
-                "kustomize.toolkit.fluxcd.io",
-                "Kustomization",
-                "kustomizations",
-                true,
-            ),
-        );
-        // An alias/plural pair that collide on fuzzy matching (`hr` is a
-        // subsequence of horizontalpodautoscalers), for suggestion-priority
-        // tests.
-        let hr = mk(
-            "helm.toolkit.fluxcd.io",
-            "HelmRelease",
-            "helmreleases",
-            true,
-        );
-        registry.insert("helmreleases".to_string(), hr.clone());
-        registry.insert("hr".to_string(), hr);
-        registry.insert(
-            "horizontalpodautoscalers".to_string(),
-            mk(
-                "autoscaling",
-                "HorizontalPodAutoscaler",
-                "horizontalpodautoscalers",
-                true,
-            ),
-        );
-        registry.insert(
-            "externalsecrets".to_string(),
-            mk(
-                "external-secrets.io",
-                "ExternalSecret",
-                "externalsecrets",
-                true,
-            ),
-        );
-        // A CR without curated columns, for custom-view tests.
-        registry.insert(
-            "certificates".to_string(),
-            mk("cert-manager.io", "Certificate", "certificates", true),
-        );
-        // A CRD whose plural collides with the `:snapshots` built-in command,
-        // for palette-priority tests (CRD names outrank built-ins).
-        registry.insert(
-            "snapshots".to_string(),
-            mk("kopiur.home-operations.com", "Snapshot", "snapshots", true),
-        );
-        // ArgoCD CRDs, for the `t` suspend/resume/sync menu.
-        registry.insert(
-            "applications".to_string(),
-            mk("argoproj.io", "Application", "applications", true),
-        );
-        registry.insert(
-            "applicationsets".to_string(),
-            mk("argoproj.io", "ApplicationSet", "applicationsets", true),
-        );
-        // Mirror discover(): catalogued kinds with a group also resolve by
-        // (and are listed under) their group-qualified name.
-        let mut catalog: Vec<String> = [
-            "applications",
-            "applicationsets",
-            "certificates",
-            "deployments",
-            "events",
-            "helmreleases",
-            "horizontalpodautoscalers",
-            "kustomizations",
-            "namespaces",
-            "nodes",
-            "pods",
-            "services",
-            "snapshots",
-        ]
-        .iter()
-        .map(|s| s.to_string())
-        .collect();
-        for plural in catalog.clone() {
-            let kind = registry[&plural].clone();
-            if kind.ar.group.is_empty() {
-                continue;
-            }
-            let qualified = format!("{plural}.{}", kind.ar.group);
-            registry.insert(qualified.clone(), kind);
-            catalog.push(qualified);
+        self.registry.insert(kind.to_lowercase(), k.clone());
+        self.registry.insert(plural.clone(), k.clone());
+        self.catalog.push(plural.clone());
+        if !group.is_empty() {
+            let qualified = format!("{plural}.{group}");
+            self.registry.insert(qualified.clone(), k);
+            self.catalog.push(qualified);
         }
-        registry.insert(
-            "events.events.k8s.io".to_string(),
-            mk("events.k8s.io", "Event", "events", true),
-        );
-        catalog.sort();
-        Self {
-            client,
-            context: "test".into(),
-            cluster_name: "test-cluster".into(),
-            cluster_url: "https://127.0.0.1:6443".into(),
-            server_version: String::new(),
-            default_namespace: "default".into(),
-            cli_context: Some("test".into()),
-            connected: true,
-            registry,
-            catalog,
-            streaming_lists: Arc::new(AtomicU8::new(STREAMING_UNKNOWN)),
-        }
+        self.catalog.sort();
     }
 }
 

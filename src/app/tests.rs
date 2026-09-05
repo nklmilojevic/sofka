@@ -1825,6 +1825,379 @@ async fn drill_into_workload_then_esc_restores() {
 }
 
 #[tokio::test]
+async fn o_on_pod_scopes_to_its_host_node() {
+    let (mut app, _rx) = test_app();
+    app.switch_kind("pods");
+    apply(
+        &mut app,
+        json!({"apiVersion": "v1", "kind": "Pod",
+               "metadata": {"name": "web", "namespace": "default"},
+               "spec": {"nodeName": "node-1"}}),
+    );
+    app.table_state.select(Some(0));
+
+    app.handle_key(press(KeyCode::Char('o'))).unwrap();
+    assert_eq!(app.kind_plural, "nodes");
+    assert_eq!(app.fields.as_deref(), Some("metadata.name=node-1"));
+    assert_eq!(app.scope_label.as_deref(), Some("node of pod/web"));
+    // The same flash a configured drill gives: one action, one feedback.
+    assert_eq!(app.flash, "↳ drilled into nodes");
+    assert!(!app.flash_err);
+
+    app.handle_key(press(KeyCode::Esc)).unwrap();
+    assert_eq!(app.kind_plural, "pods");
+}
+
+/// One `[views."<key>"]` stanza, compiled, asserting it compiled cleanly.
+fn views_for(key: &str, cfg: crate::config::ViewConfig) -> HashMap<String, crate::views::View> {
+    let (views, warnings) = crate::views::compile(&HashMap::from([(key.to_string(), cfg)]));
+    assert!(warnings.is_empty(), "{warnings:?}");
+    views
+}
+
+/// The `[views."<key>"].node` a user writes to teach sofka where a kind the
+/// built-in table doesn't list keeps its node name.
+fn views_with_node(key: &str, pointer: &str) -> HashMap<String, crate::views::View> {
+    views_for(
+        key,
+        crate::config::ViewConfig {
+            node: Some(pointer.to_string()),
+            ..Default::default()
+        },
+    )
+}
+
+/// The `[views."<key>"].drill` that sends `enter` to another kind.
+fn views_with_drill(key: &str, kind: &str, labels: &str) -> HashMap<String, crate::views::View> {
+    views_for(
+        key,
+        crate::config::ViewConfig {
+            drill: Some(crate::config::DrillConfig {
+                kind: kind.to_string(),
+                labels: Some(labels.to_string()),
+                fields: None,
+            }),
+            ..Default::default()
+        },
+    )
+}
+
+#[tokio::test]
+async fn enter_on_nodeclaim_scopes_to_its_node() {
+    // Karpenter writes the node's name onto the claim at registration; the
+    // pair is otherwise linked by providerID, which nodes can't be field-
+    // selected by.
+    let claim = json!({
+        "apiVersion": "karpenter.sh/v1", "kind": "NodeClaim",
+        "metadata": {"name": "default-sfpsl"},
+        "status": {"nodeName": "ip-10-0-1-2", "providerID": "aws:///us-west-2b/i-0123"}
+    });
+
+    // `enter` and `o` are the same jump, and esc unwinds either. No config:
+    // the nodeclaims row ships in the built-in table.
+    for key in [KeyCode::Enter, KeyCode::Char('o')] {
+        let (mut app, _rx) = test_app();
+        app.cluster
+            .register_kind("karpenter.sh", "NodeClaim", "nodeclaims", false);
+        app.switch_kind("nodeclaims");
+        apply(&mut app, claim.clone());
+        app.table_state.select(Some(0));
+
+        app.handle_key(press(key)).unwrap();
+        assert_eq!(app.kind_plural, "nodes");
+        assert_eq!(app.fields.as_deref(), Some("metadata.name=ip-10-0-1-2"));
+        assert_eq!(
+            app.scope_label.as_deref(),
+            Some("node of nodeclaim/default-sfpsl")
+        );
+        assert_eq!(app.stack.len(), 1);
+        assert!(!app.flash_err);
+
+        app.handle_key(press(KeyCode::Esc)).unwrap();
+        assert_eq!(app.kind_plural, "nodeclaims");
+        assert_eq!(app.fields, None);
+        assert!(app.stack.is_empty());
+    }
+}
+
+#[tokio::test]
+async fn unregistered_nodeclaim_warns_instead_of_navigating() {
+    let (mut app, _rx) = test_app();
+    app.cluster
+        .register_kind("karpenter.sh", "NodeClaim", "nodeclaims", false);
+    app.switch_kind("nodeclaims");
+    // Launched but not yet registered: no status.nodeName to jump to.
+    apply(
+        &mut app,
+        json!({
+            "apiVersion": "karpenter.sh/v1", "kind": "NodeClaim",
+            "metadata": {"name": "default-pending"},
+            "status": {"providerID": "aws:///us-west-2b/i-0123"}
+        }),
+    );
+    app.table_state.select(Some(0));
+
+    app.handle_key(press(KeyCode::Enter)).unwrap();
+    assert_eq!(app.kind_plural, "nodeclaims");
+    assert!(app.stack.is_empty());
+    assert!(app.flash_err);
+    assert!(app.flash.contains("has no node assigned"), "{}", app.flash);
+}
+
+#[tokio::test]
+async fn o_on_a_kind_that_names_no_node_warns() {
+    let (mut app, _rx) = test_app();
+    app.switch_kind("secrets");
+    apply(
+        &mut app,
+        json!({"apiVersion": "v1", "kind": "Secret",
+               "metadata": {"name": "tls", "namespace": "default"}}),
+    );
+    app.table_state.select(Some(0));
+
+    app.handle_key(press(KeyCode::Char('o'))).unwrap();
+    assert_eq!(app.kind_plural, "secrets");
+    assert!(app.flash_err);
+    assert!(app.flash.contains("names no node"), "{}", app.flash);
+
+    // `enter` still falls through to the detail view.
+    app.handle_key(press(KeyCode::Enter)).unwrap();
+    assert_eq!(app.mode, Mode::Detail);
+    assert_eq!(app.kind_plural, "secrets");
+}
+
+#[tokio::test]
+async fn a_node_pointer_that_lands_on_a_non_name_says_so() {
+    let (mut app, _rx) = test_app();
+    // Points at an object, not a name — a config mistake, distinct from a
+    // row whose node isn't assigned yet.
+    app.user_views = views_with_node("certificates", "/status");
+
+    app.switch_kind("certificates");
+    apply(
+        &mut app,
+        json!({
+            "apiVersion": "cert-manager.io/v1", "kind": "Certificate",
+            "metadata": {"name": "tls", "namespace": "default"},
+            "status": {"assignedNode": "node-7"}
+        }),
+    );
+    app.table_state.select(Some(0));
+
+    app.handle_key(press(KeyCode::Enter)).unwrap();
+    assert_eq!(app.kind_plural, "certificates");
+    assert!(app.flash_err);
+    assert!(app.flash.contains("is not a node name"), "{}", app.flash);
+}
+
+/// A kind the built-in table has never heard of jumps to its node once
+/// `[views."…"].node` says where the name lives.
+#[tokio::test]
+async fn configured_node_pointer_makes_any_kind_jump() {
+    let (mut app, _rx) = test_app();
+    app.user_views = views_with_node("certificates", "/status/assignedNode");
+
+    app.switch_kind("certificates");
+    apply(
+        &mut app,
+        json!({
+            "apiVersion": "cert-manager.io/v1", "kind": "Certificate",
+            "metadata": {"name": "tls", "namespace": "default"},
+            "status": {"assignedNode": "node-7"}
+        }),
+    );
+    app.table_state.select(Some(0));
+
+    app.handle_key(press(KeyCode::Enter)).unwrap();
+    assert_eq!(app.kind_plural, "nodes");
+    assert_eq!(app.fields.as_deref(), Some("metadata.name=node-7"));
+    assert_eq!(app.scope_label.as_deref(), Some("node of certificate/tls"));
+}
+
+#[tokio::test]
+async fn enter_on_nodepool_drills_into_its_nodeclaims() {
+    let (mut app, _rx) = test_app();
+    app.cluster
+        .register_kind("karpenter.sh", "NodePool", "nodepools", false);
+    app.cluster
+        .register_kind("karpenter.sh", "NodeClaim", "nodeclaims", false);
+    app.user_views = views_with_drill(
+        "karpenter.sh/v1/nodepools",
+        "nodeclaims",
+        "karpenter.sh/nodepool={name}",
+    );
+    app.switch_kind("nodepools");
+    apply(
+        &mut app,
+        json!({"apiVersion": "karpenter.sh/v1", "kind": "NodePool",
+               "metadata": {"name": "default"}}),
+    );
+    app.table_state.select(Some(0));
+
+    app.handle_key(press(KeyCode::Enter)).unwrap();
+    assert_eq!(app.kind_plural, "nodeclaims");
+    assert_eq!(app.labels.as_deref(), Some("karpenter.sh/nodepool=default"));
+    assert_eq!(app.fields, None);
+    assert_eq!(app.namespace, "");
+    assert_eq!(app.scope_label.as_deref(), Some("nodepool/default"));
+    assert_eq!(app.stack.len(), 1);
+    assert!(!app.flash_err);
+
+    app.handle_key(press(KeyCode::Esc)).unwrap();
+    assert_eq!(app.kind_plural, "nodepools");
+    assert_eq!(app.labels, None);
+    assert!(app.stack.is_empty());
+}
+
+#[tokio::test]
+async fn configured_drill_keeps_a_namespaced_target_in_the_rows_namespace() {
+    let (mut app, _rx) = test_app();
+    // A drill target may be named by alias; `{namespace}` is filled too.
+    app.user_views = views_with_drill("certificates", "secret", "cert={name},ns={namespace}");
+    app.switch_kind("certificates");
+    apply(
+        &mut app,
+        json!({"apiVersion": "cert-manager.io/v1", "kind": "Certificate",
+               "metadata": {"name": "tls", "namespace": "edge"}}),
+    );
+    app.table_state.select(Some(0));
+
+    app.handle_key(press(KeyCode::Enter)).unwrap();
+    assert_eq!(app.kind_plural, "secrets");
+    assert_eq!(app.namespace, "edge");
+    assert_eq!(app.labels.as_deref(), Some("cert=tls,ns=edge"));
+    assert_eq!(app.scope_label.as_deref(), Some("certificate/tls"));
+}
+
+#[tokio::test]
+async fn enter_on_externalsecret_opens_the_secret_it_writes() {
+    let (mut app, _rx) = test_app();
+    // The target Secret shares the ExternalSecret's name and namespace and
+    // carries no label naming it, so this is a field selector, not a label.
+    app.user_views = views_for(
+        "externalsecrets",
+        crate::config::ViewConfig {
+            drill: Some(crate::config::DrillConfig {
+                kind: "secrets".to_string(),
+                labels: None,
+                fields: Some("metadata.name={name}".to_string()),
+            }),
+            ..Default::default()
+        },
+    );
+    app.switch_kind("externalsecrets");
+    apply(
+        &mut app,
+        json!({"apiVersion": "external-secrets.io/v1", "kind": "ExternalSecret",
+               "metadata": {"name": "db-creds", "namespace": "shop"}}),
+    );
+    app.table_state.select(Some(0));
+
+    app.handle_key(press(KeyCode::Enter)).unwrap();
+    assert_eq!(app.kind_plural, "secrets");
+    assert_eq!(app.namespace, "shop");
+    assert_eq!(app.fields.as_deref(), Some("metadata.name=db-creds"));
+    assert_eq!(app.labels, None);
+    assert_eq!(app.scope_label.as_deref(), Some("externalsecret/db-creds"));
+}
+
+/// `views::BUILTIN_DRILLS` is what `compile` warns from, so a plural listed
+/// there must really have a built-in arm: a drill smuggled past `compile` for
+/// each listed kind the fixture knows must never be honoured. (Kinds the
+/// fixture can't switch to are skipped rather than faked.)
+#[tokio::test]
+async fn builtin_drill_list_matches_the_enter_arms() {
+    for plural in crate::views::BUILTIN_DRILLS {
+        let (mut app, _rx) = test_app();
+        if app.cluster.resolve(plural).is_none() {
+            continue;
+        }
+        app.user_views = HashMap::from([(
+            plural.to_string(),
+            crate::views::View {
+                drill: Some(crate::views::Drill {
+                    kind: "secrets".to_string(),
+                    labels: None,
+                    fields: None,
+                }),
+                ..Default::default()
+            },
+        )]);
+        app.switch_kind(plural);
+        apply(
+            &mut app,
+            json!({"apiVersion": "v1", "kind": "Thing",
+                   "metadata": {"name": "a", "namespace": "default"}}),
+        );
+        app.table_state.select(Some(0));
+
+        app.handle_key(press(KeyCode::Enter)).unwrap();
+        assert_ne!(
+            app.kind_plural, "secrets",
+            "{plural} honoured a configured drill"
+        );
+    }
+}
+
+#[tokio::test]
+async fn configured_drill_to_an_unknown_kind_warns_and_stays() {
+    let (mut app, _rx) = test_app();
+    app.user_views = views_with_drill("certificates", "widgets", "cert={name}");
+    app.switch_kind("certificates");
+    apply(
+        &mut app,
+        json!({"apiVersion": "cert-manager.io/v1", "kind": "Certificate",
+               "metadata": {"name": "tls", "namespace": "default"}}),
+    );
+    app.table_state.select(Some(0));
+
+    app.handle_key(press(KeyCode::Enter)).unwrap();
+    assert_eq!(app.kind_plural, "certificates");
+    assert!(app.stack.is_empty());
+    assert!(app.flash_err);
+    assert!(
+        app.flash.contains("widgets kind unavailable"),
+        "{}",
+        app.flash
+    );
+}
+
+#[tokio::test]
+async fn configured_drill_wins_over_node_on_enter_but_o_still_jumps() {
+    let (mut app, _rx) = test_app();
+    app.user_views = views_for(
+        "certificates",
+        crate::config::ViewConfig {
+            node: Some("/status/assignedNode".to_string()),
+            drill: Some(crate::config::DrillConfig {
+                kind: "secrets".to_string(),
+                labels: Some("cert={name}".to_string()),
+                fields: None,
+            }),
+            ..Default::default()
+        },
+    );
+    app.switch_kind("certificates");
+    let cert = json!({"apiVersion": "cert-manager.io/v1", "kind": "Certificate",
+                      "metadata": {"name": "tls", "namespace": "default"},
+                      "status": {"assignedNode": "node-7"}});
+    apply(&mut app, cert.clone());
+    app.table_state.select(Some(0));
+
+    app.handle_key(press(KeyCode::Enter)).unwrap();
+    assert_eq!(app.kind_plural, "secrets");
+    app.handle_key(press(KeyCode::Esc)).unwrap();
+    assert_eq!(app.kind_plural, "certificates");
+
+    // Rows arrive from the watch after a pop; feed the same one back.
+    apply(&mut app, cert);
+    app.table_state.select(Some(0));
+    app.handle_key(press(KeyCode::Char('o'))).unwrap();
+    assert_eq!(app.kind_plural, "nodes");
+    assert_eq!(app.fields.as_deref(), Some("metadata.name=node-7"));
+}
+
+#[tokio::test]
 async fn root_switch_clears_drill_stack() {
     let (mut app, _rx) = test_app();
     app.switch_kind("pods");
@@ -7255,8 +7628,7 @@ async fn user_view_wins_over_printer_columns() {
                 align: None,
                 condition_field: None,
             }],
-            sort: None,
-            replace: false,
+            ..Default::default()
         })),
     });
     assert_eq!(app.display_headers(), ["NAME", "MINE", "AGE"]);

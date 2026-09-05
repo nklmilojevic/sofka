@@ -2386,8 +2386,8 @@ mod tests {
     fn view(columns: Vec<crate::views::UserColumn>, replace: bool) -> crate::views::View {
         crate::views::View {
             columns,
-            sort: None,
             replace,
+            ..Default::default()
         }
     }
 
@@ -2472,9 +2472,8 @@ mod tests {
         assert_eq!(spec.headers(), vec!["NAME", "MINE", "AGE"]);
         // A sort-only user view (no columns) still gets printer columns.
         let sort_only = crate::views::View {
-            columns: vec![],
             sort: Some(("PHASE".into(), false)),
-            replace: false,
+            ..Default::default()
         };
         let spec = build_spec("widgets", Some(&sort_only), Some(&crd), false);
         assert_eq!(spec.headers(), vec!["NAME", "PHASE", "AGE"]);
