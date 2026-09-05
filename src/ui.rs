@@ -21,6 +21,16 @@ enum TableCellText<'a> {
 }
 
 impl<'a> TableCellText<'a> {
+    /// The cell's text with the *source's* lifetime, when it is a cached cell
+    /// rather than a per-frame override — so a renderer can borrow it instead
+    /// of copying it into an owned widget.
+    fn borrowed(&self) -> Option<&'a str> {
+        match self {
+            TableCellText::Borrowed(value) => Some(value),
+            TableCellText::Owned(_) => None,
+        }
+    }
+
     fn as_str(&self) -> &str {
         match self {
             TableCellText::Borrowed(value) => value,
@@ -300,8 +310,14 @@ fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
     // Per-kind key hints share the box with the info cluster (k9s-style);
     // narrow terminals collapse back to info-only and keep the full hint
     // line at the bottom instead.
-    let hints = header_hints(app);
-    if !hints.is_empty() && header_hints_fit(area.width) {
+    // Fit first: the hints are formatted, styled lines, and a narrow terminal
+    // throws every one of them away.
+    let hints = if header_hints_fit(area.width) {
+        header_hints(app)
+    } else {
+        Vec::new()
+    };
+    if !hints.is_empty() {
         let sub = Layout::default()
             .direction(Direction::Horizontal)
             .constraints([
@@ -542,7 +558,6 @@ fn draw_table(frame: &mut Frame, app: &mut App, area: Rect) {
     let show_ns = app.show_namespace_column();
     let metrics_cols = app.metrics_columns();
     let headers: Vec<String> = app.display_headers();
-    let pods_view = app.kind_plural == "pods";
     let sort_col = app.sort_column;
     let sort_arrow = if app.sort_desc { " ↓" } else { " ↑" };
     // Offset from a displayed column index back to the view spec's (the spec
@@ -575,9 +590,12 @@ fn draw_table(frame: &mut Frame, app: &mut App, area: Rect) {
             .map(|(i, h)| {
                 // Active sort column gets a direction arrow in the sorter color
                 // (sky, bold), matching k9s; the label inherits the header color.
+                // Borrowed from `headers`, which outlives the render below:
+                // the header list is already rebuilt every frame, and cloning
+                // every label again for the widget doubled that.
                 if Some(i) == sort_col {
                     let mut line = Line::from(vec![
-                        Span::raw(h.clone()),
+                        Span::raw(h.as_str()),
                         Span::styled(
                             sort_arrow,
                             Style::default()
@@ -591,8 +609,8 @@ fn draw_table(frame: &mut Frame, app: &mut App, area: Rect) {
                     Cell::from(line)
                 } else {
                     match align_of(i) {
-                        Some(a) => Cell::from(Text::from(h.clone()).alignment(a)),
-                        None => Cell::from(h.clone()),
+                        Some(a) => Cell::from(Text::from(h.as_str()).alignment(a)),
+                        None => Cell::from(h.as_str()),
                     }
                 }
             })
@@ -634,7 +652,7 @@ fn draw_table(frame: &mut Frame, app: &mut App, area: Rect) {
     let offset = app.table_state.offset();
     let selected = app.table_state.selected();
 
-    let visible_objects = app.rows_window(offset, visible_rows);
+    let visible_objects = app.rows_window_keyed(offset, visible_rows);
     app.ensure_table_cell_cache(&visible_objects);
     let cell_cache = app.table_cell_cache();
     let spec = app.view_spec();
@@ -652,13 +670,26 @@ fn draw_table(frame: &mut Frame, app: &mut App, area: Rect) {
         })
         .collect();
 
+    // Scrolled-away columns are never drawn, so their values must not be
+    // formatted or measured either. STATUS/READY are the exception: the row
+    // color reads them, but their cached text is already there to borrow.
+    let shown = |idx: Option<usize>| idx.is_some_and(&col_visible);
+    let cpu_shown = shown(cpu_idx);
+    let mem_shown = shown(mem_idx);
+    let pct_cpu_shown = shown(pct_cpu_idx);
+    let pct_mem_shown = shown(pct_mem_idx);
+    let metrics_shown = cpu_shown || mem_shown || pct_cpu_shown || pct_mem_shown;
+
     let rows: Vec<Row> = visible_objects
         .iter()
-        .map(|obj| {
-            let row_key = crate::store::row_key(obj);
-            let marked_row = !app.marked.is_empty() && app.marked.contains(&row_key);
+        .map(|(row_key, obj)| {
+            // The store's own key, carried through the viewport: rebuilding
+            // `"{ns}/{name}"` here allocated a `String` per visible row per
+            // frame purely to look up rows the cache is already keyed by.
+            let row_key: &str = row_key;
+            let marked_row = !app.marked.is_empty() && app.marked.contains(row_key);
             let (base_cells, status_idx) = cell_cache
-                .get(&row_key)
+                .get(row_key)
                 .expect("visible rows are warmed in the table cell cache");
             let mut style_idx = status_idx;
             let mut cells = Vec::with_capacity(headers.len());
@@ -669,43 +700,66 @@ fn draw_table(frame: &mut Frame, app: &mut App, area: Rect) {
                 style_idx = status_idx.map(|i| i + 1);
             }
             for (i, cell) in base_cells.iter().enumerate() {
-                if let Some(value) = spec.volatile(obj, &app.kind_plural, i) {
-                    cells.push(TableCellText::Owned(value));
-                } else {
-                    cells.push(TableCellText::Borrowed(cell));
+                // A hidden cell keeps its cached text (free, and STATUS/READY
+                // still color the row) but skips the volatile re-render.
+                let volatile = col_visible(ns_off + i)
+                    .then(|| spec.volatile(obj, &app.kind_plural, i))
+                    .flatten();
+                match volatile {
+                    Some(value) => cells.push(TableCellText::Owned(value)),
+                    None => cells.push(TableCellText::Borrowed(cell)),
                 }
             }
             if app.node_capacity_columns() {
-                cells.push(TableCellText::Owned(app.node_pods_cell(obj)));
+                cells.push(match col_visible(cells.len()) {
+                    true => TableCellText::Owned(app.node_pods_cell(obj)),
+                    false => TableCellText::Borrowed(""),
+                });
             }
             let mut metrics_raw = None;
             let mut node_pcts: (Option<i64>, Option<i64>) = (None, None);
             if metrics_cols {
-                let name = obj.metadata.name.as_deref().unwrap_or_default();
-                let key = if pods_view {
-                    format!(
-                        "{}/{}",
-                        obj.metadata.namespace.as_deref().unwrap_or_default(),
-                        name
-                    )
+                // Placeholders when every metrics column is scrolled away:
+                // the display indices below still have to line up.
+                let (cpu, mem) = if metrics_shown {
+                    let raw = app.metrics_for(obj);
+                    metrics_raw = Some(raw);
+                    raw
                 } else {
-                    name.to_string()
+                    (0, 0)
                 };
-                let (cpu, mem) = app.metrics.get(&key).copied().unwrap_or((0, 0));
-                metrics_raw = Some((cpu, mem));
-                cells.push(TableCellText::Owned(columns::fmt_cpu(cpu)));
-                cells.push(TableCellText::Owned(columns::fmt_mem(mem)));
+                cells.push(match cpu_shown {
+                    true => TableCellText::Owned(columns::fmt_cpu(cpu)),
+                    false => TableCellText::Borrowed(""),
+                });
+                cells.push(match mem_shown {
+                    true => TableCellText::Owned(columns::fmt_mem(mem)),
+                    false => TableCellText::Borrowed(""),
+                });
                 if app.node_capacity_columns() {
-                    let (alloc_cpu, alloc_mem) = columns::node_allocatable(obj);
-                    node_pcts = (
-                        columns::usage_pct(cpu, alloc_cpu),
-                        columns::usage_pct(mem, alloc_mem),
-                    );
-                    cells.push(TableCellText::Owned(columns::fmt_pct(node_pcts.0)));
-                    cells.push(TableCellText::Owned(columns::fmt_pct(node_pcts.1)));
+                    if pct_cpu_shown || pct_mem_shown {
+                        let (alloc_cpu, alloc_mem) = columns::node_allocatable(obj);
+                        node_pcts = (
+                            columns::usage_pct(cpu, alloc_cpu),
+                            columns::usage_pct(mem, alloc_mem),
+                        );
+                    }
+                    cells.push(match pct_cpu_shown {
+                        true => TableCellText::Owned(columns::fmt_pct(node_pcts.0)),
+                        false => TableCellText::Borrowed(""),
+                    });
+                    cells.push(match pct_mem_shown {
+                        true => TableCellText::Owned(columns::fmt_pct(node_pcts.1)),
+                        false => TableCellText::Borrowed(""),
+                    });
                 }
             }
             for (i, c) in cells.iter().enumerate() {
+                // Only visible columns are sized: `col_rules` below reads
+                // `needed` for those alone.
+                if !col_visible(i) {
+                    continue;
+                }
                 if let Some(n) = needed.get_mut(i) {
                     *n = (*n).max(cell_width(c.as_str()));
                 }
@@ -752,7 +806,13 @@ fn draw_table(frame: &mut Frame, app: &mut App, area: Rect) {
                         c.into_cell_aligned(align)
                             .style(Style::default().fg(status_badge))
                     } else if i == name_col {
-                        render_name_cell(app, c.as_str(), row_color)
+                        match c.borrowed() {
+                            Some(name) => render_name_cell(app, name, row_color),
+                            // A volatile/override NAME cell has no cached text
+                            // to borrow, so it keeps its owned copy.
+                            None => Cell::from(c.as_str().to_string())
+                                .style(Style::default().fg(row_color)),
+                        }
                     } else if Some(i) == age_idx {
                         c.into_cell_aligned(align).style(theme::dim())
                     } else if Some(i) == restarts_idx {
@@ -852,10 +912,8 @@ fn draw_table(frame: &mut Frame, app: &mut App, area: Rect) {
         .saturating_sub(2)
         .saturating_sub(2)
         .saturating_sub(2 * ncols.saturating_sub(1));
-    let widths: Vec<Constraint> = distribute_column_widths(content_budget, &col_rules)
-        .into_iter()
-        .map(Constraint::Length)
-        .collect();
+    let col_widths = distribute_column_widths(content_budget, &col_rules);
+    let widths: Vec<Constraint> = col_widths.iter().copied().map(Constraint::Length).collect();
 
     let kind_label = app.list_title();
     // k9s title: resource name (teal, bold) then a yellow [count].
@@ -908,30 +966,35 @@ fn draw_table(frame: &mut Frame, app: &mut App, area: Rect) {
     // carries the display-header index it shows, since columns can be
     // scrolled out of view.
     {
-        use ratatui::layout::{Flex, Margin};
+        use ratatui::layout::Margin;
         let inner = area.inner(Margin::new(1, 1));
         let sel_w = 2u16; // "▌ " with HighlightSpacing::Always
-        let cols_area = Rect {
-            x: inner.x.saturating_add(sel_w),
-            y: inner.y,
-            width: inner.width.saturating_sub(sel_w),
-            height: inner.height,
-        };
-        let rects = Layout::horizontal(widths.clone())
-            .flex(Flex::Start)
-            .spacing(2)
-            .split(cols_area);
+        let cols_x = inner.x.saturating_add(sel_w);
+        let cols_end = inner.x.saturating_add(inner.width);
+        // The widths are already fixed `Length`s that fit the budget, and the
+        // Table lays them out left-packed with the same 2-cell spacing — so
+        // the columns land on a running sum. Running the constraint solver a
+        // second time (and cloning the constraints for it) only to rediscover
+        // that was pure duplicate work.
+        let mut x = cols_x;
+        let mut ranges = Vec::with_capacity(col_widths.len());
+        for (w, i) in col_widths
+            .iter()
+            .copied()
+            .zip((0..headers.len()).filter(|&i| col_visible(i)))
+        {
+            let start = x.min(cols_end);
+            let end = start.saturating_add(w).min(cols_end);
+            ranges.push((start, end, i));
+            x = end.saturating_add(2); // Table::column_spacing
+        }
         app.record_table_hit(
             inner.y,
             inner.y.saturating_add(1),
             inner.height.saturating_sub(1),
             inner.x,
-            inner.x.saturating_add(inner.width),
-            rects
-                .iter()
-                .zip((0..headers.len()).filter(|&i| col_visible(i)))
-                .map(|(r, i)| (r.x, r.x + r.width, i))
-                .collect(),
+            cols_end,
+            ranges,
         );
     }
 
@@ -1067,32 +1130,48 @@ fn all_ready(ready: &str) -> bool {
 /// fuzzy row filter (bold yellow) so a scan across many filtered results is
 /// faster — every visible row already matched, this just shows *where*.
 /// Falls back to a flat `base`-colored cell when there's no active filter.
-fn render_name_cell(app: &App, name: &str, base: Color) -> Cell<'static> {
-    let Some(matched) = app.filter_match_indices(name).filter(|idx| !idx.is_empty()) else {
-        return Cell::from(name.to_string()).style(Style::default().fg(base));
-    };
-    let matched: std::collections::HashSet<usize> = matched.into_iter().collect();
+fn render_name_cell<'a>(app: &App, name: &'a str, base: Color) -> Cell<'a> {
     let plain = Style::default().fg(base);
+    let Some(mut matched) = app.filter_match_indices(name).filter(|idx| !idx.is_empty()) else {
+        // Borrowed: with no filter this is every visible row, every frame.
+        return Cell::from(name).style(plain);
+    };
     let hl = Style::default()
         .fg(theme::yellow())
         .add_modifier(Modifier::BOLD);
+    // The matcher reports positions in order; walking them alongside the char
+    // boundaries makes each run a slice of `name`, so neither the set nor the
+    // per-run strings the old version built are needed. Sorted defensively —
+    // the previous code used a set and so did not depend on the order.
+    if !matched.is_sorted() {
+        matched.sort_unstable();
+    }
 
-    let mut spans = Vec::new();
-    let mut run = String::new();
+    let mut spans: Vec<Span<'a>> = Vec::new();
+    let mut next = 0usize;
+    let mut run_start = 0usize;
     let mut run_matched = false;
-    for (i, ch) in name.chars().enumerate() {
-        let is_match = matched.contains(&i);
-        if !run.is_empty() && is_match != run_matched {
+    for (char_idx, (byte_idx, _)) in name.char_indices().enumerate() {
+        let is_match = matched.get(next).is_some_and(|&m| m == char_idx);
+        if is_match {
+            next += 1;
+        }
+        if byte_idx == 0 {
+            run_matched = is_match;
+        } else if is_match != run_matched {
             spans.push(Span::styled(
-                std::mem::take(&mut run),
+                &name[run_start..byte_idx],
                 if run_matched { hl } else { plain },
             ));
+            run_start = byte_idx;
+            run_matched = is_match;
         }
-        run_matched = is_match;
-        run.push(ch);
     }
-    if !run.is_empty() {
-        spans.push(Span::styled(run, if run_matched { hl } else { plain }));
+    if !name.is_empty() {
+        spans.push(Span::styled(
+            &name[run_start..],
+            if run_matched { hl } else { plain },
+        ));
     }
     Cell::from(Line::from(spans))
 }
@@ -1107,6 +1186,7 @@ fn draw_scrollable(
     let inner_h = area.height.saturating_sub(2) as usize;
     view.set_viewport(inner_w, inner_h);
     let (start, end, row_offset) = view.visible_source_window();
+    let needle = Needle::new(&view.filter);
     let text: Vec<Line> = view
         .lines
         .iter()
@@ -1114,7 +1194,7 @@ fn draw_scrollable(
         .take(end - start)
         .map(|l| {
             let line = strip_ansi_if_present(l);
-            highlight_matches(Line::from(highlight_yaml(&line)), &view.filter)
+            highlight_matches(Line::from(highlight_yaml(&line)), &needle)
         })
         .collect();
     let text = if view.wrap {
@@ -1144,12 +1224,19 @@ fn visible_wrapped_rows(
     row_offset: usize,
     height: usize,
 ) -> Vec<Line<'static>> {
-    lines
-        .into_iter()
-        .flat_map(|line| wrap_line(line, width))
-        .skip(row_offset)
-        .take(height)
-        .collect()
+    let mut out: Vec<Line<'static>> = Vec::new();
+    // `row_offset` counts rows of the *first* line that sit above the viewport
+    // (see `Scrollable::visible_source_window`); later lines start at their
+    // own first row.
+    let mut skip = row_offset;
+    for line in lines {
+        if out.len() >= height {
+            break;
+        }
+        out.extend(wrap_line_window(line, width, skip, height - out.len()));
+        skip = 0;
+    }
+    out
 }
 
 /// Logs view with optional substring filter + match highlighting.
@@ -1186,7 +1273,7 @@ fn draw_logs(frame: &mut Frame, app: &mut App, area: Rect) {
     let is_plain = active
         && !filter.starts_with('!')
         && !(filter.len() >= 2 && filter.starts_with('/') && filter.ends_with('/'));
-    let highlight = if is_plain { filter.as_str() } else { "" };
+    let highlight = Needle::new(if is_plain { filter.as_str() } else { "" });
 
     // Which lines pass the filter, and where each starts in display rows.
     // Maintained incrementally across frames (see `LogIndex`) rather than
@@ -1235,18 +1322,13 @@ fn draw_logs(frame: &mut Frame, app: &mut App, area: Rect) {
             let Some(l) = app.logs.view.lines.get(buf_idx) else {
                 break;
             };
-            let line = render_log_line(l, highlight);
+            let line = render_log_line(l, &highlight);
             if wrap {
-                for (j, sub) in wrap_line(line, inner_w).into_iter().enumerate() {
-                    let r = row + j;
-                    if r < scroll {
-                        continue;
-                    }
-                    if r >= scroll + inner_h {
-                        break;
-                    }
-                    rows.push(sub);
-                }
+                // Only this line's rows that fall inside [scroll, scroll+h)
+                // are built — the rest of a very long line is never laid out.
+                let skip = scroll.saturating_sub(row);
+                let take = (scroll + inner_h).saturating_sub(row) - skip;
+                rows.extend(wrap_line_window(line, inner_w, skip, take));
             } else {
                 rows.push(line);
             }
@@ -1345,31 +1427,75 @@ pub(crate) fn wrapped_height(raw: &str, width: usize) -> usize {
 /// breaking spans mid-way as needed. A wide glyph that doesn't fit in the
 /// remaining columns moves whole to the next row. Counterpart of
 /// [`wrapped_height`] — keep the fill rules identical.
+/// Concatenated plain text of a styled line, for filtering render-time-built
+/// views (help) where no raw string backs the line.
+fn line_text(line: &Line) -> String {
+    line.spans.iter().map(|s| s.content.as_ref()).collect()
+}
+
+#[cfg(test)]
 fn wrap_line(line: Line<'static>, width: usize) -> Vec<Line<'static>> {
+    wrap_line_window(line, width, 0, usize::MAX)
+}
+
+/// [`wrap_line`], but materializing only display rows `skip .. skip + take`.
+///
+/// The viewport shows a few dozen rows; a single log or JSON line can occupy
+/// thousands. Wrapping the whole line into owned spans and throwing away
+/// everything off-screen made one huge line cost the same whether three of its
+/// rows were visible or all of them. Rows before the window are walked for
+/// their column arithmetic but never built, and the walk stops entirely once
+/// the window is full.
+///
+/// The column arithmetic is untouched, so this still agrees exactly with
+/// [`wrapped_height`] — the scroll math depends on that.
+fn wrap_line_window(
+    line: Line<'static>,
+    width: usize,
+    skip: usize,
+    take: usize,
+) -> Vec<Line<'static>> {
     let width = width.max(1);
     let mut out: Vec<Line> = Vec::new();
+    if take == 0 {
+        return out;
+    }
+    let end = skip.saturating_add(take);
     let mut cur: Vec<Span> = Vec::new();
     let mut col = 0usize;
+    let mut row = 0usize;
     for span in line.spans {
         let style = span.style;
         let mut buf = String::new();
         for c in span.content.chars() {
             let w = UnicodeWidthChar::width(c).unwrap_or(0);
             if col + w > width && col > 0 {
-                if !buf.is_empty() {
-                    cur.push(Span::styled(std::mem::take(&mut buf), style));
+                if row >= skip {
+                    if !buf.is_empty() {
+                        cur.push(Span::styled(std::mem::take(&mut buf), style));
+                    }
+                    out.push(Line::from(std::mem::take(&mut cur)));
                 }
-                out.push(Line::from(std::mem::take(&mut cur)));
+                row += 1;
                 col = 0;
+                if row >= end {
+                    return out;
+                }
             }
-            buf.push(c);
+            // Rows above the window still advance the column count, but their
+            // text is never copied anywhere.
+            if row >= skip {
+                buf.push(c);
+            }
             col += w;
         }
-        if !buf.is_empty() {
+        if row >= skip && !buf.is_empty() {
             cur.push(Span::styled(buf, style));
         }
     }
-    out.push(Line::from(cur)); // final row; an empty line still takes one row
+    if row >= skip {
+        out.push(Line::from(cur)); // final row; an empty line still takes one row
+    }
     out
 }
 
@@ -1377,7 +1503,7 @@ fn wrap_line(line: Line<'static>, width: usize) -> Vec<Line<'static>> {
 /// in its own stable color, an optional leading RFC3339 timestamp dimmed (k9s
 /// style), then the message body in its severity color with search matches
 /// highlighted on top.
-fn render_log_line(line: &str, needle: &str) -> Line<'static> {
+fn render_log_line(line: &str, needle: &Needle<'_>) -> Line<'static> {
     // Severity is detected on the ANSI-stripped text so a color-wrapped level
     // token (e.g. "\x1b[33mwarn\x1b[0m") is still recognized.
     let base = if memchr::memchr(0x1b, line.as_bytes()).is_some() {
@@ -1514,7 +1640,7 @@ fn source_color(label: &str) -> Color {
 /// Render a log-line body: split it into runs by any embedded ANSI SGR codes
 /// (escape bytes stripped), style each run by its ANSI color — or `base` when
 /// it carries none — and overlay search-match highlights.
-fn render_body(body: &str, needle: &str, base: Color) -> Vec<Span<'static>> {
+fn render_body(body: &str, needle: &Needle<'_>, base: Color) -> Vec<Span<'static>> {
     let mut spans = Vec::new();
     for run in ansi_runs(body) {
         let mut style = Style::default().fg(run.color.unwrap_or(base));
@@ -1528,28 +1654,46 @@ fn render_body(body: &str, needle: &str, base: Color) -> Vec<Span<'static>> {
 
 /// Append `text` to `spans` styled with `base`, highlighting case-insensitive
 /// occurrences of `needle` on top.
-fn push_highlighted(spans: &mut Vec<Span<'static>>, text: &str, needle: &str, base: Style) {
+fn push_highlighted(spans: &mut Vec<Span<'static>>, text: &str, needle: &Needle<'_>, base: Style) {
     if needle.is_empty() {
         if !text.is_empty() {
             spans.push(Span::styled(text.to_string(), base));
         }
         return;
     }
-    // Lowercasing is not always length-preserving (e.g. Turkish İ, German ß),
-    // so match on the same string we slice to keep byte offsets valid and avoid
-    // panicking on a non-char-boundary index for multi-byte log lines.
-    let hay = text.to_lowercase();
-    let pat = needle.to_lowercase();
-    if text.len() != hay.len() {
-        // Offsets from `hay` wouldn't be valid in `text`; skip highlighting
-        // rather than risk slicing mid-character.
-        spans.push(Span::styled(text.to_string(), base));
-        return;
-    }
     let hl = Style::default()
         .bg(theme::yellow())
         .fg(theme::crust())
         .add_modifier(Modifier::BOLD);
+
+    // ASCII needle: match straight against `text`, so the offsets are already
+    // the ones we slice with and nothing has to be folded or copied first.
+    if needle.ascii {
+        let mut idx = 0;
+        while let Some(pos) = find_ascii_ci(&text[idx..], needle.text) {
+            let start = idx + pos;
+            let end = start + needle.text.len();
+            if start > idx {
+                spans.push(Span::styled(text[idx..start].to_string(), base));
+            }
+            spans.push(Span::styled(text[start..end].to_string(), hl));
+            idx = end;
+        }
+        if idx < text.len() {
+            spans.push(Span::styled(text[idx..].to_string(), base));
+        }
+        return;
+    }
+
+    // Non-ASCII needle: lowercasing is not always length-preserving (e.g.
+    // Turkish İ, German ß), so match on a fold of the same string we slice and
+    // give up on highlighting when the fold moved the offsets.
+    let hay = text.to_lowercase();
+    let pat = needle.text.to_lowercase();
+    if text.len() != hay.len() {
+        spans.push(Span::styled(text.to_string(), base));
+        return;
+    }
     let mut idx = 0;
     while let Some(pos) = hay[idx..].find(&pat) {
         let start = idx + pos;
@@ -1562,6 +1706,67 @@ fn push_highlighted(spans: &mut Vec<Span<'static>>, text: &str, needle: &str, ba
     }
     if idx < text.len() {
         spans.push(Span::styled(text[idx..].to_string(), base));
+    }
+}
+
+/// ASCII case-insensitive substring search, allocation-free.
+///
+/// The log paths scan every visible line for fixed markers on every frame.
+/// Doing that by lowercasing a copy of the line cost one allocation and one
+/// full extra pass per line; matching case-insensitively over the original
+/// bytes costs neither. Safe on UTF-8: a multi-byte sequence never contains an
+/// ASCII byte, so the returned offset is always a char boundary.
+fn find_ascii_ci(hay: &str, needle: &str) -> Option<usize> {
+    let (h, n) = (hay.as_bytes(), needle.as_bytes());
+    if n.is_empty() {
+        return Some(0);
+    }
+    if h.len() < n.len() {
+        return None;
+    }
+    let last = h.len() - n.len();
+    let (lo, up) = (n[0].to_ascii_lowercase(), n[0].to_ascii_uppercase());
+    let mut i = 0;
+    while i <= last {
+        let off = memchr::memchr2(lo, up, &h[i..=last])?;
+        let start = i + off;
+        if h[start..start + n.len()].eq_ignore_ascii_case(n) {
+            return Some(start);
+        }
+        i = start + 1;
+    }
+    None
+}
+
+/// True when `s` begins with `prefix`, ignoring ASCII case.
+fn starts_ascii_ci(s: &str, prefix: &str) -> bool {
+    s.len() >= prefix.len() && s.as_bytes()[..prefix.len()].eq_ignore_ascii_case(prefix.as_bytes())
+}
+
+/// A search needle prepared once per frame instead of per styled span.
+///
+/// `push_highlighted` runs for every ANSI run of every visible line, and it
+/// used to lowercase both the needle *and* the run text on each call — two
+/// allocations and two passes per span, for a needle that is the same all
+/// frame.
+struct Needle<'a> {
+    text: &'a str,
+    /// ASCII needles match case-insensitively straight against the original
+    /// bytes; anything else falls back to whole-string lowercasing, whose
+    /// offsets are only valid when the fold preserved length.
+    ascii: bool,
+}
+
+impl<'a> Needle<'a> {
+    fn new(text: &'a str) -> Self {
+        Needle {
+            ascii: text.is_ascii(),
+            text,
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.text.is_empty()
     }
 }
 
@@ -1710,83 +1915,99 @@ fn ansi_16_color(code: u8) -> Option<Color> {
 /// (`…Zwarn`), `level=error`, and the klog prefix (`E0627 …`). Errors red,
 /// warnings peach, debug/trace dimmed; info and anything unrecognized stay in
 /// the default text color so they read calmly and real problems pop.
+/// Level markers, error-group first, then warn, then debug — the order the
+/// leftmost-first scan below breaks ties with, matching the group order the
+/// per-group minimum used to impose. `z…` entries catch a level glued to the
+/// end of an RFC3339 timestamp (`…T10:00:00Zerror`).
+const LEVEL_MARKERS: &[&str] = &[
+    " error",
+    "\terror",
+    "zerror",
+    "level=error",
+    " fatal",
+    "zfatal",
+    " panic",
+    " warn",
+    "\twarn",
+    "zwarn",
+    "level=warn",
+    " debug",
+    "\tdebug",
+    "zdebug",
+    " trace",
+    "ztrace",
+    "level=debug",
+];
+/// Index of the first warn marker, and of the first debug marker.
+const FIRST_WARN_MARKER: usize = 7;
+const FIRST_DEBUG_MARKER: usize = 11;
+
+/// One automaton for every marker, built once. Leftmost-first with
+/// case-insensitive matching reproduces exactly what seventeen separate
+/// `find` calls over a lowercased copy of the line used to compute: the
+/// earliest marker wins, and an earlier pattern wins a tie.
+fn level_markers() -> &'static aho_corasick::AhoCorasick {
+    static MARKERS: std::sync::OnceLock<aho_corasick::AhoCorasick> = std::sync::OnceLock::new();
+    MARKERS.get_or_init(|| {
+        aho_corasick::AhoCorasick::builder()
+            .ascii_case_insensitive(true)
+            .match_kind(aho_corasick::MatchKind::LeftmostFirst)
+            .build(LEVEL_MARKERS)
+            .expect("level marker automaton")
+    })
+}
+
 fn log_level_color(line: &str) -> Color {
-    let l = line.to_ascii_lowercase();
     // Structured logs: read the level field directly (authoritative — a later
     // "…error…" in the message can't override it).
-    if let Some(level) = json_field(&l, "level").or_else(|| json_field(&l, "severity")) {
+    if let Some(level) = json_field(line, LEVEL_KEY).or_else(|| json_field(line, SEVERITY_KEY)) {
         return level_color(level);
     }
     // klog prefixes (`E0627 …`) put the level at the very start.
-    if klog_level(&l, 'e') || klog_level(&l, 'f') {
+    if klog_level(line, 'e') || klog_level(line, 'f') {
         return theme::red();
     }
-    if klog_level(&l, 'w') {
+    if klog_level(line, 'w') {
         return theme::peach();
     }
     // Otherwise the leftmost level marker wins, since the level precedes the
     // message — so a later "…the last error:" can't override a `warn` level.
-    let first = |needles: &[&str]| needles.iter().filter_map(|n| l.find(n)).min();
-    let candidates = [
-        (
-            first(&[
-                " error",
-                "\terror",
-                "zerror",
-                "level=error",
-                " fatal",
-                "zfatal",
-                " panic",
-            ]),
-            theme::red(),
-        ),
-        (
-            first(&[" warn", "\twarn", "zwarn", "level=warn"]),
-            theme::peach(),
-        ),
-        (
-            first(&[
-                " debug",
-                "\tdebug",
-                "zdebug",
-                " trace",
-                "ztrace",
-                "level=debug",
-            ]),
-            theme::overlay1(),
-        ),
-    ];
-    candidates
-        .into_iter()
-        .filter_map(|(pos, color)| pos.map(|p| (p, color)))
-        .min_by_key(|(p, _)| *p)
-        .map(|(_, color)| color)
-        .unwrap_or(theme::text())
+    match level_markers().find(line).map(|m| m.pattern().as_usize()) {
+        Some(i) if i < FIRST_WARN_MARKER => theme::red(),
+        Some(i) if i < FIRST_DEBUG_MARKER => theme::peach(),
+        Some(_) => theme::overlay1(),
+        None => theme::text(),
+    }
 }
 
-/// Color for a parsed level token (already lowercased).
+/// Color for a parsed level token, matched case-insensitively (the line is no
+/// longer lowercased into a temporary copy before it gets here).
 fn level_color(level: &str) -> Color {
-    if level.starts_with("err")
-        || level.starts_with("fatal")
-        || level.starts_with("crit")
-        || level.starts_with("panic")
+    if starts_ascii_ci(level, "err")
+        || starts_ascii_ci(level, "fatal")
+        || starts_ascii_ci(level, "crit")
+        || starts_ascii_ci(level, "panic")
     {
         theme::red()
-    } else if level.starts_with("warn") {
+    } else if starts_ascii_ci(level, "warn") {
         theme::peach()
-    } else if level.starts_with("debug") || level.starts_with("trace") {
+    } else if starts_ascii_ci(level, "debug") || starts_ascii_ci(level, "trace") {
         theme::overlay1()
     } else {
         theme::text() // info, notice, unknown — keep readable
     }
 }
 
+const LEVEL_KEY: &str = "\"level\"";
+const SEVERITY_KEY: &str = "\"severity\"";
+
 /// Read a JSON string field's value, e.g. `json_field(r#"…"level":"warn"…"#,
-/// "level") == Some("warn")`. Tolerant of whitespace around the colon. Input is
-/// expected already lowercased.
+/// LEVEL_KEY) == Some("warn")`. Tolerant of whitespace around the colon.
+/// `key` is the quoted field name; it is matched case-insensitively, and the
+/// value comes back exactly as written (see [`level_color`]).
 fn json_field<'a>(l: &'a str, key: &str) -> Option<&'a str> {
-    let pat = format!("\"{key}\"");
-    let i = l.find(&pat)?;
+    let pat = key;
+    let i = find_ascii_ci(l, pat)?;
     let rest = l[i + pat.len()..].trim_start();
     let rest = rest.strip_prefix(':')?.trim_start();
     let rest = rest.strip_prefix('"')?;
@@ -1794,10 +2015,11 @@ fn json_field<'a>(l: &'a str, key: &str) -> Option<&'a str> {
     Some(&rest[..end])
 }
 
-/// True if `l` starts with a klog level marker, e.g. `e0627 …` (lowercased).
+/// True if `l` starts with a klog level marker, e.g. `E0627 …`.
 fn klog_level(l: &str, level: char) -> bool {
     let mut it = l.chars();
-    it.next() == Some(level) && it.next().is_some_and(|c| c.is_ascii_digit())
+    it.next().is_some_and(|c| c.eq_ignore_ascii_case(&level))
+        && it.next().is_some_and(|c| c.is_ascii_digit())
 }
 
 /// Unified-diff view with +/- line coloring.
@@ -1806,6 +2028,7 @@ fn draw_diff(frame: &mut Frame, view: &mut crate::app::Scrollable, area: Rect) {
     let inner_h = area.height.saturating_sub(2) as usize;
     view.set_viewport(inner_w, inner_h);
     let (start, end, row_offset) = view.visible_source_window();
+    let needle = Needle::new(&view.filter);
     let lines: Vec<Line> = view
         .lines
         .iter()
@@ -1819,7 +2042,7 @@ fn draw_diff(frame: &mut Frame, view: &mut crate::app::Scrollable, area: Rect) {
                 _ => theme::overlay1(),
             };
             let line = Line::from(Span::styled(line.into_owned(), Style::default().fg(color)));
-            highlight_matches(line, &view.filter)
+            highlight_matches(line, &needle)
         })
         .collect();
     let lines = if view.wrap {
@@ -1866,7 +2089,7 @@ fn doc_title(view: &crate::app::Scrollable) -> String {
 /// span's own style for the unmatched stretches. A needle spanning two spans
 /// (e.g. across a YAML key/value boundary) is not highlighted — the line is
 /// still *shown* (filtering matches on the raw text), just not marked.
-fn highlight_matches(line: Line<'static>, needle: &str) -> Line<'static> {
+fn highlight_matches(line: Line<'static>, needle: &Needle<'_>) -> Line<'static> {
     if needle.is_empty() {
         return line;
     }
@@ -1875,12 +2098,6 @@ fn highlight_matches(line: Line<'static>, needle: &str) -> Line<'static> {
         push_highlighted(&mut spans, &span.content, needle, span.style);
     }
     Line::from(spans)
-}
-
-/// Concatenated plain text of a styled line, for filtering render-time-built
-/// views (help) where no raw string backs the line.
-fn line_text(line: &Line) -> String {
-    line.spans.iter().map(|s| s.content.as_ref()).collect()
 }
 
 /// YAML / `kubectl describe` colorization: comments dimmed, section headers in
@@ -2190,6 +2407,7 @@ fn draw_help(frame: &mut Frame, app: &App, area: Rect) {
     }
     // `/` search: keep only matching binding lines (section headers and
     // spacers match like any other text), highlighting the matched runs.
+    let help_needle = Needle::new(&app.help_filter);
     let needle = app.help_filter.to_lowercase();
     let (lines, title) = if needle.is_empty() {
         (lines, " Help ".to_string())
@@ -2197,7 +2415,7 @@ fn draw_help(frame: &mut Frame, app: &App, area: Rect) {
         let shown: Vec<Line> = lines
             .into_iter()
             .filter(|l| line_text(l).to_lowercase().contains(&needle))
-            .map(|l| highlight_matches(l, &app.help_filter))
+            .map(|l| highlight_matches(l, &help_needle))
             .collect();
         let title = format!(" Help · /{} [{}] ", app.help_filter, shown.len());
         (shown, title)
@@ -3740,6 +3958,37 @@ mod tests {
 
     /// The scroll math (`wrapped_height`) and the renderer (`wrap_line`) must
     /// produce the same row count for any input, or follow/clamping drifts.
+    /// The windowed wrap must return exactly the slice of the full wrap it
+    /// stands in for — the viewport shows those rows, and the scroll math is
+    /// computed from `wrapped_height`, so any disagreement is a visible drift.
+    #[test]
+    fn wrap_window_matches_the_full_wrap() {
+        let cases = [
+            "",
+            "short",
+            "a much longer plain ascii log line that wraps a few times over",
+            "\x1b[33mwarn\x1b[0m something colorful happened in the reconcile loop",
+            "日本語のログ行 with mixed ascii ワイド文字",
+            "cafe\u{301} naïve élan über — dash",
+        ];
+        for w in [1usize, 3, 10, 37] {
+            for raw in cases {
+                let full = wrap_line(render_log_line(raw, &Needle::new("")), w);
+                for skip in 0..=full.len() + 1 {
+                    for take in 0..=full.len() + 1 {
+                        let window =
+                            wrap_line_window(render_log_line(raw, &Needle::new("")), w, skip, take);
+                        let expected: Vec<_> = full.iter().skip(skip).take(take).cloned().collect();
+                        assert_eq!(
+                            window, expected,
+                            "window({skip},{take}) of {raw:?} at width {w}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
     #[test]
     fn wrapped_height_matches_wrap_line() {
         let cases = [
@@ -3760,7 +4009,7 @@ mod tests {
         ];
         for w in [1usize, 3, 10, 37, 120] {
             for raw in cases {
-                let rendered = render_log_line(raw, "");
+                let rendered = render_log_line(raw, &Needle::new(""));
                 let rows = wrap_line(rendered, w).len();
                 assert_eq!(
                     wrapped_height(raw, w),
@@ -3922,7 +4171,7 @@ mod tests {
 
     #[test]
     fn render_colors_prefix_then_body() {
-        let line = render_log_line("[rod] Killed PID: 25258", "");
+        let line = render_log_line("[rod] Killed PID: 25258", &Needle::new(""));
         // First span is the colored source prefix, kept verbatim.
         assert_eq!(line.spans[0].content, "[rod] ");
         assert_eq!(line.spans[0].style.fg, Some(source_color("rod")));
@@ -3954,7 +4203,7 @@ mod tests {
         // Caddy-style line: level token wrapped in an SGR color, escapes must
         // not survive into the rendered text.
         let raw = "2026/07/01 08:43:13 \x1b[34mINFO\x1b[0m WAF started";
-        let line = render_log_line(raw, "");
+        let line = render_log_line(raw, &Needle::new(""));
         let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
         assert_eq!(text, "2026/07/01 08:43:13 INFO WAF started");
         assert!(!text.contains('\x1b') && !text.contains("[34m"));
@@ -3981,7 +4230,7 @@ mod tests {
 
     #[test]
     fn render_dims_leading_timestamp() {
-        let line = render_log_line("2026-06-30T12:52:20.876Z request done", "");
+        let line = render_log_line("2026-06-30T12:52:20.876Z request done", &Needle::new(""));
         assert_eq!(line.spans[0].content, "2026-06-30T12:52:20.876Z");
         assert_eq!(line.spans[0].style.fg, theme::dim().fg);
     }

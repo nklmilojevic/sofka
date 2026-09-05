@@ -291,8 +291,195 @@ fn helm_decode(c: &mut Criterion) {
     g.finish();
 }
 
+/// 2.4b — just the viewport half of a frame: the row-key resolution and the
+/// cell-cache warming the renderer does for every visible row, without the
+/// terminal write. Isolates the per-row identity work from the buffer diff.
+fn viewport(c: &mut Criterion) {
+    let mut g = c.benchmark_group("viewport");
+    for n in [500usize, 2_000] {
+        let (app, _rx) = bs::pods_app_with_metrics(n);
+        black_box(app.row_count());
+        g.bench_with_input(BenchmarkId::new("warm_47", n), &n, |b, _| {
+            b.iter(|| black_box(bs::warm_viewport(&app, 0, 47)));
+        });
+    }
+    g.finish();
+}
+
+/// 2.4 — one full table frame: the viewport query, cell-cache warming, the
+/// per-row widget build (volatile cells, metrics, width measurement) and the
+/// column layout + mouse geometry. This is the unit a redraw actually costs,
+/// and the one the render findings (canonical row keys, hidden columns,
+/// per-frame header/layout rebuilds) are about.
+fn frame(c: &mut Criterion) {
+    let mut g = c.benchmark_group("frame");
+
+    for n in [500usize, 2_000] {
+        let (mut app, _rx) = bs::pods_app_with_metrics(n);
+        app.table_state.select(Some(0));
+        let mut term = bs::terminal(200, 50);
+        // A fixture that renders the wrong columns measures the wrong work.
+        assert!(
+            bs::headers(&app).iter().any(|h| h == "STATUS"),
+            "pods fixture must render the real pod columns, got {:?}",
+            bs::headers(&app)
+        );
+        bs::render_frame(&mut term, &mut app);
+        g.bench_with_input(BenchmarkId::new("table", n), &n, |b, _| {
+            b.iter(|| bs::render_frame(&mut term, &mut app));
+        });
+    }
+
+    // Horizontally scrolled: three columns are off the left edge, so their
+    // cells are formatted and measured but never drawn.
+    {
+        let n = 2_000usize;
+        let (mut app, _rx) = bs::pods_app_with_metrics(n);
+        app.table_state.select(Some(0));
+        app.col_offset = 3;
+        let mut term = bs::terminal(200, 50);
+        bs::render_frame(&mut term, &mut app);
+        g.bench_with_input(BenchmarkId::new("table_scrolled", n), &n, |b, _| {
+            b.iter(|| bs::render_frame(&mut term, &mut app));
+        });
+    }
+
+    // A watch event between frames: the row it touched re-renders, the rest of
+    // the viewport comes from the cell cache.
+    {
+        let n = 2_000usize;
+        let (mut app, _rx) = bs::pods_app_with_metrics(n);
+        app.table_state.select(Some(0));
+        let mut term = bs::terminal(200, 50);
+        bs::render_frame(&mut term, &mut app);
+        g.bench_with_input(BenchmarkId::new("event_then_frame", n), &n, |b, _| {
+            let mut i = 0usize;
+            b.iter(|| {
+                bs::touch_one(&mut app, i % n);
+                i += 1;
+                bs::render_frame(&mut term, &mut app);
+            });
+        });
+    }
+
+    g.finish();
+}
+
+/// 4.x — one full frame of the logs view. Every visible line is re-parsed for
+/// severity, re-split into ANSI runs, re-highlighted and (when wrapping)
+/// re-wrapped on every redraw, so this is the number a paused or streaming log
+/// viewport actually costs.
+fn log_frame(c: &mut Criterion) {
+    let mut g = c.benchmark_group("log_frame");
+    for (label, filter, wrap) in [
+        ("plain", "", false),
+        ("wrapped", "", true),
+        ("filtered", "reconcile", false),
+    ] {
+        let (mut app, _rx) = bs::logs_app(10_000, filter, wrap);
+        let mut term = bs::terminal(200, 50);
+        bs::render_frame(&mut term, &mut app);
+        g.bench_function(label, |b| {
+            b.iter(|| bs::render_frame(&mut term, &mut app));
+        });
+    }
+
+    // One 256 KB record at the tail: the viewport shows a handful of its rows.
+    let (mut app, _rx) = bs::logs_app_huge_line(1_000, 256 * 1024);
+    let mut term = bs::terminal(200, 50);
+    bs::render_frame(&mut term, &mut app);
+    g.bench_function("huge_line", |b| {
+        b.iter(|| bs::render_frame(&mut term, &mut app));
+    });
+    g.finish();
+}
+
+/// 4.x — a static YAML document redrawn. Nothing about it changes between
+/// frames, but the syntax spans and search highlighting are rebuilt each time.
+fn doc_frame(c: &mut Criterion) {
+    let mut g = c.benchmark_group("doc_frame");
+    for (label, filter) in [("plain", ""), ("filtered", "image")] {
+        let (mut app, _rx) = bs::doc_app(5_000, filter);
+        let mut term = bs::terminal(200, 50);
+        bs::render_frame(&mut term, &mut app);
+        g.bench_function(label, |b| {
+            b.iter(|| bs::render_frame(&mut term, &mut app));
+        });
+    }
+    g.finish();
+}
+
+/// 2.7 — modal overlays. Help rebuilds every binding line (and its search
+/// text) per frame; the namespace picker re-scores and re-clones its list.
+fn overlay_frame(c: &mut Criterion) {
+    let mut g = c.benchmark_group("overlay_frame");
+    for (label, filter) in [("help", ""), ("help_search", "log")] {
+        let (mut app, _rx) = bs::help_app(filter);
+        let mut term = bs::terminal(200, 50);
+        bs::render_frame(&mut term, &mut app);
+        g.bench_function(label, |b| {
+            b.iter(|| bs::render_frame(&mut term, &mut app));
+        });
+    }
+    for (label, filter) in [("ns_browse", ""), ("ns_filtered", "team-01")] {
+        let (mut app, _rx) = bs::ns_picker_app(500, filter);
+        let mut term = bs::terminal(200, 50);
+        bs::render_frame(&mut term, &mut app);
+        g.bench_function(label, |b| {
+            b.iter(|| bs::render_frame(&mut term, &mut app));
+        });
+    }
+    g.finish();
+}
+
+/// 3.x — the table frame with a fuzzy filter active, so every visible NAME
+/// cell re-runs the fuzzy matcher and rebuilds its highlight runs.
+fn name_cells(c: &mut Criterion) {
+    let mut g = c.benchmark_group("name_cells");
+    let (mut app, _rx) = bs::pods_app(2_000);
+    app.filter = "workload".to_string();
+    app.table_state.select(Some(0));
+    black_box(app.row_count());
+    let mut term = bs::terminal(200, 50);
+    bs::render_frame(&mut term, &mut app);
+    g.bench_function("filtered_frame/2000", |b| {
+        b.iter(|| bs::render_frame(&mut term, &mut app));
+    });
+    g.finish();
+}
+
+/// 4.3 — provider log ingest: framing one received chunk, parsing each record
+/// and rendering it into display lines. `fragmented` is one long record
+/// arriving in 4 KB pieces, which re-scans the incomplete buffer each time.
+fn provider_ingest(c: &mut Criterion) {
+    let mut g = c.benchmark_group("provider_ingest");
+    for n in [256usize, 2_000] {
+        let chunk = bs::provider_chunk(n);
+        g.bench_with_input(BenchmarkId::new("chunk", n), &n, |b, _| {
+            b.iter(|| black_box(sofka::providers::bench_ingest_chunk(black_box(&chunk))));
+        });
+    }
+    let record = bs::provider_long_record(512 * 1024);
+    g.bench_function("fragmented_512k", |b| {
+        b.iter(|| {
+            black_box(sofka::providers::bench_ingest_fragmented(
+                black_box(&record),
+                4096,
+            ))
+        });
+    });
+    g.finish();
+}
+
 criterion_group!(
     benches,
+    frame,
+    viewport,
+    log_frame,
+    doc_frame,
+    overlay_frame,
+    name_cells,
+    provider_ingest,
     rows_cache,
     filter,
     filter_cmp,

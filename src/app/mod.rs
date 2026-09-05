@@ -45,6 +45,18 @@ impl App {
     pub fn bench_invalidate_rows(&self) {
         self.invalidate_rows();
     }
+
+    /// Put a bench fixture into the state real navigation leaves behind:
+    /// the resolved `Kind` installed and the view spec built for it. Seeding
+    /// `kind_plural` alone leaves `spec` built from an empty plural, so every
+    /// cached cell, comparison filter and header measured through it belongs
+    /// to `DEFAULT_COLUMNS` rather than the kind's real layout.
+    #[cfg(feature = "bench")]
+    pub fn bench_install_kind(&mut self, plural: &str) {
+        self.kind = self.cluster.resolve(plural);
+        self.kind_plural = plural.to_string();
+        self.refresh_view_spec();
+    }
 }
 
 /// Larger cap used while autoscroll is paused: we stop trimming so the line
@@ -1696,6 +1708,9 @@ pub struct App {
     /// Scratch buffer for the fuzzy filter's "namespace name" haystack, reused
     /// across rows so the filter pass doesn't allocate a `String` per object.
     hay_buf: RefCell<String>,
+    /// Scratch buffer for the `"{namespace}/{name}"` metrics-map key, reused
+    /// for the same reason: it is built per visible row per frame.
+    metrics_key_buf: RefCell<String>,
 
     /// Compiled log provider from `[providers.logs]`, re-resolved on context
     /// switch and `:reload` so each cluster can point at its own backend.
@@ -1891,6 +1906,7 @@ impl App {
             should_quit: false,
             matcher: SkimMatcherV2::default(),
             hay_buf: RefCell::new(String::new()),
+            metrics_key_buf: RefCell::new(String::new()),
             rows_cache: RefCell::new(RowsCache {
                 dirty: true,
                 keys: Vec::new(),
