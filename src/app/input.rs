@@ -552,12 +552,19 @@ impl App {
         self.mode = Mode::Table;
         self.command.clear();
         // Dispatch leaves the view the palette was opened from behind,
-        // so run the cleanup its own esc path would have done.
-        match self.palette_return {
+        // so run the cleanup its own esc path would have done. Help can sit
+        // between the palette and that view, so unwrap its return destination.
+        let source = if self.palette_return == Mode::Help {
+            self.help_return
+        } else {
+            self.palette_return
+        };
+        match source {
             Mode::Logs => self.stop_log_stream(),
             Mode::Events => self.stop_event_stream(),
             _ => {}
         }
+        self.help_return = Mode::Table;
         self.palette_return = Mode::Table;
         // `:kind namespace` switches both at once (`:deploy social`,
         // `:cephclusters all`); only the first word selects the kind.

@@ -1035,6 +1035,44 @@ async fn navigation_views_share_palette_and_help_shortcuts() {
 }
 
 #[tokio::test]
+async fn palette_from_help_cleans_up_the_underlying_stream() {
+    for source in [Mode::Logs, Mode::Events] {
+        let (mut app, _rx) = test_app();
+        let log_gen = app.log_gen;
+        let event_gen = app.event_gen;
+        match source {
+            Mode::Logs => app.log_tasks.push(tokio::spawn(std::future::pending())),
+            Mode::Events => {
+                app.event_task = Some(tokio::spawn(std::future::pending()));
+            }
+            _ => unreachable!(),
+        }
+        app.mode = source;
+
+        app.handle_key(press(KeyCode::Char('?'))).unwrap();
+        app.handle_key(press(KeyCode::Char(':'))).unwrap();
+        for c in "skin".chars() {
+            app.handle_key(press(KeyCode::Char(c))).unwrap();
+        }
+        app.handle_key(press(KeyCode::Enter)).unwrap();
+
+        assert_eq!(app.mode, Mode::Skins);
+        assert_eq!(app.help_return, Mode::Table);
+        match source {
+            Mode::Logs => {
+                assert!(app.log_tasks.is_empty());
+                assert_eq!(app.log_gen, log_gen + 1);
+            }
+            Mode::Events => {
+                assert!(app.event_task.is_none());
+                assert_eq!(app.event_gen, event_gen + 1);
+            }
+            _ => unreachable!(),
+        }
+    }
+}
+
+#[tokio::test]
 async fn explain_evidence_escape_walks_back_to_the_table() {
     for (key, evidence_mode) in [('l', Mode::Logs), ('E', Mode::Events)] {
         let (mut app, _rx) = test_app();
