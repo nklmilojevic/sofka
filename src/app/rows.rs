@@ -367,7 +367,7 @@ impl App {
                 ord = ord.reverse();
             }
             // Ties always fall back to namespace/name ascending.
-            ord.then_with(|| a.1.cmp(&b.1))
+            ord.then_with(|| natural_cmp(a.1.0, b.1.0).then_with(|| natural_cmp(a.1.1, b.1.1)))
         });
         cache.keys = entries.into_iter().map(|(_, _, k)| k.clone()).collect();
         cache.dirty = false;
