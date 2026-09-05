@@ -1303,13 +1303,14 @@ pub struct App {
     /// Search query for the help view (`?`), which has no backing
     /// [`Scrollable`] — its lines are built at render time.
     pub help_filter: String,
+    /// Which view help was opened from, so closing it returns to that view.
+    pub help_return: Mode,
     /// Which doc view (`Detail`/`Diff`/`Events`/`Help`) the `/` search prompt
     /// was opened from, so the renderer keeps drawing it underneath and
     /// enter/esc return to it.
     pub doc_filter_return: Mode,
-    /// Which view the `:` command palette was opened from (the table or a
-    /// document view — detail/diff/events/logs), so esc returns there and the
-    /// renderer keeps drawing it underneath the suggestion popup.
+    /// Which navigation view the `:` command palette was opened from, so esc
+    /// returns there and the renderer keeps drawing it underneath the popup.
     pub palette_return: Mode,
     pub logs: LogsView,
 
@@ -1504,6 +1505,9 @@ pub struct App {
     pub explain_title: String,
     /// The object the explain view is investigating, kept so `r` can re-gather.
     pub explain_source: Option<DynamicObject>,
+    /// Parent of the explain view. Kept separately because an evidence view
+    /// (logs/events) temporarily uses `return_mode` to return to Explain.
+    explain_return: Mode,
     /// GitOps view: the reconciliation-chain findings, cursor, title, and the
     /// object being investigated (kept so `r` can re-gather).
     pub gitops_items: Vec<crate::explain::Finding>,
@@ -1635,6 +1639,7 @@ impl App {
             last_action_error: None,
             detail: Scrollable::empty(),
             help_filter: String::new(),
+            help_return: Mode::Table,
             doc_filter_return: Mode::Detail,
             palette_return: Mode::Table,
             logs: LogsView::default(),
@@ -1724,6 +1729,7 @@ impl App {
             explain_state: ListState::default(),
             explain_title: String::new(),
             explain_source: None,
+            explain_return: Mode::Table,
             gitops_items: Vec::new(),
             gitops_state: ListState::default(),
             gitops_title: String::new(),

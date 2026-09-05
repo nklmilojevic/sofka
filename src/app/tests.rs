@@ -979,6 +979,91 @@ async fn palette_opens_from_document_views() {
 }
 
 #[tokio::test]
+async fn navigation_views_share_palette_and_help_shortcuts() {
+    let (mut app, _rx) = test_app();
+
+    for source in [
+        Mode::Table,
+        Mode::Detail,
+        Mode::Logs,
+        Mode::Containers,
+        Mode::Confirm,
+        Mode::Pulse,
+        Mode::Xray,
+        Mode::Explain,
+        Mode::Timeline,
+        Mode::Gitops,
+        Mode::Diff,
+        Mode::Events,
+        Mode::FluxMenu,
+        Mode::TransferMenu,
+        Mode::PortForwards,
+        Mode::Skins,
+        Mode::Snapshots,
+        Mode::Fleet,
+        Mode::Find,
+    ] {
+        app.mode = source;
+        app.handle_key(press(KeyCode::Char(':'))).unwrap();
+        assert_eq!(app.mode, Mode::Command, "palette from {source:?}");
+        assert_eq!(app.palette_return, source);
+        app.handle_key(press(KeyCode::Esc)).unwrap();
+        assert_eq!(app.mode, source, "palette return to {source:?}");
+
+        app.handle_key(press(KeyCode::Char('?'))).unwrap();
+        assert_eq!(app.mode, Mode::Help, "help from {source:?}");
+        assert_eq!(app.help_return, source);
+        app.handle_key(press(KeyCode::Esc)).unwrap();
+        assert_eq!(app.mode, source, "help return to {source:?}");
+    }
+
+    app.mode = Mode::Help;
+    app.help_return = Mode::Explain;
+    app.handle_key(press(KeyCode::Char(':'))).unwrap();
+    assert_eq!(app.mode, Mode::Command);
+    app.handle_key(press(KeyCode::Esc)).unwrap();
+    assert_eq!(app.mode, Mode::Help);
+    app.handle_key(press(KeyCode::Char('?'))).unwrap();
+    assert_eq!(app.mode, Mode::Explain);
+
+    app.mode = Mode::Namespaces;
+    app.ns_filter.clear();
+    app.handle_key(press(KeyCode::Char(':'))).unwrap();
+    app.handle_key(press(KeyCode::Char('?'))).unwrap();
+    assert_eq!(app.mode, Mode::Namespaces);
+    assert_eq!(app.ns_filter, ":?");
+}
+
+#[tokio::test]
+async fn explain_evidence_escape_walks_back_to_the_table() {
+    for (key, evidence_mode) in [('l', Mode::Logs), ('E', Mode::Events)] {
+        let (mut app, _rx) = test_app();
+        app.switch_kind("pods");
+        apply(
+            &mut app,
+            json!({
+                "apiVersion": "v1",
+                "kind": "Pod",
+                "metadata": {"name": "api-1", "namespace": "prod"},
+                "spec": {"containers": [{"name": "app"}]}
+            }),
+        );
+        app.table_state.select(Some(0));
+
+        app.handle_key(press(KeyCode::Char('X'))).unwrap();
+        assert_eq!(app.mode, Mode::Explain);
+        app.handle_key(press(KeyCode::Char(key))).unwrap();
+        assert_eq!(app.mode, evidence_mode);
+
+        app.handle_key(press(KeyCode::Esc)).unwrap();
+        assert_eq!(app.mode, Mode::Explain);
+        app.handle_key(press(KeyCode::Esc)).unwrap();
+        assert_eq!(app.mode, Mode::Table);
+        assert_eq!(app.table_state.selected(), Some(0));
+    }
+}
+
+#[tokio::test]
 async fn skin_palette_command_opens_picker() {
     let (mut app, _rx) = test_app();
     assert!(app.run_palette_command("skin"));

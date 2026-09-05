@@ -27,7 +27,8 @@ The full list. For how sofka compares to k9s, see [vs k9s](vs-k9s.md).
   `pulse`, `xray`, `explain`, `timeline`, `gitops`, `can-i`, `journal`, `debug`,
   `debug-clean`, `bundle`, `bundle-save`, `snapshot`, `snapshots`, `diff`,
   `events`, `pf`, `notify`, `find`, `vlogs`, `rightsize`, `fleet`, `skin`,
-  `reload`, `config`, `info`).
+  `reload`, `config`, `info`). `:` and `?` open the palette and help from every
+  navigation screen, then close back to the screen where they were opened.
 - **Filtering** (`/`) with matched-character highlighting: fuzzy text, `!text`
   inverse match, `-l`/`-f` label and field selectors (evaluated server-side on
   ⏎), and typed column comparisons (`status=CrashLoopBackOff`, `cpu>500m`,
@@ -86,7 +87,8 @@ The full list. For how sofka compares to k9s, see [vs k9s](vs-k9s.md).
   conditions, blocking pods and their container failure reasons
   (ImagePullBackOff, CrashLoopBackOff, OOMKilled, unschedulable, failed probes),
   and recent Warning events. No AI, no external service. `⏎`, `E`, or `l` jumps
-  from a finding to the pod, its events, or its logs.
+  from a finding to the pod, its events, or its logs. After opening evidence,
+  `esc` returns to Explain before another `esc` returns to the table.
 - **Session-local timeline** (`T` / `:timeline`) - a per-object timestamped log
   of every state change the watch saw: generation bumps, replica and readiness
   changes, pod phase, restarts, waiting reasons, condition flips. Computed from
