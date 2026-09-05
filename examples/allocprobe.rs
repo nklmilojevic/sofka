@@ -106,4 +106,70 @@ fn main() {
             std::hint::black_box(app.row_count());
         });
     }
+
+    // ---- log, document and overlay frames; provider ingest ----
+
+    for (label, filter, wrap) in [
+        ("log_frame/plain", "", false),
+        ("log_frame/wrapped", "", true),
+        ("log_frame/filtered", "reconcile", false),
+    ] {
+        let (mut app, _rx) = bs::logs_app(10_000, filter, wrap);
+        let mut term = bs::terminal(200, 50);
+        measure(label, iters, || bs::render_frame(&mut term, &mut app));
+    }
+
+    {
+        let (mut app, _rx) = bs::logs_app_huge_line(1_000, 256 * 1024);
+        let mut term = bs::terminal(200, 50);
+        measure("log_frame/huge_line", iters, || {
+            bs::render_frame(&mut term, &mut app)
+        });
+    }
+
+    for (label, filter) in [("doc_frame/plain", ""), ("doc_frame/filtered", "image")] {
+        let (mut app, _rx) = bs::doc_app(5_000, filter);
+        let mut term = bs::terminal(200, 50);
+        measure(label, iters, || bs::render_frame(&mut term, &mut app));
+    }
+
+    for (label, filter) in [("overlay/help", ""), ("overlay/help_search", "log")] {
+        let (mut app, _rx) = bs::help_app(filter);
+        let mut term = bs::terminal(200, 50);
+        measure(label, iters, || bs::render_frame(&mut term, &mut app));
+    }
+
+    for (label, filter) in [
+        ("overlay/ns_browse", ""),
+        ("overlay/ns_filtered", "team-01"),
+    ] {
+        let (mut app, _rx) = bs::ns_picker_app(500, filter);
+        let mut term = bs::terminal(200, 50);
+        measure(label, iters, || bs::render_frame(&mut term, &mut app));
+    }
+
+    {
+        let (mut app, _rx) = bs::pods_app(2_000);
+        app.filter = "workload".to_string();
+        app.table_state.select(Some(0));
+        std::hint::black_box(app.row_count());
+        let mut term = bs::terminal(200, 50);
+        measure("name_cells/filtered_frame", iters, || {
+            bs::render_frame(&mut term, &mut app)
+        });
+    }
+
+    {
+        let chunk = bs::provider_chunk(2_000);
+        measure("provider/chunk_2000", iters, || {
+            std::hint::black_box(sofka::providers::bench_ingest_chunk(&chunk));
+        });
+    }
+
+    {
+        let record = bs::provider_long_record(512 * 1024);
+        measure("provider/fragmented_512k", 20, || {
+            std::hint::black_box(sofka::providers::bench_ingest_fragmented(&record, 4096));
+        });
+    }
 }

@@ -345,6 +345,7 @@ pub fn terminal(w: u16, h: u16) -> ratatui::Terminal<ratatui::backend::TestBacke
 /// One full frame of the real UI, drawn into an in-memory backend — the unit
 /// the table renderer is actually judged by (per-row cell rendering, width
 /// measurement, column layout and mouse geometry all included).
+/// One full frame of the real UI, drawn into an in-memory backend.
 pub fn render_frame(
     terminal: &mut ratatui::Terminal<ratatui::backend::TestBackend>,
     app: &mut App,
@@ -365,4 +366,110 @@ pub fn warm_viewport(app: &App, offset: usize, n: usize) -> usize {
     let rows = app.rows_window_keyed(offset, n);
     app.ensure_table_cell_cache(&rows);
     rows.len()
+}
+
+/// An app sitting in the logs view over an `n`-line buffer, following the tail
+/// — the shape a busy pod's log stream leaves on screen.
+pub fn logs_app(n: usize, filter: &str, wrap: bool) -> (App, Receiver<Msg>) {
+    let (mut a, rx) = app();
+    a.mode = crate::app::Mode::Logs;
+    a.logs.view.title = "sherlock/app — logs".into();
+    a.logs.view.lines.extend(log_lines(n));
+    a.logs.follow = true;
+    a.logs.wrap = wrap;
+    if !filter.is_empty() {
+        a.logs.set_filter(filter.to_string());
+    }
+    (a, rx)
+}
+
+/// The same, with one enormous single-line JSON record at the tail: the
+/// viewport shows a few rows of it, and the renderer has to decide how much of
+/// it to lay out.
+pub fn logs_app_huge_line(n: usize, bytes: usize) -> (App, Receiver<Msg>) {
+    let (mut a, rx) = logs_app(n, "", true);
+    let payload = "x".repeat(bytes / 2);
+    a.logs.view.lines.push_back(format!(
+        r#"{{"level":"info","msg":"huge","blob":"{payload}"}}"#
+    ));
+    (a, rx)
+}
+
+/// An app showing a YAML document (`describe`/detail), the static-document
+/// case that is re-styled on every redraw.
+pub fn doc_app(n: usize, filter: &str) -> (App, Receiver<Msg>) {
+    let (mut a, rx) = app();
+    a.mode = crate::app::Mode::Detail;
+    a.detail = crate::app::Scrollable::doc("web-7d9f8b6c5d — yaml".into(), yaml_lines(n));
+    if !filter.is_empty() {
+        a.detail.filter = filter.to_string();
+    }
+    (a, rx)
+}
+
+/// A YAML-shaped document: keys, nested values, lists and a few comments.
+pub fn yaml_lines(n: usize) -> Vec<String> {
+    (0..n)
+        .map(|i| match i % 8 {
+            0 => "  containerStatuses:".to_string(),
+            1 => format!("    - name: app-{i}"),
+            2 => format!("      image: registry.example.com/svc-{}:v1.4.2", i % 40),
+            3 => format!("      ready: {}", i % 3 != 0),
+            4 => format!("      restartCount: {}", i % 11),
+            5 => format!("  # managed by kustomize, do not edit ({i})"),
+            6 => format!("      startedAt: 2026-08-30T09:00:{:02}Z", i % 60),
+            _ => format!(
+                "      podIP: 10.{}.{}.{}",
+                i / 65536 % 256,
+                i / 256 % 256,
+                i % 256
+            ),
+        })
+        .collect()
+}
+
+/// The `?` help overlay, optionally with a search typed into it.
+pub fn help_app(filter: &str) -> (App, Receiver<Msg>) {
+    let (mut a, rx) = app();
+    a.bench_install_kind("pods");
+    a.mode = crate::app::Mode::Help;
+    a.help_filter = filter.to_string();
+    (a, rx)
+}
+
+/// The namespace switcher over `n` namespaces, optionally filtered.
+pub fn ns_picker_app(n: usize, filter: &str) -> (App, Receiver<Msg>) {
+    let (mut a, rx) = app();
+    a.mode = crate::app::Mode::Namespaces;
+    a.ns_list = (0..n).map(|i| format!("team-{i:04}-workloads")).collect();
+    a.ns_filter = filter.to_string();
+    a.ns_state.select(Some(0));
+    (a, rx)
+}
+
+/// A chunk of provider log records exactly as the wire delivers them:
+/// newline-delimited JSON objects carrying the fields the parser reads.
+pub fn provider_chunk(n: usize) -> Vec<u8> {
+    let mut out = String::new();
+    for i in 0..n {
+        out.push_str(&format!(
+            r#"{{"_time":"2026-08-30T10:00:{:02}.{:03}Z","_msg":"reconcile complete for workload-{i} in {}ms","kubernetes.pod_name":"workload-{:05}-7d9f8b6c5d-abcd","kubernetes.container_name":"app","kubernetes.namespace_name":"ns-{}"}}"#,
+            i % 60,
+            i % 1000,
+            i % 250,
+            i,
+            i % 24,
+        ));
+        out.push('\n');
+    }
+    out.into_bytes()
+}
+
+/// One oversized record with no newline until the very end — the fragmented
+/// arrival the framing rescan is quadratic in.
+pub fn provider_long_record(bytes: usize) -> Vec<u8> {
+    let mut out = r#"{"_time":"2026-08-30T10:00:00Z","_msg":""#.to_string();
+    out.push_str(&"y".repeat(bytes));
+    out.push_str("\"}\n");
+    out.into_bytes()
 }

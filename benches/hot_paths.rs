@@ -365,10 +365,121 @@ fn frame(c: &mut Criterion) {
     g.finish();
 }
 
+/// 4.x — one full frame of the logs view. Every visible line is re-parsed for
+/// severity, re-split into ANSI runs, re-highlighted and (when wrapping)
+/// re-wrapped on every redraw, so this is the number a paused or streaming log
+/// viewport actually costs.
+fn log_frame(c: &mut Criterion) {
+    let mut g = c.benchmark_group("log_frame");
+    for (label, filter, wrap) in [
+        ("plain", "", false),
+        ("wrapped", "", true),
+        ("filtered", "reconcile", false),
+    ] {
+        let (mut app, _rx) = bs::logs_app(10_000, filter, wrap);
+        let mut term = bs::terminal(200, 50);
+        bs::render_frame(&mut term, &mut app);
+        g.bench_function(label, |b| {
+            b.iter(|| bs::render_frame(&mut term, &mut app));
+        });
+    }
+
+    // One 256 KB record at the tail: the viewport shows a handful of its rows.
+    let (mut app, _rx) = bs::logs_app_huge_line(1_000, 256 * 1024);
+    let mut term = bs::terminal(200, 50);
+    bs::render_frame(&mut term, &mut app);
+    g.bench_function("huge_line", |b| {
+        b.iter(|| bs::render_frame(&mut term, &mut app));
+    });
+    g.finish();
+}
+
+/// 4.x — a static YAML document redrawn. Nothing about it changes between
+/// frames, but the syntax spans and search highlighting are rebuilt each time.
+fn doc_frame(c: &mut Criterion) {
+    let mut g = c.benchmark_group("doc_frame");
+    for (label, filter) in [("plain", ""), ("filtered", "image")] {
+        let (mut app, _rx) = bs::doc_app(5_000, filter);
+        let mut term = bs::terminal(200, 50);
+        bs::render_frame(&mut term, &mut app);
+        g.bench_function(label, |b| {
+            b.iter(|| bs::render_frame(&mut term, &mut app));
+        });
+    }
+    g.finish();
+}
+
+/// 2.7 — modal overlays. Help rebuilds every binding line (and its search
+/// text) per frame; the namespace picker re-scores and re-clones its list.
+fn overlay_frame(c: &mut Criterion) {
+    let mut g = c.benchmark_group("overlay_frame");
+    for (label, filter) in [("help", ""), ("help_search", "log")] {
+        let (mut app, _rx) = bs::help_app(filter);
+        let mut term = bs::terminal(200, 50);
+        bs::render_frame(&mut term, &mut app);
+        g.bench_function(label, |b| {
+            b.iter(|| bs::render_frame(&mut term, &mut app));
+        });
+    }
+    for (label, filter) in [("ns_browse", ""), ("ns_filtered", "team-01")] {
+        let (mut app, _rx) = bs::ns_picker_app(500, filter);
+        let mut term = bs::terminal(200, 50);
+        bs::render_frame(&mut term, &mut app);
+        g.bench_function(label, |b| {
+            b.iter(|| bs::render_frame(&mut term, &mut app));
+        });
+    }
+    g.finish();
+}
+
+/// 3.x — the table frame with a fuzzy filter active, so every visible NAME
+/// cell re-runs the fuzzy matcher and rebuilds its highlight runs.
+fn name_cells(c: &mut Criterion) {
+    let mut g = c.benchmark_group("name_cells");
+    let (mut app, _rx) = bs::pods_app(2_000);
+    app.filter = "workload".to_string();
+    app.table_state.select(Some(0));
+    black_box(app.row_count());
+    let mut term = bs::terminal(200, 50);
+    bs::render_frame(&mut term, &mut app);
+    g.bench_function("filtered_frame/2000", |b| {
+        b.iter(|| bs::render_frame(&mut term, &mut app));
+    });
+    g.finish();
+}
+
+/// 4.3 — provider log ingest: framing one received chunk, parsing each record
+/// and rendering it into display lines. `fragmented` is one long record
+/// arriving in 4 KB pieces, which re-scans the incomplete buffer each time.
+fn provider_ingest(c: &mut Criterion) {
+    let mut g = c.benchmark_group("provider_ingest");
+    for n in [256usize, 2_000] {
+        let chunk = bs::provider_chunk(n);
+        g.bench_with_input(BenchmarkId::new("chunk", n), &n, |b, _| {
+            b.iter(|| black_box(sofka::providers::bench_ingest_chunk(black_box(&chunk))));
+        });
+    }
+    let record = bs::provider_long_record(512 * 1024);
+    g.bench_function("fragmented_512k", |b| {
+        b.iter(|| {
+            black_box(sofka::providers::bench_ingest_fragmented(
+                black_box(&record),
+                4096,
+            ))
+        });
+    });
+    g.finish();
+}
+
 criterion_group!(
     benches,
     frame,
     viewport,
+    log_frame,
+    doc_frame,
+    overlay_frame,
+    name_cells,
+    provider_ingest,
     rows_cache,
     filter,
     filter_cmp,
