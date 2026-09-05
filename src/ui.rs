@@ -6,7 +6,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{
     Block, BorderType, Borders, Cell, Clear, Gauge, HighlightSpacing, List, ListItem, ListState,
-    Paragraph, Row, Table, Wrap,
+    Paragraph, Row, Table,
 };
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
@@ -1106,8 +1106,7 @@ fn draw_scrollable(
     let inner_w = area.width.saturating_sub(2) as usize;
     let inner_h = area.height.saturating_sub(2) as usize;
     view.set_viewport(inner_w, inner_h);
-    let scroll = view.scroll;
-    let (start, end) = visible_line_window(view.lines.len(), scroll, inner_h);
+    let (start, end, row_offset) = view.visible_source_window();
     let text: Vec<Line> = view
         .lines
         .iter()
@@ -1115,20 +1114,39 @@ fn draw_scrollable(
         .take(end - start)
         .map(|l| highlight_matches(Line::from(highlight_yaml(l)), &view.filter))
         .collect();
+    let text = if view.wrap {
+        visible_wrapped_rows(text, inner_w, row_offset, inner_h)
+    } else {
+        text
+    };
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(accent))
         .title(Span::styled(doc_title(view), theme::title()));
     let p = Paragraph::new(text).block(block);
-    // Wrap folds long lines; otherwise honor the horizontal offset so content
-    // past the right edge can be scrolled into view.
+    // Wrapped lines are already sliced to the exact visible display rows;
+    // otherwise honor the horizontal offset for content past the right edge.
     let p = if view.wrap {
-        p.wrap(Wrap { trim: false })
+        p
     } else {
         p.scroll((0, view.hscroll.min(u16::MAX as usize) as u16))
     };
     frame.render_widget(p, area);
+}
+
+fn visible_wrapped_rows(
+    lines: Vec<Line<'static>>,
+    width: usize,
+    row_offset: usize,
+    height: usize,
+) -> Vec<Line<'static>> {
+    lines
+        .into_iter()
+        .flat_map(|line| wrap_line(line, width))
+        .skip(row_offset)
+        .take(height)
+        .collect()
 }
 
 /// Logs view with optional substring filter + match highlighting.
@@ -1777,8 +1795,7 @@ fn draw_diff(frame: &mut Frame, view: &mut crate::app::Scrollable, area: Rect) {
     let inner_w = area.width.saturating_sub(2) as usize;
     let inner_h = area.height.saturating_sub(2) as usize;
     view.set_viewport(inner_w, inner_h);
-    let scroll = view.scroll;
-    let (start, end) = visible_line_window(view.lines.len(), scroll, inner_h);
+    let (start, end, row_offset) = view.visible_source_window();
     let lines: Vec<Line> = view
         .lines
         .iter()
@@ -1794,6 +1811,11 @@ fn draw_diff(frame: &mut Frame, view: &mut crate::app::Scrollable, area: Rect) {
             highlight_matches(line, &view.filter)
         })
         .collect();
+    let lines = if view.wrap {
+        visible_wrapped_rows(lines, inner_w, row_offset, inner_h)
+    } else {
+        lines
+    };
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
@@ -1801,17 +1823,11 @@ fn draw_diff(frame: &mut Frame, view: &mut crate::app::Scrollable, area: Rect) {
         .title(Span::styled(doc_title(view), theme::title()));
     let p = Paragraph::new(lines).block(block);
     let p = if view.wrap {
-        p.wrap(Wrap { trim: false })
+        p
     } else {
         p.scroll((0, view.hscroll.min(u16::MAX as usize) as u16))
     };
     frame.render_widget(p, area);
-}
-
-fn visible_line_window(len: usize, scroll: usize, height: usize) -> (usize, usize) {
-    let start = scroll.min(len);
-    let end = start.saturating_add(height).min(len);
-    (start, end)
 }
 
 /// Doc-view title, extended with the active search query and the current
@@ -3752,14 +3768,6 @@ mod tests {
         assert_eq!(wrapped_height("五五五五五五", 10), 2);
         // ANSI escapes don't consume columns.
         assert_eq!(wrapped_height("\x1b[31maaaaaaaaaa\x1b[0m", 10), 1);
-    }
-
-    #[test]
-    fn visible_line_window_clamps_to_viewport() {
-        assert_eq!(visible_line_window(100, 10, 20), (10, 30));
-        assert_eq!(visible_line_window(100, 95, 20), (95, 100));
-        assert_eq!(visible_line_window(100, 150, 20), (100, 100));
-        assert_eq!(visible_line_window(100, 10, 0), (10, 10));
     }
 
     #[test]

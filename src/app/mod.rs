@@ -415,18 +415,16 @@ enum PromptKind {
 pub struct Scrollable {
     pub title: String,
     pub lines: VecDeque<String>,
-    /// Vertical scroll offset. Document views count source lines; logs count
-    /// rendered display rows. `usize` on purpose: a paused wrapped log buffer
-    /// can far exceed `u16`.
+    /// Vertical scroll offset in rendered display rows. `usize` on purpose: a
+    /// paused wrapped log buffer can far exceed `u16`.
     pub scroll: usize,
-    /// Last rendered document viewport. Zero height means it has not been drawn
-    /// yet, so scrolling falls back to the final source line.
-    viewport_w: usize,
-    viewport_h: usize,
+    /// Cached document layout from the last draw. Logs keep their equivalent
+    /// viewport and wrapping index in [`LogsView`] instead.
+    viewport: Option<DocumentViewport>,
     /// Horizontal scroll offset in columns, for views (`describe`, events) whose
     /// lines run past the right edge. Ignored while `wrap` is on.
     pub hscroll: usize,
-    /// Word-wrap toggle. When on, long lines fold instead of being clipped, and
+    /// Line-wrap toggle. When on, long lines fold instead of being clipped, and
     /// horizontal scrolling is disabled.
     pub wrap: bool,
     /// Case-insensitive substring search (`/`), vim-style: the full document
@@ -456,6 +454,32 @@ struct MatchCache {
     revision: u64,
     line_count: usize,
     matches: Vec<usize>,
+}
+
+struct DocumentViewport {
+    width: usize,
+    height: usize,
+    wrap: bool,
+    revision: u64,
+    line_count: usize,
+    /// Cumulative display-row end for every source line.
+    ends: Vec<usize>,
+}
+
+impl DocumentViewport {
+    fn total_rows(&self) -> usize {
+        self.ends.last().copied().unwrap_or(0)
+    }
+
+    fn line_at_row(&self, row: usize) -> usize {
+        self.ends.partition_point(|&end| end <= row)
+    }
+
+    fn line_start(&self, line: usize) -> usize {
+        line.checked_sub(1)
+            .and_then(|i| self.ends.get(i).copied())
+            .unwrap_or(0)
+    }
 }
 
 /// One command-palette suggestion — a built-in command (`:ctx`, `:pulse`), a
@@ -651,27 +675,81 @@ impl Scrollable {
     }
 
     pub(crate) fn set_viewport(&mut self, width: usize, height: usize) {
-        self.viewport_w = width.max(1);
-        self.viewport_h = height;
+        let width = width.max(1);
+        let stale = self.viewport.as_ref().is_none_or(|viewport| {
+            viewport.width != width
+                || viewport.wrap != self.wrap
+                || viewport.revision != self.revision
+                || viewport.line_count != self.lines.len()
+        });
+        if stale {
+            let mut rows = 0usize;
+            let ends = self
+                .lines
+                .iter()
+                .map(|line| {
+                    let line_rows = if self.wrap {
+                        crate::ui::wrapped_height(line, width)
+                    } else {
+                        1
+                    };
+                    rows = rows.saturating_add(line_rows);
+                    rows
+                })
+                .collect();
+            self.viewport = Some(DocumentViewport {
+                width,
+                height,
+                wrap: self.wrap,
+                revision: self.revision,
+                line_count: self.lines.len(),
+                ends,
+            });
+        } else if let Some(viewport) = self.viewport.as_mut() {
+            viewport.height = height;
+        }
         self.scroll = self.scroll.min(self.max_scroll());
     }
 
-    fn max_scroll(&self) -> usize {
-        if self.viewport_h == 0 {
-            return self.lines.len().saturating_sub(1);
-        }
-        if !self.wrap {
-            return self.lines.len().saturating_sub(self.viewport_h);
+    pub(crate) fn visible_source_window(&self) -> (usize, usize, usize) {
+        let Some(viewport) = self.viewport.as_ref() else {
+            let start = self.scroll.min(self.lines.len());
+            return (start, self.lines.len(), 0);
+        };
+        if viewport.height == 0 {
+            return (0, 0, 0);
         }
 
-        let mut rows = 0usize;
-        for (i, line) in self.lines.iter().enumerate().rev() {
-            rows = rows.saturating_add(crate::ui::wrapped_height(line, self.viewport_w));
-            if rows >= self.viewport_h {
-                return i;
-            }
-        }
-        0
+        let start = viewport.line_at_row(self.scroll).min(self.lines.len());
+        let row_offset = self.scroll.saturating_sub(viewport.line_start(start));
+        let visible_end = self.scroll.saturating_add(viewport.height);
+        let end = viewport
+            .ends
+            .partition_point(|&line_end| line_end < visible_end)
+            .saturating_add(1)
+            .min(self.lines.len());
+        (start, end, row_offset)
+    }
+
+    fn max_scroll(&self) -> usize {
+        self.viewport.as_ref().map_or_else(
+            || self.lines.len().saturating_sub(1),
+            |viewport| viewport.total_rows().saturating_sub(viewport.height),
+        )
+    }
+
+    fn scroll_to_line(&mut self, line: usize) {
+        let row = self
+            .viewport
+            .as_ref()
+            .map_or(line, |viewport| viewport.line_start(line));
+        self.scroll = row.min(self.max_scroll());
+    }
+
+    fn source_line_at_scroll(&self) -> usize {
+        self.viewport
+            .as_ref()
+            .map_or(self.scroll, |viewport| viewport.line_at_row(self.scroll))
     }
 
     /// Scroll horizontally by `delta` columns, clamped to the widest line. A
@@ -689,14 +767,23 @@ impl Scrollable {
         let max = widest.saturating_sub(1) as i64;
         self.hscroll = (self.hscroll as i64 + delta as i64).clamp(0, max) as usize;
     }
-    /// Toggle word wrap. Turning it on resets the horizontal offset so the view
+    /// Toggle line wrap. Turning it on resets the horizontal offset so the view
     /// snaps back to the left margin. Returns the new state.
     pub fn toggle_wrap(&mut self) -> bool {
+        let current_line = self.source_line_at_scroll();
+        let dimensions = self
+            .viewport
+            .as_ref()
+            .map(|viewport| (viewport.width, viewport.height));
         self.wrap = !self.wrap;
         if self.wrap {
             self.hscroll = 0;
         }
-        self.scroll = self.scroll.min(self.max_scroll());
+        self.viewport = None;
+        if let Some((width, height)) = dimensions {
+            self.set_viewport(width, height);
+            self.scroll_to_line(current_line);
+        }
         self.wrap
     }
 
@@ -723,12 +810,14 @@ impl Scrollable {
     pub fn drain_front(&mut self, n: usize) {
         self.lines.drain(0..n);
         self.revision = self.revision.wrapping_add(1);
+        self.viewport = None;
     }
 
     /// Drop every line.
     pub fn clear_lines(&mut self) {
         self.lines.clear();
         self.revision = self.revision.wrapping_add(1);
+        self.viewport = None;
     }
 
     /// Replace the document, invalidating the search-match cache.
@@ -738,8 +827,18 @@ impl Scrollable {
     /// live view — a refreshed events list — where the new document can have
     /// the same line count as the old one.
     pub fn replace_lines(&mut self, lines: VecDeque<String>) {
+        let dimensions = self
+            .viewport
+            .as_ref()
+            .map(|viewport| (viewport.width, viewport.height));
         self.lines = lines;
         self.revision = self.revision.wrapping_add(1);
+        self.viewport = None;
+        if let Some((width, height)) = dimensions {
+            self.set_viewport(width, height);
+        } else {
+            self.scroll = self.scroll.min(self.max_scroll());
+        }
     }
 
     /// Line indices (0-based) containing the active search query, matched
@@ -790,9 +889,10 @@ impl Scrollable {
         if matches.is_empty() {
             return;
         }
-        let pos = matches.iter().position(|&i| i >= self.scroll).unwrap_or(0);
+        let current_line = self.source_line_at_scroll();
+        let pos = matches.iter().position(|&i| i >= current_line).unwrap_or(0);
         self.match_idx = pos;
-        self.scroll = matches[pos];
+        self.scroll_to_line(matches[pos]);
     }
 
     /// Step to the next (`forward`) or previous match, wrapping around, and
@@ -809,7 +909,7 @@ impl Scrollable {
         } else {
             (cur + n - 1) % n
         };
-        self.scroll = matches[self.match_idx];
+        self.scroll_to_line(matches[self.match_idx]);
     }
 }
 

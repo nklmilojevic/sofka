@@ -1169,10 +1169,6 @@ impl App {
                 // one it replaces, which would otherwise leave a stale
                 // search-match cache behind.
                 self.detail.replace_lines(lines.into());
-                self.detail.scroll = self
-                    .detail
-                    .scroll
-                    .min(self.detail.lines.len().saturating_sub(1));
             }
             Msg::TransferDone {
                 generation,

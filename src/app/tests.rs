@@ -857,6 +857,37 @@ async fn document_scroll_keeps_the_last_page_filled() {
     app.handle_key(press(KeyCode::Char('G'))).unwrap();
     app.handle_key(press(KeyCode::Char('j'))).unwrap();
     assert_eq!(app.detail.scroll, 0, "a short document never scrolls");
+
+    // A single source line may occupy more display rows than the viewport.
+    // Bottom navigation must reach its final wrapped rows, not stop at the
+    // source line's first row.
+    app.detail = Scrollable {
+        title: "wrapped document".into(),
+        lines: vec![format!("{}LAST", "x".repeat(18 * 19))].into(),
+        wrap: true,
+        ..Default::default()
+    };
+    let mut term = Terminal::new(TestBackend::new(20, 24)).unwrap();
+    term.draw(|f| crate::ui::draw(f, &mut app)).unwrap();
+    app.handle_key(press(KeyCode::Char('G'))).unwrap();
+    assert_eq!(app.detail.scroll, 7, "bottom uses wrapped display rows");
+    app.handle_key(press(KeyCode::Char('j'))).unwrap();
+    assert_eq!(app.detail.scroll, 7, "wrapped bottom remains clamped");
+
+    term.draw(|f| crate::ui::draw(f, &mut app)).unwrap();
+    let buffer = term.backend().buffer();
+    let screen = (0..buffer.area.height)
+        .map(|y| {
+            (0..buffer.area.width)
+                .map(|x| buffer[(x, y)].symbol())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        screen.contains("LAST"),
+        "last wrapped row missing:\n{screen}"
+    );
 }
 
 #[tokio::test]
