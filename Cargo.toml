@@ -72,3 +72,7 @@ required-features = ["bench"]
 [[example]]
 name = "memprobe"
 required-features = ["bench", "dhat-heap"]
+
+[[example]]
+name = "allocprobe"
+required-features = ["bench"]

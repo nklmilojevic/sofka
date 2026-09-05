@@ -459,6 +459,13 @@ impl Store {
         self.items.get_key_value(key).map(|(key, _)| key)
     }
 
+    /// An object together with the canonical key it is stored under, so a
+    /// caller that needs both does not have to rebuild the key it looked the
+    /// object up with.
+    pub fn entry(&self, key: &str) -> Option<(&RowKey, &DynamicObject)> {
+        self.items.get_key_value(key).map(|(k, v)| (k, v.as_ref()))
+    }
+
     pub fn iter(&self) -> impl Iterator<Item = (&RowKey, &DynamicObject)> {
         self.items.iter().map(|(k, v)| (k, v.as_ref()))
     }

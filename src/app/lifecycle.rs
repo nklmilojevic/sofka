@@ -286,7 +286,7 @@ impl App {
         };
         self.store.clear();
         if let Some(cached) = self.view_cache.get(&key) {
-            self.store.seed(cached.clone());
+            self.store.seed(cached.items.clone());
         }
         self.watch_key = Some(key);
         self.metrics.clear();
@@ -340,7 +340,10 @@ impl App {
         }
         self.view_cache_order.retain(|k| *k != key);
         self.view_cache_order.push_back(key.clone());
-        self.view_cache.insert(key, self.store.take_items());
+        let items = self.store.take_items();
+        // Priced here, once, while the snapshot is being put away.
+        let bytes = view_bytes(&items);
+        self.view_cache.insert(key, CachedView { items, bytes });
         self.evict_view_cache();
     }
 
@@ -355,11 +358,15 @@ impl App {
     /// dropping it would defeat the one case the cache exists for, which is
     /// stepping straight back into the view you just left.
     fn evict_view_cache(&mut self) {
-        let too_many_objects = |cache: &HashMap<ViewKey, crate::store::Items>| {
-            cache.values().map(HashMap::len).sum::<usize>() > VIEW_CACHE_MAX_OBJECTS
+        let too_many_objects = |cache: &HashMap<ViewKey, CachedView>| {
+            cache.values().map(|v| v.items.len()).sum::<usize>() > VIEW_CACHE_MAX_OBJECTS
+        };
+        let too_many_bytes = |cache: &HashMap<ViewKey, CachedView>| {
+            cache.values().map(|v| v.bytes).sum::<usize>() > VIEW_CACHE_MAX_BYTES
         };
         while self.view_cache_order.len() > VIEW_CACHE_MAX
-            || (self.view_cache_order.len() > 1 && too_many_objects(&self.view_cache))
+            || (self.view_cache_order.len() > 1
+                && (too_many_objects(&self.view_cache) || too_many_bytes(&self.view_cache)))
         {
             match self.view_cache_order.pop_front() {
                 Some(oldest) => {
@@ -369,7 +376,59 @@ impl App {
             }
         }
     }
+}
 
+/// Approximate retained bytes of a whole view snapshot.
+///
+/// Every object, not a sample: a view is rarely uniform, and the objects the
+/// budget exists to catch — a handful of megabyte Secrets among a thousand
+/// small ConfigMaps — are exactly the ones a sample of two dozen misses,
+/// under-counting the snapshot by an order of magnitude. This runs once per
+/// snapshot, when it is cached, not on every eviction check — measured at
+/// ~1 ms per 2,000 pods and ~13 ms per 10,000, paid on a view switch that is
+/// already tearing down a watch and rebuilding the table. Objects shared with
+/// the live store are counted here too: an over-estimate, and the safe
+/// direction for a cap.
+pub(super) fn view_bytes(items: &crate::store::Items) -> usize {
+    items.values().map(|o| approx_object_bytes(o)).sum()
+}
+
+/// Per-object and per-container usage, keyed the way the UI looks them up.
+pub(super) type MetricsMaps = (HashMap<String, (i64, i64)>, HashMap<String, (i64, i64)>);
+
+/// Fold one metrics list into the per-object and per-container maps the UI
+/// reads.
+///
+/// Pods walk their container list once and total it on the way through:
+/// calling `usage_of` after `container_usage_of` re-parsed every container's
+/// CPU and memory quantity a second time, on every poll, for every pod in
+/// scope. `usage_of`'s pod branch sums exactly these values, so the totals are
+/// identical (asserted in `pod_metrics_are_split_by_container`).
+pub(super) fn metrics_maps(list: &[DynamicObject], is_node: bool) -> MetricsMaps {
+    let mut data = HashMap::new();
+    let mut containers = HashMap::new();
+    for item in list {
+        let name = item.metadata.name.clone().unwrap_or_default();
+        let key = match &item.metadata.namespace {
+            Some(n) => format!("{n}/{name}"),
+            None => name,
+        };
+        if is_node {
+            data.insert(key, usage_of(item, is_node));
+            continue;
+        }
+        let mut total = (0i64, 0i64);
+        for (container, usage) in container_usage_of(item) {
+            total.0 += usage.0;
+            total.1 += usage.1;
+            containers.insert(format!("{key}/{container}"), usage);
+        }
+        data.insert(key, total);
+    }
+    (data, containers)
+}
+
+impl App {
     /// Drop every cached view snapshot (context switch: another cluster's
     /// resources, and possibly different RBAC, must never be redisplayed).
     pub(super) fn clear_view_cache(&mut self) {
@@ -546,21 +605,7 @@ impl App {
                 };
                 let msg = match api.list(&ListParams::default()).await {
                     Ok(list) => {
-                        let mut data = HashMap::new();
-                        let mut containers = HashMap::new();
-                        for item in list {
-                            let name = item.metadata.name.clone().unwrap_or_default();
-                            let key = match &item.metadata.namespace {
-                                Some(n) => format!("{n}/{name}"),
-                                None => name,
-                            };
-                            if !is_node {
-                                for (container, usage) in container_usage_of(&item) {
-                                    containers.insert(format!("{key}/{container}"), usage);
-                                }
-                            }
-                            data.insert(key, usage_of(&item, is_node));
-                        }
+                        let (data, containers) = metrics_maps(&list.items, is_node);
                         Msg::Metrics {
                             generation: genr,
                             data,

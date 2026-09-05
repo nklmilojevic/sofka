@@ -80,35 +80,39 @@ impl App {
         }
 
         let available: std::collections::HashSet<&str> = rest.map(String::as_str).collect();
-        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        // Borrowed: the dedup set used to hold a clone of every namespace name
+        // alongside the copy that goes into the result, and this list is
+        // rebuilt on every frame the switcher is open.
+        let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
         // Favourites first, in configured order (pinned even if not currently
         // listable — the switcher still accepts a verbatim pick).
         for f in &self.namespace_favorites {
-            if !f.is_empty() && seen.insert(f.clone()) {
+            if !f.is_empty() && seen.insert(f.as_str()) {
                 out.push(f.clone());
             }
         }
         // Then session recents that still exist and aren't already favourites.
         for r in self.recent_namespaces_for_context() {
-            if available.contains(r.as_str()) && seen.insert(r.clone()) {
-                out.push(r);
+            if available.contains(r) && seen.insert(r) {
+                out.push(r.to_string());
             }
         }
         // Then everything else (ns_list is already sorted).
         for n in self.ns_list.iter().filter(|n| n.as_str() != "<all>") {
-            if seen.insert(n.clone()) {
+            if seen.insert(n.as_str()) {
                 out.push(n.clone());
             }
         }
         out
     }
 
-    /// The recent namespaces for the current context, newest first.
-    fn recent_namespaces_for_context(&self) -> Vec<String> {
+    /// The recent namespaces for the current context, newest first. Borrowed:
+    /// the callers only read them.
+    fn recent_namespaces_for_context(&self) -> impl Iterator<Item = &str> {
         self.recent_namespaces
             .get(&self.cluster.context)
-            .map(|dq| dq.iter().cloned().collect())
-            .unwrap_or_default()
+            .into_iter()
+            .flat_map(|dq| dq.iter().map(String::as_str))
     }
 
     /// Whether `n` is a configured favourite namespace.

@@ -12,7 +12,7 @@ use kube::api::{Api, ListParams};
 use kube::config::{KubeConfigOptions, Kubeconfig};
 use kube::core::DynamicObject;
 use kube::discovery::{ApiResource, Discovery, Scope};
-use kube::runtime::{WatchStreamExt, watcher};
+use kube::runtime::{WatchStreamExt, utils::Backoff, watcher};
 use kube::{Client, Config, ResourceExt};
 use tokio::sync::mpsc::Sender;
 use tokio::task::JoinHandle;
@@ -68,7 +68,12 @@ pub struct Cluster {
     /// which case kubectl falls back to its own default.
     cli_context: Option<String>,
     /// lookup key (alias/plural/kind, lowercased) -> Kind
-    registry: HashMap<String, Kind>,
+    /// Every lookup key — bare plural, lowercased kind, group-qualified name,
+    /// and each alias — pointing at one shared `Kind`. Storing a full copy per
+    /// key meant four or more duplicates of every resource's group, version,
+    /// api_version, kind and plural strings, which on a CRD-heavy cluster is
+    /// the bulk of the registry.
+    registry: HashMap<String, Arc<Kind>>,
     /// stable, de-duplicated list of plural names for completion
     pub catalog: Vec<String>,
     /// False for the placeholder built by [`Cluster::disconnected`] when the
@@ -103,11 +108,20 @@ impl Cluster {
         let config = Config::infer()
             .await
             .context("loading kubeconfig (is KUBECONFIG / ~/.kube/config present?)")?;
+        // One parse for both identity questions. `Config::infer` does not
+        // surface the context name, so the file is read once more here — but
+        // the current context and the cluster behind it come out of the same
+        // snapshot instead of two further reads.
+        let kubeconfig = Kubeconfig::read().ok();
         // The real kubeconfig current-context (if any) is what kubectl uses by
         // default; pass it explicitly so shell-outs can't drift from us.
-        let cli_context = current_context_name();
+        let cli_context = kubeconfig.as_ref().and_then(|k| k.current_context.clone());
         let context = cli_context.clone().unwrap_or_else(|| "default".into());
-        Self::from_config(config, context, cli_context).await
+        let cluster_name = kubeconfig
+            .as_ref()
+            .and_then(|k| cluster_name_in(k, &context))
+            .unwrap_or_default();
+        Self::from_config(config, context, cli_context, cluster_name).await
     }
 
     /// Connect using a specific kubeconfig context (for the `:ctx` switcher).
@@ -118,23 +132,34 @@ impl Cluster {
             cluster: None,
             user: None,
         };
+        // Read off the snapshot before it is consumed below.
+        let cluster_name = cluster_name_in(&kubeconfig, name).unwrap_or_default();
         let config = Config::from_custom_kubeconfig(kubeconfig, &opts)
             .await
             .with_context(|| format!("building config for context '{name}'"))?;
-        Self::from_config(config, name.to_string(), Some(name.to_string())).await
+        Self::from_config(
+            config,
+            name.to_string(),
+            Some(name.to_string()),
+            cluster_name,
+        )
+        .await
     }
 
+    /// `cluster_name` is resolved by the caller from the kubeconfig it has
+    /// already parsed. Reading it here made every connect parse the file again
+    /// for one field it had just been holding.
     async fn from_config(
         config: Config,
         context: String,
         cli_context: Option<String>,
+        cluster_name: String,
     ) -> Result<Self> {
         let cluster_url = config.cluster_url.to_string();
         let default_namespace = config.default_namespace.clone();
         let client = Client::try_from(config).context("building kube client")?;
         let version_client = client.clone();
 
-        let cluster_name = cluster_name_for(&context).unwrap_or_default();
         let mut cluster = Self {
             client,
             context,
@@ -236,7 +261,7 @@ impl Cluster {
     /// Merge user-defined aliases (alias -> canonical) into the registry.
     pub fn add_aliases(&mut self, aliases: &HashMap<String, String>) {
         for (alias, target) in aliases {
-            if let Some(k) = self.registry.get(&target.to_lowercase()).cloned() {
+            if let Some(k) = self.registry.get(&target.to_lowercase()).map(Arc::clone) {
                 self.registry.insert(alias.to_lowercase(), k);
             }
         }
@@ -263,7 +288,7 @@ impl Cluster {
 
         // Collect everything first, then insert bare keys in priority order so
         // that e.g. core `pods` wins over `pods.metrics.k8s.io`.
-        let mut entries: Vec<(Kind, String, String)> = Vec::new(); // (kind, plural, kind_lc)
+        let mut entries: Vec<(Arc<Kind>, String, String)> = Vec::new(); // (kind, plural, kind_lc)
         let mut catalog = Vec::new();
         for group in discovery.groups() {
             // All served versions of the group, most stable version per kind.
@@ -285,9 +310,10 @@ impl Cluster {
                 // Group-qualified keys are unambiguous; insert directly. They
                 // join the catalog too, so completion can surface a kind whose
                 // bare plural is shadowed (or find it by its group name).
+                let kind = Arc::new(kind);
                 if !ar.group.is_empty() {
                     let qualified = format!("{}.{}", plural, ar.group);
-                    self.registry.insert(qualified.clone(), kind.clone());
+                    self.registry.insert(qualified.clone(), Arc::clone(&kind));
                     catalog.push(qualified);
                 }
                 entries.push((kind, plural, kind_lc));
@@ -300,7 +326,7 @@ impl Cluster {
         // unstable sort would make `:` resolution vary between runs.
         entries.sort_by_key(|(k, _, _)| group_priority(&k.ar.group));
         for (kind, plural, kind_lc) in entries {
-            self.registry.insert(plural, kind.clone());
+            self.registry.insert(plural, Arc::clone(&kind));
             self.registry.insert(kind_lc, kind);
         }
         catalog.sort();
@@ -309,7 +335,7 @@ impl Cluster {
 
         // Built-in short aliases (k9s-style), resolved against the registry.
         for (alias, target) in ALIASES {
-            if let Some(k) = self.registry.get(*target).cloned() {
+            if let Some(k) = self.registry.get(*target).map(Arc::clone) {
                 self.registry.entry((*alias).to_string()).or_insert(k);
             }
         }
@@ -317,8 +343,13 @@ impl Cluster {
     }
 
     pub fn resolve(&self, input: &str) -> Option<Kind> {
+        self.resolve_ref(input).cloned()
+    }
+
+    /// [`Self::resolve`] without the copy, for callers that only read the kind.
+    pub fn resolve_ref(&self, input: &str) -> Option<&Kind> {
         let key = input.trim().trim_start_matches(':').to_lowercase();
-        self.registry.get(&key).cloned()
+        self.registry.get(&key).map(Arc::as_ref)
     }
 
     /// Spawn a watch task for `kind` in `namespace` ("" = all namespaces),
@@ -357,6 +388,15 @@ impl Cluster {
             let mut using_streaming =
                 streaming_lists.load(Ordering::Acquire) != STREAMING_UNSUPPORTED;
             let mut initializing = true;
+            // `watcher` re-lists as fast as the stream is polled, so an error
+            // that does not clear itself hammers the API server — the node
+            // counter measured ~9,800 requests a second against a failing test
+            // server before it was paced. This is the same client-go strategy
+            // `spawn_node_pods_poll` uses, reset only on genuine progress:
+            // `.default_backoff()` resets on any `Ok`, and `watcher` replays
+            // `Ok(Event::Init)` before every list attempt, so a failing initial
+            // list would cycle at the minimum delay forever.
+            let mut backoff = watcher::DefaultBackoff::default();
             let mut stream = watcher(
                 api.clone(),
                 if using_streaming {
@@ -383,6 +423,18 @@ impl Cluster {
                         .boxed();
                     continue;
                 }
+                // Progress, as opposed to another doomed list attempt: the
+                // init replay happens again on every retry, so it says nothing
+                // about whether the watch is working.
+                if matches!(
+                    event,
+                    Ok(watcher::Event::Apply(_)
+                        | watcher::Event::Delete(_)
+                        | watcher::Event::InitDone)
+                ) {
+                    backoff.reset();
+                }
+                let mut failed = false;
                 let msg = match event {
                     Ok(watcher::Event::Apply(obj)) | Ok(watcher::Event::InitApply(obj)) => {
                         Msg::Applied {
@@ -416,13 +468,19 @@ impl Cluster {
                     // "too old resource version: Expired" error is routine —
                     // the sync dot already shows the re-list. No error flash.
                     Err(e) if watch_error_is_benign(&e) => continue,
-                    Err(e) => Msg::Error {
-                        generation,
-                        error: e.to_string(),
-                    },
+                    Err(e) => {
+                        failed = true;
+                        Msg::Error {
+                            generation,
+                            error: e.to_string(),
+                        }
+                    }
                 };
                 if tx.send(msg).await.is_err() {
                     break; // UI gone
+                }
+                if failed {
+                    tokio::time::sleep(backoff.next().unwrap_or(WATCH_BACKOFF_CEILING)).await;
                 }
             }
         })
@@ -445,6 +503,11 @@ impl Cluster {
         }
     }
 }
+
+/// Fallback delay if the watcher backoff ever runs out of steps.
+/// `DefaultBackoff` is unbounded in attempts, so this is belt and braces
+/// rather than a real path.
+const WATCH_BACKOFF_CEILING: Duration = Duration::from_secs(30);
 
 /// A watch error the watcher recovers from by itself: the resourceVersion the
 /// watch resumed from was already compacted away by etcd (HTTP 410 Gone,
@@ -483,12 +546,6 @@ fn group_priority(group: &str) -> u8 {
     }
 }
 
-fn current_context_name() -> Option<String> {
-    // Config::infer() doesn't surface the context name, so read it directly.
-    let kubeconfig = kube::config::Kubeconfig::read().ok()?;
-    kubeconfig.current_context
-}
-
 /// The current kubeconfig context, its cluster name, and API-server URL, read
 /// offline (no connection). For `--info`. `None` when there's no kubeconfig or
 /// no current context. The server URL never carries credentials.
@@ -520,7 +577,11 @@ pub fn cluster_name_for_context(context: &str) -> String {
 
 /// Kubeconfig cluster name a context points at, when the kubeconfig knows it.
 fn cluster_name_for(context: &str) -> Option<String> {
-    let kubeconfig = kube::config::Kubeconfig::read().ok()?;
+    cluster_name_in(&kube::config::Kubeconfig::read().ok()?, context)
+}
+
+/// The same lookup against a kubeconfig the caller already parsed.
+fn cluster_name_in(kubeconfig: &Kubeconfig, context: &str) -> Option<String> {
     kubeconfig
         .contexts
         .iter()
@@ -618,7 +679,7 @@ impl Cluster {
             "helmreleases",
             true,
         );
-        let hr = cluster.registry["helmreleases"].clone();
+        let hr = Arc::clone(&cluster.registry["helmreleases"]);
         cluster.registry.insert("hr".to_string(), hr);
         cluster.register_kind(
             "autoscaling",
@@ -654,7 +715,7 @@ impl Cluster {
         };
         cluster
             .registry
-            .insert("events.events.k8s.io".to_string(), events_k8s_io);
+            .insert("events.events.k8s.io".to_string(), Arc::new(events_k8s_io));
         cluster
     }
 
@@ -682,8 +743,9 @@ impl Cluster {
             },
             namespaced,
         };
-        self.registry.insert(kind.to_lowercase(), k.clone());
-        self.registry.insert(plural.clone(), k.clone());
+        let k = Arc::new(k);
+        self.registry.insert(kind.to_lowercase(), Arc::clone(&k));
+        self.registry.insert(plural.clone(), Arc::clone(&k));
         self.catalog.push(plural.clone());
         if !group.is_empty() {
             let qualified = format!("{plural}.{group}");
@@ -1038,7 +1100,7 @@ mod tests {
         // backoff) turns the mock's deliberate 503 into a ~4-minute stall;
         // retrying is not what these tests exercise.
         config.default_retry = false;
-        Cluster::from_config(config, "test".into(), None).await
+        Cluster::from_config(config, "test".into(), None, "test-cluster".into()).await
     }
 
     #[tokio::test]

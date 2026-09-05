@@ -200,11 +200,30 @@ pub fn seed(app: &mut App, objs: impl IntoIterator<Item = DynamicObject>) {
     }
 }
 
-/// An app holding `n` synthetic pods, already listed as the pods view.
+/// An app holding `n` synthetic pods, already listed as the pods view — with
+/// the resolved kind and its real column spec installed, so cells, filters and
+/// headers are the ones the pods view actually renders.
 pub fn pods_app(n: usize) -> (App, Receiver<Msg>) {
     let (mut a, rx) = app();
-    a.kind_plural = "pods".to_string();
+    a.bench_install_kind("pods");
     seed(&mut a, (0..n).map(pod));
+    (a, rx)
+}
+
+/// `pods_app` plus a metrics snapshot for every pod, so the CPU/MEM columns
+/// render real values instead of the missing-metrics dash.
+pub fn pods_app_with_metrics(n: usize) -> (App, Receiver<Msg>) {
+    let (mut a, rx) = pods_app(n);
+    for i in 0..n {
+        let o = pod(i);
+        a.metrics.insert(
+            row_key(&o),
+            (
+                ((i * 37) % 4000) as i64,
+                ((i * 1024 * 977) % 4_000_000_000) as i64,
+            ),
+        );
+    }
     (a, rx)
 }
 
@@ -233,7 +252,7 @@ pub fn arc_clone_items(items: &crate::store::Items) -> crate::store::Items {
 /// An app holding `n` synthetic Helm release Secrets.
 pub fn helm_app(n: usize) -> (App, Receiver<Msg>) {
     let (mut a, rx) = app();
-    a.kind_plural = "helm".to_string();
+    a.bench_install_kind("helm");
     seed(&mut a, (0..n).map(helm_secret));
     (a, rx)
 }
@@ -316,4 +335,218 @@ pub fn log_lines_wide(n: usize) -> Vec<String> {
 /// Sender factory for benches that need to construct messages directly.
 pub fn channel() -> (Sender<Msg>, Receiver<Msg>) {
     mpsc::channel(4096)
+}
+
+/// A terminal backed by an in-memory buffer, the size a benchmark draws into.
+pub fn terminal(w: u16, h: u16) -> ratatui::Terminal<ratatui::backend::TestBackend> {
+    ratatui::Terminal::new(ratatui::backend::TestBackend::new(w, h)).expect("bench terminal")
+}
+
+/// One full frame of the real UI, drawn into an in-memory backend — the unit
+/// the table renderer is actually judged by (per-row cell rendering, width
+/// measurement, column layout and mouse geometry all included).
+/// One full frame of the real UI, drawn into an in-memory backend.
+pub fn render_frame(
+    terminal: &mut ratatui::Terminal<ratatui::backend::TestBackend>,
+    app: &mut App,
+) {
+    terminal
+        .draw(|f| crate::ui::draw(f, app))
+        .expect("bench frame");
+}
+
+/// The headers the table draws, for asserting a fixture is representative.
+pub fn headers(app: &App) -> Vec<String> {
+    app.display_headers()
+}
+
+/// What the table renderer does per frame before drawing anything: resolve the
+/// visible window and warm its cell cache.
+pub fn warm_viewport(app: &App, offset: usize, n: usize) -> usize {
+    let rows = app.rows_window_keyed(offset, n);
+    app.ensure_table_cell_cache(&rows);
+    rows.len()
+}
+
+/// An app sitting in the logs view over an `n`-line buffer, following the tail
+/// — the shape a busy pod's log stream leaves on screen.
+pub fn logs_app(n: usize, filter: &str, wrap: bool) -> (App, Receiver<Msg>) {
+    let (mut a, rx) = app();
+    a.mode = crate::app::Mode::Logs;
+    a.logs.view.title = "sherlock/app — logs".into();
+    a.logs.view.lines.extend(log_lines(n));
+    a.logs.follow = true;
+    a.logs.wrap = wrap;
+    if !filter.is_empty() {
+        a.logs.set_filter(filter.to_string());
+    }
+    (a, rx)
+}
+
+/// The same, with one enormous single-line JSON record at the tail: the
+/// viewport shows a few rows of it, and the renderer has to decide how much of
+/// it to lay out.
+pub fn logs_app_huge_line(n: usize, bytes: usize) -> (App, Receiver<Msg>) {
+    let (mut a, rx) = logs_app(n, "", true);
+    let payload = "x".repeat(bytes / 2);
+    a.logs.view.lines.push_back(format!(
+        r#"{{"level":"info","msg":"huge","blob":"{payload}"}}"#
+    ));
+    (a, rx)
+}
+
+/// An app showing a YAML document (`describe`/detail), the static-document
+/// case that is re-styled on every redraw.
+pub fn doc_app(n: usize, filter: &str) -> (App, Receiver<Msg>) {
+    let (mut a, rx) = app();
+    a.mode = crate::app::Mode::Detail;
+    a.detail = crate::app::Scrollable::doc("web-7d9f8b6c5d — yaml".into(), yaml_lines(n));
+    if !filter.is_empty() {
+        a.detail.filter = filter.to_string();
+    }
+    (a, rx)
+}
+
+/// A YAML-shaped document: keys, nested values, lists and a few comments.
+pub fn yaml_lines(n: usize) -> Vec<String> {
+    (0..n)
+        .map(|i| match i % 8 {
+            0 => "  containerStatuses:".to_string(),
+            1 => format!("    - name: app-{i}"),
+            2 => format!("      image: registry.example.com/svc-{}:v1.4.2", i % 40),
+            3 => format!("      ready: {}", i % 3 != 0),
+            4 => format!("      restartCount: {}", i % 11),
+            5 => format!("  # managed by kustomize, do not edit ({i})"),
+            6 => format!("      startedAt: 2026-08-30T09:00:{:02}Z", i % 60),
+            _ => format!(
+                "      podIP: 10.{}.{}.{}",
+                i / 65536 % 256,
+                i / 256 % 256,
+                i % 256
+            ),
+        })
+        .collect()
+}
+
+/// The `?` help overlay, optionally with a search typed into it.
+pub fn help_app(filter: &str) -> (App, Receiver<Msg>) {
+    let (mut a, rx) = app();
+    a.bench_install_kind("pods");
+    a.mode = crate::app::Mode::Help;
+    a.help_filter = filter.to_string();
+    (a, rx)
+}
+
+/// The namespace switcher over `n` namespaces, optionally filtered.
+pub fn ns_picker_app(n: usize, filter: &str) -> (App, Receiver<Msg>) {
+    let (mut a, rx) = app();
+    a.mode = crate::app::Mode::Namespaces;
+    a.ns_list = (0..n).map(|i| format!("team-{i:04}-workloads")).collect();
+    a.ns_filter = filter.to_string();
+    a.ns_state.select(Some(0));
+    (a, rx)
+}
+
+/// A chunk of provider log records exactly as the wire delivers them:
+/// newline-delimited JSON objects carrying the fields the parser reads.
+pub fn provider_chunk(n: usize) -> Vec<u8> {
+    let mut out = String::new();
+    for i in 0..n {
+        out.push_str(&format!(
+            r#"{{"_time":"2026-08-30T10:00:{:02}.{:03}Z","_msg":"reconcile complete for workload-{i} in {}ms","kubernetes.pod_name":"workload-{:05}-7d9f8b6c5d-abcd","kubernetes.container_name":"app","kubernetes.namespace_name":"ns-{}"}}"#,
+            i % 60,
+            i % 1000,
+            i % 250,
+            i,
+            i % 24,
+        ));
+        out.push('\n');
+    }
+    out.into_bytes()
+}
+
+/// One oversized record with no newline until the very end — the fragmented
+/// arrival the framing rescan is quadratic in.
+pub fn provider_long_record(bytes: usize) -> Vec<u8> {
+    let mut out = r#"{"_time":"2026-08-30T10:00:00Z","_msg":""#.to_string();
+    out.push_str(&"y".repeat(bytes));
+    out.push_str("\"}\n");
+    out.into_bytes()
+}
+
+/// A `PodMetrics` object with `containers` per pod, shaped like the
+/// metrics-server response the poll folds into its maps.
+pub fn pod_metrics(i: usize, containers: usize) -> DynamicObject {
+    let list: Vec<serde_json::Value> = (0..containers)
+        .map(|c| {
+            json!({
+                "name": format!("c{c}"),
+                "usage": {
+                    "cpu": format!("{}m", (i + c) % 500 + 1),
+                    "memory": format!("{}Mi", (i * 7 + c) % 2048 + 1),
+                },
+            })
+        })
+        .collect();
+    serde_json::from_value(json!({
+        "apiVersion": "metrics.k8s.io/v1beta1",
+        "kind": "PodMetrics",
+        "metadata": {
+            "name": format!("workload-{i:05}-7d9f8b6c5d-{:04x}", i * 7919 % 65536),
+            "namespace": format!("ns-{}", i % 24),
+        },
+        "containers": list,
+    }))
+    .expect("bench pod metrics fixture is valid")
+}
+
+/// The metrics list one poll receives, built outside the measurement.
+pub fn pod_metrics_list(n: usize, containers: usize) -> Vec<DynamicObject> {
+    (0..n).map(|i| pod_metrics(i, containers)).collect()
+}
+
+/// One metrics poll's fold over an already-built list.
+pub fn metrics_fold(list: &[DynamicObject]) -> usize {
+    let (data, per_container) = App::bench_metrics_maps(list, false);
+    data.len() + per_container.len()
+}
+
+/// A logs view held at a fixed retention cap: every appended batch pushes the
+/// same number of lines off the front, which is the steady state of a busy
+/// stream and the case the index has to stay incremental through.
+pub fn saturated_log_batch(
+    logs: &mut crate::app::LogsView,
+    batch: &[String],
+    wrap_width: usize,
+) -> usize {
+    logs.view.lines.extend(batch.iter().cloned());
+    let cap = 10_000;
+    let overflow = logs.view.lines.len().saturating_sub(cap);
+    if overflow > 0 {
+        logs.trim_front(overflow);
+    }
+    logs.refresh_index(wrap_width).total_rows()
+}
+
+/// A cluster whose registry holds `n` custom resources, the shape a CRD-heavy
+/// cluster leaves behind after discovery.
+pub fn crd_cluster(n: usize) -> Cluster {
+    // `Cluster::fake` builds a kube `Client`, which spawns a tower worker and
+    // needs a reactor — the same reason `app()` enters the runtime.
+    let _guard = runtime().enter();
+    let mut cluster = Cluster::fake();
+    for i in 0..n {
+        cluster.register_kind(
+            &format!("group{}.example.com", i % 40),
+            &format!("Widget{i}"),
+            &format!("widget{i}s"),
+            true,
+        );
+    }
+    cluster
+}
+
+/// What caching one view snapshot costs to price — paid once per view switch.
+pub fn view_bytes(items: &crate::store::Items) -> usize {
+    App::bench_view_bytes(items)
 }

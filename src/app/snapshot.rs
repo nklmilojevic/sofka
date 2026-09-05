@@ -50,22 +50,20 @@ impl App {
         let headers = self.display_headers();
         let show_ns = self.show_namespace_column();
         let metrics_cols = self.metrics_columns();
-        let pods_view = self.kind_plural == "pods";
 
-        let objs = self.rows();
+        let objs = self.rows_keyed();
         self.ensure_table_cell_cache(&objs);
         let cache = self.table_cell_cache();
         let spec = self.view_spec();
 
         let rows = objs
             .iter()
-            .map(|obj| {
-                let rk = row_key(obj);
+            .map(|(rk, obj)| {
                 let mut cells: Vec<String> = Vec::with_capacity(headers.len());
                 if show_ns {
                     cells.push(obj.metadata.namespace.clone().unwrap_or_default());
                 }
-                if let Some((base_cells, _)) = cache.get(&rk) {
+                if let Some((base_cells, _)) = cache.get(rk) {
                     for (i, cell) in base_cells.iter().enumerate() {
                         match spec.volatile(obj, &self.kind_plural, i) {
                             Some(v) => cells.push(v),
@@ -77,17 +75,7 @@ impl App {
                     cells.push(self.node_pods_cell(obj));
                 }
                 if metrics_cols {
-                    let name = obj.metadata.name.as_deref().unwrap_or_default();
-                    let key = if pods_view {
-                        format!(
-                            "{}/{}",
-                            obj.metadata.namespace.as_deref().unwrap_or_default(),
-                            name
-                        )
-                    } else {
-                        name.to_string()
-                    };
-                    let (cpu, mem) = self.metrics.get(&key).copied().unwrap_or((0, 0));
+                    let (cpu, mem) = self.metrics_for(obj);
                     cells.push(crate::columns::fmt_cpu(cpu));
                     cells.push(crate::columns::fmt_mem(mem));
                     // Nodes also carry %CPU/%MEM headers — the capture must
