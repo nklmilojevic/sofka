@@ -465,18 +465,20 @@ is what makes it useful, and not in the way the first run suggested.
 
 Run 2 came back thermally degraded: 54 of 75 benchmarks were slower than run 1,
 many by more than 100%, including arms of pairs that had not changed at all.
-The absolute numbers from run 2 are therefore worthless, and by extension the
-absolute numbers from run 1 are unverified.
+The absolute numbers therefore remain raw observations rather than one
+cross-run estimate; comparing adjacent arms within each run still identifies a
+stable winner.
 
 What survives is the ratio _within_ each pair, because both arms are measured
-adjacently under the same conditions. Everything below is stated as a ratio and
-labelled by how well that ratio reproduced:
+adjacently under the same conditions. The classification answers whether the
+winner reproduced, separately from the exact size of the win:
 
-- **stable** — ratios within 25% of each other across runs.
-- **noisy** — 25-50% apart, direction consistent.
-- **unstable** — more than 50% apart, direction consistent. The effect is real,
-  the size is not yet known.
+- **stable win** — the prototype is faster in both runs.
+- **stable loss** — the prototype is slower in both runs.
 - **reversed** — the two runs disagree about which arm is faster. No claim.
+
+Both ratios remain visible. “Stable” describes the direction, not a promise
+that two thermally different runs produced the same speedup magnitude.
 
 Environment: `main` at v0.22.0, Apple M1, Criterion `--warm-up-time 1
 --measurement-time 2 --sample-size 20`. Absolute figures are not comparable to
@@ -487,7 +489,7 @@ pods as a 6.2 MiB `PodList`, a 3.7 MiB `PartialObjectMetadataList`, and a 4.0 Mi
 wire benchmark reports each missing `/tmp/sofka-{full,meta,table}-pods.json`
 fixture instead of silently running no cases.
 
-### Confirmed: stable across both runs
+### Stable wins with closely reproduced ratios
 
 | Item                              | Prototype gain, run 1 | run 2 |
 | --------------------------------- | --------------------: | ----: |
@@ -506,7 +508,7 @@ picoseconds against hundreds of microseconds. They demonstrate removable work
 but omit cache keys, lookup, and invalidation, so they are not evidence for a
 production cache's speedup. The harness now labels them as concept arms.
 
-### Prototype shapes rejected or narrowed
+### Stable losses for the measured prototype shapes
 
 | Item                                     |        run 1 |        run 2 |
 | ---------------------------------------- | -----------: | -----------: |
@@ -547,7 +549,7 @@ The nested-object extraction reversal does not sink item 7 — the array column
 still favours borrowing in both runs — but the object case must be re-measured
 before it appears in a proposal.
 
-### Real but unsized: direction holds, magnitude does not
+### Stable wins with variable ratios
 
 | Pair                                              | run 1 | run 2 |
 | ------------------------------------------------- | ----: | ----: |
@@ -563,14 +565,14 @@ before it appears in a proposal.
 | Relaxed vs SeqCst atomic loads                    | 2.20x | 1.57x |
 | 10. Helm gzip output pre-sized from ISIZE         | 1.13x | 1.97x |
 
-Every row here favours the prototype in both runs, so each is eligible for an
-implementation-quality prototype; neither the effect size nor semantic safety
-follows from these results. Item 3's framing and selective parse both stay well
-above the 5% gate at their worst observed ratio, which is what the gate actually
-asks. The relaxed-atomics row is direction-stable and irrelevant: it saves about
+Every row here is a stable win because the prototype wins in both runs. The two
+ratios differ, so quote the observed range rather than one speedup figure.
+Neither semantic safety nor production impact follows from these results. Item
+3's framing and selective parse both stay above the 5% gate at their worst
+observed ratio. The relaxed-atomics row is real and irrelevant: it saves about
 0.4 ns per load. Item 10 measures pre-sizing decompressed Helm release payloads
-from gzip ISIZE; its direction is consistent but its magnitude is unstable. It
-is unrelated to PR #194's HTTP response gzip support.
+from gzip ISIZE; it is a stable 1.13x-1.97x win across the two runs and is
+unrelated to PR #194's HTTP response gzip support.
 
 ### Payload-specific SIMD interpretation
 
@@ -580,12 +582,13 @@ SIMD JSON results must be split by payload size:
   and 1.24x at 32 B, 2.02x and 2.63x at 4 KiB). At 4 KiB messages `simd-json` is
   slower than the plain DOM parse it was meant to replace. Item 3's visitor is the
   answer here and `simd-json` should not follow it.
-- The 6.2 MiB `PodList`: `simd-json` is **1.64x and 1.60x** faster — the most
-  stable non-trivial result in the whole suite. This is a startup-latency item the
-  audit missed entirely, because it only ever considered SIMD JSON for Helm and
-  logs. It needs evaluation against the real typed `DynamicObject` path, which is
-  not a `Value` DOM parse, before it becomes a proposal. The metadata and table
-  fixtures do not reproduce and should not be cited.
+- The 6.2 MiB `PodList`: `simd-json` is **1.64x and 1.60x** faster — the closest
+  non-trivial ratio reproduction in the whole suite. This is a startup-latency
+  item the audit missed entirely, because it only ever considered SIMD JSON for
+  Helm and logs. It needs evaluation against the real typed `DynamicObject`
+  path, which is not a `Value` DOM parse, before it becomes a proposal. The
+  metadata fixture reverses; the table fixture is a stable win with a wider
+  1.41x-2.67x range. Neither should be generalized to the typed path.
 
 In isolation the base64 SIMD engine wins at every size in both runs, including
 the 588-byte fixture (1.62x, 1.96x) and 16 KiB (1.98x, 1.85x). Base64 is a small
@@ -595,13 +598,13 @@ result: base64 is not the bottleneck.
 
 ### New candidates this run surfaced
 
-| Candidate                                   | run 1 | run 2 | Status                 |
-| ------------------------------------------- | ----: | ----: | ---------------------- |
-| `nucleo-matcher` for fuzzy filtering        | 3.33x | 2.03x | unstable, always >2x   |
-| `CompactString` for short repeated values   | 3.65x | 4.17x | stable                 |
-| `foldhash` for internal maps                | 2.66x | 3.93x | unstable, always >2.6x |
-| Struct-of-arrays synthetic scan, 100,000    | 1.57x | 1.53x | stable                 |
-| `lasso` interning for short repeated values | 1.11x | 1.21x | stable, marginal       |
+| Candidate                                   | run 1 | run 2 | Status                   |
+| ------------------------------------------- | ----: | ----: | ------------------------ |
+| `nucleo-matcher` for fuzzy filtering        | 3.33x | 2.03x | stable win, always >2x   |
+| `CompactString` for short repeated values   | 3.65x | 4.17x | stable win               |
+| `foldhash` for internal maps                | 2.66x | 3.93x | stable win, always >2.6x |
+| Struct-of-arrays synthetic scan, 100,000    | 1.57x | 1.53x | stable win               |
+| `lasso` interning for short repeated values | 1.11x | 1.21x | stable win, marginal     |
 
 The fuzzy matcher is the largest unclaimed win and appears nowhere in the ranked
 list. `SkimMatcherV2` is on the filter path and, through `filter_match_indices`
@@ -633,11 +636,11 @@ boxing, ANSI parser overhead, and a cheap parallel substring predicate. It also
 showed that this host cannot produce trustworthy absolute timings back-to-back
 — the second run of anything is measured on a hot machine.
 
-Before any of the unstable rows is quoted as a number in a pull request, it
-needs a third run from cold, ideally with the pair order shuffled so that
-position in the suite is not confounded with thermal state. Stable ratios
-reproduced only for the exact shapes measured here; broader production claims
-still require equivalent-output, production-path benchmarks.
+Before collapsing a wide two-run range into one speedup figure, run a third time
+from cold, ideally with the pair order shuffled so that position in the suite is
+not confounded with thermal state. A stable direction applies only to the exact
+shape measured; broader production claims still require equivalent-output,
+production-path benchmarks.
 
 ### Not yet measured
 
