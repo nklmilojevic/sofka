@@ -300,8 +300,14 @@ fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
     // Per-kind key hints share the box with the info cluster (k9s-style);
     // narrow terminals collapse back to info-only and keep the full hint
     // line at the bottom instead.
-    let hints = header_hints(app);
-    if !hints.is_empty() && header_hints_fit(area.width) {
+    // Fit first: the hints are formatted, styled lines, and a narrow terminal
+    // throws every one of them away.
+    let hints = if header_hints_fit(area.width) {
+        header_hints(app)
+    } else {
+        Vec::new()
+    };
+    if !hints.is_empty() {
         let sub = Layout::default()
             .direction(Direction::Horizontal)
             .constraints([
@@ -542,7 +548,6 @@ fn draw_table(frame: &mut Frame, app: &mut App, area: Rect) {
     let show_ns = app.show_namespace_column();
     let metrics_cols = app.metrics_columns();
     let headers: Vec<String> = app.display_headers();
-    let pods_view = app.kind_plural == "pods";
     let sort_col = app.sort_column;
     let sort_arrow = if app.sort_desc { " ↓" } else { " ↑" };
     // Offset from a displayed column index back to the view spec's (the spec
@@ -575,9 +580,12 @@ fn draw_table(frame: &mut Frame, app: &mut App, area: Rect) {
             .map(|(i, h)| {
                 // Active sort column gets a direction arrow in the sorter color
                 // (sky, bold), matching k9s; the label inherits the header color.
+                // Borrowed from `headers`, which outlives the render below:
+                // the header list is already rebuilt every frame, and cloning
+                // every label again for the widget doubled that.
                 if Some(i) == sort_col {
                     let mut line = Line::from(vec![
-                        Span::raw(h.clone()),
+                        Span::raw(h.as_str()),
                         Span::styled(
                             sort_arrow,
                             Style::default()
@@ -591,8 +599,8 @@ fn draw_table(frame: &mut Frame, app: &mut App, area: Rect) {
                     Cell::from(line)
                 } else {
                     match align_of(i) {
-                        Some(a) => Cell::from(Text::from(h.clone()).alignment(a)),
-                        None => Cell::from(h.clone()),
+                        Some(a) => Cell::from(Text::from(h.as_str()).alignment(a)),
+                        None => Cell::from(h.as_str()),
                     }
                 }
             })
@@ -634,7 +642,7 @@ fn draw_table(frame: &mut Frame, app: &mut App, area: Rect) {
     let offset = app.table_state.offset();
     let selected = app.table_state.selected();
 
-    let visible_objects = app.rows_window(offset, visible_rows);
+    let visible_objects = app.rows_window_keyed(offset, visible_rows);
     app.ensure_table_cell_cache(&visible_objects);
     let cell_cache = app.table_cell_cache();
     let spec = app.view_spec();
@@ -652,13 +660,26 @@ fn draw_table(frame: &mut Frame, app: &mut App, area: Rect) {
         })
         .collect();
 
+    // Scrolled-away columns are never drawn, so their values must not be
+    // formatted or measured either. STATUS/READY are the exception: the row
+    // color reads them, but their cached text is already there to borrow.
+    let shown = |idx: Option<usize>| idx.is_some_and(&col_visible);
+    let cpu_shown = shown(cpu_idx);
+    let mem_shown = shown(mem_idx);
+    let pct_cpu_shown = shown(pct_cpu_idx);
+    let pct_mem_shown = shown(pct_mem_idx);
+    let metrics_shown = cpu_shown || mem_shown || pct_cpu_shown || pct_mem_shown;
+
     let rows: Vec<Row> = visible_objects
         .iter()
-        .map(|obj| {
-            let row_key = crate::store::row_key(obj);
-            let marked_row = !app.marked.is_empty() && app.marked.contains(&row_key);
+        .map(|(row_key, obj)| {
+            // The store's own key, carried through the viewport: rebuilding
+            // `"{ns}/{name}"` here allocated a `String` per visible row per
+            // frame purely to look up rows the cache is already keyed by.
+            let row_key: &str = row_key;
+            let marked_row = !app.marked.is_empty() && app.marked.contains(row_key);
             let (base_cells, status_idx) = cell_cache
-                .get(&row_key)
+                .get(row_key)
                 .expect("visible rows are warmed in the table cell cache");
             let mut style_idx = status_idx;
             let mut cells = Vec::with_capacity(headers.len());
@@ -669,43 +690,66 @@ fn draw_table(frame: &mut Frame, app: &mut App, area: Rect) {
                 style_idx = status_idx.map(|i| i + 1);
             }
             for (i, cell) in base_cells.iter().enumerate() {
-                if let Some(value) = spec.volatile(obj, &app.kind_plural, i) {
-                    cells.push(TableCellText::Owned(value));
-                } else {
-                    cells.push(TableCellText::Borrowed(cell));
+                // A hidden cell keeps its cached text (free, and STATUS/READY
+                // still color the row) but skips the volatile re-render.
+                let volatile = col_visible(ns_off + i)
+                    .then(|| spec.volatile(obj, &app.kind_plural, i))
+                    .flatten();
+                match volatile {
+                    Some(value) => cells.push(TableCellText::Owned(value)),
+                    None => cells.push(TableCellText::Borrowed(cell)),
                 }
             }
             if app.node_capacity_columns() {
-                cells.push(TableCellText::Owned(app.node_pods_cell(obj)));
+                cells.push(match col_visible(cells.len()) {
+                    true => TableCellText::Owned(app.node_pods_cell(obj)),
+                    false => TableCellText::Borrowed(""),
+                });
             }
             let mut metrics_raw = None;
             let mut node_pcts: (Option<i64>, Option<i64>) = (None, None);
             if metrics_cols {
-                let name = obj.metadata.name.as_deref().unwrap_or_default();
-                let key = if pods_view {
-                    format!(
-                        "{}/{}",
-                        obj.metadata.namespace.as_deref().unwrap_or_default(),
-                        name
-                    )
+                // Placeholders when every metrics column is scrolled away:
+                // the display indices below still have to line up.
+                let (cpu, mem) = if metrics_shown {
+                    let raw = app.metrics_for(obj);
+                    metrics_raw = Some(raw);
+                    raw
                 } else {
-                    name.to_string()
+                    (0, 0)
                 };
-                let (cpu, mem) = app.metrics.get(&key).copied().unwrap_or((0, 0));
-                metrics_raw = Some((cpu, mem));
-                cells.push(TableCellText::Owned(columns::fmt_cpu(cpu)));
-                cells.push(TableCellText::Owned(columns::fmt_mem(mem)));
+                cells.push(match cpu_shown {
+                    true => TableCellText::Owned(columns::fmt_cpu(cpu)),
+                    false => TableCellText::Borrowed(""),
+                });
+                cells.push(match mem_shown {
+                    true => TableCellText::Owned(columns::fmt_mem(mem)),
+                    false => TableCellText::Borrowed(""),
+                });
                 if app.node_capacity_columns() {
-                    let (alloc_cpu, alloc_mem) = columns::node_allocatable(obj);
-                    node_pcts = (
-                        columns::usage_pct(cpu, alloc_cpu),
-                        columns::usage_pct(mem, alloc_mem),
-                    );
-                    cells.push(TableCellText::Owned(columns::fmt_pct(node_pcts.0)));
-                    cells.push(TableCellText::Owned(columns::fmt_pct(node_pcts.1)));
+                    if pct_cpu_shown || pct_mem_shown {
+                        let (alloc_cpu, alloc_mem) = columns::node_allocatable(obj);
+                        node_pcts = (
+                            columns::usage_pct(cpu, alloc_cpu),
+                            columns::usage_pct(mem, alloc_mem),
+                        );
+                    }
+                    cells.push(match pct_cpu_shown {
+                        true => TableCellText::Owned(columns::fmt_pct(node_pcts.0)),
+                        false => TableCellText::Borrowed(""),
+                    });
+                    cells.push(match pct_mem_shown {
+                        true => TableCellText::Owned(columns::fmt_pct(node_pcts.1)),
+                        false => TableCellText::Borrowed(""),
+                    });
                 }
             }
             for (i, c) in cells.iter().enumerate() {
+                // Only visible columns are sized: `col_rules` below reads
+                // `needed` for those alone.
+                if !col_visible(i) {
+                    continue;
+                }
                 if let Some(n) = needed.get_mut(i) {
                     *n = (*n).max(cell_width(c.as_str()));
                 }
@@ -852,10 +896,8 @@ fn draw_table(frame: &mut Frame, app: &mut App, area: Rect) {
         .saturating_sub(2)
         .saturating_sub(2)
         .saturating_sub(2 * ncols.saturating_sub(1));
-    let widths: Vec<Constraint> = distribute_column_widths(content_budget, &col_rules)
-        .into_iter()
-        .map(Constraint::Length)
-        .collect();
+    let col_widths = distribute_column_widths(content_budget, &col_rules);
+    let widths: Vec<Constraint> = col_widths.iter().copied().map(Constraint::Length).collect();
 
     let kind_label = app.list_title();
     // k9s title: resource name (teal, bold) then a yellow [count].
@@ -908,30 +950,35 @@ fn draw_table(frame: &mut Frame, app: &mut App, area: Rect) {
     // carries the display-header index it shows, since columns can be
     // scrolled out of view.
     {
-        use ratatui::layout::{Flex, Margin};
+        use ratatui::layout::Margin;
         let inner = area.inner(Margin::new(1, 1));
         let sel_w = 2u16; // "▌ " with HighlightSpacing::Always
-        let cols_area = Rect {
-            x: inner.x.saturating_add(sel_w),
-            y: inner.y,
-            width: inner.width.saturating_sub(sel_w),
-            height: inner.height,
-        };
-        let rects = Layout::horizontal(widths.clone())
-            .flex(Flex::Start)
-            .spacing(2)
-            .split(cols_area);
+        let cols_x = inner.x.saturating_add(sel_w);
+        let cols_end = inner.x.saturating_add(inner.width);
+        // The widths are already fixed `Length`s that fit the budget, and the
+        // Table lays them out left-packed with the same 2-cell spacing — so
+        // the columns land on a running sum. Running the constraint solver a
+        // second time (and cloning the constraints for it) only to rediscover
+        // that was pure duplicate work.
+        let mut x = cols_x;
+        let mut ranges = Vec::with_capacity(col_widths.len());
+        for (w, i) in col_widths
+            .iter()
+            .copied()
+            .zip((0..headers.len()).filter(|&i| col_visible(i)))
+        {
+            let start = x.min(cols_end);
+            let end = start.saturating_add(w).min(cols_end);
+            ranges.push((start, end, i));
+            x = end.saturating_add(2); // Table::column_spacing
+        }
         app.record_table_hit(
             inner.y,
             inner.y.saturating_add(1),
             inner.height.saturating_sub(1),
             inner.x,
-            inner.x.saturating_add(inner.width),
-            rects
-                .iter()
-                .zip((0..headers.len()).filter(|&i| col_visible(i)))
-                .map(|(r, i)| (r.x, r.x + r.width, i))
-                .collect(),
+            cols_end,
+            ranges,
         );
     }
 

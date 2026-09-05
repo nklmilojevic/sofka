@@ -1288,17 +1288,22 @@ impl App {
     /// Drop any forward whose `kubectl` process has already exited (pod
     /// restarted, connection dropped, port in use, …), flashing a heads-up.
     /// Called on every tick, so a dead forward doesn't linger in the list.
-    pub fn reap_port_forwards(&mut self) {
+    /// Returns whether any forward was reaped — i.e. whether the 1s tick that
+    /// called this changed anything on screen.
+    pub fn reap_port_forwards(&mut self) -> bool {
+        let mut reaped = false;
         let mut i = 0;
         while i < self.port_forwards.len() {
             match self.port_forwards[i].child.try_wait() {
                 Ok(Some(_)) => {
                     let pf = self.port_forwards.remove(i);
                     self.flash_warn(&format!("port-forward {} exited", pf.label()));
+                    reaped = true;
                 }
                 _ => i += 1,
             }
         }
+        reaped
     }
 
     pub(super) fn open_port_forwards(&mut self) {
@@ -2405,13 +2410,18 @@ impl App {
     /// operation: a drain or a bulk delete easily runs past the window, and
     /// blanking it mid-flight would read as "nothing is happening". Those all
     /// end in `…` by convention, which is what marks them here.
-    pub fn expire_flash(&mut self) {
+    ///
+    /// Returns whether the status line changed, so the caller can tell a tick
+    /// that did something from one that did not.
+    pub fn expire_flash(&mut self) -> bool {
         if self.flash != self.flash_seen {
-            self.status_claim = None;
+            let claimed = self.status_claim.take().is_some();
             self.flash_seen.clone_from(&self.flash);
             self.flash_since = std::time::Instant::now();
             self.flash_sticky = false;
-            return;
+            // The flash itself was drawn when it was set; only dropping a
+            // status claim on top of it changes what is on screen now.
+            return claimed;
         }
         if !self.flash.is_empty()
             && !self.flash_err
@@ -2432,7 +2442,9 @@ impl App {
             } else {
                 self.status_claim = None;
             }
+            return true;
         }
+        false
     }
 
     /// Base argv for a `kubectl` shell-out, pinned to the active context so it

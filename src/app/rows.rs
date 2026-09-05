@@ -1,5 +1,45 @@
 use super::*;
 
+/// The active filter with everything object-independent already resolved.
+/// Built once per rebuild by [`App::compile_filter_plan`]; borrows the parsed
+/// filter it was compiled from.
+enum FilterPlan<'f> {
+    Fuzzy { pat: &'f str, mask: u64 },
+    Terms(Vec<TermPlan<'f>>),
+}
+
+enum TermPlan<'f> {
+    Fuzzy {
+        pat: &'f str,
+        mask: u64,
+    },
+    NotFuzzy {
+        pat: &'f str,
+        mask: u64,
+    },
+    Cmp {
+        cmp: &'f crate::filter::Cmp,
+        column: CmpColumn,
+    },
+}
+
+/// Where one comparison term reads its value from.
+enum CmpColumn {
+    Namespace,
+    /// A displayed column whose cell is stable for an object revision — read
+    /// from the shared cell cache.
+    Cached(usize),
+    /// A displayed column that re-renders with wall time (AGE and friends) —
+    /// extracted per evaluation.
+    Live(usize),
+    /// `/status/phase` fallback for kinds without a STATUS column.
+    Phase,
+    /// The key names no column (the term can never match).
+    Missing,
+    /// The term compares metrics or age, not a column.
+    Unused,
+}
+
 impl App {
     /// Mark the cached row order/filter stale. Cheap; safe to over-call.
     pub(super) fn invalidate_rows(&self) {
@@ -61,29 +101,102 @@ impl App {
         &self,
         o: &DynamicObject,
         key: &RowKey,
-        parsed: &crate::filter::ParsedFilter,
+        plan: &FilterPlan<'_>,
         cells: &mut HashMap<RowKey, CellCacheEntry>,
     ) -> bool {
         if self.filter.is_empty() {
             return true;
         }
-        self.eval_filter(o, key, parsed, cells)
+        self.eval_filter(o, key, plan, cells)
+    }
+
+    /// Resolve everything about the active filter that does not depend on the
+    /// object: each fuzzy pattern's character mask, and which column each
+    /// comparison reads. Both used to be recomputed per object — that is, per
+    /// term per row of the whole store, on every rebuild.
+    ///
+    /// Built per rebuild rather than cached alongside the parsed filter, so it
+    /// cannot go stale against a spec that changed underneath it (wide toggle,
+    /// printer columns arriving, a view switch).
+    fn compile_filter_plan<'f>(&self, parsed: &'f crate::filter::ParsedFilter) -> FilterPlan<'f> {
+        use crate::filter::{ParsedFilter, Term};
+        let fuzzy = |pat: &'f str| (pat, subseq_mask(pat));
+        match parsed {
+            ParsedFilter::Fuzzy(pat) => {
+                let (pat, mask) = fuzzy(pat);
+                FilterPlan::Fuzzy { pat, mask }
+            }
+            ParsedFilter::Structured(s) => FilterPlan::Terms(
+                s.terms
+                    .iter()
+                    .map(|t| match t {
+                        Term::Fuzzy(p) => {
+                            let (pat, mask) = fuzzy(p);
+                            TermPlan::Fuzzy { pat, mask }
+                        }
+                        Term::NotFuzzy(p) => {
+                            let (pat, mask) = fuzzy(p);
+                            TermPlan::NotFuzzy { pat, mask }
+                        }
+                        Term::Cmp(cmp) => TermPlan::Cmp {
+                            cmp,
+                            column: self.resolve_cmp_column(cmp),
+                        },
+                    })
+                    .collect(),
+            ),
+        }
+    }
+
+    /// Which column a comparison term reads, resolved once for the rebuild.
+    /// Mirrors the lookup order the per-object path used: NAMESPACE/NS first,
+    /// then a displayed column by case-insensitive header, then the
+    /// `/status/phase` fallback for kinds without a STATUS column.
+    fn resolve_cmp_column(&self, cmp: &crate::filter::Cmp) -> CmpColumn {
+        use crate::filter::CmpValue;
+        // cpu/mem/age never read a column — they compare live metrics and the
+        // creation timestamp — so they must not resolve to a same-named one.
+        if !matches!(cmp.value, CmpValue::Num(_) | CmpValue::Str(_)) {
+            return CmpColumn::Unused;
+        }
+        let key = cmp.key.as_str();
+        if key.eq_ignore_ascii_case("namespace") || key.eq_ignore_ascii_case("ns") {
+            return CmpColumn::Namespace;
+        }
+        if let Some(i) = self.spec.header_index(key) {
+            // Elapsed-time cells re-render for the same object revision, so
+            // they are read live; every other column is exactly the string the
+            // cell cache already holds for this revision (`cells()[i]` and
+            // `cell_at(o, i)` run the same extractor).
+            return if self.spec.volatile_column(&self.kind_plural, i) {
+                CmpColumn::Live(i)
+            } else {
+                CmpColumn::Cached(i)
+            };
+        }
+        if key.eq_ignore_ascii_case("status") {
+            return CmpColumn::Phase;
+        }
+        CmpColumn::Missing
     }
 
     fn eval_filter(
         &self,
         o: &DynamicObject,
         key: &RowKey,
-        parsed: &crate::filter::ParsedFilter,
+        plan: &FilterPlan<'_>,
         cells: &mut HashMap<RowKey, CellCacheEntry>,
     ) -> bool {
-        use crate::filter::{ParsedFilter, Term};
-        match parsed {
-            ParsedFilter::Fuzzy(pat) => pat.is_empty() || self.fuzzy_match_row(o, pat, key, cells),
-            ParsedFilter::Structured(s) => s.terms.iter().all(|t| match t {
-                Term::Fuzzy(pat) => self.fuzzy_match_row(o, pat, key, cells),
-                Term::NotFuzzy(pat) => !self.fuzzy_match_row(o, pat, key, cells),
-                Term::Cmp(cmp) => self.eval_cmp(o, cmp),
+        match plan {
+            FilterPlan::Fuzzy { pat, mask } => {
+                pat.is_empty() || self.fuzzy_match_row(o, pat, *mask, key, cells)
+            }
+            FilterPlan::Terms(terms) => terms.iter().all(|t| match t {
+                TermPlan::Fuzzy { pat, mask } => self.fuzzy_match_row(o, pat, *mask, key, cells),
+                TermPlan::NotFuzzy { pat, mask } => {
+                    !self.fuzzy_match_row(o, pat, *mask, key, cells)
+                }
+                TermPlan::Cmp { cmp, column } => self.eval_cmp(o, cmp, column, key, cells),
             }),
         }
     }
@@ -105,10 +218,10 @@ impl App {
         &self,
         o: &DynamicObject,
         pat: &str,
+        pat_mask: u64,
         key: &RowKey,
         cells: &mut HashMap<RowKey, CellCacheEntry>,
     ) -> bool {
-        let pat_mask = subseq_mask(pat);
         {
             // Built into a reused buffer: this used to `format!` a fresh
             // `String` for every object on every keystroke.
@@ -133,33 +246,48 @@ impl App {
     }
 
     /// The cached cells for `key`, rendering them if absent or stale.
+    ///
+    /// A hit is the common case — an unchanged row on a refilter, and every
+    /// visible row on an ordinary redraw — so it must not allocate: the
+    /// resourceVersion is compared borrowed rather than cloned up front, and
+    /// the entry API resolves the key once instead of hashing it again to read
+    /// back what the staleness check just looked at.
     fn cell_entry<'c>(
         &self,
         key: &RowKey,
         o: &DynamicObject,
         cells: &'c mut HashMap<RowKey, CellCacheEntry>,
     ) -> &'c CellCacheEntry {
-        let resource_version = o.metadata.resource_version.clone();
-        let stale = cells
-            .get(key)
-            .is_none_or(|e| e.plural != self.kind_plural || e.resource_version != resource_version);
-        if stale {
-            let (rendered, status_idx) = self.spec.cells(o);
-            let cell_masks: Vec<u64> = rendered.iter().map(|c| subseq_mask(c)).collect();
-            let row_mask = cell_masks.iter().fold(0u64, |a, m| a | m);
-            cells.insert(
-                key.clone(),
-                CellCacheEntry {
-                    plural: self.kind_plural.clone(),
-                    resource_version,
-                    cells: rendered,
-                    status_idx,
-                    cell_masks,
-                    row_mask,
-                },
-            );
+        use std::collections::hash_map::Entry;
+        let rv = o.metadata.resource_version.as_deref();
+        match cells.entry(RowKey::clone(key)) {
+            Entry::Occupied(occupied) => {
+                let stale = {
+                    let e = occupied.get();
+                    e.plural != self.kind_plural || e.resource_version.as_deref() != rv
+                };
+                let e = occupied.into_mut();
+                if stale {
+                    *e = self.render_cell_entry(o);
+                }
+                e
+            }
+            Entry::Vacant(vacant) => vacant.insert(self.render_cell_entry(o)),
         }
-        cells.get(key).expect("just inserted")
+    }
+
+    fn render_cell_entry(&self, o: &DynamicObject) -> CellCacheEntry {
+        let (rendered, status_idx) = self.spec.cells(o);
+        let cell_masks: Vec<u64> = rendered.iter().map(|c| subseq_mask(c)).collect();
+        let row_mask = cell_masks.iter().fold(0u64, |a, m| a | m);
+        CellCacheEntry {
+            plural: self.kind_plural.clone(),
+            resource_version: o.metadata.resource_version.clone(),
+            cells: rendered,
+            status_idx,
+            cell_masks,
+            row_mask,
+        }
     }
 
     /// What fuzzy terms match against: "namespace name". Helm rows are backed
@@ -182,7 +310,14 @@ impl App {
     /// read the live metrics snapshot, `age` the creation timestamp; any
     /// other key names a displayed column (numeric values compare by the
     /// cell's leading number, text case-insensitively).
-    fn eval_cmp(&self, o: &DynamicObject, cmp: &crate::filter::Cmp) -> bool {
+    fn eval_cmp(
+        &self,
+        o: &DynamicObject,
+        cmp: &crate::filter::Cmp,
+        column: &CmpColumn,
+        key: &RowKey,
+        cells: &mut HashMap<RowKey, CellCacheEntry>,
+    ) -> bool {
         use crate::filter::CmpValue;
         match &cmp.value {
             CmpValue::Cpu(want) => cmp.op.eval(self.metrics_for(o).0.cmp(want)),
@@ -191,7 +326,7 @@ impl App {
                 Some(age) => cmp.op.eval(age.cmp(want)),
                 None => false,
             },
-            CmpValue::Num(want) => match self.column_cell(o, &cmp.key) {
+            CmpValue::Num(want) => match self.column_cell(o, column, key, cells) {
                 Some(cell) => cmp
                     .op
                     .eval(crate::columns::parse_leading_num(&cell).total_cmp(want)),
@@ -200,31 +335,44 @@ impl App {
             // `want` was folded once at parse time. ASCII cells compare through
             // an allocation-free byte iterator; non-ASCII cells use
             // whole-string lowercasing for context-sensitive Unicode mappings.
-            CmpValue::Str(want) => match self.column_cell(o, &cmp.key) {
+            CmpValue::Str(want) => match self.column_cell(o, column, key, cells) {
                 Some(cell) => cmp.op.eval(crate::filter::cmp_folded_lower(&cell, want)),
                 None => false,
             },
         }
     }
 
-    /// The displayed cell a comparison key names (case-insensitive column
-    /// header), plus NAMESPACE and a `/status/phase` fallback for kinds
-    /// without a STATUS column. Extracts only the named column — this runs
-    /// per object per rebuild when a structured filter is active.
-    fn column_cell<'o>(&self, o: &'o DynamicObject, key: &str) -> Option<Cow<'o, str>> {
-        if key.eq_ignore_ascii_case("namespace") || key.eq_ignore_ascii_case("ns") {
+    /// The displayed cell a comparison reads, for the column
+    /// [`Self::resolve_cmp_column`] already picked.
+    ///
+    /// Ordinary columns come from the same per-revision cell cache the fuzzy
+    /// fallback and the renderer read, so a comparison filter no longer
+    /// re-extracts (and, on a Helm view, re-gunzips) one column of every
+    /// object on every rebuild. Elapsed-time columns are rendered live because
+    /// their value drifts without a new resourceVersion.
+    fn column_cell<'a>(
+        &self,
+        o: &'a DynamicObject,
+        column: &CmpColumn,
+        key: &RowKey,
+        cells: &'a mut HashMap<RowKey, CellCacheEntry>,
+    ) -> Option<Cow<'a, str>> {
+        match *column {
             // Borrowed: the namespace is already a `String` on the object, and
             // this runs per object per rebuild.
-            return Some(o.metadata.namespace.as_deref().unwrap_or("").into());
+            CmpColumn::Namespace => Some(o.metadata.namespace.as_deref().unwrap_or("").into()),
+            CmpColumn::Cached(i) => self
+                .cell_entry(key, o, cells)
+                .cells
+                .get(i)
+                .map(|c| Cow::Borrowed(c.as_str())),
+            CmpColumn::Live(i) => self.spec.cell_at(o, i).map(Cow::Owned),
+            CmpColumn::Phase => {
+                let phase = phase(o);
+                (!phase.is_empty()).then_some(Cow::Owned(phase))
+            }
+            CmpColumn::Missing | CmpColumn::Unused => None,
         }
-        if let Some(i) = self.spec.header_index(key) {
-            return self.spec.cell_at(o, i).map(Cow::Owned);
-        }
-        if key.eq_ignore_ascii_case("status") {
-            let phase = phase(o);
-            return (!phase.is_empty()).then_some(Cow::Owned(phase));
-        }
-        None
     }
 
     /// Whether the running watch is scoped by `-l`/`-f` selectors from the
@@ -294,6 +442,9 @@ impl App {
         // Parsed once, not once per object: the filter check used to re-borrow
         // the filter cache and re-compare the raw filter string for every row.
         let parsed = self.parsed_filter();
+        // …and compiled once: pattern masks and comparison-column resolution
+        // are object-independent, but used to be redone for every row.
+        let plan = self.compile_filter_plan(&parsed);
         // Disjoint field borrows so the filter can warm the cell cache while
         // the sort-key cache is also held.
         let RowsCache {
@@ -319,7 +470,7 @@ impl App {
             {
                 continue;
             }
-            if !self.matches_filter_cached(o, k, &parsed, cells) {
+            if !self.matches_filter_cached(o, k, &plan, cells) {
                 continue;
             }
             // One watch event marks the whole ordering dirty, so the
@@ -357,19 +508,33 @@ impl App {
             );
             entries.push((primary, tie, k));
         }
-        let desc = self.sort_desc && sort_header.is_some();
         // Unstable: the `(namespace, name)` fallback below is a total order
         // for a Kubernetes object set, so stability buys nothing here — and a
         // stable sort allocates an n/2 scratch buffer on every rebuild.
-        entries.sort_unstable_by(|a, b| {
-            let mut ord = a.0.cmp_to(&b.0);
-            if desc {
-                ord = ord.reverse();
+        match sort_header {
+            // No sort column: every primary key is the same empty string, so
+            // the whole ordering is the namespace/name fallback. Comparing it
+            // directly skips a `SortKey` comparison per comparison.
+            None => entries.sort_unstable_by(|a, b| a.1.cmp(&b.1)),
+            Some(_) => {
+                let desc = self.sort_desc;
+                entries.sort_unstable_by(|a, b| {
+                    let mut ord = a.0.cmp_to(&b.0);
+                    if desc {
+                        ord = ord.reverse();
+                    }
+                    // Ties always fall back to namespace/name ascending.
+                    ord.then_with(|| a.1.cmp(&b.1))
+                });
             }
-            // Ties always fall back to namespace/name ascending.
-            ord.then_with(|| a.1.cmp(&b.1))
-        });
-        cache.keys = entries.into_iter().map(|(_, _, k)| k.clone()).collect();
+        }
+        // Refilled in place: this is one of the few allocations that scales
+        // with the store, and a rebuild happens per watch event whenever a
+        // filter or sort is active.
+        cache.keys.clear();
+        cache
+            .keys
+            .extend(entries.iter().map(|(_, _, k)| RowKey::clone(k)));
         cache.dirty = false;
 
         // `cells`/`sort_keys` are otherwise only ever cleared wholesale by
@@ -467,19 +632,41 @@ impl App {
             .collect()
     }
 
-    pub(crate) fn ensure_table_cell_cache(&self, rows: &[&DynamicObject]) {
+    /// [`Self::rows_window`] with each row's canonical store key alongside it.
+    ///
+    /// The renderer needs both, and the key it needs already exists: rebuilding
+    /// it from the object meant formatting `"{ns}/{name}"` into a fresh
+    /// `String` per visible row per frame — once to warm the cell cache and
+    /// again to read it back — and then hashing that instead of the `Rc` the
+    /// store and the caches are already keyed by.
+    pub(crate) fn rows_window_keyed(
+        &self,
+        offset: usize,
+        n: usize,
+    ) -> Vec<(&RowKey, &DynamicObject)> {
+        self.ensure_rows_cache();
+        self.rows_cache
+            .borrow()
+            .keys
+            .iter()
+            .skip(offset)
+            .take(n)
+            .filter_map(|k| self.store.entry(k.as_ref()))
+            .collect()
+    }
+
+    /// Every display-ordered row with its canonical store key.
+    pub(crate) fn rows_keyed(&self) -> Vec<(&RowKey, &DynamicObject)> {
+        self.rows_window_keyed(0, usize::MAX)
+    }
+
+    pub(crate) fn ensure_table_cell_cache(&self, rows: &[(&RowKey, &DynamicObject)]) {
         let mut cache = self.rows_cache.borrow_mut();
-        for obj in rows {
+        for (key, obj) in rows {
             // Shares `cell_entry` with the filter pass, so a row rendered for
             // filtering is already warm for the renderer (and vice versa) and
             // there is one place that decides what "stale" means.
-            let key = row_key(obj);
-            let key = self
-                .store
-                .key(&key)
-                .cloned()
-                .unwrap_or_else(|| Rc::from(key));
-            self.cell_entry(&key, obj, &mut cache.cells);
+            self.cell_entry(key, obj, &mut cache.cells);
         }
     }
 
@@ -630,14 +817,22 @@ impl App {
     }
 
     /// Latest (cpu_millicores, mem_bytes) for an object from the metrics map.
-    pub(super) fn metrics_for(&self, o: &DynamicObject) -> (i64, i64) {
-        let name = o.metadata.name.clone().unwrap_or_default();
-        let key = if self.kind_plural == "pods" {
-            format!("{}/{}", o.metadata.namespace.as_deref().unwrap_or(""), name)
-        } else {
-            name
-        };
-        self.metrics.get(&key).copied().unwrap_or((0, 0))
+    ///
+    /// Looked up through a reused buffer: this runs per visible row per frame
+    /// (and per object per rebuild when sorting or filtering by CPU/MEM), and
+    /// it used to clone the object's name and then format a second `String`
+    /// for the key on every one of those.
+    pub(crate) fn metrics_for(&self, o: &DynamicObject) -> (i64, i64) {
+        let name = o.metadata.name.as_deref().unwrap_or_default();
+        if self.kind_plural != "pods" {
+            return self.metrics.get(name).copied().unwrap_or((0, 0));
+        }
+        let mut key = self.metrics_key_buf.borrow_mut();
+        key.clear();
+        key.push_str(o.metadata.namespace.as_deref().unwrap_or(""));
+        key.push('/');
+        key.push_str(name);
+        self.metrics.get(key.as_str()).copied().unwrap_or((0, 0))
     }
 
     /// Latest pod count for a node from the pods poll; `None` before the
