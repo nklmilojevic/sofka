@@ -821,6 +821,99 @@ async fn ctrl_f_and_ctrl_b_page_document_views() {
 }
 
 #[tokio::test]
+async fn document_scroll_keeps_the_last_page_filled() {
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    let (mut app, _rx) = test_app();
+    app.mode = Mode::Detail;
+    app.detail = Scrollable {
+        title: "document".into(),
+        lines: (0..30).map(|i| format!("line {i}")).collect(),
+        ..Default::default()
+    };
+
+    // A 24-row terminal leaves 13 content rows after the standard header,
+    // footer, prompt, and document border.
+    let mut term = Terminal::new(TestBackend::new(80, 24)).unwrap();
+    term.draw(|f| crate::ui::draw(f, &mut app)).unwrap();
+
+    app.handle_key(press(KeyCode::Char('G'))).unwrap();
+    assert_eq!(app.detail.scroll, 17, "bottom keeps a full viewport");
+    app.handle_key(press(KeyCode::Char('j'))).unwrap();
+    assert_eq!(app.detail.scroll, 17, "cannot scroll past the last page");
+    app.handle_key(press(KeyCode::Char('k'))).unwrap();
+    assert_eq!(
+        app.detail.scroll, 16,
+        "up moves immediately from the bottom"
+    );
+
+    app.detail = Scrollable {
+        title: "short document".into(),
+        lines: (0..10).map(|i| format!("line {i}")).collect(),
+        ..Default::default()
+    };
+    term.draw(|f| crate::ui::draw(f, &mut app)).unwrap();
+    app.handle_key(press(KeyCode::Char('G'))).unwrap();
+    app.handle_key(press(KeyCode::Char('j'))).unwrap();
+    assert_eq!(app.detail.scroll, 0, "a short document never scrolls");
+
+    // A single source line may occupy more display rows than the viewport.
+    // ANSI sequences consume zero columns in both the cached layout and the
+    // rendered rows, so they cannot hide the line's tail from navigation.
+    app.detail = Scrollable {
+        title: "wrapped document".into(),
+        lines: vec![format!(
+            "{}{}LAST\x1b[0m",
+            "\x1b[31m".repeat(20),
+            "x".repeat(18 * 19)
+        )]
+        .into(),
+        wrap: true,
+        ..Default::default()
+    };
+    let mut term = Terminal::new(TestBackend::new(20, 24)).unwrap();
+    term.draw(|f| crate::ui::draw(f, &mut app)).unwrap();
+    app.handle_key(press(KeyCode::Char('G'))).unwrap();
+    assert_eq!(app.detail.scroll, 7, "bottom uses wrapped display rows");
+    app.handle_key(press(KeyCode::Char('j'))).unwrap();
+    assert_eq!(app.detail.scroll, 7, "wrapped bottom remains clamped");
+
+    term.draw(|f| crate::ui::draw(f, &mut app)).unwrap();
+    let buffer = term.backend().buffer();
+    let screen = (0..buffer.area.height)
+        .map(|y| {
+            (0..buffer.area.width)
+                .map(|x| buffer[(x, y)].symbol())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        screen.contains("LAST"),
+        "last wrapped row missing:\n{screen}"
+    );
+
+    app.detail = Scrollable {
+        title: "tabbed document".into(),
+        lines: vec![format!(
+            "{}{}TABS",
+            "\t".repeat(18 * 10),
+            "x".repeat(18 * 19)
+        )]
+        .into(),
+        wrap: true,
+        ..Default::default()
+    };
+    term.draw(|f| crate::ui::draw(f, &mut app)).unwrap();
+    app.handle_key(press(KeyCode::Char('G'))).unwrap();
+    assert_eq!(
+        app.detail.scroll, 7,
+        "tabs must not inflate the wrapped bottom offset"
+    );
+}
+
+#[tokio::test]
 async fn switching_kind_resets_stale_selection_to_top() {
     let (mut app, _rx) = test_app();
     app.switch_kind("pods");

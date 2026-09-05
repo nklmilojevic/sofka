@@ -6,7 +6,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{
     Block, BorderType, Borders, Cell, Clear, Gauge, HighlightSpacing, List, ListItem, ListState,
-    Paragraph, Row, Table, Wrap,
+    Paragraph, Row, Table,
 };
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
@@ -129,19 +129,19 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     }
 
     match app.mode {
-        Mode::Detail => draw_scrollable(frame, &app.detail, chunks[1], theme::sky()),
-        Mode::Diff => draw_diff(frame, &app.detail, chunks[1]),
-        Mode::Events => draw_scrollable(frame, &app.detail, chunks[1], theme::peach()),
+        Mode::Detail => draw_scrollable(frame, &mut app.detail, chunks[1], theme::sky()),
+        Mode::Diff => draw_diff(frame, &mut app.detail, chunks[1]),
+        Mode::Events => draw_scrollable(frame, &mut app.detail, chunks[1], theme::peach()),
         Mode::Logs | Mode::LogFilter => draw_logs(frame, app, chunks[1]),
         // The lookback prompt opens from the logs view — keep it underneath.
         Mode::Prompt if app.prompt_over_logs() => draw_logs(frame, app, chunks[1]),
         // While typing a doc search, keep drawing the view it was opened from
         // so the matches narrow live under the prompt.
         Mode::DocFilter => match app.doc_filter_return {
-            Mode::Diff => draw_diff(frame, &app.detail, chunks[1]),
-            Mode::Events => draw_scrollable(frame, &app.detail, chunks[1], theme::peach()),
+            Mode::Diff => draw_diff(frame, &mut app.detail, chunks[1]),
+            Mode::Events => draw_scrollable(frame, &mut app.detail, chunks[1], theme::peach()),
             Mode::Help => draw_help(frame, app, chunks[1]),
-            _ => draw_scrollable(frame, &app.detail, chunks[1], theme::sky()),
+            _ => draw_scrollable(frame, &mut app.detail, chunks[1], theme::sky()),
         },
         Mode::Help => draw_help(frame, app, chunks[1]),
         Mode::Pulse => draw_pulse(frame, app, chunks[1]),
@@ -155,9 +155,9 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         // While the palette is open, keep drawing the view it was opened
         // from, so a global `:` never flashes the table underneath it.
         Mode::Command => match app.palette_return {
-            Mode::Diff => draw_diff(frame, &app.detail, chunks[1]),
-            Mode::Events => draw_scrollable(frame, &app.detail, chunks[1], theme::peach()),
-            Mode::Detail => draw_scrollable(frame, &app.detail, chunks[1], theme::sky()),
+            Mode::Diff => draw_diff(frame, &mut app.detail, chunks[1]),
+            Mode::Events => draw_scrollable(frame, &mut app.detail, chunks[1], theme::peach()),
+            Mode::Detail => draw_scrollable(frame, &mut app.detail, chunks[1], theme::sky()),
             Mode::Logs => draw_logs(frame, app, chunks[1]),
             Mode::Help => draw_help(frame, app, chunks[1]),
             Mode::Pulse => draw_pulse(frame, app, chunks[1]),
@@ -1099,34 +1099,57 @@ fn render_name_cell(app: &App, name: &str, base: Color) -> Cell<'static> {
 
 fn draw_scrollable(
     frame: &mut Frame,
-    view: &crate::app::Scrollable,
+    view: &mut crate::app::Scrollable,
     area: Rect,
     accent: ratatui::style::Color,
 ) {
+    let inner_w = area.width.saturating_sub(2) as usize;
     let inner_h = area.height.saturating_sub(2) as usize;
-    let scroll = view.scroll.min(view.lines.len().saturating_sub(1));
-    let (start, end) = visible_line_window(view.lines.len(), scroll, inner_h);
+    view.set_viewport(inner_w, inner_h);
+    let (start, end, row_offset) = view.visible_source_window();
     let text: Vec<Line> = view
         .lines
         .iter()
         .skip(start)
         .take(end - start)
-        .map(|l| highlight_matches(Line::from(highlight_yaml(l)), &view.filter))
+        .map(|l| {
+            let line = strip_ansi_if_present(l);
+            highlight_matches(Line::from(highlight_yaml(&line)), &view.filter)
+        })
         .collect();
+    let text = if view.wrap {
+        visible_wrapped_rows(text, inner_w, row_offset, inner_h)
+    } else {
+        text
+    };
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(accent))
         .title(Span::styled(doc_title(view), theme::title()));
     let p = Paragraph::new(text).block(block);
-    // Wrap folds long lines; otherwise honor the horizontal offset so content
-    // past the right edge can be scrolled into view.
+    // Wrapped lines are already sliced to the exact visible display rows;
+    // otherwise honor the horizontal offset for content past the right edge.
     let p = if view.wrap {
-        p.wrap(Wrap { trim: false })
+        p
     } else {
         p.scroll((0, view.hscroll.min(u16::MAX as usize) as u16))
     };
     frame.render_widget(p, area);
+}
+
+fn visible_wrapped_rows(
+    lines: Vec<Line<'static>>,
+    width: usize,
+    row_offset: usize,
+    height: usize,
+) -> Vec<Line<'static>> {
+    lines
+        .into_iter()
+        .flat_map(|line| wrap_line(line, width))
+        .skip(row_offset)
+        .take(height)
+        .collect()
 }
 
 /// Logs view with optional substring filter + match highlighting.
@@ -1286,11 +1309,10 @@ fn draw_logs(frame: &mut Frame, app: &mut App, area: Rect) {
 /// [`wrap_line`] performs — the scroll math depends on them agreeing.
 pub(crate) fn wrapped_height(raw: &str, width: usize) -> usize {
     let width = width.max(1);
-    // Fast path: plain ASCII with no escapes wraps at exactly `width` chars.
-    // `memchr` vectorizes the escape scan (SSE2/AVX2 on x86-64, NEON on
-    // aarch64) where `<[u8]>::contains` is a scalar `iter().any()`; this runs
-    // over the whole log buffer, so the difference is not academic.
-    if raw.is_ascii() && memchr::memchr(0x1b, raw.as_bytes()).is_none() {
+    // Fast path: printable ASCII wraps at exactly `width` bytes. Control
+    // characters stay on the general path because ratatui assigns them no
+    // display width; counting a tab as one byte would drift from `wrap_line`.
+    if raw.is_ascii() && !raw.bytes().any(|b| b.is_ascii_control()) {
         return raw.len().div_ceil(width).max(1);
     }
     let mut rows = 1usize;
@@ -1555,6 +1577,14 @@ fn strip_ansi(s: &str) -> String {
     ansi_runs(s).into_iter().map(|r| r.text).collect()
 }
 
+fn strip_ansi_if_present(s: &str) -> std::borrow::Cow<'_, str> {
+    if memchr::memchr(0x1b, s.as_bytes()).is_some() {
+        std::borrow::Cow::Owned(strip_ansi(s))
+    } else {
+        std::borrow::Cow::Borrowed(s)
+    }
+}
+
 /// Split a string into styled runs by parsing ANSI SGR (`\x1b[…m`) sequences,
 /// dropping the escape bytes. Non-SGR CSI sequences (cursor moves, etc.) are
 /// swallowed too. Standard 8/16 foreground colors map onto the active skin so
@@ -1771,25 +1801,32 @@ fn klog_level(l: &str, level: char) -> bool {
 }
 
 /// Unified-diff view with +/- line coloring.
-fn draw_diff(frame: &mut Frame, view: &crate::app::Scrollable, area: Rect) {
+fn draw_diff(frame: &mut Frame, view: &mut crate::app::Scrollable, area: Rect) {
+    let inner_w = area.width.saturating_sub(2) as usize;
     let inner_h = area.height.saturating_sub(2) as usize;
-    let scroll = view.scroll.min(view.lines.len().saturating_sub(1));
-    let (start, end) = visible_line_window(view.lines.len(), scroll, inner_h);
+    view.set_viewport(inner_w, inner_h);
+    let (start, end, row_offset) = view.visible_source_window();
     let lines: Vec<Line> = view
         .lines
         .iter()
         .skip(start)
         .take(end - start)
         .map(|l| {
-            let color = match l.chars().next() {
+            let line = strip_ansi_if_present(l);
+            let color = match line.chars().next() {
                 Some('+') => theme::green(),
                 Some('-') => theme::red(),
                 _ => theme::overlay1(),
             };
-            let line = Line::from(Span::styled(l.clone(), Style::default().fg(color)));
+            let line = Line::from(Span::styled(line.into_owned(), Style::default().fg(color)));
             highlight_matches(line, &view.filter)
         })
         .collect();
+    let lines = if view.wrap {
+        visible_wrapped_rows(lines, inner_w, row_offset, inner_h)
+    } else {
+        lines
+    };
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
@@ -1797,17 +1834,11 @@ fn draw_diff(frame: &mut Frame, view: &crate::app::Scrollable, area: Rect) {
         .title(Span::styled(doc_title(view), theme::title()));
     let p = Paragraph::new(lines).block(block);
     let p = if view.wrap {
-        p.wrap(Wrap { trim: false })
+        p
     } else {
         p.scroll((0, view.hscroll.min(u16::MAX as usize) as u16))
     };
     frame.render_widget(p, area);
-}
-
-fn visible_line_window(len: usize, scroll: usize, height: usize) -> (usize, usize) {
-    let start = scroll.min(len);
-    let end = start.saturating_add(height).min(len);
-    (start, end)
 }
 
 /// Doc-view title, extended with the active search query and the current
@@ -3716,6 +3747,8 @@ mod tests {
             "short",
             "exactly-ten",
             "a much longer plain ascii log line that wraps a few times over",
+            // Tabs and other ASCII controls are zero-width.
+            "column\tvalue\tthat wraps near a boundary",
             // ANSI escapes are zero-width.
             "\x1b[33mwarn\x1b[0m something colorful happened in the reconcile loop",
             // Wide CJK glyphs take two columns and never straddle a break.
@@ -3748,14 +3781,6 @@ mod tests {
         assert_eq!(wrapped_height("五五五五五五", 10), 2);
         // ANSI escapes don't consume columns.
         assert_eq!(wrapped_height("\x1b[31maaaaaaaaaa\x1b[0m", 10), 1);
-    }
-
-    #[test]
-    fn visible_line_window_clamps_to_viewport() {
-        assert_eq!(visible_line_window(100, 10, 20), (10, 30));
-        assert_eq!(visible_line_window(100, 95, 20), (95, 100));
-        assert_eq!(visible_line_window(100, 150, 20), (100, 100));
-        assert_eq!(visible_line_window(100, 10, 0), (10, 10));
     }
 
     #[test]
