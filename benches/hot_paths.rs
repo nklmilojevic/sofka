@@ -471,6 +471,20 @@ fn provider_ingest(c: &mut Criterion) {
     g.finish();
 }
 
+/// 2.x — pricing a view snapshot when it is cached, which is what lets the
+/// eviction check just add up numbers. Paid once per view switch, so this is
+/// the number that decides whether measuring every object is affordable.
+fn view_bytes(c: &mut Criterion) {
+    let mut g = c.benchmark_group("view_bytes");
+    for n in [2_000usize, 10_000] {
+        let items = bs::items(n);
+        g.bench_with_input(BenchmarkId::new("pods", n), &n, |b, _| {
+            b.iter(|| black_box(bs::view_bytes(&items)));
+        });
+    }
+    g.finish();
+}
+
 /// 2.x — a logs view held at its retention cap: every batch trims the front,
 /// which used to invalidate the whole index and re-filter and re-measure every
 /// retained line.
@@ -532,6 +546,7 @@ fn doc_hscroll(c: &mut Criterion) {
 
 criterion_group!(
     benches,
+    view_bytes,
     log_saturated,
     metrics_fold,
     doc_hscroll,

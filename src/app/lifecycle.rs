@@ -286,7 +286,7 @@ impl App {
         };
         self.store.clear();
         if let Some(cached) = self.view_cache.get(&key) {
-            self.store.seed(cached.clone());
+            self.store.seed(cached.items.clone());
         }
         self.watch_key = Some(key);
         self.metrics.clear();
@@ -340,7 +340,10 @@ impl App {
         }
         self.view_cache_order.retain(|k| *k != key);
         self.view_cache_order.push_back(key.clone());
-        self.view_cache.insert(key, self.store.take_items());
+        let items = self.store.take_items();
+        // Priced here, once, while the snapshot is being put away.
+        let bytes = view_bytes(&items);
+        self.view_cache.insert(key, CachedView { items, bytes });
         self.evict_view_cache();
     }
 
@@ -355,11 +358,11 @@ impl App {
     /// dropping it would defeat the one case the cache exists for, which is
     /// stepping straight back into the view you just left.
     fn evict_view_cache(&mut self) {
-        let too_many_objects = |cache: &HashMap<ViewKey, crate::store::Items>| {
-            cache.values().map(HashMap::len).sum::<usize>() > VIEW_CACHE_MAX_OBJECTS
+        let too_many_objects = |cache: &HashMap<ViewKey, CachedView>| {
+            cache.values().map(|v| v.items.len()).sum::<usize>() > VIEW_CACHE_MAX_OBJECTS
         };
-        let too_many_bytes = |cache: &HashMap<ViewKey, crate::store::Items>| {
-            cache.values().map(Self::approx_view_bytes).sum::<usize>() > VIEW_CACHE_MAX_BYTES
+        let too_many_bytes = |cache: &HashMap<ViewKey, CachedView>| {
+            cache.values().map(|v| v.bytes).sum::<usize>() > VIEW_CACHE_MAX_BYTES
         };
         while self.view_cache_order.len() > VIEW_CACHE_MAX
             || (self.view_cache_order.len() > 1
@@ -373,6 +376,21 @@ impl App {
             }
         }
     }
+}
+
+/// Approximate retained bytes of a whole view snapshot.
+///
+/// Every object, not a sample: a view is rarely uniform, and the objects the
+/// budget exists to catch — a handful of megabyte Secrets among a thousand
+/// small ConfigMaps — are exactly the ones a sample of two dozen misses,
+/// under-counting the snapshot by an order of magnitude. This runs once per
+/// snapshot, when it is cached, not on every eviction check — measured at
+/// ~1 ms per 2,000 pods and ~13 ms per 10,000, paid on a view switch that is
+/// already tearing down a watch and rebuilding the table. Objects shared with
+/// the live store are counted here too: an over-estimate, and the safe
+/// direction for a cap.
+pub(super) fn view_bytes(items: &crate::store::Items) -> usize {
+    items.values().map(|o| approx_object_bytes(o)).sum()
 }
 
 /// Per-object and per-container usage, keyed the way the UI looks them up.
@@ -411,29 +429,6 @@ pub(super) fn metrics_maps(list: &[DynamicObject], is_node: bool) -> MetricsMaps
 }
 
 impl App {
-    /// Rough retained size of one cached view, from a bounded sample.
-    ///
-    /// Measuring every object would cost a full walk of the snapshot on every
-    /// eviction check, which is exactly the kind of work a cache is supposed
-    /// to avoid; a couple of dozen objects give the mean payload closely
-    /// enough to tell a Pod view from a Secret view, which is the distinction
-    /// the budget exists to make. Objects shared with the live store are
-    /// counted here too — an over-estimate, and the safe direction for a cap.
-    pub(super) fn approx_view_bytes(items: &crate::store::Items) -> usize {
-        const SAMPLE: usize = 24;
-        let count = items.len();
-        if count == 0 {
-            return 0;
-        }
-        let mut sampled = 0usize;
-        let mut bytes = 0usize;
-        for obj in items.values().take(SAMPLE) {
-            bytes += approx_object_bytes(obj);
-            sampled += 1;
-        }
-        bytes / sampled.max(1) * count
-    }
-
     /// Drop every cached view snapshot (context switch: another cluster's
     /// resources, and possibly different RBAC, must never be redisplayed).
     pub(super) fn clear_view_cache(&mut self) {

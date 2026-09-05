@@ -61,6 +61,13 @@ impl App {
         lifecycle::metrics_maps(list, is_node)
     }
 
+    /// Price a view snapshot the way caching one does. `view_bytes` is
+    /// `pub(super)`; this exposes it to `benchsupport` under the bench feature.
+    #[cfg(feature = "bench")]
+    pub fn bench_view_bytes(items: &crate::store::Items) -> usize {
+        lifecycle::view_bytes(items)
+    }
+
     #[cfg(feature = "bench")]
     pub fn bench_install_kind(&mut self, plural: &str) {
         self.kind = self.cluster.resolve(plural);
@@ -1461,6 +1468,17 @@ impl TableCellCache<'_> {
     }
 }
 
+/// A retained view snapshot and what it costs to keep.
+///
+/// The size is measured once, when the snapshot is cached, because that is the
+/// only moment its contents change — eviction then just adds up numbers
+/// instead of re-examining objects.
+pub(super) struct CachedView {
+    pub(super) items: crate::store::Items,
+    /// Approximate retained bytes (see [`helpers::approx_object_bytes`]).
+    pub(super) bytes: usize,
+}
+
 /// Maximum root views kept in the `[`/`]` history.
 const HISTORY_MAX: usize = 50;
 
@@ -1571,7 +1589,7 @@ pub struct App {
     /// Snapshots of recently-left views: shown instantly (marked syncing) when
     /// the user navigates back, while the fresh watch relists in the
     /// background. Bounded by [`VIEW_CACHE_MAX`]; cleared on context switch.
-    view_cache: HashMap<ViewKey, crate::store::Items>,
+    view_cache: HashMap<ViewKey, CachedView>,
     /// LRU order for [`Self::view_cache`] (front = oldest).
     view_cache_order: VecDeque<ViewKey>,
     /// Browser-style history of root views for `[`/`]`: every root switch

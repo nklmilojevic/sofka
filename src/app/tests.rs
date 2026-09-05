@@ -9592,26 +9592,53 @@ fn view_size_estimate_tracks_payload_not_object_count() {
         heavy_bytes > light_bytes * 100,
         "a 320 KiB object must not price like a bare pod: {heavy_bytes} vs {light_bytes}"
     );
+}
 
-    // And the per-view estimate scales with the number of objects held.
-    let one: crate::store::Items = std::iter::once((
-        crate::store::row_key(&heavy).into(),
-        std::sync::Arc::new(heavy.clone()),
-    ))
-    .collect();
-    let many: crate::store::Items = (0..50)
-        .map(|i| {
-            let mut o = heavy.clone();
-            o.metadata.name = Some(format!("secret-{i}"));
-            (crate::store::row_key(&o).into(), std::sync::Arc::new(o))
-        })
-        .collect();
-    let one_view = App::approx_view_bytes(&one);
-    let many_view = App::approx_view_bytes(&many);
-    assert!(one_view >= heavy_bytes, "{one_view} < {heavy_bytes}");
+/// A snapshot is rarely uniform, and the objects worth evicting for are the
+/// rare heavy ones. Pricing a view from a sample of a couple of dozen misses
+/// them almost every time — a thousand small ConfigMaps beside five megabyte
+/// Secrets would be priced at the ConfigMaps' mean and kept indefinitely — so
+/// every object is measured.
+#[test]
+fn view_size_estimate_counts_the_heavy_tail_of_a_skewed_view() {
+    let mut items = crate::store::Items::new();
+    for i in 0..1_000 {
+        let o = obj(json!({
+            "apiVersion": "v1", "kind": "ConfigMap",
+            "metadata": {"name": format!("small-{i}"), "namespace": "default"},
+            "data": {"key": "value"}
+        }));
+        items.insert(crate::store::row_key(&o).into(), std::sync::Arc::new(o));
+    }
+    let payload = "y".repeat(1024 * 1024);
+    for i in 0..5 {
+        let o = obj(json!({
+            "apiVersion": "v1", "kind": "Secret",
+            "metadata": {"name": format!("huge-{i}"), "namespace": "default"},
+            "data": {"release": payload}
+        }));
+        items.insert(crate::store::row_key(&o).into(), std::sync::Arc::new(o));
+    }
+
+    let measured = crate::app::lifecycle::view_bytes(&items);
     assert!(
-        many_view > one_view * 40,
-        "50 copies must price near 50x one: {many_view} vs {one_view}"
+        measured > 5 * 1024 * 1024,
+        "the five megabyte Secrets must be counted, not sampled past: {measured}"
+    );
+    // And the small objects are not what drives it.
+    let small_only: usize = items
+        .values()
+        .filter(|o| {
+            o.metadata
+                .name
+                .as_deref()
+                .is_some_and(|n| n.starts_with("small-"))
+        })
+        .map(|o| crate::app::helpers::approx_object_bytes(o))
+        .sum();
+    assert!(
+        measured > small_only * 5,
+        "a sampled mean of the small objects would have priced this at ~{small_only}"
     );
 }
 

@@ -545,3 +545,8 @@ pub fn crd_cluster(n: usize) -> Cluster {
     }
     cluster
 }
+
+/// What caching one view snapshot costs to price — paid once per view switch.
+pub fn view_bytes(items: &crate::store::Items) -> usize {
+    App::bench_view_bytes(items)
+}
