@@ -859,11 +859,16 @@ async fn document_scroll_keeps_the_last_page_filled() {
     assert_eq!(app.detail.scroll, 0, "a short document never scrolls");
 
     // A single source line may occupy more display rows than the viewport.
-    // Bottom navigation must reach its final wrapped rows, not stop at the
-    // source line's first row.
+    // ANSI sequences consume zero columns in both the cached layout and the
+    // rendered rows, so they cannot hide the line's tail from navigation.
     app.detail = Scrollable {
         title: "wrapped document".into(),
-        lines: vec![format!("{}LAST", "x".repeat(18 * 19))].into(),
+        lines: vec![format!(
+            "{}{}LAST\x1b[0m",
+            "\x1b[31m".repeat(20),
+            "x".repeat(18 * 19)
+        )]
+        .into(),
         wrap: true,
         ..Default::default()
     };

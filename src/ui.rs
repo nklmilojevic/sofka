@@ -1112,7 +1112,10 @@ fn draw_scrollable(
         .iter()
         .skip(start)
         .take(end - start)
-        .map(|l| highlight_matches(Line::from(highlight_yaml(l)), &view.filter))
+        .map(|l| {
+            let line = strip_ansi_if_present(l);
+            highlight_matches(Line::from(highlight_yaml(&line)), &view.filter)
+        })
         .collect();
     let text = if view.wrap {
         visible_wrapped_rows(text, inner_w, row_offset, inner_h)
@@ -1575,6 +1578,14 @@ fn strip_ansi(s: &str) -> String {
     ansi_runs(s).into_iter().map(|r| r.text).collect()
 }
 
+fn strip_ansi_if_present(s: &str) -> std::borrow::Cow<'_, str> {
+    if memchr::memchr(0x1b, s.as_bytes()).is_some() {
+        std::borrow::Cow::Owned(strip_ansi(s))
+    } else {
+        std::borrow::Cow::Borrowed(s)
+    }
+}
+
 /// Split a string into styled runs by parsing ANSI SGR (`\x1b[…m`) sequences,
 /// dropping the escape bytes. Non-SGR CSI sequences (cursor moves, etc.) are
 /// swallowed too. Standard 8/16 foreground colors map onto the active skin so
@@ -1802,12 +1813,13 @@ fn draw_diff(frame: &mut Frame, view: &mut crate::app::Scrollable, area: Rect) {
         .skip(start)
         .take(end - start)
         .map(|l| {
-            let color = match l.chars().next() {
+            let line = strip_ansi_if_present(l);
+            let color = match line.chars().next() {
                 Some('+') => theme::green(),
                 Some('-') => theme::red(),
                 _ => theme::overlay1(),
             };
-            let line = Line::from(Span::styled(l.clone(), Style::default().fg(color)));
+            let line = Line::from(Span::styled(line.into_owned(), Style::default().fg(color)));
             highlight_matches(line, &view.filter)
         })
         .collect();
