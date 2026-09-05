@@ -72,3 +72,10 @@ required-features = ["bench"]
 [[example]]
 name = "memprobe"
 required-features = ["bench", "dhat-heap"]
+
+# Fixed-size latency probe for state persistence. Unlike Criterion's adaptive
+# iteration count, this can time enqueue latency without building an unbounded
+# backlog faster than the filesystem worker can drain it.
+[[example]]
+name = "state_write_probe"
+required-features = ["bench"]

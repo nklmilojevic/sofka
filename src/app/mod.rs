@@ -1366,6 +1366,9 @@ pub struct App {
     gen_flag: Arc<AtomicU64>,
     pub tasks: Vec<JoinHandle<()>>,
     pub tx: Sender<Msg>,
+    /// Ordered off-thread persistence for small UI state files. `None` keeps
+    /// unit tests and degraded startup on the synchronous fallback.
+    pub state_writer: Option<crate::state_writer::StateWriter>,
     stack: Vec<Frame>,
     /// Scope of the running watch, so its rows can be stashed under the right
     /// key when the user navigates away.
@@ -1545,6 +1548,10 @@ pub struct App {
     pub watch_errors: u64,
     /// The most recent error message, for `:info` diagnostics.
     pub last_error: Option<String>,
+    /// The most recent failure to persist a small UI-state file (namespace,
+    /// sort, fleet marks). Kept apart from [`Self::last_error`], which `:info`
+    /// reports under watch health — a disk problem is not a watch problem.
+    pub last_state_write_error: Option<String>,
     /// Whether the Metrics API has ever returned data this session.
     pub metrics_seen: bool,
     /// The metrics poll's most recent failure (`None` while it works), for
@@ -1738,6 +1745,7 @@ impl App {
             gen_flag: Arc::new(AtomicU64::new(0)),
             tasks: Vec::new(),
             tx,
+            state_writer: None,
             stack: Vec::new(),
             watch_key: None,
             view_cache: HashMap::new(),
@@ -1820,6 +1828,7 @@ impl App {
             journal: crate::journal::Journal::default(),
             watch_errors: 0,
             last_error: None,
+            last_state_write_error: None,
             metrics_seen: false,
             metrics_error: None,
             rbac_allowed: None,

@@ -199,6 +199,13 @@ async fn run_main(args: Args) -> Result<()> {
     let (tx, mut rx) = mpsc::channel(EVENT_CHANNEL_CAP);
     let panic_tx = tx.clone();
     let mut app = App::new(cluster, tx);
+    match sofka::state_writer::StateWriter::new(app.tx.clone()) {
+        Ok(writer) => app.state_writer = Some(writer),
+        Err(e) => {
+            eprintln!("warning: {e}; state writes will run synchronously");
+            config_warnings.push(e);
+        }
+    }
     // Fleet marks (`space` in `:ctx`) persist under the state dir, overlaying
     // the `[fleet] contexts` config list across restarts.
     let fleet_marks_path = fleet::FleetMarks::default_path();

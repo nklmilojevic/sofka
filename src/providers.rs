@@ -421,7 +421,9 @@ pub async fn discover(client: kube::Client, base: &LogProvider) -> Result<LogPro
 /// `http` win, then literal 9428 (the VictoriaLogs default), then the first
 /// declared port.
 fn pick_service(services: &[Service]) -> Option<(String, String, i32)> {
-    let candidates: Vec<(&Service, i32)> = services
+    // Consume the filtered iterator directly: `min_by_key` is O(n), and no
+    // temporary candidates allocation is needed for the one selected item.
+    let (svc, port) = services
         .iter()
         .filter_map(|s| {
             let ports = s.spec.as_ref()?.ports.as_ref()?;
@@ -432,20 +434,16 @@ fn pick_service(services: &[Service]) -> Option<(String, String, i32)> {
                 .or_else(|| ports.first())?;
             Some((s, port.port))
         })
-        .collect();
-    // Only the first candidate is used, so pick the minimum directly rather
-    // than sorting the whole list — and compare borrowed, instead of cloning
-    // two `String`s per comparison.
-    let (svc, port) = candidates.iter().min_by_key(|(s, _)| {
-        (
-            s.metadata.namespace.as_deref().unwrap_or_default(),
-            s.metadata.name.as_deref().unwrap_or_default(),
-        )
-    })?;
+        .min_by_key(|(s, _)| {
+            (
+                s.metadata.namespace.as_deref().unwrap_or_default(),
+                s.metadata.name.as_deref().unwrap_or_default(),
+            )
+        })?;
     Some((
         svc.metadata.namespace.clone().unwrap_or_default(),
         svc.metadata.name.clone().unwrap_or_default(),
-        *port,
+        port,
     ))
 }
 
@@ -1051,7 +1049,8 @@ pub async fn discover_metrics(
 /// First (by namespace/name) service with a usable port, preferring `http`,
 /// then the well-known query ports (Prometheus 9090, VM single 8428/8429).
 fn pick_metrics_service(services: &[Service]) -> Option<(String, String, i32)> {
-    let candidates: Vec<(&Service, i32)> = services
+    // As above, select in one pass without materializing every candidate.
+    let (svc, port) = services
         .iter()
         .filter_map(|s| {
             let ports = s.spec.as_ref()?.ports.as_ref()?;
@@ -1062,21 +1061,27 @@ fn pick_metrics_service(services: &[Service]) -> Option<(String, String, i32)> {
                 .or_else(|| ports.first())?;
             Some((s, port.port))
         })
-        .collect();
-    // Only the first candidate is used, so pick the minimum directly rather
-    // than sorting the whole list — and compare borrowed, instead of cloning
-    // two `String`s per comparison.
-    let (svc, port) = candidates.iter().min_by_key(|(s, _)| {
-        (
-            s.metadata.namespace.as_deref().unwrap_or_default(),
-            s.metadata.name.as_deref().unwrap_or_default(),
-        )
-    })?;
+        .min_by_key(|(s, _)| {
+            (
+                s.metadata.namespace.as_deref().unwrap_or_default(),
+                s.metadata.name.as_deref().unwrap_or_default(),
+            )
+        })?;
     Some((
         svc.metadata.namespace.clone().unwrap_or_default(),
         svc.metadata.name.clone().unwrap_or_default(),
-        *port,
+        port,
     ))
+}
+
+#[cfg(feature = "bench")]
+pub fn bench_pick_log_service(services: &[Service]) -> Option<(String, String, i32)> {
+    pick_service(services)
+}
+
+#[cfg(feature = "bench")]
+pub fn bench_pick_metrics_service(services: &[Service]) -> Option<(String, String, i32)> {
+    pick_metrics_service(services)
 }
 
 impl MetricsProvider {
@@ -1356,6 +1361,33 @@ mod tests {
         .unwrap();
         assert_eq!(pick_service(&[bare]), None);
         assert_eq!(pick_service(&[]), None);
+    }
+
+    #[test]
+    fn pick_metrics_service_is_deterministic_and_prefers_query_ports() {
+        let ordinary = svc("z-monitoring", "prom", serde_json::json!([{"port": 8080}]));
+        let query = svc(
+            "a-monitoring",
+            "victoria-metrics",
+            serde_json::json!([{"port": 8080}, {"port": 8428}]),
+        );
+        assert_eq!(
+            pick_metrics_service(&[ordinary, query]),
+            Some(("a-monitoring".into(), "victoria-metrics".into(), 8428))
+        );
+
+        let named = svc(
+            "monitoring",
+            "prometheus",
+            serde_json::json!([
+                {"port": 9090},
+                {"name": "http", "port": 8081}
+            ]),
+        );
+        assert_eq!(
+            pick_metrics_service(&[named]),
+            Some(("monitoring".into(), "prometheus".into(), 8081))
+        );
     }
 
     #[tokio::test]

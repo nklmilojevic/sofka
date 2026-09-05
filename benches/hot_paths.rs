@@ -11,6 +11,7 @@
 //! - `metadata`    -> 3.3 (typed field lookup vs whole-meta serialization)
 //! - `log_filter`  -> 4.1 (O(n*m) substring scan)
 //! - `log_wrap`    -> 2.3 / 4.2 (full-buffer re-measure per frame)
+//! - `cell_extract` / `provider_selection` -> Tier 2/3 follow-up baselines
 
 use std::hint::black_box;
 
@@ -291,6 +292,53 @@ fn helm_decode(c: &mut Criterion) {
     g.finish();
 }
 
+/// Tier 3 — targeted structured-filter extraction. The baseline forces the
+/// borrowed JSON string into an owned `String`, matching the old `sget ->
+/// String` contract; production consumes the `Cow::Borrowed` directly.
+fn cell_extract(c: &mut Criterion) {
+    let mut g = c.benchmark_group("cell_extract");
+    let pods: Vec<_> = (0..2_000).map(bs::pod).collect();
+    let spec = columns::build_spec("pods", None, None, true);
+
+    g.bench_function("borrowed_ip_2000", |b| {
+        b.iter(|| {
+            for pod in &pods {
+                black_box(spec.cell_at(black_box(pod), 4).unwrap());
+            }
+        });
+    });
+    g.bench_function("owned_ip_baseline_2000", |b| {
+        b.iter(|| {
+            for pod in &pods {
+                black_box(spec.cell_at(black_box(pod), 4).unwrap().into_owned());
+            }
+        });
+    });
+    g.finish();
+}
+
+/// Tier 2 — provider autodiscovery. Both implementations use `min_by_key`;
+/// the baseline first collects every candidate into a `Vec`, while production
+/// feeds the filtered iterator directly into the minimum selection.
+fn provider_selection(c: &mut Criterion) {
+    let mut g = c.benchmark_group("provider_selection");
+    let services = bs::services(256);
+
+    g.bench_function("logs_streaming_256", |b| {
+        b.iter(|| black_box(bs::pick_log_service(black_box(&services))));
+    });
+    g.bench_function("logs_collected_baseline_256", |b| {
+        b.iter(|| black_box(bs::pick_log_service_collected(black_box(&services))));
+    });
+    g.bench_function("metrics_streaming_256", |b| {
+        b.iter(|| black_box(bs::pick_metrics_service(black_box(&services))));
+    });
+    g.bench_function("metrics_collected_baseline_256", |b| {
+        b.iter(|| black_box(bs::pick_metrics_service_collected(black_box(&services))));
+    });
+    g.finish();
+}
+
 criterion_group!(
     benches,
     rows_cache,
@@ -303,6 +351,8 @@ criterion_group!(
     metadata,
     log_filter,
     log_wrap,
-    log_viewport
+    log_viewport,
+    cell_extract,
+    provider_selection
 );
 criterion_main!(benches);

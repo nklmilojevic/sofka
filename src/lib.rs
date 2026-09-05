@@ -10,6 +10,7 @@
 
 pub mod altscroll;
 pub mod app;
+pub mod atomicfile;
 #[cfg(feature = "bench")]
 pub mod benchsupport;
 pub mod bundle;
@@ -30,6 +31,7 @@ pub mod providers;
 pub mod rightsize;
 pub mod snapshot;
 pub mod sortmem;
+pub mod state_writer;
 pub mod store;
 pub mod text;
 pub mod theme;

@@ -61,10 +61,14 @@ impl App {
             self.flash = format!("fleet + {ctx}");
         }
         self.flash_err = false;
-        if let Some(path) = self.fleet_marks_path.clone()
-            && let Err(e) = self.fleet_marks.save(&path)
-        {
-            self.flash_warn(&format!("fleet mark not saved: {e}"));
+        if let Some(path) = self.fleet_marks_path.clone() {
+            let result = match &self.state_writer {
+                Some(writer) => writer.save_fleet(self.fleet_marks.clone(), path),
+                None => self.fleet_marks.save(&path),
+            };
+            if let Err(e) = result {
+                self.flash_warn(&format!("fleet mark not saved: {e}"));
+            }
         }
     }
 

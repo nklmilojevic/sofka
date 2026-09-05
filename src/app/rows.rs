@@ -218,7 +218,7 @@ impl App {
             return Some(o.metadata.namespace.as_deref().unwrap_or("").into());
         }
         if let Some(i) = self.spec.header_index(key) {
-            return self.spec.cell_at(o, i).map(Cow::Owned);
+            return self.spec.cell_at(o, i);
         }
         if key.eq_ignore_ascii_case("status") {
             let phase = phase(o);
@@ -754,10 +754,14 @@ impl App {
             None if self.sort_memory.clear(&kind) => {}
             None => return, // nothing was remembered; skip the disk write
         }
-        if let Some(path) = self.sort_memory_path.clone()
-            && let Err(e) = self.sort_memory.save(&path)
-        {
-            self.flash_warn(&format!("failed to save sort state: {e}"));
+        if let Some(path) = self.sort_memory_path.clone() {
+            let result = match &self.state_writer {
+                Some(writer) => writer.save_sort(self.sort_memory.clone(), path),
+                None => self.sort_memory.save(&path),
+            };
+            if let Err(e) = result {
+                self.flash_warn(&format!("failed to save sort state: {e}"));
+            }
         }
     }
 

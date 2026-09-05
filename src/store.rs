@@ -228,6 +228,13 @@ pub enum Msg {
         generation: u64,
         error: String,
     },
+    /// A generation-independent persistent UI-state write failed. The id lets
+    /// the UI acknowledge that it actually handled the notice; merely putting
+    /// it in the event channel is not delivery during shutdown.
+    StateWriteFailed {
+        id: u64,
+        error: String,
+    },
     /// A background action (delete, restart, scale, drain, helm op, …)
     /// finished; replaces its "…ing" progress flash with a result. Also
     /// carries `:can-i` verdicts, which are the same thing: a one-line answer

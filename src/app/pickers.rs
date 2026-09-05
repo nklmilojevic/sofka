@@ -151,10 +151,14 @@ impl App {
         {
             return;
         }
-        if let Some(path) = self.namespace_memory_path.clone()
-            && let Err(e) = self.namespace_memory.save(&path)
-        {
-            self.flash_warn(&format!("failed to save namespace state: {e}"));
+        if let Some(path) = self.namespace_memory_path.clone() {
+            let result = match &self.state_writer {
+                Some(writer) => writer.save_namespace(self.namespace_memory.clone(), path),
+                None => self.namespace_memory.save(&path),
+            };
+            if let Err(e) = result {
+                self.flash_warn(&format!("failed to save namespace state: {e}"));
+            }
         }
     }
 
