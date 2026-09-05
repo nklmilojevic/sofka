@@ -1,10 +1,16 @@
 //! Disposable A/B probes for the post-#188 optimization plan.
 //!
+//! Only the options that are still open live here. Probes whose result has
+//! since been implemented were removed rather than kept as a second copy:
+//! canonical row identity and the layout hit-test (PR #220), borrowed
+//! highlight runs and in-place provider framing (PR #221). The benchmarks that
+//! now guard those in production are in `benches/hot_paths.rs`.
+//!
 //! These deliberately keep the baseline and prototype in one binary so both
 //! see identical codegen, machine load, and thermal conditions.
 
 use std::borrow::Cow;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::hint::black_box;
 use std::io::Read;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -137,167 +143,8 @@ fn provider_parse(c: &mut Criterion) {
     g.finish();
 }
 
-fn drain_baseline(buf: &mut Vec<u8>) -> Vec<String> {
-    let Some(last_nl) = buf.iter().rposition(|&b| b == b'\n') else {
-        return Vec::new();
-    };
-    let complete: Vec<u8> = buf.drain(..=last_nl).collect();
-    String::from_utf8_lossy(&complete)
-        .lines()
-        .map(str::to_string)
-        .filter(|line| !line.trim().is_empty())
-        .collect()
-}
-
-fn ingest_baseline(chunks: &[Vec<u8>]) -> usize {
-    let mut buf = Vec::new();
-    let mut sum = 0usize;
-    for chunk in chunks {
-        buf.extend_from_slice(chunk);
-        for line in drain_baseline(&mut buf) {
-            if let Some(entry) = parse_dom(&line) {
-                sum += checksum(&[entry]);
-            }
-        }
-    }
-    sum
-}
-
-fn ingest_in_place(chunks: &[Vec<u8>]) -> usize {
-    let mut buf = Vec::new();
-    let mut sum = 0usize;
-    for chunk in chunks {
-        buf.extend_from_slice(chunk);
-        let complete = buf.iter().rposition(|&b| b == b'\n').map_or(0, |i| i + 1);
-        if complete == 0 {
-            continue;
-        }
-        for line in buf[..complete].split(|&b| b == b'\n') {
-            if line.is_empty() {
-                continue;
-            }
-            if let Ok(line) = std::str::from_utf8(line)
-                && let Some(entry) = parse_selective(line)
-            {
-                sum += checksum(&[entry]);
-            }
-        }
-        buf.copy_within(complete.., 0);
-        buf.truncate(buf.len() - complete);
-    }
-    sum
-}
-
-fn chunked(bytes: &[u8], chunk: usize) -> Vec<Vec<u8>> {
-    bytes.chunks(chunk).map(<[u8]>::to_vec).collect()
-}
-
-fn provider_framing(c: &mut Criterion) {
-    let mut wire = provider_lines(10_000, 48).join("\n").into_bytes();
-    wire.push(b'\n');
-    let mut g = c.benchmark_group("plan/provider_framing");
-    for size in [1_024usize, 65_536] {
-        let chunks = chunked(&wire, size);
-        g.bench_with_input(BenchmarkId::new("baseline", size), &chunks, |b, chunks| {
-            b.iter(|| black_box(ingest_baseline(chunks)))
-        });
-        g.bench_with_input(BenchmarkId::new("in_place", size), &chunks, |b, chunks| {
-            b.iter(|| black_box(ingest_in_place(chunks)))
-        });
-    }
-    let fragmented = chunked(&wire, 17);
-    g.bench_function("baseline_fragmented17", |b| {
-        b.iter(|| black_box(ingest_baseline(&fragmented)))
-    });
-    g.bench_function("in_place_fragmented17", |b| {
-        b.iter(|| black_box(ingest_in_place(&fragmented)))
-    });
-    g.finish();
-}
-
-fn render_frame(c: &mut Criterion) {
-    use ratatui::Terminal;
-    use ratatui::backend::TestBackend;
-
-    let mut g = c.benchmark_group("plan/render_frame_2000_120x52");
-    for (label, filter) in [("plain", ""), ("filtered", "workload-01")] {
-        let (mut app, _rx) = bs::pods_app(2_000);
-        app.filter = filter.to_owned();
-        let mut terminal = Terminal::new(TestBackend::new(120, 52)).unwrap();
-        terminal
-            .draw(|frame| sofka::ui::draw(frame, &mut app))
-            .unwrap();
-        g.bench_function(label, |b| {
-            b.iter(|| {
-                terminal
-                    .draw(|frame| sofka::ui::draw(frame, &mut app))
-                    .unwrap();
-                black_box(&terminal);
-            })
-        });
-    }
-    g.finish();
-}
-
-struct RowIdentity {
-    namespace: String,
-    name: String,
-    key: String,
-    resource_version: String,
-}
-
-fn row_identity(c: &mut Criterion) {
-    let rows: Vec<_> = (0..40)
-        .map(|i| {
-            let namespace = format!("namespace-{}", i % 12);
-            let name = format!("workload-{i:05}-7d9f8b6c5d");
-            RowIdentity {
-                key: format!("{namespace}/{name}"),
-                namespace,
-                name,
-                resource_version: format!("{}", 100_000 + i),
-            }
-        })
-        .collect();
-    let cache: HashMap<_, _> = rows
-        .iter()
-        .map(|row| (row.key.clone(), row.resource_version.clone()))
-        .collect();
-    let mut g = c.benchmark_group("plan/row_identity_40");
-    g.bench_function("format_clone_current", |b| {
-        b.iter(|| {
-            let mut sum = 0usize;
-            for row in &rows {
-                let cache_key = format!("{}/{}", row.namespace, row.name);
-                let rv = row.resource_version.clone();
-                sum += cache.get(&cache_key).is_some_and(|cached| cached == &rv) as usize;
-                let mark_key = format!("{}/{}", row.namespace, row.name);
-                let metrics_key = format!("{}/{}", row.namespace, row.name);
-                let name = row.name.clone();
-                sum += mark_key.len() + metrics_key.len() + name.len();
-            }
-            black_box(sum)
-        })
-    });
-    g.bench_function("canonical_borrowed", |b| {
-        b.iter(|| {
-            let mut sum = 0usize;
-            for row in &rows {
-                sum += cache
-                    .get(row.key.as_str())
-                    .is_some_and(|cached| cached.as_str() == row.resource_version.as_str())
-                    as usize;
-                sum += row.key.len() * 2 + row.name.len();
-            }
-            black_box(sum)
-        })
-    });
-    g.finish();
-}
-
 fn per_frame_derived_work(c: &mut Criterion) {
     use k8s_openapi::jiff::Timestamp;
-    use ratatui::layout::{Constraint, Flex, Layout, Rect};
 
     let mut g = c.benchmark_group("plan/per_frame_derived");
     g.bench_function("timestamp_160_calls", |b| {
@@ -311,112 +158,6 @@ fn per_frame_derived_work(c: &mut Criterion) {
     });
     g.bench_function("timestamp_once", |b| b.iter(|| black_box(Timestamp::now())));
 
-    let widths = [
-        Constraint::Length(18),
-        Constraint::Length(12),
-        Constraint::Length(10),
-        Constraint::Length(8),
-        Constraint::Length(8),
-        Constraint::Length(7),
-    ];
-    let area = Rect::new(2, 1, 116, 48);
-    g.bench_function("ratatui_layout_for_hit_test", |b| {
-        b.iter(|| {
-            black_box(
-                Layout::horizontal(widths)
-                    .flex(Flex::Start)
-                    .spacing(2)
-                    .split(area),
-            )
-        })
-    });
-    g.bench_function("direct_hit_rects", |b| {
-        b.iter(|| {
-            let mut x = area.x;
-            let rects: Vec<_> = [18u16, 12, 10, 8, 8, 7]
-                .into_iter()
-                .map(|width| {
-                    let rect = (x, x + width);
-                    x += width + 2;
-                    rect
-                })
-                .collect();
-            black_box(rects)
-        })
-    });
-    g.finish();
-}
-
-fn highlight_baseline(name: &str, matched: &[usize]) -> usize {
-    let matched: HashSet<usize> = matched.iter().copied().collect();
-    let mut spans = Vec::new();
-    let mut run = String::new();
-    let mut run_matched = false;
-    for (i, ch) in name.chars().enumerate() {
-        let is_match = matched.contains(&i);
-        if !run.is_empty() && is_match != run_matched {
-            spans.push(std::mem::take(&mut run));
-        }
-        run_matched = is_match;
-        run.push(ch);
-    }
-    if !run.is_empty() {
-        spans.push(run);
-    }
-    spans.iter().map(String::len).sum()
-}
-
-fn highlight_borrowed(name: &str, matched: &[usize]) -> usize {
-    let mut wanted = matched.iter().copied().peekable();
-    let mut run_start = 0usize;
-    let mut prev_match = false;
-    let mut total = 0usize;
-    for (char_idx, (byte_idx, _)) in name.char_indices().enumerate() {
-        let is_match = wanted.peek().is_some_and(|&idx| idx == char_idx);
-        if is_match {
-            wanted.next();
-        }
-        if byte_idx != 0 && is_match != prev_match {
-            total += name[run_start..byte_idx].len();
-            run_start = byte_idx;
-        }
-        prev_match = is_match;
-    }
-    total + name[run_start..].len()
-}
-
-fn highlights(c: &mut Criterion) {
-    let matcher = SkimMatcherV2::default();
-    let names: Vec<String> = (0..40)
-        .map(|i| format!("workload-{i:05}-7d9f8b6c5d-abcd"))
-        .collect();
-    let indices: Vec<Vec<usize>> = names
-        .iter()
-        .map(|name| matcher.fuzzy_indices(name, "wld").unwrap().1)
-        .collect();
-    let mut g = c.benchmark_group("plan/highlight_40");
-    g.bench_function("owned_hashset", |b| {
-        b.iter(|| {
-            black_box(
-                names
-                    .iter()
-                    .zip(&indices)
-                    .map(|(name, idx)| highlight_baseline(name, idx))
-                    .sum::<usize>(),
-            )
-        })
-    });
-    g.bench_function("borrowed_sorted", |b| {
-        b.iter(|| {
-            black_box(
-                names
-                    .iter()
-                    .zip(&indices)
-                    .map(|(name, idx)| highlight_borrowed(name, idx))
-                    .sum::<usize>(),
-            )
-        })
-    });
     g.finish();
 }
 
@@ -868,12 +609,8 @@ fn sizes(c: &mut Criterion) {
 
 criterion_group!(
     benches,
-    render_frame,
-    row_identity,
     per_frame_derived_work,
-    highlights,
     provider_parse,
-    provider_framing,
     pickers_and_headers,
     custom_columns,
     hashers,

@@ -20,18 +20,17 @@ Helm deduplication, allocating structured comparisons, full pod re-lists for
 node counts, and unbounded derived caches. The remaining work is smaller and is
 mostly allocation/lifetime design rather than arithmetic.
 
-The best next optimization is the table render path. A normal 40-row pod frame
-currently makes about 200 avoidable `String` allocations before ratatui builds
-its widgets: two independently formatted row keys, a resource-version clone on
-every cell-cache hit, a separately formatted metrics key, and an owned copy of
-every name. At the 16 ms frame ceiling this can reach roughly 12,000 avoidable
-allocations per second during a busy watch.
+The table render path was the best next optimization and has since been taken:
+a normal 40-row pod frame made about 200 avoidable `String` allocations before
+ratatui built its widgets — two independently formatted row keys, a
+resource-version clone on every cell-cache hit, a separately formatted metrics
+key, and an owned copy of every name. That series shipped in PRs #220 and #221;
+see "Already implemented" at the end of this document.
 
-The other high-value target is provider log ingestion. It copies each received
-chunk into a second byte vector, allocates a `String` per line, parses every line
-into a complete `serde_json::Value`, and then allocates the four retained
-strings. That work is directly proportional to log rate and can be replaced by
-in-place line framing plus a selective Serde visitor.
+Provider log ingestion was the other high-value target. Its framing half also
+shipped (#221). What remains is the parse: every line still becomes a complete
+`serde_json::Value` before the four retained strings are copied out of it, work
+directly proportional to log rate, replaceable by a selective Serde visitor.
 
 There is no justified handwritten assembly target. The important scans already
 use `aho-corasick` and `memchr`, which dispatch to AVX2/SSE2 or NEON. `flate2`
@@ -92,14 +91,18 @@ This makes feature trimming a binary-size task, not a likely runtime win.
 
 ## Ranked recommendations
 
+Ranks 1-3 and half of rank 6 have since been implemented and are struck from
+this document; what is left below is what remains open. See "Already
+implemented" at the end for where each landed.
+
 | Rank | Candidate | Main effect | Confidence |
 | ---: | --- | --- | --- |
-| 1 | Carry canonical row keys through the render window and fix cache-hit ownership | Frame latency and allocations | High |
-| 2 | Cache filter highlight indices and render borrowed name spans | Filtered-frame latency | High |
-| 3 | Stream provider JSON lines without intermediate vectors or a full `Value` DOM | Log throughput and allocator pressure | High |
+| ~~1~~ | ~~Carry canonical row keys through the render window~~ | shipped, PR #220 | — |
+| 2 | Cache filter highlight indices by row/filter revision | Filtered-frame latency | High |
+| 3 | Deserialize only the configured provider fields, without a `Value` DOM | Log throughput and allocator pressure | High |
 | 4 | Cache display headers, help, and picker results | Modal/frame latency | High |
 | 5 | Move/coalesce state-file persistence off the UI thread | Input tail latency | High |
-| 6 | Skip invisible-column and unnecessary timer work | Frame/idle CPU | High |
+| 6 | Capture one timestamp per frame; schedule idle redraws by visible change | Frame/idle CPU | High |
 | 7 | Avoid deep `Value` clones in custom-column extraction | Custom-resource latency | Medium-high |
 | 8 | Benchmark a faster hasher for internal object/cache maps | Filter/sort/watch throughput | Medium |
 | 9 | Reduce retained metadata payloads, especially last-applied annotations | RSS | Workload-dependent |
@@ -107,46 +110,16 @@ This makes feature trimming a binary-size task, not a likely runtime win.
 | 11 | Compact message and history key representations | Burst CPU and bounded memory | Medium-low |
 | 12 | Allocator, PGO, and per-target build experiments | Broad runtime/startup | Platform-dependent |
 
-## 1. Canonical row identity through the render path
-
-Relevant code: `App::rows_window`, `App::ensure_table_cell_cache`,
-`App::metrics_for`, `draw_table`, `render_name_cell`, and `Store::key`.
-
-For each visible pod row, the current frame does all of the following:
-
-1. `ensure_table_cell_cache` calls `row_key`, formatting `namespace/name`.
-2. `cell_entry` clones `metadata.resource_version` before it knows whether the
-   cache entry is stale.
-3. `draw_table` calls `row_key` again for marks and the cell-cache lookup.
-4. The metrics block formats the same `namespace/name` a third time.
-5. With no filter, `render_name_cell` converts the borrowed name to an owned
-   `String` solely because its return type is `Cell<'static>`.
-
-Recommended design:
-
-- Return a render-window item containing `&RowKey` and `&DynamicObject`, or
-  provide an iterator over that pair, so the store's canonical `Rc<str>` key is
-  carried through cache warming, marks, metrics, and rendering.
-- Compare `resource_version.as_deref()` on cache hits and clone it only when
-  inserting/replacing a `CellCacheEntry`.
-- Key metrics and marked rows by the canonical row key where their namespace
-  semantics match. Nodes can use their existing bare-name key without a new
-  allocation.
-- Make `render_name_cell<'a>` return `Cell<'a>` and borrow `name` in the
-  unfiltered case.
-- Cache `display_headers` when `ViewSpec`, namespace mode, or metric-column
-  availability changes. Header cells can borrow the cached strings.
-
-Add a render-focused Criterion benchmark and an allocation-count assertion for
-an unchanged 40-row frame. Acceptance: at least 90% of the identified
-pre-widget allocations disappear and rendered snapshots remain byte-identical.
-
 ## 2. Filter highlighting should reuse the filter pass
 
+*The rendering half of this shipped in PR #221: `render_name_cell` no longer
+builds a `HashSet`, slices its highlight runs out of the name, and borrows the
+name outright when no filter is active. What follows is the half that did not.*
+
 When a filter is active, `filter_match_indices` invokes `SkimMatcherV2` again
-for every visible name on every redraw. `render_name_cell` then converts the
-returned vector to a freshly allocated `HashSet<usize>` and constructs owned
-strings for alternating highlighted runs.
+for every visible name on every redraw — the same work the filter pass just
+did. Cache the matched indices by row and filter revision so the redraw reads
+them instead of recomputing them.
 
 Store the sorted match indices with the row/filter cache, keyed by row identity
 and filter generation. Build them when the filter result is computed or lazily
@@ -161,13 +134,18 @@ steady redraws separately from the one-time filter change.
 
 ## 3. Provider log ingestion
 
-Relevant code: `providers::drain_lines`, `providers::parse_entry`, and
-`Tail::next_entry`.
+*The framing half shipped in PR #221: the tail tracks how far it has scanned,
+validates each complete region once, and hands parsers borrowed lines — which
+also removed the quadratic rescan of a long fragmented record. What follows is
+the half that did not: `parse_entry` still builds a full `serde_json::Value`
+per record and then copies the four fields it keeps.*
+
+Relevant code: `providers::parse_entry`.
 
 The current SSE stream path performs avoidable layered ownership:
 
 - `Vec::drain(..=last_nl).collect::<Vec<u8>>()` copies every complete byte and
-  shifts any partial tail.
+  shifts any partial tail. *(shipped, PR #221)*
 - `String::from_utf8_lossy(...).lines().map(str::to_string)` allocates each line.
 - `serde_json::from_str::<Value>` builds a full object DOM.
 - `_msg`, `_time`, pod, and container are copied again into the retained entry.
@@ -229,10 +207,10 @@ coalescing, write failure, shutdown flush, and rapid sort/namespace toggles.
 
 ## 6. Invisible columns, timestamps, layout, and idle redraws
 
-`draw_table` computes volatile values and cell widths for every column before
-filtering horizontally scrolled-out columns. Apply visibility before volatile
-formatting and width measurement. Keep status/ready values available when they
-are needed for row coloring even if their cells are hidden.
+*Two of these shipped in PR #220: hidden columns are no longer formatted or
+measured, and the mouse hit-test derives its column ranges arithmetically
+instead of running the layout solver a second time. The timestamp and
+idle-redraw items below remain open.*
 
 Capture the current timestamp once per frame/rebuild and pass it to AGE,
 UPDATED, LAST-SCHEDULE, and running-job duration calculations. The present code
@@ -436,13 +414,16 @@ measured 10k-100k-object workload that misses the interactive budget.
 
 ## Recommended implementation order and gates
 
-1. Add table-render, filtered-highlight, picker, and provider-ingest benchmarks
-   plus allocation counters. Benchmarks are prerequisites, not optional
-   follow-up work.
-2. Land canonical row identity, resource-version borrow-on-hit, borrowed name
-   rendering, and cached highlight indices as one render-focused series.
-3. Land provider framing and selective deserialization separately.
-4. Cache header/help/picker models, then remove invisible-column and timer work.
+1. ~~Add table-render, filtered-highlight, picker, and provider-ingest
+   benchmarks plus allocation counters.~~ Done: `benches/hot_paths.rs` and
+   `examples/allocprobe.rs` (#220-#222). Benchmarks were prerequisites, not
+   optional follow-up work, and they are what caught the two harness flaws
+   recorded below.
+2. ~~Canonical row identity, resource-version borrow-on-hit, borrowed name
+   rendering~~ (#220, #221). Cached highlight indices remain.
+3. ~~Provider framing~~ (#221). Selective deserialization remains.
+4. Cache header/help/picker models; ~~remove invisible-column work~~ (#220),
+   timer work remains.
 5. Move persistence to one coalescing worker.
 6. Run the custom-column borrow, hasher, retained-annotation, message-layout,
    Helm backend, allocator, and PGO experiments independently. Keep only
@@ -494,20 +475,16 @@ tree. Wire fixtures are live captures from the audit cluster: 771 pods as a
 
 | Item | Prototype gain, run 1 | run 2 |
 | --- | ---: | ---: |
-| 1. Canonical row identity, 40 rows | 20.3x | 17.6x |
-| 2. Borrowed highlight indices, 40 rows | 8.1x | 9.3x |
-| 3. In-place framing, 1 KiB chunks | 2.29x | 2.26x |
-| 3. In-place framing, 64 KiB chunks | 2.26x | 2.50x |
 | 3. Selective parse, 10,000 x 32 B | 2.52x | 3.00x |
 | 4. Cached picker and header models | free | free |
 | 6. One timestamp per frame | 146x | 170x |
 | 10. Gzip output pre-sized from ISIZE | 1.13x | 1.97x |
 
-Items 1 and 2 are the render series and remain the strongest proposal: both
-reproduce, both are large, and neither depends on a magnitude the noise can
-reach. Item 6's ratio is enormous but its absolute saving is about 4 us per
-frame, roughly 1.4% of a frame; it stays justified as the fix for formatting
-timestamps that can straddle a second boundary mid-frame, not as a speed win.
+The render series (items 1 and 2) measured 20.3x/17.6x and 8.1x/9.3x here and
+has since shipped; those rows moved to "Already implemented" below. Item 6's
+ratio is enormous but its absolute saving is about 4 us per frame, roughly 1.4%
+of a frame; it stays justified as the fix for formatting timestamps that can
+straddle a second boundary mid-frame, not as a speed win.
 
 Item 4's cached arms measure in picoseconds against hundreds of microseconds.
 That is a "the work is gone" result, not a speedup to quote.
@@ -642,3 +619,22 @@ Item 12 needs separate builds per allocator; `examples/allocator_probe.rs` is
 registered for that and has not been run. PGO, `panic = "abort"`, and binary size
 remain unmeasured. Item 9, retained annotation bytes, needs a live cluster survey
 rather than a benchmark.
+
+## Already implemented
+
+These recommendations have shipped, so their prototypes and their sections were
+removed from this document rather than left as proposals. The benchmarks that
+guard them now live in `benches/hot_paths.rs`, measured against the production
+code instead of against a prototype.
+
+| Was | Shipped in | Measured after landing |
+| --- | --- | --- |
+| 1. Canonical row identity through the render path | #220 | viewport warm -66%/-68%; frame allocations -15%/-17% |
+| 2. Borrowed highlight runs, no `HashSet` (rendering half) | #221 | filtered-frame allocations -13% |
+| 3. In-place provider framing, scan offset (framing half) | #221 | fragmented record 11.6 ms -> 74 us; chunk ingest -9% |
+| 6. Hidden columns not formatted or measured | #220 | scrolled-frame allocations -19% |
+| 6. Mouse hit-test derived from the fixed widths | #220 | folded into the frame result above |
+
+Two items from this document's rank 2 and rank 3 are only half done — cached
+highlight indices and selective deserialization — and both remain in their
+sections above.
