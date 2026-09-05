@@ -87,6 +87,12 @@ impl App {
         );
     }
 
+    pub(super) fn drop_owner_scope(&mut self) {
+        if self.owner.take().is_some() {
+            self.scope_label = None;
+        }
+    }
+
     pub(super) fn drill_into_cronjob_jobs(&mut self, obj: &DynamicObject) {
         let Some(jobs) = self.cluster.resolve("jobs") else {
             self.flash_warn("jobs kind unavailable");

@@ -2266,6 +2266,90 @@ async fn cronjob_enter_drills_into_owned_jobs() {
 }
 
 #[tokio::test]
+async fn cronjob_jobs_owner_change_drops_the_row() {
+    let (mut app, _rx) = test_app();
+    app.switch_kind("cronjobs");
+    apply(
+        &mut app,
+        json!({
+            "apiVersion": "batch/v1", "kind": "CronJob",
+            "metadata": {"name": "backup", "namespace": "ops", "uid": "cj-1"},
+            "spec": {"schedule": "* * * * *", "jobTemplate": {"spec": {}}}
+        }),
+    );
+    app.table_state.select(Some(0));
+    app.handle_key(press(KeyCode::Enter)).unwrap();
+    assert_eq!(app.kind_plural, "jobs");
+
+    let job = |owner: &str, rv: &str| {
+        json!({
+            "apiVersion": "batch/v1", "kind": "Job",
+            "metadata": {
+                "name": "run-1", "namespace": "ops", "resourceVersion": rv,
+                "ownerReferences": [{"apiVersion": "batch/v1", "kind": "CronJob", "name": owner, "uid": "cj-1"}]
+            },
+            "spec": {}
+        })
+    };
+    apply(&mut app, job("backup", "1"));
+    assert_eq!(row_names(&app), vec!["run-1"]);
+
+    apply(&mut app, job("other", "2"));
+    assert!(row_names(&app).is_empty());
+
+    apply(&mut app, job("backup", "3"));
+    assert_eq!(row_names(&app), vec!["run-1"]);
+}
+
+#[tokio::test]
+async fn namespace_switch_drops_the_cronjob_owner_scope() {
+    let (mut app, _rx) = test_app();
+    app.switch_kind("cronjobs");
+    apply(
+        &mut app,
+        json!({
+            "apiVersion": "batch/v1", "kind": "CronJob",
+            "metadata": {"name": "backup", "namespace": "ops"},
+            "spec": {"schedule": "* * * * *", "jobTemplate": {"spec": {}}}
+        }),
+    );
+    app.table_state.select(Some(0));
+    app.handle_key(press(KeyCode::Enter)).unwrap();
+    assert!(app.owner.is_some());
+
+    app.handle_key(press(KeyCode::Char('0'))).unwrap();
+    assert_eq!(app.kind_plural, "jobs");
+    assert!(app.all_namespaces());
+    assert_eq!(app.owner, None);
+    assert_eq!(app.scope_label, None);
+    apply(
+        &mut app,
+        json!({"apiVersion": "batch/v1", "kind": "Job",
+               "metadata": {"name": "unrelated", "namespace": "other"}, "spec": {}}),
+    );
+    assert_eq!(row_names(&app), vec!["unrelated"]);
+
+    app.handle_key(press(KeyCode::Esc)).unwrap();
+    assert_eq!(app.kind_plural, "cronjobs");
+    apply(
+        &mut app,
+        json!({
+            "apiVersion": "batch/v1", "kind": "CronJob",
+            "metadata": {"name": "backup", "namespace": "ops"},
+            "spec": {"schedule": "* * * * *", "jobTemplate": {"spec": {}}}
+        }),
+    );
+    app.table_state.select(Some(0));
+    app.handle_key(press(KeyCode::Enter)).unwrap();
+    assert!(app.owner.is_some());
+
+    app.set_namespace("other".into());
+    assert_eq!(app.namespace, "other");
+    assert_eq!(app.owner, None);
+    assert_eq!(app.scope_label, None);
+}
+
+#[tokio::test]
 async fn cronjob_jobs_then_job_drills_into_pods_and_pops_back() {
     let (mut app, _rx) = test_app();
     app.switch_kind("cronjobs");

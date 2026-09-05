@@ -444,6 +444,7 @@ impl App {
 
     pub(super) fn set_namespace(&mut self, sel: String) {
         self.namespace = normalize_ns(&sel);
+        self.drop_owner_scope();
         self.note_recent_namespace(&sel);
         self.remember_namespace();
         self.set_flash(format!("namespace: {}", self.namespace_label()));
