@@ -491,10 +491,10 @@ fixture instead of silently running no cases.
 
 ### Stable wins with closely reproduced ratios
 
-| Item                              | Prototype gain, run 1 | run 2 |
-| --------------------------------- | --------------------: | ----: |
-| 3. Selective parse, 10,000 x 32 B |                 2.52x | 3.00x |
-| 6. One timestamp per frame        |                  146x |  170x |
+| Item                              | Prototype gain, run 1 | run 2 | Outcome               |
+| --------------------------------- | --------------------: | ----: | --------------------- |
+| 3. Selective parse, 10,000 x 32 B |                 2.52x | 3.00x | Not implemented; open |
+| 6. One timestamp per frame        |                  146x |  170x | Not implemented; open |
 
 The render series (items 1 and 2) measured 20.3x/17.6x and 8.1x/9.3x here.
 Implementations and production-path benchmarks are queued in #220 and #221;
@@ -510,13 +510,13 @@ production cache's speedup. The harness now labels them as concept arms.
 
 ### Stable losses for the measured prototype shapes
 
-| Item                                     |        run 1 |        run 2 |
-| ---------------------------------------- | -----------: | -----------: |
-| Box every `Msg`, including `Msg::Synced` |  2.4x slower |  2.6x slower |
-| `vte` parser callbacks vs byte scan      |  2.7x slower |  2.3x slower |
-| `ansitok` text ranges vs byte scan       | 15.8x slower | 12.2x slower |
-| Rayon substring, 2,000 rows              |  8.6x slower |  3.6x slower |
-| Rayon substring, 20,000 rows             |  1.4x slower |  2.4x slower |
+| Item                                     |        run 1 |        run 2 | Outcome                                 |
+| ---------------------------------------- | -----------: | -----------: | --------------------------------------- |
+| Box every `Msg`, including `Msg::Synced` |  2.4x slower |  2.6x slower | Rejected                                |
+| `vte` parser callbacks vs byte scan      |  2.7x slower |  2.3x slower | Rejected for measured parser-only shape |
+| `ansitok` text ranges vs byte scan       | 15.8x slower | 12.2x slower | Rejected for measured parser-only shape |
+| Rayon substring, 2,000 rows              |  8.6x slower |  3.6x slower | Rejected for substring predicate        |
+| Rayon substring, 20,000 rows             |  1.4x slower |  2.4x slower | Rejected for substring predicate        |
 
 Boxing the entire enum is the clearest reversal, and it reproduces.
 `size_of::<Msg>()` is 168 bytes, but pushing 4,096 boxed messages costs 2.4-2.6x
@@ -533,11 +533,11 @@ same allocation costs.
 
 ### Reversed: no claim can be made
 
-| Pair                                         |        run 1 |        run 2 |
-| -------------------------------------------- | -----------: | -----------: |
-| 7. Borrowed extraction, nested object column | 1.44x faster | 1.01x slower |
-| `simd-json` on `PartialObjectMetadataList`   | 1.32x faster | 1.32x slower |
-| Rayon substring, 100,000 rows                | 1.20x faster | 1.80x slower |
+| Pair                                         |        run 1 |        run 2 | Outcome                      |
+| -------------------------------------------- | -----------: | -----------: | ---------------------------- |
+| 7. Borrowed extraction, nested object column | 1.44x faster | 1.01x slower | Not implemented; no decision |
+| `simd-json` on `PartialObjectMetadataList`   | 1.32x faster | 1.32x slower | Not implemented; no decision |
+| Rayon substring, 100,000 rows                | 1.20x faster | 1.80x slower | Not implemented; no decision |
 
 The cheap substring predicate gives no reason to pay Rayon setup costs at any
 measured size; its 100,000-row result does not reproduce. It does not settle the
@@ -551,19 +551,19 @@ before it appears in a proposal.
 
 ### Stable wins with variable ratios
 
-| Pair                                              | run 1 | run 2 |
-| ------------------------------------------------- | ----: | ----: |
-| 3. Selective parse vs DOM, 1,000 x 32 B           | 2.80x | 1.79x |
-| 3. Selective parse vs DOM, 1,000 x 4 KiB          | 1.87x | 1.14x |
-| 3. In-place framing, 17-byte fragments            | 1.60x | 1.11x |
-| 7. Borrowed extraction, scalar column             | 1.10x | 2.15x |
-| 7. Borrowed extraction, 100-element array         | 1.83x | 1.44x |
-| 8. `foldhash` vs std hasher, 20,000 keys          | 2.66x | 3.93x |
-| 8. `ahash` vs std hasher, 20,000 keys             | 2.21x | 4.12x |
-| `nucleo-matcher` vs `SkimMatcherV2`, 20,000 names | 3.33x | 2.03x |
-| `simd-json` on the 4.0 MiB `Table`                | 1.41x | 2.67x |
-| Relaxed vs SeqCst atomic loads                    | 2.20x | 1.57x |
-| 10. Helm gzip output pre-sized from ISIZE         | 1.13x | 1.97x |
+| Pair                                              | run 1 | run 2 | Outcome                                         |
+| ------------------------------------------------- | ----: | ----: | ----------------------------------------------- |
+| 3. Selective parse vs DOM, 1,000 x 32 B           | 2.80x | 1.79x | Not implemented; open                           |
+| 3. Selective parse vs DOM, 1,000 x 4 KiB          | 1.87x | 1.14x | Not implemented; open                           |
+| 3. In-place framing, 17-byte fragments            | 1.60x | 1.11x | Implemented in pending #221                     |
+| 7. Borrowed extraction, scalar column             | 1.10x | 2.15x | Not implemented; object case unresolved         |
+| 7. Borrowed extraction, 100-element array         | 1.83x | 1.44x | Not implemented; object case unresolved         |
+| 8. `foldhash` vs std hasher, 20,000 keys          | 2.66x | 3.93x | Not implemented; production benchmark required  |
+| 8. `ahash` vs std hasher, 20,000 keys             | 2.21x | 4.12x | Not implemented; production benchmark required  |
+| `nucleo-matcher` vs `SkimMatcherV2`, 20,000 names | 3.33x | 2.03x | Not implemented; semantic validation required   |
+| `simd-json` on the 4.0 MiB `Table`                | 1.41x | 2.67x | Not implemented; typed-path validation required |
+| Relaxed vs SeqCst atomic loads                    | 2.20x | 1.57x | Rejected; negligible                            |
+| 10. Helm gzip output pre-sized from ISIZE         | 1.13x | 1.97x | Not implemented; open                           |
 
 Every row here is a stable win because the prototype wins in both runs. The two
 ratios differ, so quote the observed range rather than one speedup figure.
@@ -598,13 +598,13 @@ result: base64 is not the bottleneck.
 
 ### New candidates this run surfaced
 
-| Candidate                                   | run 1 | run 2 | Status                   |
-| ------------------------------------------- | ----: | ----: | ------------------------ |
-| `nucleo-matcher` for fuzzy filtering        | 3.33x | 2.03x | stable win, always >2x   |
-| `CompactString` for short repeated values   | 3.65x | 4.17x | stable win               |
-| `foldhash` for internal maps                | 2.66x | 3.93x | stable win, always >2.6x |
-| Struct-of-arrays synthetic scan, 100,000    | 1.57x | 1.53x | stable win               |
-| `lasso` interning for short repeated values | 1.11x | 1.21x | stable win, marginal     |
+| Candidate                                   | run 1 | run 2 | Outcome                                        |
+| ------------------------------------------- | ----: | ----: | ---------------------------------------------- |
+| `nucleo-matcher` for fuzzy filtering        | 3.33x | 2.03x | Not implemented; semantic validation required  |
+| `CompactString` for short repeated values   | 3.65x | 4.17x | Not implemented; real-key benchmark required   |
+| `foldhash` for internal maps                | 2.66x | 3.93x | Not implemented; production benchmark required |
+| Struct-of-arrays synthetic scan, 100,000    | 1.57x | 1.53x | Concept only; not implemented                  |
+| `lasso` interning for short repeated values | 1.11x | 1.21x | Not implemented; real-key benchmark required   |
 
 The fuzzy matcher is the largest unclaimed win and appears nowhere in the ranked
 list. `SkimMatcherV2` is on the filter path and, through `filter_match_indices`
