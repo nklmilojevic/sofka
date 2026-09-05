@@ -166,6 +166,39 @@ fn main() {
         });
     }
 
+    // ---- part 3: watch-event ingest, log retention, discovery registry ----
+
+    {
+        use sofka::app::LogsView;
+        let seed = bs::log_lines(10_000);
+        let batch = bs::log_lines(50);
+        for (label, filter, w) in [
+            ("log_saturated/nofilter", "", 0usize),
+            ("log_saturated/filtered", "reconcile", 0),
+        ] {
+            let mut logs = LogsView::default();
+            logs.view.lines.extend(seed.iter().cloned());
+            if !filter.is_empty() {
+                logs.set_filter(filter.to_string());
+            }
+            logs.refresh_index(w);
+            measure(label, iters, || {
+                std::hint::black_box(bs::saturated_log_batch(&mut logs, &batch, w));
+            });
+        }
+    }
+
+    {
+        let list = bs::pod_metrics_list(2_000, 3);
+        measure("metrics_fold/2000_pods_3c", 20, || {
+            std::hint::black_box(bs::metrics_fold(&list));
+        });
+    }
+
+    measure("discovery/registry_500_crds", 20, || {
+        std::hint::black_box(bs::crd_cluster(500));
+    });
+
     {
         let record = bs::provider_long_record(512 * 1024);
         measure("provider/fragmented_512k", 20, || {

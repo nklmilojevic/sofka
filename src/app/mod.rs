@@ -5,7 +5,7 @@
 //! re-scope the previous view), and `esc` pops back.
 
 use std::borrow::Cow;
-use std::cell::{Ref, RefCell};
+use std::cell::{Cell, Ref, RefCell};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::rc::Rc;
 use std::sync::Arc;
@@ -51,6 +51,16 @@ impl App {
     /// `kind_plural` alone leaves `spec` built from an empty plural, so every
     /// cached cell, comparison filter and header measured through it belongs
     /// to `DEFAULT_COLUMNS` rather than the kind's real layout.
+    /// Fold a metrics list exactly as the poll does — `metrics_maps` is
+    /// `pub(super)`; this exposes it to `benchsupport` under the bench feature.
+    #[cfg(feature = "bench")]
+    pub fn bench_metrics_maps(
+        list: &[kube::core::DynamicObject],
+        is_node: bool,
+    ) -> lifecycle::MetricsMaps {
+        lifecycle::metrics_maps(list, is_node)
+    }
+
     #[cfg(feature = "bench")]
     pub fn bench_install_kind(&mut self, plural: &str) {
         self.kind = self.cluster.resolve(plural);
@@ -459,6 +469,10 @@ pub struct Scrollable {
     /// YAML view with a `/` search active that was thousands of allocations
     /// at up to 62 Hz.
     match_cache: RefCell<Option<MatchCache>>,
+    /// Widest line in display columns, with the revision and line count it was
+    /// measured at. Horizontal scrolling clamps against it, and recomputing it
+    /// meant walking and char-counting the whole document on every ←/→.
+    widest: Cell<Option<(u64, usize, usize)>>,
 }
 
 struct MatchCache {
@@ -474,23 +488,45 @@ struct DocumentViewport {
     wrap: bool,
     revision: u64,
     line_count: usize,
-    /// Cumulative display-row end for every source line.
+    /// Cumulative display-row end for every source line — built only when
+    /// wrapping. Without wrap every line is exactly one row, so the table
+    /// would just be `[1, 2, 3, …]`: an allocation and a fill proportional to
+    /// the document for something three arithmetic operations answer.
     ends: Vec<usize>,
 }
 
 impl DocumentViewport {
     fn total_rows(&self) -> usize {
+        if !self.wrap {
+            return self.line_count;
+        }
         self.ends.last().copied().unwrap_or(0)
     }
 
     fn line_at_row(&self, row: usize) -> usize {
+        if !self.wrap {
+            return row.min(self.line_count);
+        }
         self.ends.partition_point(|&end| end <= row)
     }
 
     fn line_start(&self, line: usize) -> usize {
+        if !self.wrap {
+            return line;
+        }
         line.checked_sub(1)
             .and_then(|i| self.ends.get(i).copied())
             .unwrap_or(0)
+    }
+
+    /// How many source lines finish strictly before display row `row`.
+    /// Unwrapped, line `i` ends at row `i + 1`, so this is `row - 1` clamped —
+    /// the same answer the cumulative table used to be searched for.
+    fn lines_before_row(&self, row: usize) -> usize {
+        if !self.wrap {
+            return row.saturating_sub(1).min(self.line_count);
+        }
+        self.ends.partition_point(|&line_end| line_end < row)
     }
 }
 
@@ -696,19 +732,17 @@ impl Scrollable {
         });
         if stale {
             let mut rows = 0usize;
-            let ends = self
-                .lines
-                .iter()
-                .map(|line| {
-                    let line_rows = if self.wrap {
-                        crate::ui::wrapped_height(line, width)
-                    } else {
-                        1
-                    };
-                    rows = rows.saturating_add(line_rows);
-                    rows
-                })
-                .collect();
+            let ends: Vec<usize> = if self.wrap {
+                self.lines
+                    .iter()
+                    .map(|line| {
+                        rows = rows.saturating_add(crate::ui::wrapped_height(line, width));
+                        rows
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            };
             self.viewport = Some(DocumentViewport {
                 width,
                 height,
@@ -736,8 +770,7 @@ impl Scrollable {
         let row_offset = self.scroll.saturating_sub(viewport.line_start(start));
         let visible_end = self.scroll.saturating_add(viewport.height);
         let end = viewport
-            .ends
-            .partition_point(|&line_end| line_end < visible_end)
+            .lines_before_row(visible_end)
             .saturating_add(1)
             .min(self.lines.len());
         (start, end, row_offset)
@@ -770,15 +803,29 @@ impl Scrollable {
         if self.wrap {
             return;
         }
+        let max = self.widest_line().saturating_sub(1) as i64;
+        self.hscroll = (self.hscroll as i64 + delta as i64).clamp(0, max) as usize;
+    }
+    /// Chars in the longest line, cached against the document's revision and
+    /// line count so a held ←/→ does not rescan the whole document per press.
+    fn widest_line(&self) -> usize {
+        let line_count = self.lines.len();
+        if let Some((revision, count, widest)) = self.widest.get()
+            && revision == self.revision
+            && count == line_count
+        {
+            return widest;
+        }
         let widest = self
             .lines
             .iter()
             .map(|l| l.chars().count())
             .max()
             .unwrap_or(0);
-        let max = widest.saturating_sub(1) as i64;
-        self.hscroll = (self.hscroll as i64 + delta as i64).clamp(0, max) as usize;
+        self.widest.set(Some((self.revision, line_count, widest)));
+        widest
     }
+
     /// Toggle line wrap. Turning it on resets the horizontal offset so the view
     /// snaps back to the left margin. Returns the new state.
     pub fn toggle_wrap(&mut self) -> bool {
@@ -859,8 +906,49 @@ impl Scrollable {
     /// Memoized: this is called once per frame from `doc_title` and again per
     /// keypress from `n`/`N`, always over the whole document.
     pub fn match_lines(&self) -> Vec<usize> {
+        self.ensure_match_cache();
+        self.match_cache
+            .borrow()
+            .as_ref()
+            .map(|c| c.matches.clone())
+            .unwrap_or_default()
+    }
+
+    /// How many lines match the active search — read from the cache without
+    /// copying it. The title bar asks for this on every frame.
+    pub fn match_count(&self) -> usize {
+        self.ensure_match_cache();
+        self.match_cache
+            .borrow()
+            .as_ref()
+            .map_or(0, |c| c.matches.len())
+    }
+
+    /// The source line of the `i`th match.
+    pub fn match_line(&self, i: usize) -> Option<usize> {
+        self.ensure_match_cache();
+        let cache = self.match_cache.borrow();
+        cache.as_ref()?.matches.get(i).copied()
+    }
+
+    /// Position of the first match at or after `line`, wrapping to the first
+    /// match when none follow. Binary search: the match list is ascending, and
+    /// this used to copy the whole thing and walk it.
+    fn match_pos_at_or_after(&self, line: usize) -> usize {
+        self.ensure_match_cache();
+        let cache = self.match_cache.borrow();
+        let Some(c) = cache.as_ref() else {
+            return 0;
+        };
+        let pos = c.matches.partition_point(|&m| m < line);
+        if pos == c.matches.len() { 0 } else { pos }
+    }
+
+    /// Rebuild the match cache if the filter, revision or line count moved.
+    fn ensure_match_cache(&self) {
         if self.filter.is_empty() {
-            return Vec::new();
+            self.match_cache.borrow_mut().take();
+            return;
         }
         let line_count = self.lines.len();
         if let Some(c) = self.match_cache.borrow().as_ref()
@@ -868,7 +956,7 @@ impl Scrollable {
             && c.line_count == line_count
             && c.filter == self.filter
         {
-            return c.matches.clone();
+            return;
         }
 
         // Plain case-insensitive substring — deliberately *not* `LogMatcher`,
@@ -888,30 +976,29 @@ impl Scrollable {
             filter: self.filter.clone(),
             revision: self.revision,
             line_count,
-            matches: matches.clone(),
+            matches,
         });
-        matches
     }
 
     /// Finalize a search: scroll to the first match at or after the current
     /// position (wrapping to the first if none follow), so `⏎` lands on a hit
     /// without disturbing the rest of the document. No-op with no matches.
     pub fn focus_first_match(&mut self) {
-        let matches = self.match_lines();
-        if matches.is_empty() {
+        if self.match_count() == 0 {
             return;
         }
         let current_line = self.source_line_at_scroll();
-        let pos = matches.iter().position(|&i| i >= current_line).unwrap_or(0);
+        let pos = self.match_pos_at_or_after(current_line);
         self.match_idx = pos;
-        self.scroll_to_line(matches[pos]);
+        if let Some(line) = self.match_line(pos) {
+            self.scroll_to_line(line);
+        }
     }
 
     /// Step to the next (`forward`) or previous match, wrapping around, and
     /// scroll it into view. No-op with no matches.
     pub fn step_match(&mut self, forward: bool) {
-        let matches = self.match_lines();
-        let n = matches.len();
+        let n = self.match_count();
         if n == 0 {
             return;
         }
@@ -921,7 +1008,9 @@ impl Scrollable {
         } else {
             (cur + n - 1) % n
         };
-        self.scroll_to_line(matches[self.match_idx]);
+        if let Some(line) = self.match_line(self.match_idx) {
+            self.scroll_to_line(line);
+        }
     }
 }
 
@@ -995,6 +1084,47 @@ impl LogIndex {
             return row.min(self.shown.len());
         }
         self.ends.partition_point(|&end| (end as usize) <= row)
+    }
+
+    /// Drop the first `n` buffer lines from the index without rebuilding it.
+    ///
+    /// Retention trims from the front on every appended batch once the buffer
+    /// is full, and each trim used to invalidate the whole index — so a
+    /// saturated buffer re-filtered and re-measured every retained line on
+    /// every batch, which is the opposite of incremental. Here the entries
+    /// that fall away are dropped and the rest are rebased, which touches only
+    /// what the index already holds and never looks at the text again.
+    ///
+    /// Indices stay `u32` and are shifted rather than stored absolutely: the
+    /// shift is a flat pass over a few hundred kilobytes at worst, and
+    /// absolute ids would either double the index or need overflow handling.
+    fn trim_front(&mut self, n: usize) {
+        if n == 0 {
+            return;
+        }
+        let drop = self.shown.partition_point(|&i| (i as usize) < n);
+        let dropped_rows = if self.wrap_width == 0 {
+            drop
+        } else {
+            match drop.checked_sub(1) {
+                Some(last) => self.ends.get(last).copied().unwrap_or(0) as usize,
+                None => 0,
+            }
+        };
+        self.shown.drain(..drop);
+        let shift = n as u32;
+        for i in &mut self.shown {
+            *i -= shift;
+        }
+        if self.wrap_width > 0 {
+            self.ends.drain(..drop);
+            let rows = dropped_rows as u32;
+            for e in &mut self.ends {
+                *e -= rows;
+            }
+        }
+        self.total_rows -= dropped_rows;
+        self.consumed = self.consumed.saturating_sub(n);
     }
 
     fn reset(&mut self, filter: &str, wrap_width: usize, revision: u64) {
@@ -1085,6 +1215,22 @@ impl LogsView {
     /// index and the line buffer at the same time.
     pub fn index(&self) -> &LogIndex {
         &self.index
+    }
+
+    /// Drop `n` lines from the front of the buffer, carrying the index across
+    /// instead of invalidating it.
+    ///
+    /// `Scrollable::drain_front` bumps the revision — line indices below it
+    /// have shifted, so anything holding them must know — and the index used
+    /// to answer that by rebuilding from scratch. It can rebase instead, so
+    /// the revision it is now consistent with is recorded here.
+    pub fn trim_front(&mut self, n: usize) {
+        if n == 0 {
+            return;
+        }
+        self.view.drain_front(n);
+        self.index.trim_front(n);
+        self.index.revision = self.view.revision();
     }
 
     /// Bring the filter/wrap index up to date with the buffer.
@@ -1186,27 +1332,55 @@ const PREV_REVISIONS_MAX: usize = 256;
 /// drilling away and back keeps the baseline.
 #[derive(Default)]
 pub(super) struct PrevRevisions {
-    map: HashMap<(String, String), Arc<DynamicObject>>,
-    order: VecDeque<(String, String)>,
+    /// Keyed by `"{kind}/{key}"` behind an `Rc` so the map and the eviction
+    /// order share one string. A `(String, String)` tuple key cannot be looked
+    /// up borrowed, which meant every read allocated two strings just to hash
+    /// them, and every write allocated two more and then cloned the tuple
+    /// before finding out the entry already existed — on the watch path, for
+    /// every applied object.
+    map: HashMap<Rc<str>, Arc<DynamicObject>>,
+    order: VecDeque<Rc<str>>,
+    /// Scratch buffer for building a lookup key without allocating.
+    probe: RefCell<String>,
 }
 
 impl PrevRevisions {
+    fn probe_key(&self, kind: &str, key: &str) -> std::cell::RefMut<'_, String> {
+        let mut probe = self.probe.borrow_mut();
+        probe.clear();
+        probe.push_str(kind);
+        probe.push('/');
+        probe.push_str(key);
+        probe
+    }
+
     pub(super) fn insert(&mut self, kind: &str, key: &str, obj: Arc<DynamicObject>) {
-        let k = (kind.to_string(), key.to_string());
-        if self.map.insert(k.clone(), obj).is_none() {
-            self.order.push_back(k);
-            while self.order.len() > PREV_REVISIONS_MAX {
-                if let Some(oldest) = self.order.pop_front() {
-                    self.map.remove(&oldest);
-                }
+        // Disjoint field borrows: the probe is read while the map is written.
+        let PrevRevisions { map, order, probe } = self;
+        let mut probe = probe.borrow_mut();
+        probe.clear();
+        probe.push_str(kind);
+        probe.push('/');
+        probe.push_str(key);
+        // The common case by far: the same object updated again.
+        if let Some(slot) = map.get_mut(probe.as_str()) {
+            *slot = obj;
+            return;
+        }
+        let owned: Rc<str> = Rc::from(probe.as_str());
+        drop(probe);
+        map.insert(Rc::clone(&owned), obj);
+        order.push_back(owned);
+        while order.len() > PREV_REVISIONS_MAX {
+            if let Some(oldest) = order.pop_front() {
+                map.remove(&oldest);
             }
         }
     }
 
     pub(super) fn get(&self, kind: &str, key: &str) -> Option<&DynamicObject> {
-        self.map
-            .get(&(kind.to_string(), key.to_string()))
-            .map(Arc::as_ref)
+        let probe = self.probe_key(kind, key);
+        self.map.get(probe.as_str()).map(Arc::as_ref)
     }
 }
 
@@ -1296,6 +1470,14 @@ const VIEW_CACHE_MAX: usize = 8;
 /// roughly eight times one snapshot. Objects are `Arc`-shared with the live
 /// store, so the live view is nearly free; this bounds the *departed* ones.
 const VIEW_CACHE_MAX_OBJECTS: usize = 10_000;
+
+/// Third bound, and the one that actually tracks memory: retained bytes across
+/// all snapshots. An object count is not a memory cap either — ten thousand
+/// ConfigMaps or Helm storage Secrets are worth orders of magnitude more than
+/// ten thousand Pods, so the same count can mean a few megabytes or a few
+/// gigabytes. Estimated rather than measured (see [`App::approx_view_bytes`]),
+/// so it is a guard rail, not an accountant.
+const VIEW_CACHE_MAX_BYTES: usize = 64 * 1024 * 1024;
 
 /// Identity of a watch scope, used to key cached view snapshots. Two visits
 /// with the same key list exactly the same server-side set, so the previous

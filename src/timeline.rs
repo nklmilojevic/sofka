@@ -26,6 +26,11 @@ const MAX_PER_OBJECT: usize = 50;
 /// least-recently-touched one.
 const MAX_OBJECTS: usize = 2000;
 
+/// Ceiling on the creation-dedup set. Far above [`MAX_OBJECTS`], because it
+/// tracks every object seen rather than every object with history, but bounded
+/// so a long session on a churning cluster cannot grow it without end.
+const MAX_SEEN: usize = 50_000;
+
 /// Coloring/severity of a timeline entry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Level {
@@ -51,9 +56,19 @@ pub struct Timeline {
     history: HashMap<String, VecDeque<Entry>>,
     /// Touch order for [`MAX_OBJECTS`] eviction (front = oldest).
     order: VecDeque<String>,
-    /// Keys observed at least once, so "created" fires only on genuine first
-    /// sight (not on a watcher relist, which re-applies everything).
-    seen: HashSet<String>,
+    /// Hashes of keys observed at least once, so "created" fires only on
+    /// genuine first sight (not on a watcher relist, which re-applies
+    /// everything).
+    ///
+    /// Hashes rather than keys, and bounded: this used to hold an owned key
+    /// string for every object the session ever saw, with nothing ever
+    /// removing one — not eviction, not deletion — so on a high-churn cluster
+    /// it grew for as long as the context stayed open. Eight bytes per entry
+    /// with a ceiling costs a phantom "created" only if an object evicted from
+    /// here is later re-observed *and* was born after this session started.
+    seen: HashSet<u64>,
+    /// Insertion order for [`MAX_SEEN`] eviction (front = oldest).
+    seen_order: VecDeque<u64>,
 }
 
 impl Default for Timeline {
@@ -63,6 +78,7 @@ impl Default for Timeline {
             history: HashMap::new(),
             order: VecDeque::new(),
             seen: HashSet::new(),
+            seen_order: VecDeque::new(),
         }
     }
 }
@@ -74,6 +90,7 @@ impl Timeline {
         self.history.clear();
         self.order.clear();
         self.seen.clear();
+        self.seen_order.clear();
     }
 
     /// Record the transitions from `prev` to `new` for one object. `prev` is
@@ -89,8 +106,10 @@ impl Timeline {
         new: &DynamicObject,
     ) {
         let now = Self::now();
-        let key = tkey(plural, rk);
-        let first_ever = self.seen.insert(key.clone());
+        // The key is formatted only when something is actually recorded: this
+        // runs for every applied object, and the overwhelming majority are
+        // already-seen objects with no transition to report.
+        let first_ever = self.mark_seen(plural, rk);
         match prev {
             // First sight (initial list / post-relist). Record a creation only
             // for an object genuinely born after we started watching, and only
@@ -98,7 +117,7 @@ impl Timeline {
             None => {
                 if first_ever && created_after(new, self.started) {
                     self.push(
-                        &key,
+                        &tkey(plural, rk),
                         now,
                         Level::Good,
                         format!("{} created", singular(plural)),
@@ -106,11 +125,36 @@ impl Timeline {
                 }
             }
             Some(prev) => {
+                let mut key: Option<String> = None;
                 for (level, text) in transitions(prev, new, plural) {
-                    self.push(&key, now, level, text);
+                    let key = key.get_or_insert_with(|| tkey(plural, rk));
+                    self.push(key, now, level, text);
                 }
             }
         }
+    }
+
+    /// Record that `plural`/`rk` has been seen, returning whether this was the
+    /// first time. Hashes the pair in place rather than building a key.
+    fn mark_seen(&mut self, plural: &str, rk: &str) -> bool {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        plural.hash(&mut h);
+        // Separator, so ("a", "b/c") and ("a/b", "c") cannot collide by
+        // concatenation.
+        0u8.hash(&mut h);
+        rk.hash(&mut h);
+        let digest = h.finish();
+        if !self.seen.insert(digest) {
+            return false;
+        }
+        self.seen_order.push_back(digest);
+        while self.seen_order.len() > MAX_SEEN {
+            if let Some(oldest) = self.seen_order.pop_front() {
+                self.seen.remove(&oldest);
+            }
+        }
+        true
     }
 
     /// Record a deletion.

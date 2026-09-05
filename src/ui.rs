@@ -2070,18 +2070,14 @@ fn doc_title(view: &crate::app::Scrollable) -> String {
     if view.filter.is_empty() {
         return format!(" {} ", view.title);
     }
-    let matches = view.match_lines();
-    if matches.is_empty() {
+    // Count only — the title needs a number, not a copy of every match index,
+    // and it is rebuilt on every frame.
+    let total = view.match_count();
+    if total == 0 {
         format!(" {} · /{} [no matches] ", view.title, view.filter)
     } else {
-        let cur = view.match_idx.min(matches.len() - 1) + 1;
-        format!(
-            " {} · /{} [{}/{}] ",
-            view.title,
-            view.filter,
-            cur,
-            matches.len()
-        )
+        let cur = view.match_idx.min(total - 1) + 1;
+        format!(" {} · /{} [{}/{}] ", view.title, view.filter, cur, total)
     }
 }
 

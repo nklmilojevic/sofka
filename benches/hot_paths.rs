@@ -471,8 +471,70 @@ fn provider_ingest(c: &mut Criterion) {
     g.finish();
 }
 
+/// 2.x — a logs view held at its retention cap: every batch trims the front,
+/// which used to invalidate the whole index and re-filter and re-measure every
+/// retained line.
+fn log_saturated(c: &mut Criterion) {
+    use sofka::app::LogsView;
+
+    let mut g = c.benchmark_group("log_saturated");
+    let seed = bs::log_lines(10_000);
+    let batch = bs::log_lines(50);
+    for (label, filter, wrap_width) in [
+        ("nofilter", "", 0usize),
+        ("filtered", "reconcile", 0),
+        ("wrapped", "", 120),
+    ] {
+        let mut logs = LogsView::default();
+        logs.view.lines.extend(seed.iter().cloned());
+        if !filter.is_empty() {
+            logs.set_filter(filter.to_string());
+        }
+        logs.refresh_index(wrap_width);
+        g.bench_function(label, |b| {
+            b.iter(|| black_box(bs::saturated_log_batch(&mut logs, &batch, wrap_width)));
+        });
+    }
+    g.finish();
+}
+
+/// 2.x — one metrics poll's fold: per-container usage plus the pod totals the
+/// CPU/MEM columns read.
+fn metrics_fold(c: &mut Criterion) {
+    let mut g = c.benchmark_group("metrics_fold");
+    for n in [500usize, 2_000] {
+        // Built once: the fixture's JSON is not what this measures.
+        let list = bs::pod_metrics_list(n, 3);
+        g.bench_with_input(BenchmarkId::new("pods_3c", n), &n, |b, _| {
+            b.iter(|| black_box(bs::metrics_fold(&list)));
+        });
+    }
+    g.finish();
+}
+
+/// 2.x — horizontal scrolling in a document view: one keypress used to walk
+/// and char-count every line to find the clamp.
+fn doc_hscroll(c: &mut Criterion) {
+    let mut g = c.benchmark_group("doc_hscroll");
+    for n in [5_000usize, 50_000] {
+        let mut doc = sofka::app::Scrollable::doc("yaml".into(), bs::yaml_lines(n));
+        g.bench_with_input(BenchmarkId::new("keypress", n), &n, |b, _| {
+            let mut dir = 1i32;
+            b.iter(|| {
+                doc.scroll_h(dir);
+                dir = -dir;
+                black_box(doc.hscroll)
+            });
+        });
+    }
+    g.finish();
+}
+
 criterion_group!(
     benches,
+    log_saturated,
+    metrics_fold,
+    doc_hscroll,
     frame,
     viewport,
     log_frame,

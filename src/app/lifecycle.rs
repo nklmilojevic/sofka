@@ -358,8 +358,12 @@ impl App {
         let too_many_objects = |cache: &HashMap<ViewKey, crate::store::Items>| {
             cache.values().map(HashMap::len).sum::<usize>() > VIEW_CACHE_MAX_OBJECTS
         };
+        let too_many_bytes = |cache: &HashMap<ViewKey, crate::store::Items>| {
+            cache.values().map(Self::approx_view_bytes).sum::<usize>() > VIEW_CACHE_MAX_BYTES
+        };
         while self.view_cache_order.len() > VIEW_CACHE_MAX
-            || (self.view_cache_order.len() > 1 && too_many_objects(&self.view_cache))
+            || (self.view_cache_order.len() > 1
+                && (too_many_objects(&self.view_cache) || too_many_bytes(&self.view_cache)))
         {
             match self.view_cache_order.pop_front() {
                 Some(oldest) => {
@@ -368,6 +372,66 @@ impl App {
                 None => break,
             }
         }
+    }
+}
+
+/// Per-object and per-container usage, keyed the way the UI looks them up.
+pub(super) type MetricsMaps = (HashMap<String, (i64, i64)>, HashMap<String, (i64, i64)>);
+
+/// Fold one metrics list into the per-object and per-container maps the UI
+/// reads.
+///
+/// Pods walk their container list once and total it on the way through:
+/// calling `usage_of` after `container_usage_of` re-parsed every container's
+/// CPU and memory quantity a second time, on every poll, for every pod in
+/// scope. `usage_of`'s pod branch sums exactly these values, so the totals are
+/// identical (asserted in `pod_metrics_are_split_by_container`).
+pub(super) fn metrics_maps(list: &[DynamicObject], is_node: bool) -> MetricsMaps {
+    let mut data = HashMap::new();
+    let mut containers = HashMap::new();
+    for item in list {
+        let name = item.metadata.name.clone().unwrap_or_default();
+        let key = match &item.metadata.namespace {
+            Some(n) => format!("{n}/{name}"),
+            None => name,
+        };
+        if is_node {
+            data.insert(key, usage_of(item, is_node));
+            continue;
+        }
+        let mut total = (0i64, 0i64);
+        for (container, usage) in container_usage_of(item) {
+            total.0 += usage.0;
+            total.1 += usage.1;
+            containers.insert(format!("{key}/{container}"), usage);
+        }
+        data.insert(key, total);
+    }
+    (data, containers)
+}
+
+impl App {
+    /// Rough retained size of one cached view, from a bounded sample.
+    ///
+    /// Measuring every object would cost a full walk of the snapshot on every
+    /// eviction check, which is exactly the kind of work a cache is supposed
+    /// to avoid; a couple of dozen objects give the mean payload closely
+    /// enough to tell a Pod view from a Secret view, which is the distinction
+    /// the budget exists to make. Objects shared with the live store are
+    /// counted here too — an over-estimate, and the safe direction for a cap.
+    pub(super) fn approx_view_bytes(items: &crate::store::Items) -> usize {
+        const SAMPLE: usize = 24;
+        let count = items.len();
+        if count == 0 {
+            return 0;
+        }
+        let mut sampled = 0usize;
+        let mut bytes = 0usize;
+        for obj in items.values().take(SAMPLE) {
+            bytes += approx_object_bytes(obj);
+            sampled += 1;
+        }
+        bytes / sampled.max(1) * count
     }
 
     /// Drop every cached view snapshot (context switch: another cluster's
@@ -546,21 +610,7 @@ impl App {
                 };
                 let msg = match api.list(&ListParams::default()).await {
                     Ok(list) => {
-                        let mut data = HashMap::new();
-                        let mut containers = HashMap::new();
-                        for item in list {
-                            let name = item.metadata.name.clone().unwrap_or_default();
-                            let key = match &item.metadata.namespace {
-                                Some(n) => format!("{n}/{name}"),
-                                None => name,
-                            };
-                            if !is_node {
-                                for (container, usage) in container_usage_of(&item) {
-                                    containers.insert(format!("{key}/{container}"), usage);
-                                }
-                            }
-                            data.insert(key, usage_of(&item, is_node));
-                        }
+                        let (data, containers) = metrics_maps(&list.items, is_node);
                         Msg::Metrics {
                             generation: genr,
                             data,

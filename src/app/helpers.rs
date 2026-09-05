@@ -940,6 +940,47 @@ pub(super) fn ready_eq(o: &DynamicObject, ready_ptr: &str, want_ptr: &str) -> bo
 }
 
 /// Extract (cpu millicores, memory bytes) from a metrics-API object.
+/// Approximate heap bytes one stored object holds: its JSON body plus the
+/// typed metadata beside it. Structural constants are rough — this feeds a
+/// memory guard rail, not an allocator report.
+pub(super) fn approx_object_bytes(obj: &DynamicObject) -> usize {
+    /// Per-node bookkeeping (enum tag, map/vec headers) charged to every
+    /// value, plus the key string for a map entry.
+    const NODE_OVERHEAD: usize = 32;
+
+    fn value_bytes(v: &Value) -> usize {
+        match v {
+            Value::Null | Value::Bool(_) | Value::Number(_) => NODE_OVERHEAD,
+            Value::String(s) => NODE_OVERHEAD + s.len(),
+            Value::Array(a) => NODE_OVERHEAD + a.iter().map(value_bytes).sum::<usize>(),
+            Value::Object(o) => {
+                NODE_OVERHEAD
+                    + o.iter()
+                        .map(|(k, v)| NODE_OVERHEAD + k.len() + value_bytes(v))
+                        .sum::<usize>()
+            }
+        }
+    }
+
+    let meta = &obj.metadata;
+    let string_len = |s: &Option<String>| s.as_ref().map_or(0, String::len);
+    let map_len = |m: &Option<std::collections::BTreeMap<String, String>>| {
+        m.as_ref().map_or(0, |m| {
+            m.iter()
+                .map(|(k, v)| NODE_OVERHEAD + k.len() + v.len())
+                .sum::<usize>()
+        })
+    };
+    size_of::<DynamicObject>()
+        + value_bytes(&obj.data)
+        + string_len(&meta.name)
+        + string_len(&meta.namespace)
+        + string_len(&meta.uid)
+        + string_len(&meta.resource_version)
+        + map_len(&meta.labels)
+        + map_len(&meta.annotations)
+}
+
 pub(super) fn usage_of(obj: &DynamicObject, is_node: bool) -> (i64, i64) {
     use crate::columns::{parse_cpu_milli, parse_mem_bytes};
     if is_node {

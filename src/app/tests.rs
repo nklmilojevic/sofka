@@ -5250,6 +5250,32 @@ fn pod_metrics_are_split_by_container() {
         ]
     );
     assert_eq!(usage_of(&metrics, false), (175, 80 * 1024 * 1024));
+
+    // The poll totals the per-container pass instead of re-parsing every
+    // quantity through `usage_of`; the two must not drift apart.
+    let summed = container_usage_of(&metrics)
+        .into_iter()
+        .fold((0i64, 0i64), |acc, (_, (cpu, mem))| {
+            (acc.0 + cpu, acc.1 + mem)
+        });
+    assert_eq!(summed, usage_of(&metrics, false));
+
+    // Missing and malformed quantities degrade to zero on both paths.
+    let ragged = obj(json!({
+        "apiVersion": "metrics.k8s.io/v1beta1",
+        "kind": "PodMetrics",
+        "metadata": {"name": "ragged", "namespace": "default"},
+        "containers": [
+            {"name": "app", "usage": {"cpu": "10m"}},
+            {"name": "broken", "usage": {"cpu": "nonsense", "memory": "8Mi"}}
+        ]
+    }));
+    let summed = container_usage_of(&ragged)
+        .into_iter()
+        .fold((0i64, 0i64), |acc, (_, (cpu, mem))| {
+            (acc.0 + cpu, acc.1 + mem)
+        });
+    assert_eq!(summed, usage_of(&ragged, false));
 }
 
 #[tokio::test]
@@ -9540,6 +9566,55 @@ async fn view_cache_evicts_least_recently_used() {
 /// A view-count cap is not a memory cap: two 2,000-pod views cost twice one.
 /// The object bound is what keeps a big cluster's cache from multiplying, so
 /// a large view must evict earlier than `VIEW_CACHE_MAX` would.
+/// The view-cache byte budget is only as good as its size estimate: it exists
+/// to tell a view of Pods from a view of Secrets carrying megabyte payloads,
+/// which an object count cannot.
+#[test]
+fn view_size_estimate_tracks_payload_not_object_count() {
+    let light = obj(json!({
+        "apiVersion": "v1", "kind": "Pod",
+        "metadata": {"name": "web", "namespace": "default"},
+        "status": {"phase": "Running"}
+    }));
+    let heavy = obj(json!({
+        "apiVersion": "v1", "kind": "Secret",
+        "metadata": {
+            "name": "sh.helm.release.v1.app.v1",
+            "namespace": "default",
+            "annotations": {"payload": "x".repeat(64 * 1024)},
+        },
+        "data": {"release": "y".repeat(256 * 1024)}
+    }));
+
+    let light_bytes = crate::app::helpers::approx_object_bytes(&light);
+    let heavy_bytes = crate::app::helpers::approx_object_bytes(&heavy);
+    assert!(
+        heavy_bytes > light_bytes * 100,
+        "a 320 KiB object must not price like a bare pod: {heavy_bytes} vs {light_bytes}"
+    );
+
+    // And the per-view estimate scales with the number of objects held.
+    let one: crate::store::Items = std::iter::once((
+        crate::store::row_key(&heavy).into(),
+        std::sync::Arc::new(heavy.clone()),
+    ))
+    .collect();
+    let many: crate::store::Items = (0..50)
+        .map(|i| {
+            let mut o = heavy.clone();
+            o.metadata.name = Some(format!("secret-{i}"));
+            (crate::store::row_key(&o).into(), std::sync::Arc::new(o))
+        })
+        .collect();
+    let one_view = App::approx_view_bytes(&one);
+    let many_view = App::approx_view_bytes(&many);
+    assert!(one_view >= heavy_bytes, "{one_view} < {heavy_bytes}");
+    assert!(
+        many_view > one_view * 40,
+        "50 copies must price near 50x one: {many_view} vs {one_view}"
+    );
+}
+
 #[tokio::test]
 async fn view_cache_evicts_on_total_objects_not_just_view_count() {
     let (mut app, _rx) = test_app();
@@ -9743,6 +9818,42 @@ async fn log_index_tracks_appends_incrementally() {
                 .lines
                 .extend((0..20).map(|i| format!("batch {batch} line {i} some padding text here")));
             assert_index_matches_naive(&mut logs, w, "append");
+        }
+    }
+}
+
+/// Retention trims from the front on every batch once the buffer is full. The
+/// index rebases instead of rebuilding, so it has to land on exactly what a
+/// rebuild would have produced — otherwise the viewport and the scroll anchor
+/// drift apart silently.
+#[tokio::test]
+async fn log_index_survives_front_trimming() {
+    let mut logs = LogsView::default();
+    for w in [0usize, 20] {
+        for filter in ["", "keep"] {
+            logs.view.clear_lines();
+            logs.set_filter(filter.to_string());
+            logs.view.lines.extend((0..120).map(|i| {
+                let tag = if i % 3 == 0 { "keep" } else { "drop" };
+                format!("line {i} {tag} with padding text long enough to wrap")
+            }));
+            assert_index_matches_naive(&mut logs, w, "seed");
+
+            for trim in [1usize, 7, 40] {
+                logs.trim_front(trim);
+                assert_index_matches_naive(&mut logs, w, "trim");
+                logs.view.lines.extend(
+                    (0..10).map(|i| {
+                        format!("appended {i} keep with padding text long enough to wrap")
+                    }),
+                );
+                assert_index_matches_naive(&mut logs, w, "append after trim");
+            }
+
+            // Trimming everything leaves an empty, still-consistent index.
+            let all = logs.view.lines.len();
+            logs.trim_front(all);
+            assert_index_matches_naive(&mut logs, w, "trim to empty");
         }
     }
 }

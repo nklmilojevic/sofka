@@ -473,3 +473,75 @@ pub fn provider_long_record(bytes: usize) -> Vec<u8> {
     out.push_str("\"}\n");
     out.into_bytes()
 }
+
+/// A `PodMetrics` object with `containers` per pod, shaped like the
+/// metrics-server response the poll folds into its maps.
+pub fn pod_metrics(i: usize, containers: usize) -> DynamicObject {
+    let list: Vec<serde_json::Value> = (0..containers)
+        .map(|c| {
+            json!({
+                "name": format!("c{c}"),
+                "usage": {
+                    "cpu": format!("{}m", (i + c) % 500 + 1),
+                    "memory": format!("{}Mi", (i * 7 + c) % 2048 + 1),
+                },
+            })
+        })
+        .collect();
+    serde_json::from_value(json!({
+        "apiVersion": "metrics.k8s.io/v1beta1",
+        "kind": "PodMetrics",
+        "metadata": {
+            "name": format!("workload-{i:05}-7d9f8b6c5d-{:04x}", i * 7919 % 65536),
+            "namespace": format!("ns-{}", i % 24),
+        },
+        "containers": list,
+    }))
+    .expect("bench pod metrics fixture is valid")
+}
+
+/// The metrics list one poll receives, built outside the measurement.
+pub fn pod_metrics_list(n: usize, containers: usize) -> Vec<DynamicObject> {
+    (0..n).map(|i| pod_metrics(i, containers)).collect()
+}
+
+/// One metrics poll's fold over an already-built list.
+pub fn metrics_fold(list: &[DynamicObject]) -> usize {
+    let (data, per_container) = App::bench_metrics_maps(list, false);
+    data.len() + per_container.len()
+}
+
+/// A logs view held at a fixed retention cap: every appended batch pushes the
+/// same number of lines off the front, which is the steady state of a busy
+/// stream and the case the index has to stay incremental through.
+pub fn saturated_log_batch(
+    logs: &mut crate::app::LogsView,
+    batch: &[String],
+    wrap_width: usize,
+) -> usize {
+    logs.view.lines.extend(batch.iter().cloned());
+    let cap = 10_000;
+    let overflow = logs.view.lines.len().saturating_sub(cap);
+    if overflow > 0 {
+        logs.trim_front(overflow);
+    }
+    logs.refresh_index(wrap_width).total_rows()
+}
+
+/// A cluster whose registry holds `n` custom resources, the shape a CRD-heavy
+/// cluster leaves behind after discovery.
+pub fn crd_cluster(n: usize) -> Cluster {
+    // `Cluster::fake` builds a kube `Client`, which spawns a tower worker and
+    // needs a reactor — the same reason `app()` enters the runtime.
+    let _guard = runtime().enter();
+    let mut cluster = Cluster::fake();
+    for i in 0..n {
+        cluster.register_kind(
+            &format!("group{}.example.com", i % 40),
+            &format!("Widget{i}"),
+            &format!("widget{i}s"),
+            true,
+        );
+    }
+    cluster
+}
