@@ -867,6 +867,10 @@ impl Scrollable {
     /// Drop `n` lines from the front (log-buffer trimming). Shifts every
     /// index, so it bumps the revision.
     pub fn drain_front(&mut self, n: usize) {
+        // Clamped: retention only ever asks for the overflow, but "drop more
+        // than is there" is a reasonable request to make of a buffer and it
+        // should mean "drop everything", not panic.
+        let n = n.min(self.lines.len());
         self.lines.drain(0..n);
         self.revision = self.revision.wrapping_add(1);
         self.viewport = None;

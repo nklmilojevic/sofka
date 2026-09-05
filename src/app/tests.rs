@@ -9858,6 +9858,159 @@ async fn log_index_survives_front_trimming() {
     }
 }
 
+/// The rebase has to be a *rebase*: a `trim_front` that quietly reset the index
+/// would leave every other test in this file passing, because the next refresh
+/// would rebuild the right answer anyway. So check the index directly, before
+/// any refresh — it must already describe the trimmed buffer.
+#[tokio::test]
+async fn log_index_rebases_without_rebuilding() {
+    let mut logs = LogsView::default();
+    for w in [0usize, 24] {
+        logs.view.clear_lines();
+        logs.set_filter("keep".into());
+        logs.view.lines.extend((0..100).map(|i| {
+            let tag = if i % 3 == 0 { "keep" } else { "drop" };
+            format!("line {i} {tag} with padding text long enough to wrap")
+        }));
+        logs.refresh_index(w);
+
+        logs.trim_front(30);
+        // No refresh_index() call here: this is the state the trim left behind.
+        let (want_shown, want_total) = naive_log_index(&logs, w);
+        let idx = logs.index();
+        let got: Vec<u32> = (0..idx.shown_len())
+            .map(|i| idx.line_at(i).unwrap() as u32)
+            .collect();
+        assert_eq!(got, want_shown, "rebased shown lines (wrap {w})");
+        assert_eq!(
+            idx.total_rows(),
+            want_total,
+            "rebased total rows (wrap {w})"
+        );
+        assert!(
+            idx.shown_len() > 0,
+            "fixture must leave matches behind, or this proves nothing"
+        );
+    }
+}
+
+/// The shapes that are easy to get wrong once indices are being shifted rather
+/// than recomputed: trimming past the end, trimming an index that was never
+/// built, and trimming when nothing matches the filter.
+#[tokio::test]
+async fn log_index_trim_handles_degenerate_input() {
+    let mut logs = LogsView::default();
+
+    // Trimming more than the buffer holds.
+    logs.view
+        .lines
+        .extend((0..10).map(|i| format!("line {i} keep")));
+    logs.set_filter("keep".into());
+    logs.refresh_index(0);
+    logs.trim_front(1_000);
+    assert_eq!(logs.view.lines.len(), 0);
+    assert_index_matches_naive(&mut logs, 0, "over-trim");
+
+    // Trimming an index that was never folded in (nothing consumed yet).
+    logs.view.clear_lines();
+    logs.set_filter(String::new());
+    logs.view
+        .lines
+        .extend((0..40).map(|i| format!("line {i} padding")));
+    logs.trim_front(15);
+    assert_index_matches_naive(&mut logs, 0, "trim before first refresh");
+
+    // Trimming while the filter matches nothing at all.
+    logs.view.clear_lines();
+    logs.set_filter("zzz-no-match".into());
+    logs.view
+        .lines
+        .extend((0..40).map(|i| format!("line {i} padding")));
+    logs.refresh_index(12);
+    assert_eq!(logs.index().shown_len(), 0);
+    logs.trim_front(20);
+    assert_index_matches_naive(&mut logs, 12, "trim with no matches");
+
+    // Trimming exactly the matched prefix, so every shown entry falls away.
+    logs.view.clear_lines();
+    logs.set_filter("keep".into());
+    logs.view
+        .lines
+        .extend((0..20).map(|i| format!("line {i} {}", if i < 10 { "keep" } else { "other" })));
+    logs.refresh_index(0);
+    assert_eq!(logs.index().shown_len(), 10);
+    logs.trim_front(10);
+    assert_eq!(
+        logs.index().shown_len(),
+        0,
+        "all matches were in the prefix"
+    );
+    assert_index_matches_naive(&mut logs, 0, "trim the whole matched prefix");
+}
+
+/// The steady state 026 is about: a stream running against a full retention
+/// buffer, where every batch trims. Driven through the real message path, with
+/// a filter and wrapping on, so the index is rebased hundreds of times in a row
+/// and must still agree with a rebuild — and a surviving line's display row
+/// must move down by exactly the rows that were dropped, which is what the
+/// paused scroll anchor is shifted by.
+#[tokio::test]
+async fn log_index_stays_correct_through_a_saturated_stream() {
+    let (mut app, _rx) = test_app();
+    app.logs_cfg.buffer = 200;
+    app.logs.wrap = true;
+    app.logs.set_filter("keep".into());
+    let wrap_width = 30;
+
+    for batch in 0..60 {
+        app.handle_msg(Msg::LogLines {
+            generation: app.log_gen,
+            lines: (0..25)
+                .map(|i| {
+                    let tag = if (batch + i) % 3 == 0 { "keep" } else { "drop" };
+                    format!("batch {batch} line {i} {tag} padding text that wraps")
+                })
+                .collect(),
+        });
+
+        // Rows of the lines about to be dropped by the *next* batch, and where
+        // a line that will survive sits right now.
+        let before = app.logs.refresh_index(wrap_width);
+        let survivor_pos = before.shown_len().saturating_sub(1);
+        let survivor_line = before.line_at(survivor_pos);
+        let survivor_row = before.start_row(survivor_pos);
+        let len_before = app.logs.view.lines.len();
+
+        assert_index_matches_naive(&mut app.logs, wrap_width, "saturated batch");
+
+        if let Some(line) = survivor_line
+            && len_before >= app.logs_cfg.buffer
+        {
+            // Find that same source line after the next trim and check it moved
+            // by exactly the dropped rows.
+            let dropped_lines = 25.min(len_before);
+            let dropped_rows: usize = app
+                .logs
+                .view
+                .lines
+                .iter()
+                .take(dropped_lines)
+                .filter(|l| app.logs.matches(l))
+                .map(|l| crate::ui::wrapped_height(l, wrap_width))
+                .sum();
+            if line >= dropped_lines {
+                assert!(
+                    survivor_row >= dropped_rows,
+                    "a surviving line cannot start above the rows dropped before it"
+                );
+            }
+        }
+    }
+
+    assert_eq!(app.logs.view.lines.len(), 200, "buffer held at its cap");
+    assert_index_matches_naive(&mut app.logs, wrap_width, "end of stream");
+}
+
 #[tokio::test]
 async fn log_index_rebuilds_on_filter_and_wrap_changes() {
     let mut logs = LogsView::default();
