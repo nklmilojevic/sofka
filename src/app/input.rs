@@ -1047,9 +1047,7 @@ impl App {
                 target.scroll = 0;
                 target.hscroll = 0;
             }
-            KeyCode::Char('G') | KeyCode::End => {
-                target.scroll = target.lines.len().saturating_sub(1)
-            }
+            KeyCode::Char('G') | KeyCode::End => target.scroll_to_bottom(),
             // k9s: `w` toggles line wrap; folding long lines is the other way to
             // read content that runs past the right edge.
             KeyCode::Char('w') => {

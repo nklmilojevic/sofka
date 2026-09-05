@@ -415,10 +415,14 @@ enum PromptKind {
 pub struct Scrollable {
     pub title: String,
     pub lines: VecDeque<String>,
-    /// Scroll offset in display rows. `usize` on purpose: a paused log buffer
-    /// (100k lines, wrapped) far exceeds `u16`; views that hand this to a
-    /// ratatui `Paragraph` clamp at the edge instead.
+    /// Vertical scroll offset. Document views count source lines; logs count
+    /// rendered display rows. `usize` on purpose: a paused wrapped log buffer
+    /// can far exceed `u16`.
     pub scroll: usize,
+    /// Last rendered document viewport. Zero height means it has not been drawn
+    /// yet, so scrolling falls back to the final source line.
+    viewport_w: usize,
+    viewport_h: usize,
     /// Horizontal scroll offset in columns, for views (`describe`, events) whose
     /// lines run past the right edge. Ignored while `wrap` is on.
     pub hscroll: usize,
@@ -638,9 +642,38 @@ impl Scrollable {
         Self::default()
     }
     pub fn scroll_by(&mut self, delta: i32) {
-        let max = self.lines.len().saturating_sub(1) as i64;
+        let max = self.max_scroll() as i64;
         self.scroll = (self.scroll as i64 + delta as i64).clamp(0, max) as usize;
     }
+
+    pub(crate) fn scroll_to_bottom(&mut self) {
+        self.scroll = self.max_scroll();
+    }
+
+    pub(crate) fn set_viewport(&mut self, width: usize, height: usize) {
+        self.viewport_w = width.max(1);
+        self.viewport_h = height;
+        self.scroll = self.scroll.min(self.max_scroll());
+    }
+
+    fn max_scroll(&self) -> usize {
+        if self.viewport_h == 0 {
+            return self.lines.len().saturating_sub(1);
+        }
+        if !self.wrap {
+            return self.lines.len().saturating_sub(self.viewport_h);
+        }
+
+        let mut rows = 0usize;
+        for (i, line) in self.lines.iter().enumerate().rev() {
+            rows = rows.saturating_add(crate::ui::wrapped_height(line, self.viewport_w));
+            if rows >= self.viewport_h {
+                return i;
+            }
+        }
+        0
+    }
+
     /// Scroll horizontally by `delta` columns, clamped to the widest line. A
     /// no-op while wrapping, since wrapped lines have no off-screen right edge.
     pub fn scroll_h(&mut self, delta: i32) {
@@ -663,6 +696,7 @@ impl Scrollable {
         if self.wrap {
             self.hscroll = 0;
         }
+        self.scroll = self.scroll.min(self.max_scroll());
         self.wrap
     }
 

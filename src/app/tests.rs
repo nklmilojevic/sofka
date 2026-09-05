@@ -821,6 +821,45 @@ async fn ctrl_f_and_ctrl_b_page_document_views() {
 }
 
 #[tokio::test]
+async fn document_scroll_keeps_the_last_page_filled() {
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    let (mut app, _rx) = test_app();
+    app.mode = Mode::Detail;
+    app.detail = Scrollable {
+        title: "document".into(),
+        lines: (0..30).map(|i| format!("line {i}")).collect(),
+        ..Default::default()
+    };
+
+    // A 24-row terminal leaves 13 content rows after the standard header,
+    // footer, prompt, and document border.
+    let mut term = Terminal::new(TestBackend::new(80, 24)).unwrap();
+    term.draw(|f| crate::ui::draw(f, &mut app)).unwrap();
+
+    app.handle_key(press(KeyCode::Char('G'))).unwrap();
+    assert_eq!(app.detail.scroll, 17, "bottom keeps a full viewport");
+    app.handle_key(press(KeyCode::Char('j'))).unwrap();
+    assert_eq!(app.detail.scroll, 17, "cannot scroll past the last page");
+    app.handle_key(press(KeyCode::Char('k'))).unwrap();
+    assert_eq!(
+        app.detail.scroll, 16,
+        "up moves immediately from the bottom"
+    );
+
+    app.detail = Scrollable {
+        title: "short document".into(),
+        lines: (0..10).map(|i| format!("line {i}")).collect(),
+        ..Default::default()
+    };
+    term.draw(|f| crate::ui::draw(f, &mut app)).unwrap();
+    app.handle_key(press(KeyCode::Char('G'))).unwrap();
+    app.handle_key(press(KeyCode::Char('j'))).unwrap();
+    assert_eq!(app.detail.scroll, 0, "a short document never scrolls");
+}
+
+#[tokio::test]
 async fn switching_kind_resets_stale_selection_to_top() {
     let (mut app, _rx) = test_app();
     app.switch_kind("pods");

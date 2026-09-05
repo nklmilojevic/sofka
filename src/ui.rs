@@ -129,19 +129,19 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     }
 
     match app.mode {
-        Mode::Detail => draw_scrollable(frame, &app.detail, chunks[1], theme::sky()),
-        Mode::Diff => draw_diff(frame, &app.detail, chunks[1]),
-        Mode::Events => draw_scrollable(frame, &app.detail, chunks[1], theme::peach()),
+        Mode::Detail => draw_scrollable(frame, &mut app.detail, chunks[1], theme::sky()),
+        Mode::Diff => draw_diff(frame, &mut app.detail, chunks[1]),
+        Mode::Events => draw_scrollable(frame, &mut app.detail, chunks[1], theme::peach()),
         Mode::Logs | Mode::LogFilter => draw_logs(frame, app, chunks[1]),
         // The lookback prompt opens from the logs view — keep it underneath.
         Mode::Prompt if app.prompt_over_logs() => draw_logs(frame, app, chunks[1]),
         // While typing a doc search, keep drawing the view it was opened from
         // so the matches narrow live under the prompt.
         Mode::DocFilter => match app.doc_filter_return {
-            Mode::Diff => draw_diff(frame, &app.detail, chunks[1]),
-            Mode::Events => draw_scrollable(frame, &app.detail, chunks[1], theme::peach()),
+            Mode::Diff => draw_diff(frame, &mut app.detail, chunks[1]),
+            Mode::Events => draw_scrollable(frame, &mut app.detail, chunks[1], theme::peach()),
             Mode::Help => draw_help(frame, app, chunks[1]),
-            _ => draw_scrollable(frame, &app.detail, chunks[1], theme::sky()),
+            _ => draw_scrollable(frame, &mut app.detail, chunks[1], theme::sky()),
         },
         Mode::Help => draw_help(frame, app, chunks[1]),
         Mode::Pulse => draw_pulse(frame, app, chunks[1]),
@@ -155,9 +155,9 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         // While the palette is open, keep drawing the view it was opened
         // from, so a global `:` never flashes the table underneath it.
         Mode::Command => match app.palette_return {
-            Mode::Diff => draw_diff(frame, &app.detail, chunks[1]),
-            Mode::Events => draw_scrollable(frame, &app.detail, chunks[1], theme::peach()),
-            Mode::Detail => draw_scrollable(frame, &app.detail, chunks[1], theme::sky()),
+            Mode::Diff => draw_diff(frame, &mut app.detail, chunks[1]),
+            Mode::Events => draw_scrollable(frame, &mut app.detail, chunks[1], theme::peach()),
+            Mode::Detail => draw_scrollable(frame, &mut app.detail, chunks[1], theme::sky()),
             Mode::Logs => draw_logs(frame, app, chunks[1]),
             Mode::Help => draw_help(frame, app, chunks[1]),
             Mode::Pulse => draw_pulse(frame, app, chunks[1]),
@@ -1099,12 +1099,14 @@ fn render_name_cell(app: &App, name: &str, base: Color) -> Cell<'static> {
 
 fn draw_scrollable(
     frame: &mut Frame,
-    view: &crate::app::Scrollable,
+    view: &mut crate::app::Scrollable,
     area: Rect,
     accent: ratatui::style::Color,
 ) {
+    let inner_w = area.width.saturating_sub(2) as usize;
     let inner_h = area.height.saturating_sub(2) as usize;
-    let scroll = view.scroll.min(view.lines.len().saturating_sub(1));
+    view.set_viewport(inner_w, inner_h);
+    let scroll = view.scroll;
     let (start, end) = visible_line_window(view.lines.len(), scroll, inner_h);
     let text: Vec<Line> = view
         .lines
@@ -1771,9 +1773,11 @@ fn klog_level(l: &str, level: char) -> bool {
 }
 
 /// Unified-diff view with +/- line coloring.
-fn draw_diff(frame: &mut Frame, view: &crate::app::Scrollable, area: Rect) {
+fn draw_diff(frame: &mut Frame, view: &mut crate::app::Scrollable, area: Rect) {
+    let inner_w = area.width.saturating_sub(2) as usize;
     let inner_h = area.height.saturating_sub(2) as usize;
-    let scroll = view.scroll.min(view.lines.len().saturating_sub(1));
+    view.set_viewport(inner_w, inner_h);
+    let scroll = view.scroll;
     let (start, end) = visible_line_window(view.lines.len(), scroll, inner_h);
     let lines: Vec<Line> = view
         .lines
