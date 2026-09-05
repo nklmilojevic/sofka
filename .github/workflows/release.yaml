@@ -46,9 +46,9 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
+          - os: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
-          - os: ubuntu-24.04-arm
+          - os: ubuntu-22.04-arm
             target: aarch64-unknown-linux-gnu
           - os: macos-latest
             target: aarch64-apple-darwin
@@ -76,6 +76,25 @@ jobs:
 
       - name: Build
         run: cargo build --release --locked --target ${{ matrix.target }}
+
+      - name: Verify Linux compatibility
+        if: runner.os == 'Linux'
+        run: |
+          bin="target/${{ matrix.target }}/release/sofka"
+          "$bin" --version
+
+          max_glibc="$(
+            objdump -T "$bin" \
+              | grep -oE 'GLIBC_[0-9]+\.[0-9]+' \
+              | sort -Vu \
+              | tail -1
+          )"
+          echo "Maximum required glibc: $max_glibc"
+          if ! dpkg --compare-versions "${max_glibc#GLIBC_}" le 2.35; then
+            echo "::error::$bin requires $max_glibc;" \
+              "expected GLIBC_2.35 or older"
+            exit 1
+          fi
 
       - name: Package
         run: |
@@ -169,7 +188,7 @@ jobs:
           persist-credentials: false
 
       - name: Setup Nix
-        uses: ./.github/actions/setup-nix
+        uses: ./.github/actions/setup-nix # zizmor: ignore[self-repository]
 
       # CI no longer runs any Nix job, so this is where flake/packaging
       # breakage surfaces.
