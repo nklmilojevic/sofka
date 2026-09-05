@@ -1156,12 +1156,65 @@ impl SortKey {
         use std::cmp::Ordering;
         match (self, other) {
             (SortKey::Num(a), SortKey::Num(b)) => a.partial_cmp(b).unwrap_or(Ordering::Equal),
-            (SortKey::Text(a), SortKey::Text(b)) => a.cmp(b),
+            (SortKey::Text(a), SortKey::Text(b)) => natural_cmp(a, b),
             // Mixed kinds shouldn't occur within one column; keep it stable.
             (SortKey::Num(_), SortKey::Text(_)) => Ordering::Less,
             (SortKey::Text(_), SortKey::Num(_)) => Ordering::Greater,
         }
     }
+}
+
+fn natural_cmp(a: &str, b: &str) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+
+    let a = a.as_bytes();
+    let b = b.as_bytes();
+    let (mut ai, mut bi) = (0, 0);
+
+    while ai < a.len() && bi < b.len() {
+        if a[ai].is_ascii_digit() && b[bi].is_ascii_digit() {
+            let a_end = digit_run_end(a, ai);
+            let b_end = digit_run_end(b, bi);
+            let a_sig = significant_digits(&a[ai..a_end]);
+            let b_sig = significant_digits(&b[bi..b_end]);
+            let ord = a_sig.len().cmp(&b_sig.len()).then_with(|| a_sig.cmp(b_sig));
+            if ord != Ordering::Equal {
+                return ord;
+            }
+            ai = a_end;
+            bi = b_end;
+        } else {
+            let ord = a[ai].cmp(&b[bi]);
+            if ord != Ordering::Equal {
+                return ord;
+            }
+            ai += 1;
+            bi += 1;
+        }
+    }
+
+    match (ai == a.len(), bi == b.len()) {
+        (true, false) => Ordering::Less,
+        (false, true) => Ordering::Greater,
+        (true, true) => a.len().cmp(&b.len()).then_with(|| a.cmp(b)),
+        (false, false) => unreachable!(),
+    }
+}
+
+fn digit_run_end(bytes: &[u8], start: usize) -> usize {
+    let mut end = start;
+    while end < bytes.len() && bytes[end].is_ascii_digit() {
+        end += 1;
+    }
+    end
+}
+
+fn significant_digits(digits: &[u8]) -> &[u8] {
+    let first = digits
+        .iter()
+        .position(|digit| *digit != b'0')
+        .unwrap_or(digits.len());
+    &digits[first..]
 }
 
 /// Maximum previous object revisions retained for the session diff.

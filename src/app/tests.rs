@@ -4823,6 +4823,58 @@ async fn sort_by_numeric_column_and_invert() {
 }
 
 #[tokio::test]
+async fn name_sort_uses_natural_numeric_segments() {
+    let (mut app, _rx) = test_app();
+    app.switch_kind("pods");
+    for name in ["pod-10", "pod-2", "pod-11", "pod-0", "pod-9", "pod-1"] {
+        apply(
+            &mut app,
+            json!({
+                "apiVersion": "v1",
+                "kind": "Pod",
+                "metadata": {"name": name, "namespace": "default"}
+            }),
+        );
+    }
+    let names = |app: &App| -> Vec<String> {
+        app.rows()
+            .iter()
+            .map(|object| object.metadata.name.clone().unwrap())
+            .collect()
+    };
+
+    assert_eq!(
+        names(&app),
+        ["pod-0", "pod-1", "pod-2", "pod-9", "pod-10", "pod-11"]
+    );
+
+    app.handle_key(press(KeyCode::Char('S'))).unwrap();
+    app.sort_picker_state.select(Some(1));
+    app.handle_key(press(KeyCode::Enter)).unwrap();
+    assert_eq!(app.sort_column, Some(0));
+    assert_eq!(
+        names(&app),
+        ["pod-0", "pod-1", "pod-2", "pod-9", "pod-10", "pod-11"]
+    );
+
+    app.handle_key(press(KeyCode::Char('I'))).unwrap();
+    assert_eq!(
+        names(&app),
+        ["pod-11", "pod-10", "pod-9", "pod-2", "pod-1", "pod-0"]
+    );
+}
+
+#[test]
+fn natural_comparison_handles_leading_zeroes_and_large_numbers() {
+    assert_eq!(natural_cmp("pod-2", "pod-02"), std::cmp::Ordering::Less);
+    assert_eq!(natural_cmp("pod-02a", "pod-2b"), std::cmp::Ordering::Less);
+    assert_eq!(
+        natural_cmp("pod-99999999999999999999", "pod-100000000000000000000"),
+        std::cmp::Ordering::Less
+    );
+}
+
+#[tokio::test]
 async fn sorted_order_updates_when_an_object_changes() {
     // Sort keys are cached per resourceVersion; an update must invalidate the
     // changed row's cached key (via invalidate_row) and re-sort with the new
