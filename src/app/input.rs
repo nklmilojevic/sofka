@@ -60,6 +60,25 @@ impl App {
             return Ok(());
         }
 
+        // Navigation screens share the command-palette and help bindings.
+        // Text-entry pickers deliberately stay out of this path so `:` and `?`
+        // remain ordinary input while filtering or filling a prompt.
+        let plain = !key.modifiers.contains(KeyModifiers::CONTROL)
+            && !key.modifiers.contains(KeyModifiers::ALT);
+        if plain && self.has_global_view_shortcuts() {
+            match key.code {
+                KeyCode::Char(':') => {
+                    self.open_palette();
+                    return Ok(());
+                }
+                KeyCode::Char('?') if self.mode != Mode::Help => {
+                    self.open_help();
+                    return Ok(());
+                }
+                _ => {}
+            }
+        }
+
         match self.mode {
             Mode::Table => self.key_table(key),
             Mode::Command => self.key_command(key),
@@ -93,9 +112,40 @@ impl App {
         Ok(())
     }
 
+    fn has_global_view_shortcuts(&self) -> bool {
+        matches!(
+            self.mode,
+            Mode::Table
+                | Mode::Detail
+                | Mode::Logs
+                | Mode::Help
+                | Mode::Containers
+                | Mode::Confirm
+                | Mode::Pulse
+                | Mode::Xray
+                | Mode::Explain
+                | Mode::Timeline
+                | Mode::Gitops
+                | Mode::Diff
+                | Mode::Events
+                | Mode::FluxMenu
+                | Mode::TransferMenu
+                | Mode::PortForwards
+                | Mode::Skins
+                | Mode::Snapshots
+                | Mode::Fleet
+                | Mode::Find
+        )
+    }
+
+    fn open_help(&mut self) {
+        self.help_return = self.mode;
+        self.help_filter.clear();
+        self.mode = Mode::Help;
+    }
+
     pub(super) fn key_table(&mut self, key: KeyEvent) {
         match key.code {
-            KeyCode::Char(':') => self.open_palette(),
             KeyCode::Char('/') => self.mode = Mode::Filter,
             KeyCode::Char('q') => self.should_quit = true,
             KeyCode::Esc => {
@@ -224,10 +274,6 @@ impl App {
                 } else {
                     self.request_flux_menu();
                 }
-            }
-            KeyCode::Char('?') => {
-                self.help_filter.clear();
-                self.mode = Mode::Help;
             }
             // User-defined bindings fall through here (built-ins take
             // priority): bookmarks first, then plugins. Any unhandled key — a
@@ -506,12 +552,19 @@ impl App {
         self.mode = Mode::Table;
         self.command.clear();
         // Dispatch leaves the view the palette was opened from behind,
-        // so run the cleanup its own esc path would have done.
-        match self.palette_return {
+        // so run the cleanup its own esc path would have done. Help can sit
+        // between the palette and that view, so unwrap its return destination.
+        let source = if self.palette_return == Mode::Help {
+            self.help_return
+        } else {
+            self.palette_return
+        };
+        match source {
             Mode::Logs => self.stop_log_stream(),
             Mode::Events => self.stop_event_stream(),
             _ => {}
         }
+        self.help_return = Mode::Table;
         self.palette_return = Mode::Table;
         // `:kind namespace` switches both at once (`:deploy social`,
         // `:cephclusters all`); only the first word selects the kind.
@@ -968,9 +1021,6 @@ impl App {
                 self.doc_filter_return = self.mode;
                 self.mode = Mode::DocFilter;
             }
-            // The command palette works from document views too — switching
-            // away doesn't require backing out to the table first.
-            KeyCode::Char(':') => self.open_palette(),
             // Jump to the next / previous search match (vim `n`/`N`). No-op
             // when no search is active.
             KeyCode::Char('n') if detail => target.step_match(true),
@@ -1016,11 +1066,6 @@ impl App {
             return;
         }
         match key.code {
-            // The command palette works from the logs view too.
-            KeyCode::Char(':') => {
-                self.open_palette();
-                return;
-            }
             // k9s: `s` toggles autoscroll/follow (we also accept `f`).
             KeyCode::Char('s') | KeyCode::Char('f') => {
                 self.logs.follow = !self.logs.follow;
@@ -1202,7 +1247,10 @@ impl App {
         match key.code {
             // Esc backs out of an active search first, then closes help.
             KeyCode::Esc if !self.help_filter.is_empty() => self.help_filter.clear(),
-            KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('?') => self.mode = Mode::Table,
+            KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('?') => {
+                self.mode = self.help_return;
+                self.help_return = Mode::Table;
+            }
             KeyCode::Char('/') => {
                 self.doc_filter_return = self.mode;
                 self.mode = Mode::DocFilter;

@@ -20,6 +20,7 @@ impl App {
             return;
         };
         self.set_return_mode();
+        self.explain_return = self.return_mode;
         let name = obj.metadata.name.clone().unwrap_or_default();
         self.explain_title = format!("{name} — explain");
         self.explain_items.clear();
@@ -114,8 +115,10 @@ impl App {
         let len = self.explain_items.len();
         match key.code {
             KeyCode::Esc | KeyCode::Char('q') => {
-                self.mode = self.return_mode;
-                if self.return_mode == Mode::Table {
+                let destination = self.explain_return;
+                self.mode = destination;
+                self.explain_return = Mode::Table;
+                if destination == Mode::Table {
                     self.restore_selection();
                 }
             }

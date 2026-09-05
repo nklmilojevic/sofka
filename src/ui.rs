@@ -153,12 +153,45 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         Mode::Fleet => draw_fleet(frame, app, chunks[1]),
         Mode::Find => draw_find(frame, app, chunks[1]),
         // While the palette is open, keep drawing the view it was opened
-        // from, so `:` from a document view doesn't flash the table.
+        // from, so a global `:` never flashes the table underneath it.
         Mode::Command => match app.palette_return {
             Mode::Diff => draw_diff(frame, &app.detail, chunks[1]),
             Mode::Events => draw_scrollable(frame, &app.detail, chunks[1], theme::peach()),
             Mode::Detail => draw_scrollable(frame, &app.detail, chunks[1], theme::sky()),
             Mode::Logs => draw_logs(frame, app, chunks[1]),
+            Mode::Help => draw_help(frame, app, chunks[1]),
+            Mode::Pulse => draw_pulse(frame, app, chunks[1]),
+            Mode::Xray => draw_xray(frame, app, chunks[1]),
+            Mode::Explain => draw_explain(frame, app, chunks[1]),
+            Mode::Gitops => draw_gitops(frame, app, chunks[1]),
+            Mode::Timeline => draw_timeline(frame, app, chunks[1]),
+            Mode::PortForwards => draw_port_forwards(frame, app, chunks[1]),
+            Mode::Fleet => draw_fleet(frame, app, chunks[1]),
+            Mode::Find => draw_find(frame, app, chunks[1]),
+            Mode::Containers => {
+                draw_table(frame, app, chunks[1]);
+                draw_containers(frame, app, chunks[1]);
+            }
+            Mode::Confirm => {
+                draw_table(frame, app, chunks[1]);
+                draw_confirm(frame, app, chunks[1]);
+            }
+            Mode::FluxMenu => {
+                draw_table(frame, app, chunks[1]);
+                draw_flux_menu(frame, app, chunks[1]);
+            }
+            Mode::TransferMenu => {
+                draw_table(frame, app, chunks[1]);
+                draw_transfer_menu(frame, app, chunks[1]);
+            }
+            Mode::Skins => {
+                draw_table(frame, app, chunks[1]);
+                draw_skins(frame, app, chunks[1]);
+            }
+            Mode::Snapshots => {
+                draw_table(frame, app, chunks[1]);
+                draw_snapshots(frame, app, chunks[1]);
+            }
             _ => draw_table(frame, app, chunks[1]),
         },
         _ => draw_table(frame, app, chunks[1]),
@@ -1908,7 +1941,7 @@ fn draw_help(frame: &mut Frame, app: &App, area: Rect) {
         Line::from(Span::styled("  Navigation", theme::title())),
         bind(
             ":<resource>",
-            "command palette — fuzzy over kinds + commands (tab/↑↓)",
+            "global command palette — fuzzy over kinds + commands (tab/↑↓)",
         ),
         bind(
             ":<res> <ns>",
@@ -2066,7 +2099,7 @@ fn draw_help(frame: &mut Frame, app: &App, area: Rect) {
         ),
         Line::from(""),
         bind(":q / ctrl-c", "quit"),
-        bind("?", "toggle help"),
+        bind("?", "global help — close to return to the previous screen"),
     ];
     // Config-defined plugins, with their (possibly modified) key chords.
     if !app.plugins.is_empty() {

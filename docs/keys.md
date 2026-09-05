@@ -1,7 +1,9 @@
 # Key reference
 
 The full keymap. `?` inside sofka shows the same thing, including your own
-plugin, bookmark, and workspace chords.
+plugin, bookmark, and workspace chords. `:` and `?` work from every navigation
+screen; closing either returns to the screen where it was opened. Text-entry
+pickers keep both characters available as input.
 
 ## Table views
 
@@ -79,8 +81,9 @@ the document. `esc` backs out - the first press clears an active search. In the
 ## Explain view (`X`)
 
 `j` / `k` move, `⏎` goes to the resource behind a finding (a blocking pod), `E`
-its events, `l` its logs, `r` gathers again, `esc` goes back. A finding you can
-drill into has a trailing `→`.
+its events, `l` its logs, `r` gathers again, `esc` goes back. After opening
+logs or events, one `esc` returns to Explain and another returns to the table. A
+finding you can drill into has a trailing `→`.
 
 ## Text inputs (palette, filters, prompts)
 
