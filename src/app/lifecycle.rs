@@ -387,7 +387,7 @@ impl App {
         let user_has_columns = self
             .active_user_view()
             .is_some_and(|v| !v.columns.is_empty());
-        if crate::columns::has_curated(&self.kind_plural)
+        if crate::columns::has_curated(&self.kind_plural, &kind.ar.group)
             || kind.ar.group.is_empty()
             || kind.ar.plural.to_lowercase() != self.kind_plural
             || self.crd_views.contains_key(&self.kind_plural)

@@ -237,11 +237,11 @@ pub(super) fn node_targets_label(targets: &[String]) -> String {
     }
 }
 
-/// What manages `obj`, if anything: its Flux owner (from the toolkit labels)
-/// preferred, else its controller/owner reference. Used to warn that a delete
-/// will be recreated.
+/// What manages `obj`, if anything: its GitOps owner (from the Flux toolkit
+/// labels or the Argo CD tracking stamp) preferred, else its controller/owner
+/// reference. Used to warn that a delete will be recreated.
 pub(super) fn managed_by(obj: &DynamicObject) -> Option<String> {
-    if let Some(f) = flux_managed_by(obj) {
+    if let Some(f) = gitops_managed_by(obj) {
         return Some(f);
     }
     let owners = obj.metadata.owner_references.as_ref()?;
@@ -252,10 +252,21 @@ pub(super) fn managed_by(obj: &DynamicObject) -> Option<String> {
     Some(format!("{}/{}", owner.kind, owner.name))
 }
 
-/// The Flux Kustomization/HelmRelease managing `obj`, from its toolkit labels.
-/// Used to warn that an edit will be reverted on the next reconcile.
-pub(super) fn flux_managed_by(obj: &DynamicObject) -> Option<String> {
-    crate::gitops::owner_ref(obj).map(|r| format!("Flux {}/{}", r.kind, r.name))
+/// The GitOps owner managing `obj` — a Flux Kustomization/HelmRelease from the
+/// toolkit labels, or an Argo CD Application from its tracking stamp. Used to
+/// warn that an edit will be reverted on the next reconcile.
+///
+/// An owner only *inferred* from the generic `app.kubernetes.io/instance`
+/// label is ignored: Helm and hand-written manifests set it too, and a warning
+/// that names an Application which may not exist is worse than none.
+pub(super) fn gitops_managed_by(obj: &DynamicObject) -> Option<String> {
+    let owner = crate::gitops::owner_ref(obj).filter(|o| !o.inferred)?;
+    Some(format!(
+        "{} {}/{}",
+        owner.engine.label(),
+        owner.reference.kind,
+        owner.reference.name
+    ))
 }
 
 pub(super) fn delete_confirm_label(

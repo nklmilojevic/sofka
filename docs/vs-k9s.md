@@ -24,7 +24,10 @@ For measured start time, memory use, command start time, and binary size, see th
   and the ArgoCD `operation` field through the Kubernetes API - no `flux` or
   `argocd` binary. ArgoCD suspend/resume stashes the original sync policy as a
   base64 annotation so `prune`, `selfHeal`, and `allowEmpty` survive the
-  round-trip. Works with bulk multiselect too.
+  round-trip. Works with bulk multiselect too. `:gitops` goes the other way for
+  either controller: from any object, to the Kustomization or Application that
+  applied it, the source and revision behind it, and what is blocking the
+  reconcile.
 - **Port-forwards run in the background.** Starting one doesn't freeze the TUI
   for its lifetime. `:pf` lists the active forwards and stops them individually
   while the others keep running. sofka tears all of them down on quit instead of

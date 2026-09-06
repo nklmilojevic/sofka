@@ -1807,7 +1807,7 @@ mod tests {
             SortValue::Num(_) => panic!("reason sorts as text"),
         }
 
-        let spec = crate::columns::build_spec("widgets", None, Some(&view), false);
+        let spec = crate::columns::build_spec("widgets", "", None, Some(&view), false);
         assert_eq!(spec.headers(), vec!["NAME", "A", "B", "C", "AGE"]);
         let (cells, status_idx) = spec.cells(&obj, crate::columns::now_secs());
         assert_eq!(

@@ -660,6 +660,7 @@ impl App {
             .and_then(|i| self.display_headers().get(i).cloned());
         let spec = crate::columns::build_spec(
             &self.kind_plural,
+            self.kind.as_ref().map_or("", |k| k.ar.group.as_str()),
             self.active_user_view(),
             self.crd_views
                 .get(&self.kind_plural)

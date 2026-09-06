@@ -85,7 +85,7 @@ const FLUX_SUSPENDABLE_KINDS: &[&str] = &[
 
 /// The ArgoCD CRD group. Used to disambiguate the very generic `applications`
 /// and `applicationsets` plurals — only `argoproj.io` kinds get the `t` menu.
-const ARGOCD_GROUP: &str = "argoproj.io";
+const ARGOCD_GROUP: &str = crate::gitops::ARGO_GROUP;
 
 /// Items in the Flux action menu (`t`), in display order. Deliberately a menu
 /// — not a single-key toggle — so suspending something always takes an
@@ -573,7 +573,7 @@ const PALETTE_COMMANDS: &[PaletteCommand] = &[
     },
     PaletteCommand {
         action: PaletteAction::Gitops,
-        names: &["gitops", "flux", "reconcile", "recon"],
+        names: &["gitops", "flux", "argocd", "argo", "reconcile", "recon"],
     },
     PaletteCommand {
         action: PaletteAction::CanI,
@@ -2084,7 +2084,7 @@ impl App {
             crd_views: HashMap::new(),
             wide: false,
             compact: false,
-            spec: crate::columns::build_spec("", None, None, false),
+            spec: crate::columns::build_spec("", "", None, None, false),
         }
     }
 

@@ -11,6 +11,8 @@ use k8s_openapi::jiff::Timestamp;
 use kube::core::DynamicObject;
 use serde_json::Value;
 
+use crate::gitops::ARGO_GROUP;
+
 /// Curated extractors borrow values that already live in the Kubernetes
 /// object and own only derived/formatted values. Cached full rows convert the
 /// result once; one-column filter/sort probes can consume borrowed text.
@@ -290,6 +292,41 @@ const FLUX_SOURCE_COLUMNS: &[Column] = &[
     column("AGE", col_age),
 ];
 
+/// Argo CD Applications. HEALTH is the status column rather than SYNC: an
+/// OutOfSync app that still serves traffic is a warning, a Degraded one is the
+/// broken row an operator is scanning for.
+const ARGOCD_APP_COLUMNS: &[Column] = &[
+    column("NAME", col_name),
+    column("SYNC", col_argo_sync),
+    status_column("HEALTH", col_argo_health),
+    column("REVISION", col_argo_revision),
+    column("PROJECT", col_argo_project),
+    wide_column("DESTINATION", col_argo_destination),
+    wide_column("REPO", col_argo_repo),
+    column("AGE", col_age),
+];
+
+/// Argo CD ApplicationSets. They have no sync/health of their own — their
+/// status is whether the generators produced Applications.
+const ARGOCD_APPSET_COLUMNS: &[Column] = &[
+    column("NAME", col_name),
+    status_column("STATUS", col_argo_appset_status),
+    column("GENERATORS", col_argo_generators),
+    column("MESSAGE", col_argo_appset_message),
+    column("PROJECT", col_argo_project),
+    wide_column("REPO", col_argo_repo),
+    column("AGE", col_age),
+];
+
+/// Argo CD AppProjects — the guardrails an Application is allowed to sync
+/// within.
+const ARGOCD_APPPROJECT_COLUMNS: &[Column] = &[
+    column("NAME", col_name),
+    column("DESTINATIONS", col_argo_allowed_destinations),
+    column("SOURCE REPOS", col_argo_allowed_repos),
+    column("AGE", col_age),
+];
+
 const DEFAULT_COLUMNS: &[Column] = &[column("NAME", col_name), column("AGE", col_age)];
 
 /// One row per release, at its latest revision — like `helm list`. Backed by
@@ -314,7 +351,9 @@ const HELM_HISTORY_COLUMNS: &[Column] = &[
     column("UPDATED", col_helm_updated),
 ];
 
-fn columns_for(plural: &str) -> &'static [Column] {
+/// The curated columns for a kind. `group` disambiguates plurals that aren't
+/// unique across API groups — `applications` alone says nothing about Argo CD.
+fn columns_for(plural: &str, group: &str) -> &'static [Column] {
     match plural {
         "pods" => POD_COLUMNS,
         "deployments" => DEPLOYMENT_COLUMNS,
@@ -340,6 +379,9 @@ fn columns_for(plural: &str) -> &'static [Column] {
         "gitrepositories" | "helmrepositories" | "ocirepositories" | "buckets" => {
             FLUX_SOURCE_COLUMNS
         }
+        "applications" if group == ARGO_GROUP => ARGOCD_APP_COLUMNS,
+        "applicationsets" if group == ARGO_GROUP => ARGOCD_APPSET_COLUMNS,
+        "appprojects" if group == ARGO_GROUP => ARGOCD_APPPROJECT_COLUMNS,
         "helm" => HELM_COLUMNS,
         "helmhistory" => HELM_HISTORY_COLUMNS,
         _ => DEFAULT_COLUMNS,
@@ -349,8 +391,8 @@ fn columns_for(plural: &str) -> &'static [Column] {
 /// Whether `plural` has curated columns (anything beyond the NAME/AGE
 /// fallback). Kinds without them are candidates for the CRD printer-column
 /// fallback.
-pub fn has_curated(plural: &str) -> bool {
-    columns_for(plural).as_ptr() != DEFAULT_COLUMNS.as_ptr()
+pub fn has_curated(plural: &str, group: &str) -> bool {
+    columns_for(plural, group).as_ptr() != DEFAULT_COLUMNS.as_ptr()
 }
 
 /// The full curated headers for a kind (wide columns included), excluding the
@@ -359,15 +401,36 @@ pub fn has_curated(plural: &str) -> bool {
 /// user views, printer columns, and wide-mode filtering.
 #[cfg(test)]
 pub fn headers(plural: &str) -> Vec<&'static str> {
-    columns_for(plural).iter().map(|c| c.header).collect()
+    headers_in(plural, "")
+}
+
+/// As [`headers`], for a kind whose plural needs its API group to
+/// disambiguate.
+#[cfg(test)]
+pub fn headers_in(plural: &str, group: &str) -> Vec<&'static str> {
+    columns_for(plural, group)
+        .iter()
+        .map(|c| c.header)
+        .collect()
 }
 
 /// Cells for one object, aligned with [`headers`]. The 2nd return value is the
 /// index of the column that should be colorized as a status (or None).
 #[cfg(test)]
 pub fn cells(obj: &DynamicObject, plural: &str, now: i64) -> (Vec<String>, Option<usize>) {
+    cells_in(obj, plural, "", now)
+}
+
+/// As [`cells`], for a kind whose plural needs its API group to disambiguate.
+#[cfg(test)]
+pub fn cells_in(
+    obj: &DynamicObject,
+    plural: &str,
+    group: &str,
+    now: i64,
+) -> (Vec<String>, Option<usize>) {
     let ctx = CellContext::new(obj, now);
-    let columns = columns_for(plural);
+    let columns = columns_for(plural, group);
     let values = columns
         .iter()
         .map(|c| (c.extract)(&ctx).into_owned())
@@ -382,6 +445,7 @@ pub fn cells(obj: &DynamicObject, plural: &str, now: i64) -> (Vec<String>, Optio
 /// per view change, never per row.
 pub struct ViewSpec {
     plural: String,
+    group: String,
     columns: Vec<SpecColumn>,
     status_idx: Option<usize>,
 }
@@ -424,18 +488,22 @@ fn spec_user(uc: &crate::views::UserColumn) -> SpecColumn {
 /// user view defines no columns and `plural` has no curated ones.
 pub fn build_spec(
     plural: &str,
+    group: &str,
     user: Option<&crate::views::View>,
     crd: Option<&crate::views::View>,
     wide: bool,
 ) -> ViewSpec {
-    let mut cols: Vec<SpecColumn> = columns_for(plural).iter().map(spec_curated).collect();
+    let mut cols: Vec<SpecColumn> = columns_for(plural, group)
+        .iter()
+        .map(spec_curated)
+        .collect();
     // A user view only counts as explicit column config when it has columns —
     // a sort-only view (or one whose columns all failed validation) still
     // benefits from the printer-column fallback.
     let view = match user {
         Some(v) if !v.columns.is_empty() => Some(v),
         _ => {
-            if has_curated(plural) {
+            if has_curated(plural, group) {
                 None
             } else {
                 crd
@@ -468,6 +536,7 @@ pub fn build_spec(
     let status_idx = cols.iter().position(|c| c.is_status);
     ViewSpec {
         plural: plural.to_string(),
+        group: group.to_string(),
         columns: cols,
         status_idx,
     }
@@ -562,7 +631,7 @@ impl ViewSpec {
             SpecSource::Curated(extract) => {
                 let ctx = CellContext::new(obj, now);
                 let v = extract(&ctx);
-                if is_numeric_header(&self.plural, header) {
+                if is_numeric_header(&self.plural, &self.group, header) {
                     crate::views::SortValue::Num(parse_leading_num(&v))
                 } else {
                     crate::views::SortValue::Text(v.to_lowercase().to_string())
@@ -590,11 +659,11 @@ impl ViewSpec {
 }
 
 /// Columns whose curated cell is a count/number and should sort numerically.
-fn is_numeric_header(plural: &str, header: &str) -> bool {
+fn is_numeric_header(plural: &str, group: &str, header: &str) -> bool {
     // READY is a count ("1/2") for workloads, but flux kinds render it as
     // True/False/Unknown, which must sort as text.
     if header == "READY" {
-        let cols = columns_for(plural);
+        let cols = columns_for(plural, group);
         return cols.as_ptr() != FLUX_OBJECT_COLUMNS.as_ptr()
             && cols.as_ptr() != FLUX_SOURCE_COLUMNS.as_ptr();
     }
@@ -1237,6 +1306,185 @@ fn flux_source_url(d: &Value) -> Cow<'_, str> {
         (Some(endpoint), None) => Cow::Borrowed(endpoint),
         (None, Some(bucket)) => Cow::Borrowed(bucket),
         (None, None) => Cow::Borrowed(""),
+    }
+}
+
+/// Argo CD sync state: `Synced` / `OutOfSync`, `Unknown` until the controller
+/// has compared the live objects with the source.
+fn col_argo_sync<'a>(ctx: &CellContext<'a>) -> Cow<'a, str> {
+    Cow::Borrowed(sget(ctx.data, &["status", "sync", "status"]).unwrap_or("Unknown"))
+}
+
+/// Argo CD health: `Healthy` / `Progressing` / `Degraded` / `Missing` /
+/// `Suspended`.
+fn col_argo_health<'a>(ctx: &CellContext<'a>) -> Cow<'a, str> {
+    Cow::Borrowed(sget(ctx.data, &["status", "health", "status"]).unwrap_or("Unknown"))
+}
+
+/// The revision Argo last synced, abbreviated the way git does when it's a
+/// commit SHA (a chart version or branch is left alone).
+fn col_argo_revision<'a>(ctx: &CellContext<'a>) -> Cow<'a, str> {
+    let rev = sget(ctx.data, &["status", "sync", "revision"]).unwrap_or_default();
+    if rev.len() == 40 && rev.chars().all(|c| c.is_ascii_hexdigit()) {
+        Cow::Borrowed(&rev[..7])
+    } else {
+        Cow::Borrowed(rev)
+    }
+}
+
+/// The AppProject an Application (or an ApplicationSet's template) syncs under.
+fn col_argo_project<'a>(ctx: &CellContext<'a>) -> Cow<'a, str> {
+    Cow::Borrowed(
+        sget(ctx.data, &["spec", "project"])
+            .or_else(|| sget(ctx.data, &["spec", "template", "spec", "project"]))
+            .unwrap_or_default(),
+    )
+}
+
+/// Where the Application deploys: `<cluster>/<namespace>`, with the cluster
+/// left off when it's the local one Argo runs in.
+fn col_argo_destination<'a>(ctx: &CellContext<'a>) -> Cow<'a, str> {
+    let dest = |k: &str| {
+        sget(ctx.data, &["spec", "destination", k])
+            .or_else(|| sget(ctx.data, &["spec", "template", "spec", "destination", k]))
+            .unwrap_or_default()
+    };
+    let namespace = dest("namespace");
+    let cluster = match (dest("name"), dest("server")) {
+        ("", server) if server.contains("kubernetes.default.svc") => "",
+        ("", server) => server,
+        (name, _) => name,
+    };
+    match (cluster, namespace) {
+        ("", ns) => Cow::Borrowed(ns),
+        (c, "") => Cow::Borrowed(c),
+        (c, ns) => Cow::Owned(format!("{c}/{ns}")),
+    }
+}
+
+/// The repository the Application syncs from — the first one for a
+/// multi-source app.
+fn col_argo_repo<'a>(ctx: &CellContext<'a>) -> Cow<'a, str> {
+    Cow::Borrowed(
+        argo_first_source(ctx.data)
+            .and_then(|s| s.get("repoURL")?.as_str())
+            .unwrap_or_default(),
+    )
+}
+
+/// The first `source`/`sources[0]` of an Application or of an
+/// ApplicationSet's template.
+fn argo_first_source(d: &Value) -> Option<&Value> {
+    for base in ["/spec", "/spec/template/spec"] {
+        if let Some(one) = d.pointer(&format!("{base}/source")) {
+            return Some(one);
+        }
+        if let Some(first) = d
+            .pointer(&format!("{base}/sources"))
+            .and_then(Value::as_array)
+            .and_then(|a| a.first())
+        {
+            return Some(first);
+        }
+    }
+    None
+}
+
+/// The generator kinds an ApplicationSet is built from (`git`, `list`,
+/// `matrix`, …) — what to read before wondering where its Applications came
+/// from.
+fn col_argo_generators<'a>(ctx: &CellContext<'a>) -> Cow<'a, str> {
+    let names: Vec<&str> = ctx
+        .data
+        .pointer("/spec/generators")
+        .and_then(Value::as_array)
+        .map(|gens| {
+            gens.iter()
+                .filter_map(|g| g.as_object()?.keys().next().map(String::as_str))
+                .collect()
+        })
+        .unwrap_or_default();
+    if names.is_empty() {
+        Cow::Borrowed("")
+    } else {
+        Cow::Owned(names.join(","))
+    }
+}
+
+/// An ApplicationSet reports through conditions, not a phase: `ErrorOccurred`
+/// inverts (True is the failure), `ResourcesUpToDate` is the healthy one.
+fn col_argo_appset_status<'a>(ctx: &CellContext<'a>) -> Cow<'a, str> {
+    if condition_is(ctx.data, "ErrorOccurred", "True") {
+        return Cow::Borrowed("Error");
+    }
+    if condition_is(ctx.data, "ResourcesUpToDate", "True") {
+        return Cow::Borrowed("Ready");
+    }
+    if ctx.data.pointer("/status/conditions").is_none() {
+        return Cow::Borrowed("Unknown");
+    }
+    Cow::Borrowed("Progressing")
+}
+
+/// The message behind an ApplicationSet's status: the error when it has one,
+/// otherwise whatever is keeping it from being up to date.
+fn col_argo_appset_message<'a>(ctx: &CellContext<'a>) -> Cow<'a, str> {
+    let conds = ctx
+        .data
+        .pointer("/status/conditions")
+        .and_then(Value::as_array);
+    let Some(conds) = conds else {
+        return Cow::Borrowed("");
+    };
+    let pick = |ty: &str, status: &str| {
+        conds
+            .iter()
+            .find(|c| {
+                c.get("type").and_then(Value::as_str) == Some(ty)
+                    && c.get("status").and_then(Value::as_str) == Some(status)
+            })
+            .and_then(|c| c.get("message")?.as_str())
+    };
+    Cow::Borrowed(
+        pick("ErrorOccurred", "True")
+            .or_else(|| pick("ResourcesUpToDate", "False"))
+            .unwrap_or_default(),
+    )
+}
+
+/// The namespaces an AppProject allows syncing into, deduplicated.
+fn col_argo_allowed_destinations<'a>(ctx: &CellContext<'a>) -> Cow<'a, str> {
+    Cow::Owned(join_unique(ctx.data.pointer("/spec/destinations"), |d| {
+        d.get("namespace").and_then(Value::as_str)
+    }))
+}
+
+/// The repositories an AppProject allows syncing from.
+fn col_argo_allowed_repos<'a>(ctx: &CellContext<'a>) -> Cow<'a, str> {
+    Cow::Owned(join_unique(
+        ctx.data.pointer("/spec/sourceRepos"),
+        Value::as_str,
+    ))
+}
+
+/// Comma-join the extracted strings of a JSON array, dropping repeats and
+/// empties. `<none>` when nothing is allowed at all.
+fn join_unique<'a>(
+    list: Option<&'a Value>,
+    extract: impl Fn(&'a Value) -> Option<&'a str>,
+) -> String {
+    let mut out: Vec<&str> = Vec::new();
+    for v in list.and_then(Value::as_array).into_iter().flatten() {
+        if let Some(s) = extract(v).filter(|s| !s.is_empty())
+            && !out.contains(&s)
+        {
+            out.push(s);
+        }
+    }
+    if out.is_empty() {
+        "<none>".to_string()
+    } else {
+        out.join(",")
     }
 }
 
@@ -2523,6 +2771,162 @@ mod tests {
                 assert!(idx < cells.len(), "{kind} status index");
             }
         }
+        // The kinds whose columns only apply inside their own API group.
+        for kind in ["applications", "applicationsets", "appprojects"] {
+            let headers = headers_in(kind, ARGO_GROUP);
+            let (cells, status_idx) = cells_in(&o, kind, ARGO_GROUP, now_secs());
+            assert_eq!(headers.len(), cells.len(), "{kind} column count");
+            if let Some(idx) = status_idx {
+                assert!(idx < cells.len(), "{kind} status index");
+            }
+        }
+    }
+
+    #[test]
+    fn argocd_application_cells_show_sync_health_and_revision() {
+        let app = obj(json!({
+            "apiVersion": "argoproj.io/v1alpha1",
+            "kind": "Application",
+            "metadata": {"name": "api", "namespace": "argocd"},
+            "spec": {
+                "project": "prod",
+                "destination": {"server": "https://kubernetes.default.svc",
+                                "namespace": "prod"},
+                "source": {"repoURL": "https://github.com/acme/gitops",
+                           "path": "apps/api", "targetRevision": "main"}
+            },
+            "status": {
+                "sync": {"status": "OutOfSync",
+                         "revision": "0123456789abcdef0123456789abcdef01234567"},
+                "health": {"status": "Degraded"}
+            }
+        }));
+        assert_eq!(
+            headers_in("applications", ARGO_GROUP),
+            vec![
+                "NAME",
+                "SYNC",
+                "HEALTH",
+                "REVISION",
+                "PROJECT",
+                "DESTINATION",
+                "REPO",
+                "AGE"
+            ]
+        );
+        let (cells, status_idx) = cells_in(&app, "applications", ARGO_GROUP, now_secs());
+        assert_eq!(cells[1], "OutOfSync");
+        assert_eq!(cells[2], "Degraded");
+        // A commit SHA is abbreviated; the local cluster is left off the
+        // destination.
+        assert_eq!(cells[3], "0123456");
+        assert_eq!(cells[4], "prod");
+        assert_eq!(cells[5], "prod");
+        assert_eq!(cells[6], "https://github.com/acme/gitops");
+        // HEALTH is what colors the row.
+        assert_eq!(status_idx, Some(2));
+
+        // A chart version is not a SHA and stays whole, and a named cluster
+        // shows up next to the namespace.
+        let remote = obj(json!({
+            "apiVersion": "argoproj.io/v1alpha1", "kind": "Application",
+            "metadata": {"name": "redis"},
+            "spec": {"destination": {"name": "eu-west", "namespace": "cache"}},
+            "status": {"sync": {"status": "Synced", "revision": "18.1.2"},
+                       "health": {"status": "Healthy"}}
+        }));
+        let (cells, _) = cells_in(&remote, "applications", ARGO_GROUP, now_secs());
+        assert_eq!(cells[3], "18.1.2");
+        assert_eq!(cells[5], "eu-west/cache");
+    }
+
+    #[test]
+    fn argocd_application_before_the_controller_looks_reads_unknown() {
+        let app = obj(json!({
+            "apiVersion": "argoproj.io/v1alpha1", "kind": "Application",
+            "metadata": {"name": "api"}, "spec": {}
+        }));
+        let (cells, _) = cells_in(&app, "applications", ARGO_GROUP, now_secs());
+        assert_eq!(cells[1], "Unknown");
+        assert_eq!(cells[2], "Unknown");
+    }
+
+    #[test]
+    fn argocd_applicationset_cells_come_from_conditions() {
+        let appset = obj(json!({
+            "apiVersion": "argoproj.io/v1alpha1",
+            "kind": "ApplicationSet",
+            "metadata": {"name": "prod-apps"},
+            "spec": {
+                "generators": [{"git": {}}, {"clusters": {}}],
+                "template": {"spec": {"project": "prod",
+                    "source": {"repoURL": "https://github.com/acme/gitops"}}}
+            },
+            "status": {"conditions": [
+                {"type": "ErrorOccurred", "status": "True",
+                 "message": "error generating params"},
+                {"type": "ResourcesUpToDate", "status": "False"}
+            ]}
+        }));
+        let (cells, status_idx) = cells_in(&appset, "applicationsets", ARGO_GROUP, now_secs());
+        assert_eq!(cells[1], "Error");
+        assert_eq!(cells[2], "git,clusters");
+        assert_eq!(cells[3], "error generating params");
+        assert_eq!(cells[4], "prod");
+        assert_eq!(status_idx, Some(1));
+
+        // ErrorOccurred=False with everything generated is the healthy shape.
+        let ok = obj(json!({
+            "apiVersion": "argoproj.io/v1alpha1", "kind": "ApplicationSet",
+            "metadata": {"name": "prod-apps"},
+            "status": {"conditions": [
+                {"type": "ErrorOccurred", "status": "False"},
+                {"type": "ResourcesUpToDate", "status": "True"}
+            ]}
+        }));
+        let (cells, _) = cells_in(&ok, "applicationsets", ARGO_GROUP, now_secs());
+        assert_eq!(cells[1], "Ready");
+        assert_eq!(cells[3], "");
+    }
+
+    #[test]
+    fn argocd_appproject_cells_list_what_it_allows() {
+        let project = obj(json!({
+            "apiVersion": "argoproj.io/v1alpha1",
+            "kind": "AppProject",
+            "metadata": {"name": "prod"},
+            "spec": {
+                "sourceRepos": ["https://github.com/acme/gitops"],
+                "destinations": [
+                    {"server": "https://kubernetes.default.svc", "namespace": "prod"},
+                    {"server": "https://kubernetes.default.svc", "namespace": "prod"},
+                    {"server": "https://kubernetes.default.svc", "namespace": "staging"}
+                ]
+            }
+        }));
+        let (cells, _) = cells_in(&project, "appprojects", ARGO_GROUP, now_secs());
+        assert_eq!(cells[1], "prod,staging");
+        assert_eq!(cells[2], "https://github.com/acme/gitops");
+
+        let empty = obj(json!({
+            "apiVersion": "argoproj.io/v1alpha1", "kind": "AppProject",
+            "metadata": {"name": "locked"}, "spec": {}
+        }));
+        let (cells, _) = cells_in(&empty, "appprojects", ARGO_GROUP, now_secs());
+        assert_eq!(cells[1], "<none>");
+    }
+
+    #[test]
+    fn a_foreign_applications_crd_keeps_the_printer_column_fallback() {
+        // `applications` is a generic plural — only Argo's own kind gets the
+        // sync/health columns, everything else stays a fallback candidate so
+        // its CRD printer columns are used instead.
+        assert!(has_curated("applications", ARGO_GROUP));
+        assert!(!has_curated("applications", "app.k8s.io"));
+        assert_eq!(
+            headers_in("applications", "app.k8s.io"),
+            vec!["NAME", "AGE"]
+        );
     }
 
     // ----- view specs (curated + user/printer columns + wide) --------------
@@ -2563,7 +2967,7 @@ mod tests {
             ],
             false,
         );
-        let spec = build_spec("pods", Some(&v), None, false);
+        let spec = build_spec("pods", "", Some(&v), None, false);
         assert_eq!(
             spec.headers(),
             vec!["NAME", "READY", "STATUS", "RESTARTS", "NODE-IP", "AGE"]
@@ -2589,18 +2993,18 @@ mod tests {
             ],
             true,
         );
-        let spec = build_spec("pods", Some(&v), None, true);
+        let spec = build_spec("pods", "", Some(&v), None, true);
         assert_eq!(spec.headers(), vec!["NAME", "PHASE"]);
     }
 
     #[test]
     fn spec_wide_mode_gates_wide_only_columns() {
-        let narrow = build_spec("pods", None, None, false);
+        let narrow = build_spec("pods", "", None, None, false);
         assert_eq!(
             narrow.headers(),
             vec!["NAME", "READY", "STATUS", "RESTARTS", "AGE"]
         );
-        let wide = build_spec("pods", None, None, true);
+        let wide = build_spec("pods", "", None, None, true);
         assert_eq!(
             wide.headers(),
             vec!["NAME", "READY", "STATUS", "RESTARTS", "IP", "NODE", "AGE"]
@@ -2615,10 +3019,10 @@ mod tests {
             false,
         );
         // Unknown kind: printer columns upgrade the NAME/AGE fallback.
-        let spec = build_spec("widgets", None, Some(&crd), false);
+        let spec = build_spec("widgets", "", None, Some(&crd), false);
         assert_eq!(spec.headers(), vec!["NAME", "PHASE", "AGE"]);
         // Curated kind: printer columns never apply.
-        let spec = build_spec("pods", None, Some(&crd), false);
+        let spec = build_spec("pods", "", None, Some(&crd), false);
         assert_eq!(
             spec.headers(),
             vec!["NAME", "READY", "STATUS", "RESTARTS", "AGE"]
@@ -2628,14 +3032,14 @@ mod tests {
             vec![user_col("MINE", "/status/mine", ColumnKind::Text)],
             false,
         );
-        let spec = build_spec("widgets", Some(&user), Some(&crd), false);
+        let spec = build_spec("widgets", "", Some(&user), Some(&crd), false);
         assert_eq!(spec.headers(), vec!["NAME", "MINE", "AGE"]);
         // A sort-only user view (no columns) still gets printer columns.
         let sort_only = crate::views::View {
             sort: Some(("PHASE".into(), false)),
             ..Default::default()
         };
-        let spec = build_spec("widgets", Some(&sort_only), Some(&crd), false);
+        let spec = build_spec("widgets", "", Some(&sort_only), Some(&crd), false);
         assert_eq!(spec.headers(), vec!["NAME", "PHASE", "AGE"]);
     }
 
@@ -2646,7 +3050,7 @@ mod tests {
             vec![user_col("CPU", "/spec/cpu", ColumnKind::Quantity)],
             false,
         );
-        let spec = build_spec("widgets", Some(&v), None, false);
+        let spec = build_spec("widgets", "", Some(&v), None, false);
         let o = obj(json!({
             "apiVersion": "example.com/v1", "kind": "Widget",
             "metadata": {"name": "w"},
@@ -2671,7 +3075,7 @@ mod tests {
                 "containerStatuses": []
             }
         }));
-        let spec = build_spec("pods", None, None, true);
+        let spec = build_spec("pods", "", None, None, true);
 
         assert!(matches!(
             spec.cell_at(&pod, 0, now_secs()),
@@ -2698,7 +3102,7 @@ mod tests {
                 "status": {"conditions": [{"type": "Ready", "status": status}]}
             }))
         };
-        let spec = build_spec("kustomizations", None, None, false);
+        let spec = build_spec("kustomizations", "", None, None, false);
         let ready =
             |status: &str| match spec.sort_value(&flux(status), "READY", now_secs()).unwrap() {
                 SortValue::Text(t) => t,
@@ -2715,7 +3119,7 @@ mod tests {
                 {"ready": false, "restartCount": 0, "state": {"running": {}}}
             ]}
         }));
-        let spec = build_spec("pods", None, None, false);
+        let spec = build_spec("pods", "", None, None, false);
         match spec.sort_value(&pod, "READY", now_secs()).unwrap() {
             SortValue::Num(n) => assert_eq!(n, 1.0),
             SortValue::Text(t) => panic!("pod READY must sort numerically, got '{t}'"),

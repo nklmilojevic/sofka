@@ -37,7 +37,9 @@ architecture. The short version:
   patches. No `flux` binary. Plus a native Helm inspector that decodes release
   Secrets itself.
 - **Argo CD built in** - `t` suspends, resumes, and syncs ArgoCD Applications
-  and ApplicationSets through native API patches. No `argocd` binary.
+  and ApplicationSets through native API patches, `:argo` walks the
+  Application → source → revision chain behind any object it applied, and
+  Applications get sync/health columns. No `argocd` binary.
 - **It tells you why something is broken** - `X` opens a deterministic,
   evidence-based incident view. No AI, no external service.
 - **Bulk actions** - `space` marks rows for delete, kill, or Flux actions across

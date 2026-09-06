@@ -32,13 +32,14 @@ Milestone status. Longer-form thinking on direction lives in
 
 ## Milestone 4: GitOps and safety
 
-- [x] Flux ownership and dependency navigation.
+- [x] Flux and Argo CD ownership and dependency navigation.
 - [x] Revision and reconciliation-chain visibility.
 - [x] Managed-resource mutation warnings.
 - [x] Action-aware authorization checks.
 - [x] Declarative guardrails.
 - [x] Local action journal.
 - [x] ArgoCD Application suspend/resume/sync controls.
+- [x] ArgoCD Application/ApplicationSet/AppProject columns and sync chain.
 
 ## Milestone 5: debugging and collaboration
 

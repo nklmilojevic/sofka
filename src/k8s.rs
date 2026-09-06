@@ -589,6 +589,10 @@ pub const ALIASES: &[(&str, &str)] = &[
     // Flux CD — the CRDs' own `shortNames`.
     ("ks", "kustomizations"),
     ("hr", "helmreleases"),
+    // Argo CD — the CRDs' own `shortNames`.
+    ("app", "applications"),
+    ("appset", "applicationsets"),
+    ("appproj", "appprojects"),
 ];
 
 #[cfg(any(test, feature = "bench"))]
@@ -658,9 +662,11 @@ impl Cluster {
         // A CRD whose plural collides with the `:snapshots` built-in command,
         // for palette-priority tests (CRD names outrank built-ins).
         cluster.register_kind("kopiur.home-operations.com", "Snapshot", "snapshots", true);
-        // ArgoCD CRDs, for the `t` suspend/resume/sync menu.
+        // ArgoCD CRDs, for the `t` suspend/resume/sync menu and the GitOps
+        // view's Application chain.
         cluster.register_kind("argoproj.io", "Application", "applications", true);
         cluster.register_kind("argoproj.io", "ApplicationSet", "applicationsets", true);
+        cluster.register_kind("argoproj.io", "AppProject", "appprojects", true);
         // A second `events` kind, reachable only by its qualified name — the
         // bare plural stays with core, as `discover` would leave it.
         let events_k8s_io = Kind {

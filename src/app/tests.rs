@@ -4331,6 +4331,36 @@ async fn argocd_menu_requires_explicit_choice_not_a_single_key() {
     assert!(!app.flash.contains("suspending"));
 }
 
+#[tokio::test]
+async fn argocd_applications_get_sync_and_health_columns() {
+    let (mut app, _rx) = test_app();
+    app.switch_kind("applications");
+    apply(&mut app, argocd_app("guestbook"));
+
+    let headers: Vec<String> = app.display_headers().to_vec();
+    assert!(
+        headers.contains(&"SYNC".to_string()) && headers.contains(&"HEALTH".to_string()),
+        "{headers:?}"
+    );
+    assert!(headers.contains(&"PROJECT".to_string()), "{headers:?}");
+}
+
+#[tokio::test]
+async fn gitops_view_opens_for_an_argocd_application() {
+    let (mut app, _rx) = test_app();
+    app.switch_kind("applications");
+    apply(&mut app, argocd_app("guestbook"));
+
+    // `:argo` and `:argocd` are the Argo-flavored names of the GitOps view.
+    assert!(app.run_palette_command("argocd"));
+    assert_eq!(app.mode, Mode::Gitops);
+    assert_eq!(app.gitops_title, "guestbook — GitOps");
+    app.handle_key(press(KeyCode::Esc)).unwrap();
+    assert_eq!(app.mode, Mode::Table);
+    assert!(app.run_palette_command("argo"));
+    assert_eq!(app.mode, Mode::Gitops);
+}
+
 #[test]
 fn argocd_suspend_stashes_automated_and_removes_field() {
     let o = obj(argocd_app("guestbook"));
@@ -7479,6 +7509,48 @@ async fn editing_unmanaged_object_skips_the_warning() {
     let (mut app, _rx) = app_with_pod(); // plain pod, no toolkit labels
     app.request_edit();
     assert_ne!(app.mode, Mode::Confirm, "unmanaged edit needs no confirm");
+    assert!(matches!(app.pending, Some(Suspend::Shell(_))));
+}
+
+#[tokio::test]
+async fn editing_argocd_managed_object_confirms_with_revert_warning() {
+    let (mut app, _rx) = test_app();
+    app.switch_kind("pods");
+    apply(
+        &mut app,
+        json!({"apiVersion":"v1","kind":"Pod","metadata":{
+            "name":"a","namespace":"default","annotations":{
+                "argocd.argoproj.io/tracking-id":"guestbook:/Pod:default/a"}}}),
+    );
+    app.table_state.select(Some(0));
+
+    app.request_edit();
+    assert_eq!(app.mode, Mode::Confirm);
+    assert!(app.pending.is_none(), "must not edit before confirming");
+    assert!(
+        app.confirm_label
+            .contains("Managed by Argo CD Application/guestbook"),
+        "{}",
+        app.confirm_label
+    );
+}
+
+#[tokio::test]
+async fn a_bare_instance_label_is_too_weak_to_warn_on() {
+    // Helm sets `app.kubernetes.io/instance` on everything it installs —
+    // warning about an Argo Application that may not exist would cry wolf.
+    let (mut app, _rx) = test_app();
+    app.switch_kind("pods");
+    apply(
+        &mut app,
+        json!({"apiVersion":"v1","kind":"Pod","metadata":{
+            "name":"a","namespace":"default","labels":{
+                "app.kubernetes.io/instance":"guestbook"}}}),
+    );
+    app.table_state.select(Some(0));
+
+    app.request_edit();
+    assert_ne!(app.mode, Mode::Confirm, "{}", app.confirm_label);
     assert!(matches!(app.pending, Some(Suspend::Shell(_))));
 }
 
@@ -10801,7 +10873,7 @@ async fn filtering_matches_a_naive_fuzzy_pass() {
 
         // Naive expectation: name haystack, else any rendered cell.
         let matcher = crate::fuzzy::Fuzzy::new();
-        let spec = crate::columns::build_spec("pods", None, None, false);
+        let spec = crate::columns::build_spec("pods", "", None, None, false);
         let mut want: Vec<String> = Vec::new();
         for (k, o) in app.store.iter() {
             let hay = format!(

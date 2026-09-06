@@ -825,16 +825,16 @@ impl App {
         } else {
             format!("{name} in {ns}")
         };
-        // A Flux-managed object gets its spec reverted on the next reconcile —
-        // warn (and confirm) before opening the editor.
-        let flux = flux_managed_by(obj);
+        // A GitOps-managed object gets its spec reverted on the next
+        // reconcile — warn (and confirm) before opening the editor.
+        let managed = gitops_managed_by(obj);
         let mut argv = self.kubectl_base();
         argv.extend(["edit".into(), self.kind_plural.clone(), name]);
         if !ns.is_empty() {
             argv.push("-n".into());
             argv.push(ns);
         }
-        match flux {
+        match managed {
             Some(owner) => {
                 self.confirm_label = format!(
                     "⚠ Managed by {owner} — your edit will be reverted on the next reconcile. Edit anyway?"

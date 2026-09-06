@@ -2066,8 +2066,8 @@ fn draw_help(frame: &mut Frame, app: &App, area: Rect) {
             "historical right-sizing: P50/P95/P99 usage → suggested requests + patch (needs [providers.metrics])",
         ),
         bind(
-            ":gitops · :flux",
-            "Flux owner, source, revisions & reconciliation chain (⏎ to jump)",
+            ":gitops · :flux · :argo",
+            "Flux/Argo CD owner, source, revisions & reconciliation chain (⏎ to jump)",
         ),
         bind(
             ":journal · :audit",

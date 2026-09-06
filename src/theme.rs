@@ -515,18 +515,24 @@ pub fn accent() -> Style {
 /// against the row tint.
 pub fn status_color(s: &str) -> Color {
     match s {
-        "Running" | "Ready" | "Active" | "Bound" | "True" | "deployed" => green(),
+        // Argo CD's Healthy/Synced read like Running: the app is where it
+        // should be.
+        "Running" | "Ready" | "Active" | "Bound" | "True" | "deployed" | "Healthy" | "Synced" => {
+            green()
+        }
         // Faded, not "healthy green" — a finished pod isn't running, and a
         // scaled-to-zero workload isn't serving.
-        "Succeeded" | "Completed" | "superseded" | "uninstalled" | "ScaledDown" => overlay0(),
+        "Succeeded" | "Completed" | "superseded" | "uninstalled" | "ScaledDown" | "Suspended" => {
+            overlay0()
+        }
         "Pending" | "ContainerCreating" | "PodInitializing" | "Progressing" | "pending-install"
-        | "pending-upgrade" | "pending-rollback" => yellow(),
+        | "pending-upgrade" | "pending-rollback" | "OutOfSync" => yellow(),
         // Matches row_color's killColor — a distinct "on its way out" hue,
         // not the same bucket as Pending.
         "Terminating" | "uninstalling" => mauve(),
         "Failed" | "Error" | "CrashLoopBackOff" | "ImagePullBackOff" | "ErrImagePull"
         | "Evicted" | "OOMKilled" | "NotReady" | "False" | "failed" | "Degraded"
-        | "Unavailable" | "Stalled" => red(),
+        | "Unavailable" | "Stalled" | "Missing" => red(),
         "Unknown" | "" | "unknown" => overlay1(),
         _ => text(),
     }
@@ -546,10 +552,12 @@ pub fn row_color(s: &str) -> Color {
     match s {
         "Failed" | "Error" | "CrashLoopBackOff" | "ImagePullBackOff" | "ErrImagePull"
         | "Evicted" | "OOMKilled" | "NotReady" | "Unhealthy" | "False" | "failed" | "Degraded"
-        | "Unavailable" | "Stalled" => red(),
+        | "Unavailable" | "Stalled" | "Missing" => red(),
         "Pending" | "ContainerCreating" | "PodInitializing" | "Progressing" | "pending-install"
-        | "pending-upgrade" | "pending-rollback" => peach(),
-        "Completed" | "Succeeded" | "superseded" | "uninstalled" | "ScaledDown" => overlay0(),
+        | "pending-upgrade" | "pending-rollback" | "OutOfSync" => peach(),
+        "Completed" | "Succeeded" | "superseded" | "uninstalled" | "ScaledDown" | "Suspended" => {
+            overlay0()
+        }
         // k9s killColor — terminating/deleting rows.
         "Terminating" | "uninstalling" => mauve(),
         _ => blue(),
@@ -677,6 +685,26 @@ mod tests {
         // Pending pops distinct from the row's peach.
         assert_eq!(status_color("Pending"), yellow());
         assert_ne!(status_color("Pending"), row_color("Pending"));
+    }
+
+    #[test]
+    fn argocd_sync_and_health_statuses_are_colored() {
+        // Argo's own status vocabulary, which no k8s phase covers.
+        assert_eq!(status_color("Healthy"), green());
+        assert_eq!(status_color("Synced"), green());
+        assert_eq!(row_color("Healthy"), blue());
+        // Drift is a warning, not a failure.
+        assert_eq!(status_color("OutOfSync"), yellow());
+        assert_eq!(row_color("OutOfSync"), peach());
+        // A Missing app is as broken as a failed one.
+        assert_eq!(status_color("Missing"), red());
+        assert_eq!(row_color("Missing"), red());
+        // Suspended fades — nothing is wrong, nothing is happening.
+        assert_eq!(status_color("Suspended"), row_color("Suspended"));
+        assert_eq!(row_color("Suspended"), overlay0());
+        // Degraded/Progressing already had the right colors.
+        assert_eq!(status_color("Degraded"), red());
+        assert_eq!(row_color("Progressing"), peach());
     }
 
     #[test]

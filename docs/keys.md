@@ -29,7 +29,7 @@ pickers keep both characters available as input.
 | `y` / `d` / `E`                               | view YAML / describe (`kubectl`) / live events                                                                                                                |
 | `x`                                           | secrets: show `data` base64-decoded (as `stringData`)                                                                                                         |
 | `X` / `T`                                     | explain why the selection is unhealthy / session-local state-change timeline                                                                                  |
-| `:gitops` / `:flux`                           | Flux owner, source, revisions & reconciliation chain for the selection (`⏎` to jump)                                                                          |
+| `:gitops` / `:flux` / `:argo`                 | Flux/Argo CD owner, source, revisions & reconciliation chain for the selection (`⏎` to jump)                                                                  |
 | `:can-i` / `:can-i <verb> <resource> [ns]`    | what you can do here / check a single action (`SelfSubjectAccessReview`)                                                                                      |
 | `:journal` / `:audit`                         | session-local log of the mutating actions you've taken                                                                                                        |
 | `:rightsize`                                  | historical right-sizing: P50/P95/P99 usage → suggested requests + patch preview (needs a metrics backend)                                                     |

@@ -135,12 +135,24 @@ The full list. For how sofka compares to k9s, see [vs k9s](vs-k9s.md).
   base64 annotation so resume restores it exactly; ApplicationSet suspend sets
   `applicationsSync` to `create-only` (no `none` mode exists) and stashes the
   original value the same way. Sync-now patches the top-level `operation`
-  field. No `argocd` binary needed. Works with bulk multiselect.
-- **GitOps view** (`:gitops` / `:flux`) - the Flux ownership and reconciliation
-  chain for the selection: the owning Kustomization/HelmRelease, its source
+  field. No `argocd` binary needed. Works with bulk multiselect. Applications,
+  ApplicationSets, and AppProjects get curated columns too - sync and health
+  (health colors the row), the synced revision abbreviated like git shows it,
+  the project, destination, and repository; an ApplicationSet shows its
+  generators and the condition holding it back. `app`, `appset`, and `appproj`
+  are aliases for the three kinds.
+- **GitOps view** (`:gitops` / `:flux` / `:argo`) - the ownership and
+  reconciliation chain for the selection, whichever controller applied it. For
+  Flux: the owning Kustomization/HelmRelease, its source
   (GitRepository/OCIRepository/HelmRepository) with applied and latest revision,
-  the `dependsOn` edges, and ready status. Each item is a finding you can `⏎`
-  into.
+  the `dependsOn` edges, and ready status. For Argo CD: the Application named by
+  the object's `argocd.argoproj.io/tracking-id` annotation or instance label,
+  its sync and health status, the revision synced, whether its sync policy is
+  automated, the repositories and paths it syncs from, and the AppProject and
+  generating ApplicationSet beside it. Either way the last block says what is
+  blocking - a suspended owner, an unready source, drift ("OutOfSync - 1 of 3
+  resources differ"), degraded health, a failed sync - or that it reconciled.
+  Each item is a finding you can `⏎` into.
 - **Native Helm inspector** (`:helm` / `:hm`) - sofka decodes Helm's release
   storage Secrets directly (double base64 → gunzip → JSON, same as Helm) and
   lists one row per release at its latest revision, like `helm list`. `⏎` opens
