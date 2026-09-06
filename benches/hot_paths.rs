@@ -629,23 +629,15 @@ fn xray_index(c: &mut Criterion) {
 fn events_doc(c: &mut Criterion) {
     let mut g = c.benchmark_group("events_doc");
     for n in [200usize, 1_000] {
-        let events = bs::events(n);
+        let doc = bs::event_doc(&bs::events(n));
         g.bench_with_input(BenchmarkId::new("render", n), &n, |b, _| {
-            b.iter(|| black_box(bs::format_event_lines(&events).len()));
+            b.iter(|| black_box(bs::event_doc_render(&doc)));
         });
     }
-    // Quadratic by construction, so it stays small: 200 events already means
-    // 200 rebuilds averaging 100 events each.
     let n = 200usize;
     let events = bs::events(n);
     g.bench_with_input(BenchmarkId::new("initial_burst", n), &n, |b, _| {
-        b.iter(|| {
-            let mut total = 0usize;
-            for i in 1..=events.len() {
-                total += bs::format_event_lines(&events[..i]).len();
-            }
-            black_box(total)
-        });
+        b.iter(|| black_box(bs::event_doc_initial(&events)));
     });
     g.finish();
 }
@@ -658,6 +650,20 @@ fn object_yaml(c: &mut Criterion) {
     for (label, obj) in [("pod", bs::pod(1)), ("fat", bs::fat_object(120))] {
         g.bench_function(label, |b| {
             b.iter(|| black_box(app.object_yaml(black_box(&obj)).len()));
+        });
+    }
+    g.finish();
+}
+
+/// 3-4/037 — the `d` keypress: two cleaned YAML renders and a unified diff of
+/// the whole document, all on the UI thread.
+fn object_diff(c: &mut Criterion) {
+    let mut g = c.benchmark_group("object_diff");
+    for entries in [40usize, 240] {
+        let prev = bs::fat_object(entries);
+        let live = bs::fat_object_changed(entries);
+        g.bench_with_input(BenchmarkId::new("fat", entries), &entries, |b, _| {
+            b.iter(|| black_box(bs::diff_document(&prev, &live)));
         });
     }
     g.finish();
@@ -705,6 +711,7 @@ criterion_group!(
     xray_index,
     events_doc,
     object_yaml,
+    object_diff,
     log_ingest,
     log_retain,
     rows_cache,

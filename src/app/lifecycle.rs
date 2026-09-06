@@ -1,9 +1,5 @@
 use super::*;
 
-/// Fallback delay if the watcher backoff ever runs out of steps. `DefaultBackoff`
-/// is unbounded in attempts, so this is belt and braces rather than a real path.
-const NODE_PODS_BACKOFF_CEILING: Duration = Duration::from_secs(30);
-
 fn node_pods_watch_forbidden(error: &watcher::Error) -> bool {
     match error {
         watcher::Error::InitialListFailed(kube::Error::Api(status))
@@ -716,8 +712,7 @@ impl App {
                             // the counts are going nowhere; `dirty` survives, so
                             // the next tick after recovery still emits.
                             Err(_) => {
-                                let delay =
-                                    backoff.next().unwrap_or(NODE_PODS_BACKOFF_CEILING);
+                                let delay = backoff.next().unwrap_or(WATCH_BACKOFF_CEILING);
                                 tokio::time::sleep(delay).await;
                             }
                         }
@@ -1188,6 +1183,25 @@ impl App {
                     None => self.clear_claimed_status(claim),
                 }
             }
+            Msg::Diff {
+                generation,
+                claim,
+                title,
+                result,
+            } if generation == self.generation => match result {
+                Ok(lines) => {
+                    self.detail = Scrollable {
+                        title,
+                        lines: lines.into(),
+                        ..Default::default()
+                    };
+                    self.mode = Mode::Diff;
+                    self.clear_claimed_status(claim);
+                }
+                Err(label) => {
+                    self.set_claimed_status(claim, format!("no diff: live matches {label}"), false)
+                }
+            },
             Msg::Events {
                 generation,
                 title,

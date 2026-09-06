@@ -705,7 +705,7 @@ async fn provider_log_task(
                     // Skip anything the backfill already showed (the tail may
                     // replay a little history at the seam).
                     if e.nanos.is_none_or(|n| n > backfill_max) {
-                        batch.extend(e.lines(prefix, timestamps));
+                        batch.render_entry(&e, prefix, timestamps);
                     }
                     if batch.is_full() && !batch.flush(&tx, generation).await {
                         return;

@@ -11911,3 +11911,151 @@ async fn faults_watch_changes_preserve_pod_identity_or_clear_selection() {
     });
     assert_eq!(app.table_state.selected(), None);
 }
+
+/// The borrowed YAML projection must produce exactly what serializing a
+/// stamped clone produced — same fields, same order, same flattening.
+#[tokio::test]
+async fn object_yaml_matches_a_stamped_clone() {
+    let (mut app, _rx) = test_app();
+    app.kind = app.cluster.resolve("pods");
+    let untyped = obj(json!({
+        "metadata": {
+            "name": "web", "namespace": "default", "uid": "u1",
+            "labels": {"app": "web"},
+            "annotations": {"note": "line one\nline two"},
+        },
+        "spec": {"containers": [{"name": "app", "image": "nginx:1.27"}]},
+        "status": {"phase": "Running", "podIP": "10.0.0.1"},
+    }));
+
+    let mut stamped = untyped.clone();
+    stamped.types = Some(TypeMeta {
+        api_version: "v1".into(),
+        kind: "Pod".into(),
+    });
+    let expected: Vec<String> = serde_yaml::to_string(&stamped)
+        .unwrap()
+        .lines()
+        .map(String::from)
+        .collect();
+
+    assert_eq!(app.object_yaml(&untyped), expected);
+    assert!(expected.iter().any(|l| l == "apiVersion: v1"));
+    assert!(expected.iter().any(|l| l == "kind: Pod"));
+
+    // An object that already carries its type is passed through untouched.
+    let typed = obj(json!({
+        "apiVersion": "apps/v1",
+        "kind": "Deployment",
+        "metadata": {"name": "api", "namespace": "default"},
+        "spec": {"replicas": 3},
+    }));
+    let direct: Vec<String> = serde_yaml::to_string(&typed)
+        .unwrap()
+        .lines()
+        .map(String::from)
+        .collect();
+    assert_eq!(app.object_yaml(&typed), direct);
+}
+
+/// A large object's diff leaves the UI thread: `open_diff` returns without
+/// switching mode, and the document arrives as a message instead.
+#[tokio::test]
+async fn a_large_diff_is_rendered_off_the_ui_thread() {
+    let (mut app, mut rx) = test_app();
+    app.switch_kind("deployments");
+    // Comfortably past the inline budget, so the worker path is taken.
+    let filler = "x".repeat(200 * 1024);
+    let dep = |rv: &str, replicas: i64, note: &str| {
+        json!({
+            "apiVersion": "apps/v1", "kind": "Deployment",
+            "metadata": {
+                "name": "web", "namespace": "default", "resourceVersion": rv,
+                "annotations": {"example.com/filler": note},
+            },
+            "spec": {"replicas": replicas}
+        })
+    };
+    apply(&mut app, dep("1", 1, &filler));
+    apply(&mut app, dep("2", 3, &filler));
+    app.table_state.select(Some(0));
+
+    app.open_diff();
+    assert_ne!(
+        app.mode,
+        Mode::Diff,
+        "the keypress must not block on the diff"
+    );
+
+    let msg = next_diff_msg(&mut rx).await;
+    let Msg::Diff { result, .. } = &msg else {
+        unreachable!()
+    };
+    let lines = result.as_ref().expect("the revisions differ");
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.starts_with('-') && l.contains("replicas: 1"))
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.starts_with('+') && l.contains("replicas: 3"))
+    );
+
+    app.handle_msg(msg);
+    assert_eq!(app.mode, Mode::Diff);
+    assert!(app.detail.title.contains("session"), "{}", app.detail.title);
+}
+
+/// An unchanged large object reports "no diff" through the same path, and
+/// still does not open an empty document.
+#[tokio::test]
+async fn a_large_unchanged_diff_stays_on_the_current_view() {
+    let (mut app, mut rx) = test_app();
+    app.switch_kind("deployments");
+    let filler = "x".repeat(200 * 1024);
+    let last = serde_json::to_string(&json!({
+        "apiVersion": "apps/v1", "kind": "Deployment",
+        "metadata": {
+            "name": "web", "namespace": "default",
+            "annotations": {"example.com/filler": filler},
+        },
+        "spec": {"replicas": 3}
+    }))
+    .unwrap();
+    apply(
+        &mut app,
+        json!({
+            "apiVersion": "apps/v1", "kind": "Deployment",
+            "metadata": {
+                "name": "web", "namespace": "default", "resourceVersion": "1",
+                "annotations": {
+                    "kubectl.kubernetes.io/last-applied-configuration": last,
+                    "example.com/filler": filler,
+                },
+            },
+            "spec": {"replicas": 3}
+        }),
+    );
+    app.table_state.select(Some(0));
+
+    app.open_diff();
+    let msg = next_diff_msg(&mut rx).await;
+    app.handle_msg(msg);
+    assert_ne!(app.mode, Mode::Diff);
+    assert!(app.flash.contains("no diff"), "{}", app.flash);
+}
+
+/// The next `Msg::Diff` on the channel, skipping whatever the watch queued.
+async fn next_diff_msg(rx: &mut Receiver<Msg>) -> Msg {
+    loop {
+        let msg = tokio::time::timeout(Duration::from_secs(10), rx.recv())
+            .await
+            .expect("the diff worker must report back")
+            .expect("channel open");
+        if matches!(msg, Msg::Diff { .. }) {
+            return msg;
+        }
+    }
+}

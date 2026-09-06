@@ -679,7 +679,17 @@ impl LogBatch {
 
     /// Add one stream line under `prefix` (empty for a single-pod stream).
     pub(super) fn push(&mut self, prefix: &str, line: String) {
-        self.lines.push(format!("{prefix}{line}"));
+        // A single-pod stream has nothing to prepend, which is the common
+        // case: move the line the reader already allocated rather than
+        // copying it into an identical new one.
+        if prefix.is_empty() {
+            self.lines.push(line);
+            return;
+        }
+        let mut prefixed = String::with_capacity(prefix.len() + line.len());
+        prefixed.push_str(prefix);
+        prefixed.push_str(&line);
+        self.lines.push(prefixed);
     }
 
     /// Add one line that is already complete (an error notice, a provider
@@ -688,8 +698,14 @@ impl LogBatch {
         self.lines.push(line);
     }
 
-    pub(super) fn extend<I: IntoIterator<Item = String>>(&mut self, lines: I) {
-        self.lines.extend(lines);
+    /// Append one provider record's display lines straight into the batch.
+    pub(super) fn render_entry(
+        &mut self,
+        entry: &crate::providers::LogEntry,
+        prefix: crate::providers::Prefix,
+        timestamps: bool,
+    ) {
+        entry.render_into(&mut self.lines, prefix, timestamps);
     }
 
     pub(super) fn is_empty(&self) -> bool {
@@ -700,9 +716,11 @@ impl LogBatch {
         self.lines.len() >= LOG_BATCH_LINES
     }
 
-    /// Hand the pending lines off, leaving an empty batch behind.
+    /// Hand the pending lines off, leaving an empty batch behind. The
+    /// replacement starts at the batch size, so a steady stream does not
+    /// re-grow the same `Vec` from nothing between every flush.
     pub(super) fn take(&mut self) -> Vec<String> {
-        std::mem::take(&mut self.lines)
+        std::mem::replace(&mut self.lines, Vec::with_capacity(LOG_BATCH_LINES))
     }
 
     /// Send the pending lines. `false` once the UI is gone.
@@ -715,47 +733,88 @@ impl LogBatch {
     }
 }
 
-pub(super) async fn send_event_snapshot(
-    tx: &Sender<Msg>,
-    generation: u64,
-    title: &str,
-    items: &HashMap<String, DynamicObject>,
+/// The events document, maintained incrementally.
+///
+/// A watch delivers one event at a time, and the whole document is republished
+/// each time it changes. Re-deriving every row from its `DynamicObject` on each
+/// publish made that quadratic over an initial list, so each row is rendered
+/// once when its event arrives and a publish only re-sorts the rendered rows.
+pub(crate) struct EventDoc {
+    /// Row key → (sort key, rendered row).
+    rows: crate::store::FastMap<String, (String, String)>,
     events_v1: bool,
-) -> bool {
-    tx.send(Msg::Events {
-        generation,
-        title: title.to_string(),
-        lines: format_event_lines(items.values(), events_v1),
-    })
-    .await
-    .is_ok()
 }
 
+impl EventDoc {
+    pub(crate) fn new(events_v1: bool) -> Self {
+        Self {
+            rows: crate::store::FastMap::default(),
+            events_v1,
+        }
+    }
+
+    pub(crate) fn clear(&mut self) {
+        self.rows.clear();
+    }
+
+    pub(crate) fn apply(&mut self, event: &DynamicObject) {
+        let seen = event_time(event, self.events_v1);
+        let line = event_line(event, self.events_v1, &seen);
+        self.rows.insert(row_key(event), (seen, line));
+    }
+
+    pub(crate) fn remove(&mut self, event: &DynamicObject) {
+        self.rows.remove(&row_key(event));
+    }
+
+    /// The document as the view shows it: header, then rows newest first.
+    pub(crate) fn render(&self) -> Vec<String> {
+        let mut rows: Vec<&(String, String)> = self.rows.values().collect();
+        // Unstable: the comparator orders on both tuple fields, i.e. the whole
+        // element, so a tie means the two rows are indistinguishable.
+        rows.sort_unstable_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+
+        let mut lines = Vec::with_capacity(rows.len().max(1) + 1);
+        lines.push(EVENT_HEADER.to_string());
+        if rows.is_empty() {
+            lines.push("(no events)".into());
+        } else {
+            lines.extend(rows.into_iter().map(|(_, line)| line.clone()));
+        }
+        lines
+    }
+
+    /// Publish the document. `false` once the UI is gone.
+    pub(super) async fn publish(&self, tx: &Sender<Msg>, generation: u64, title: &str) -> bool {
+        tx.send(Msg::Events {
+            generation,
+            title: title.to_string(),
+            lines: self.render(),
+        })
+        .await
+        .is_ok()
+    }
+}
+
+const EVENT_HEADER: &str = concat!(
+    "LAST SEEN            ",
+    "TYPE     ",
+    "REASON                   ",
+    "COUNT ",
+    "MESSAGE"
+);
+
+/// One-shot render of a fixed set of events (the diagnostic bundle), through
+/// the same accumulator the live view uses.
 pub(crate) fn format_event_lines<'a, I>(events: I, events_v1: bool) -> Vec<String>
 where
     I: IntoIterator<Item = &'a DynamicObject>,
 {
-    let mut rows: Vec<(String, String)> = events
-        .into_iter()
-        .map(|event| {
-            let seen = event_time(event, events_v1);
-            (seen.clone(), event_line(event, events_v1, &seen))
-        })
-        .collect();
-    // Unstable: the comparator orders on both tuple fields, i.e. the whole
-    // element, so a tie means the two rows are indistinguishable.
-    rows.sort_unstable_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
-
-    let mut lines = vec![format!(
-        "{:<20} {:<8} {:<24} {:>5} {}",
-        "LAST SEEN", "TYPE", "REASON", "COUNT", "MESSAGE"
-    )];
-    if rows.is_empty() {
-        lines.push("(no events)".into());
-    } else {
-        lines.extend(rows.into_iter().map(|(_, line)| line));
+    let mut doc = EventDoc::new(events_v1);
+    for event in events {
+        doc.apply(event);
     }
-    lines
+    doc.render()
 }
 
 pub(super) fn event_line(event: &DynamicObject, events_v1: bool, seen: &str) -> String {
@@ -841,6 +900,17 @@ pub(super) fn ivalue(v: &Value, path: &[&str]) -> Option<i64> {
 }
 
 /// Recursively flatten an object and its owned children into xray rows.
+/// Deepest owner chain the tree walks. Kubernetes ownership is shallow —
+/// cronjob → job → pod is the longest built-in chain — so anything beyond this
+/// is a cycle in the owner references, and the walk stops there instead of
+/// recursing until the stack runs out.
+const XRAY_MAX_DEPTH: usize = 8;
+
+/// Which pool entries each owner uid claims, by position. Positions, not
+/// objects: the pool outlives the walk, so the tree is built from borrows
+/// instead of one deep clone per owner reference.
+type OwnerIndex<'a> = crate::store::FastMap<&'a str, Vec<u32>>;
+
 /// Build the owner index over `pool` and flatten the whole tree — the CPU half
 /// of one xray refresh, split out from the polling task so it can be tested and
 /// benchmarked without a cluster.
@@ -849,21 +919,22 @@ pub(crate) fn xray_flatten(
     roots: &[DynamicObject],
     pool: &[(String, DynamicObject)],
 ) -> Vec<XrayItem> {
-    let mut children: std::collections::HashMap<String, Vec<(String, DynamicObject)>> =
-        std::collections::HashMap::new();
-    for (label, o) in pool {
+    let mut children: OwnerIndex<'_> = OwnerIndex::default();
+    for (i, (_, o)) in pool.iter().enumerate() {
         if let Some(owners) = &o.metadata.owner_references {
             for owner in owners {
                 children
-                    .entry(owner.uid.clone())
+                    .entry(owner.uid.as_str())
                     .or_default()
-                    .push((label.clone(), o.clone()));
+                    .push(i as u32);
             }
         }
     }
-    let mut items = Vec::new();
+    // Each root contributes its own row and a populated pool contributes most
+    // of the rest, so this is the right order of magnitude on the first push.
+    let mut items = Vec::with_capacity(roots.len() + pool.len());
     for root in roots {
-        emit_xray(root_kind, root, 0, &children, &mut items);
+        emit_xray(root_kind, root, 0, pool, &children, &mut items);
     }
     items
 }
@@ -872,7 +943,8 @@ pub(super) fn emit_xray(
     kind: &str,
     obj: &DynamicObject,
     depth: usize,
-    children: &std::collections::HashMap<String, Vec<(String, DynamicObject)>>,
+    pool: &[(String, DynamicObject)],
+    children: &OwnerIndex<'_>,
     items: &mut Vec<XrayItem>,
 ) {
     let name = obj.metadata.name.clone().unwrap_or_default();
@@ -886,11 +958,13 @@ pub(super) fn emit_xray(
         container: None,
     });
 
-    if let Some(uid) = &obj.metadata.uid
-        && let Some(kids) = children.get(uid)
+    if depth < XRAY_MAX_DEPTH
+        && let Some(uid) = &obj.metadata.uid
+        && let Some(kids) = children.get(uid.as_str())
     {
-        for (clabel, cobj) in kids {
-            emit_xray(clabel, cobj, depth + 1, children, items);
+        for &i in kids {
+            let (clabel, cobj) = &pool[i as usize];
+            emit_xray(clabel, cobj, depth + 1, pool, children, items);
         }
     }
 

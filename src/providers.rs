@@ -207,6 +207,17 @@ impl LogEntry {
     /// Render the entry as display lines (a multi-line message becomes one
     /// buffer line per physical line, like a streamed log would).
     pub fn lines(&self, prefix: Prefix, timestamps: bool) -> Vec<String> {
+        let mut out = Vec::new();
+        self.render_into(&mut out, prefix, timestamps);
+        out
+    }
+
+    /// Append this entry's display lines to `out`. The streaming form: the
+    /// ingest loop appends straight into the pending batch instead of taking
+    /// a fresh `Vec` per entry, and each line is sized before it is filled.
+    pub fn render_into(&self, out: &mut Vec<String>, prefix: Prefix, timestamps: bool) {
+        // An empty `String` does not allocate, so the untagged case — the
+        // common one — still costs nothing here.
         let tag = match prefix {
             Prefix::None => String::new(),
             Prefix::Container if self.container.is_empty() => String::new(),
@@ -218,14 +229,21 @@ impl LogEntry {
             },
         };
         let ts = if timestamps && !self.time.is_empty() {
-            format!("{} ", self.time)
+            self.time.as_str()
         } else {
-            String::new()
+            ""
         };
-        self.msg
-            .split('\n')
-            .map(|part| format!("{tag}{ts}{part}"))
-            .collect()
+        let stamp = usize::from(!ts.is_empty());
+        for part in self.msg.split('\n') {
+            let mut line = String::with_capacity(tag.len() + ts.len() + stamp + part.len());
+            line.push_str(&tag);
+            if !ts.is_empty() {
+                line.push_str(ts);
+                line.push(' ');
+            }
+            line.push_str(part);
+            out.push(line);
+        }
     }
 }
 

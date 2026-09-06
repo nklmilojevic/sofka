@@ -115,6 +115,16 @@ pub enum Msg {
         /// Set when describe failed and we fell back to YAML.
         warn: Option<String>,
     },
+    /// Result of an off-thread `d` diff. Large documents are serialized and
+    /// diffed on a blocking worker so the keypress does not stall the frame.
+    Diff {
+        generation: u64,
+        claim: StatusClaim,
+        title: String,
+        /// The diff rows, or the baseline label when live matched it (which
+        /// stays on the current view rather than opening an empty document).
+        result: Result<Vec<String>, String>,
+    },
     /// Live Event rows for the selected object.
     Events {
         generation: u64,

@@ -57,6 +57,16 @@ const MAX_LOG_LINES_PAUSED: usize = 100_000;
 const LOG_BATCH_LINES: usize = 64;
 const LOG_BATCH_MS: u64 = 50;
 
+/// The events document coalesces the same way: a rollout can produce dozens of
+/// events in a few milliseconds, and republishing the whole document for each
+/// one only makes the view re-layout. Short enough that a single live event
+/// still lands within one frame of arriving.
+const EVENTS_PUBLISH_MS: u64 = 100;
+
+/// Fallback delay if a watcher backoff ever runs out of steps. `DefaultBackoff`
+/// is unbounded in attempts, so this is belt and braces rather than a real path.
+const WATCH_BACKOFF_CEILING: Duration = Duration::from_secs(30);
+
 /// Initial status-bar hint. Unlike transient action results, this stays visible
 /// until another interaction replaces it.
 const WELCOME_FLASH: &str =
@@ -2144,7 +2154,9 @@ use helpers::*;
 pub use notify::notification_sequence;
 // Reachable from `benchsupport` so `benches/` can drive the real code paths.
 #[cfg(feature = "bench")]
-pub(crate) use helpers::{format_event_lines, ingest_lines, xray_flatten};
+pub(crate) use details::diff_document;
+#[cfg(feature = "bench")]
+pub(crate) use helpers::{EventDoc, ingest_lines, xray_flatten};
 pub use pickers::DEFAULT_SORT_LABEL;
 
 #[cfg(test)]

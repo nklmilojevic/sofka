@@ -522,9 +522,27 @@ pub fn events(n: usize) -> Vec<DynamicObject> {
         .collect()
 }
 
-/// The production event-document render: format every event and sort the rows.
-pub fn format_event_lines(events: &[DynamicObject]) -> Vec<String> {
-    crate::app::format_event_lines(events.iter(), false)
+/// An events document holding `events`, ready to publish.
+pub struct EventDocFixture(crate::app::EventDoc);
+
+pub fn event_doc(events: &[DynamicObject]) -> EventDocFixture {
+    let mut doc = crate::app::EventDoc::new(false);
+    for e in events {
+        doc.apply(e);
+    }
+    EventDocFixture(doc)
+}
+
+/// One publish of an accumulated document — what the view rebuilds whenever
+/// the events document changes.
+pub fn event_doc_render(doc: &EventDocFixture) -> usize {
+    doc.0.render().len()
+}
+
+/// What an N-event initial list costs end to end: ingest every event, then
+/// publish the document the view finally draws.
+pub fn event_doc_initial(events: &[DynamicObject]) -> usize {
+    event_doc_render(&event_doc(events))
 }
 
 /// A wide object: `entries` status conditions plus a label/annotation block the
@@ -604,4 +622,30 @@ pub fn logs_app_at_capacity(buffer: usize) -> App {
 /// Lines currently retained in the follow buffer.
 pub fn log_line_count(app: &App) -> usize {
     app.logs.view.lines.len()
+}
+
+/// One `d` keypress on a changed object: clean both revisions and walk the
+/// unified diff. Runs on the UI thread, so this is keypress latency.
+pub fn diff_document(previous: &DynamicObject, live: &DynamicObject) -> usize {
+    let baseline = serde_yaml::to_string(previous).expect("fixture yaml");
+    crate::app::diff_document(&baseline, live.clone()).len()
+}
+
+/// A changed revision of `fat_object`: same shape, different status.
+pub fn fat_object_changed(entries: usize) -> DynamicObject {
+    let mut o = fat_object(entries);
+    if let Some(conds) = o
+        .data
+        .pointer_mut("/status/conditions")
+        .and_then(serde_json::Value::as_array_mut)
+    {
+        for (i, c) in conds.iter_mut().enumerate() {
+            if i.is_multiple_of(4) {
+                c["status"] = json!("Unknown");
+                c["message"] = json!(format!("controller {i} is re-reconciling"));
+            }
+        }
+    }
+    o.metadata.resource_version = Some("987999".into());
+    o
 }
