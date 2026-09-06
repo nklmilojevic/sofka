@@ -745,13 +745,17 @@ async fn run(
                 while let Ok(m) = rx.try_recv() {
                     app.handle_msg(m);
                 }
+                dirty = true;
+            }
+            _ = frame.tick(), if dirty => {
+                // Delivery rides the frame clock, not the drain: a rollout can
+                // wake the drain many times between two frames, and delivering
+                // there launched a notifier process per wake-up. One frame is
+                // also the interval the merged text is written for.
                 if let Some(text) = app.take_notification() {
                     app.run_notify_command(&text);
                     ring_notification(&text, &app.notify_cfg);
                 }
-                dirty = true;
-            }
-            _ = frame.tick(), if dirty => {
                 terminal.draw(|f| ui::draw(f, app))?;
                 dirty = false;
             }

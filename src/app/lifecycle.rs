@@ -712,7 +712,7 @@ impl App {
                             // the counts are going nowhere; `dirty` survives, so
                             // the next tick after recovery still emits.
                             Err(_) => {
-                                let delay = backoff.next().unwrap_or(WATCH_BACKOFF_CEILING);
+                                let delay = backoff.next().unwrap_or(crate::k8s::WATCH_BACKOFF_CEILING);
                                 tokio::time::sleep(delay).await;
                             }
                         }
@@ -877,8 +877,15 @@ impl App {
             Msg::Notify(text) => {
                 self.borrow_status(format!("🔔 {text}"), false);
                 // Delivery happens once per frame in the run loop (see
-                // `take_notification`), so a batch of these coalesces.
-                self.pending_notify.push(text);
+                // `take_notification`), so a batch of these coalesces. The
+                // queue is bounded here rather than at delivery: a rollout
+                // across many notified objects would otherwise build a large
+                // string only for `take_notification` to ellipsize it away.
+                if self.pending_notify.len() < MAX_PENDING_NOTIFY {
+                    self.pending_notify.push(text);
+                } else {
+                    self.dropped_notify += 1;
+                }
             }
             Msg::LogLines { generation, lines } if generation == self.log_gen => {
                 self.push_log_lines(lines);

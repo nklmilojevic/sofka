@@ -467,7 +467,12 @@ impl App {
                 since_seconds,
                 ..Default::default()
             };
-            forward_log_stream(api, pod, lp, prefix, tx, genr, flag).await;
+            let ctx = LogStreamCtx {
+                generation: genr,
+                flag,
+                setup: None,
+            };
+            forward_log_stream(api, pod, lp, prefix, tx, ctx).await;
         });
         self.log_tasks.push(handle);
     }
@@ -532,6 +537,7 @@ impl App {
         // Bound the per-pod tail so an aggregate over many pods stays sane; the
         // follow buffer trims the total anyway.
         let per_pod_tail = tail.min(100);
+        let max_streams = self.logs_cfg.max_streams;
         let handle = tokio::spawn(async move {
             let list_api: Api<Pod> = if ns.is_empty() {
                 Api::all(client.clone())
@@ -558,7 +564,11 @@ impl App {
                     })
                     .await;
             }
-            let mut streams = tokio::task::JoinSet::new();
+            // Enumerate the whole match first: the fan-out has to be capped
+            // against a known total, and the order has to be stable so that
+            // "the first N containers" means the same set on every restart
+            // rather than whatever the API happened to return first.
+            let mut targets: Vec<(String, String, String, bool)> = Vec::new();
             for p in pods {
                 let pod_ns = p.metadata.namespace.clone().unwrap_or_default();
                 let pod_name = p.metadata.name.clone().unwrap_or_default();
@@ -569,30 +579,67 @@ impl App {
                     .unwrap_or_default();
                 let multi = containers.len() > 1;
                 for c in containers {
-                    let prefix = if multi {
-                        format!("[{pod_name}:{c}] ")
-                    } else {
-                        format!("[{pod_name}] ")
-                    };
-                    let (client, tx, flag) = (client.clone(), tx.clone(), flag.clone());
-                    let (pn, pns) = (pod_name.clone(), pod_ns.clone());
-                    streams.spawn(async move {
-                        let api: Api<Pod> = Api::namespaced(client, &pns);
-                        let (tail_lines, since_seconds) = match since {
-                            Some(s) => (None, Some(s)),
-                            None => (Some(per_pod_tail), None),
-                        };
-                        let lp = LogParams {
-                            follow: true,
-                            container: Some(c),
-                            timestamps,
-                            tail_lines,
-                            since_seconds,
-                            ..Default::default()
-                        };
-                        forward_log_stream(api, pn, lp, prefix, tx, genr, flag).await;
-                    });
+                    targets.push((pod_ns.clone(), pod_name.clone(), c, multi));
                 }
+            }
+            targets.sort_by(|a, b| (&a.0, &a.1, &a.2).cmp(&(&b.0, &b.1, &b.2)));
+
+            // Every stream is a live connection and a task of its own, so a
+            // broad selector on a large cluster would open thousands. Cover as
+            // much as the budget allows and say what is not covered — silently
+            // showing part of a match would be worse than showing less.
+            let total = targets.len();
+            if max_streams > 0 && total > max_streams {
+                targets.truncate(max_streams);
+                let pods_covered = targets
+                    .iter()
+                    .map(|(ns, name, _, _)| (ns, name))
+                    .collect::<std::collections::BTreeSet<_>>()
+                    .len();
+                let _ = tx
+                    .send(Msg::LogLines {
+                        generation: genr,
+                        lines: vec![format!(
+                            "[partial] streaming {max_streams} of {total} containers \
+                             ({pods_covered} pods) — raise [logs] max_streams to widen"
+                        )],
+                    })
+                    .await;
+            }
+
+            // Opening every connection at once is its own burst of API load,
+            // separate from how many stay open.
+            let setup = Arc::new(tokio::sync::Semaphore::new(LOG_STREAM_SETUP_CONCURRENCY));
+            let mut streams = tokio::task::JoinSet::new();
+            for (pod_ns, pod_name, c, multi) in targets {
+                let prefix = if multi {
+                    format!("[{pod_name}:{c}] ")
+                } else {
+                    format!("[{pod_name}] ")
+                };
+                let (client, tx, flag) = (client.clone(), tx.clone(), flag.clone());
+                let setup = Arc::clone(&setup);
+                streams.spawn(async move {
+                    let api: Api<Pod> = Api::namespaced(client, &pod_ns);
+                    let (tail_lines, since_seconds) = match since {
+                        Some(s) => (None, Some(s)),
+                        None => (Some(per_pod_tail), None),
+                    };
+                    let lp = LogParams {
+                        follow: true,
+                        container: Some(c),
+                        timestamps,
+                        tail_lines,
+                        since_seconds,
+                        ..Default::default()
+                    };
+                    let ctx = LogStreamCtx {
+                        generation: genr,
+                        flag,
+                        setup: Some(setup),
+                    };
+                    forward_log_stream(api, pod_name, lp, prefix, tx, ctx).await;
+                });
             }
             while streams.join_next().await.is_some() {
                 if flag.load(Ordering::SeqCst) != genr {

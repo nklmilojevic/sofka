@@ -37,10 +37,17 @@ Each notify is its own bounded single-object watch, so it keeps firing while you
 browse other views - "tell me when this rollout finishes" and keep working.
 `:notify` on the same row turns it off. Everything is session-local.
 
+Because each one holds a watch for the session, `max_watches` caps how many can
+be active at once; turning one off always works, even at the cap. Delivery is
+coalesced to one message per frame, so a rollout touching many notified objects
+arrives as a single notification rather than a burst the sink would rate-limit
+away.
+
 ```toml
 [notify]
 bell = true         # ring the terminal bell
 desktop = "osc777"  # "osc777" | "osc9" | "both" | "off"
+max_watches = 25    # max objects watched at once (0 = no cap)
 # command = ["notify-send", "sofka", "$MESSAGE"]     # Linux, inside tmux
 # command = ["terminal-notifier", "-title", "sofka"] # macOS ($MESSAGE appended)
 ```
@@ -70,6 +77,7 @@ tail = 300         # initial lines fetched per stream (kubectl --tail)
 buffer = 5000      # max lines kept while following (oldest dropped)
 buffer_bytes = 67108864 # max bytes kept while following (0 = no limit)
 line_bytes = 16384 # max bytes kept per line (0 = keep whole lines)
+max_streams = 50   # max concurrent streams an aggregate view opens (0 = no cap)
 since = "1h"       # optional: only logs newer than this — replaces tail
 fullscreen = false # open log views fullscreen (F toggles per session)
 ```
@@ -78,6 +86,13 @@ fullscreen = false # open log views fullscreen (F toggles per session)
 memory, because one structured-log record can be megabytes on its own. A line
 longer than `line_bytes` is cut and marked `…[N bytes truncated]`, so the loss
 is visible in the buffer rather than silent.
+
+An aggregate view — a label selector, or a workload with many pods — opens one
+stream per container, each a live connection. `max_streams` caps how many run at
+once; when the match is larger, the view says so with a `[partial] streaming N of
+M containers` line rather than quietly showing part of the match. Containers are
+covered in namespace/pod/container order, so the same selector always covers the
+same set.
 
 In the view, `/` filters with a case-insensitive substring, a `/regex/`, or a
 leading `!` to invert (keep lines that don't match). A malformed regex is flagged

@@ -28,68 +28,76 @@ impl App {
         // of whatever namespace filter was active in the table view.
         let ns = String::new();
 
+        // Index-addressed so the gather below can hand the results back in a
+        // fixed order regardless of which finishes first.
+        let kinds = [nodes, pods, deploys, sts, ds, jobs, pvc];
+
         let handle = tokio::spawn(async move {
             loop {
                 if flag.load(Ordering::SeqCst) != genr {
                     break;
                 }
                 let mut p = Pulse::default();
+
+                // Seven independent lists that used to run one after another,
+                // so the dashboard took the sum of seven round-trips on every
+                // refresh. They are bounded rather than unbounded: a health
+                // snapshot must not itself be a burst of load.
+                let mut lists = gather_lists(&client, &kinds, &ns).await;
+
                 // A denied/failed list must not render as "0 healthy" tiles —
                 // record it so the view can say the numbers are incomplete.
+                // Folded in kind order, so the reported failure does not
+                // depend on which list lost the race.
                 let mut warn = None;
-
-                if let Some((ar, _)) = &nodes {
-                    let items = list_or_warn(&client, ar, false, "", &mut warn).await;
-                    p.nodes_total = items.len();
-                    p.nodes_ready = items.iter().filter(|o| node_ready(o)).count();
-                }
-                if let Some((ar, nsd)) = &pods {
-                    let items = list_or_warn(&client, ar, *nsd, &ns, &mut warn).await;
-                    p.pods_total = items.len();
-                    for o in &items {
-                        match phase(o).as_str() {
-                            "Running" => p.pods_running += 1,
-                            "Pending" => p.pods_pending += 1,
-                            "Failed" => p.pods_failed += 1,
-                            "Succeeded" => p.pods_succeeded += 1,
-                            _ => {}
-                        }
+                for (_, w) in lists.iter_mut() {
+                    if let Some(w) = w.take() {
+                        warn.get_or_insert(w);
                     }
                 }
-                if let Some((ar, nsd)) = &deploys {
-                    let items = list_or_warn(&client, ar, *nsd, &ns, &mut warn).await;
-                    p.deploys_total = items.len();
-                    p.deploys_ready = items
-                        .iter()
-                        .filter(|o| ready_eq(o, "/status/readyReplicas", "/spec/replicas"))
-                        .count();
+
+                let [nodes, pods, deploys, sts, ds, jobs, pvc] = &lists;
+                p.nodes_total = nodes.0.len();
+                p.nodes_ready = nodes.0.iter().filter(|o| node_ready(o)).count();
+
+                p.pods_total = pods.0.len();
+                for o in &pods.0 {
+                    match phase(o).as_str() {
+                        "Running" => p.pods_running += 1,
+                        "Pending" => p.pods_pending += 1,
+                        "Failed" => p.pods_failed += 1,
+                        "Succeeded" => p.pods_succeeded += 1,
+                        _ => {}
+                    }
                 }
-                if let Some((ar, nsd)) = &sts {
-                    let items = list_or_warn(&client, ar, *nsd, &ns, &mut warn).await;
-                    p.sts_total = items.len();
-                    p.sts_ready = items
-                        .iter()
-                        .filter(|o| ready_eq(o, "/status/readyReplicas", "/spec/replicas"))
-                        .count();
-                }
-                if let Some((ar, nsd)) = &ds {
-                    let items = list_or_warn(&client, ar, *nsd, &ns, &mut warn).await;
-                    p.ds_total = items.len();
-                    p.ds_ready = items
-                        .iter()
+
+                p.deploys_total = deploys.0.len();
+                p.deploys_ready = deploys
+                    .0
+                    .iter()
+                    .filter(|o| ready_eq(o, "/status/readyReplicas", "/spec/replicas"))
+                    .count();
+
+                p.sts_total = sts.0.len();
+                p.sts_ready = sts
+                    .0
+                    .iter()
+                    .filter(|o| ready_eq(o, "/status/readyReplicas", "/spec/replicas"))
+                    .count();
+
+                p.ds_total = ds.0.len();
+                p.ds_ready =
+                    ds.0.iter()
                         .filter(|o| {
                             ready_eq(o, "/status/numberReady", "/status/desiredNumberScheduled")
                         })
                         .count();
-                }
-                if let Some((ar, nsd)) = &jobs {
-                    p.jobs_total = list_or_warn(&client, ar, *nsd, &ns, &mut warn).await.len();
-                }
-                if let Some((ar, nsd)) = &pvc {
-                    let items = list_or_warn(&client, ar, *nsd, &ns, &mut warn).await;
-                    p.pvc_total = items.len();
-                    p.pvc_bound = items.iter().filter(|o| phase(o) == "Bound").count();
-                }
+
+                p.jobs_total = jobs.0.len();
+
+                p.pvc_total = pvc.0.len();
+                p.pvc_bound = pvc.0.iter().filter(|o| phase(o) == "Bound").count();
+
                 p.warn = warn;
 
                 if tx
@@ -143,7 +151,7 @@ impl App {
             return;
         };
         let root_kind = trim_s(&self.kind_plural).to_string();
-        let pool_kinds: Vec<(String, ApiResource, bool)> = xray_pool_plurals(&root_kind)
+        let all_pool_kinds: Vec<(String, ApiResource, bool)> = xray_pool_plurals(&root_kind)
             .iter()
             .filter_map(|plural| {
                 self.cluster
@@ -151,6 +159,15 @@ impl App {
                     .map(|k| (trim_s(plural).to_string(), k.ar, k.namespaced))
             })
             .collect();
+        let (pool_aliases_of_root, pool_kinds) = split_pool_kinds(all_pool_kinds, &root_ar);
+        let requests: Vec<Option<(ApiResource, bool)>> =
+            std::iter::once(Some((root_ar.clone(), root_nsd)))
+                .chain(
+                    pool_kinds
+                        .iter()
+                        .map(|(_, ar, nsd)| Some((ar.clone(), *nsd))),
+                )
+                .collect();
 
         let client = self.cluster.client.clone();
         let tx = self.tx.clone();
@@ -163,13 +180,28 @@ impl App {
                 if flag.load(Ordering::SeqCst) != genr {
                     break;
                 }
+                // The roots and every pool kind are independent lists that
+                // used to run one after another; the tree cannot be built
+                // until all of them are in, so serialising them only added
+                // round-trips.
+                let mut lists = gather_list_vec(&client, &requests, &ns).await;
                 let mut warn = None;
-                let roots = list_or_warn(&client, &root_ar, root_nsd, &ns, &mut warn).await;
-                let mut pool: Vec<(String, DynamicObject)> = Vec::new();
-                for (label, ar, namespaced) in &pool_kinds {
-                    for o in list_or_warn(&client, ar, *namespaced, &ns, &mut warn).await {
-                        pool.push((label.clone(), o));
+                for (_, w) in lists.iter_mut() {
+                    if let Some(w) = w.take() {
+                        warn.get_or_insert(w);
                     }
+                }
+                let mut lists = lists.into_iter();
+                let (roots, _) = lists.next().expect("the root list is always requested");
+
+                let mut pool: Vec<(String, DynamicObject)> =
+                    Vec::with_capacity(lists.len() * roots.len());
+                for ((label, _, _), (items, _)) in pool_kinds.iter().zip(lists) {
+                    pool.extend(items.into_iter().map(|o| (label.clone(), o)));
+                }
+                // A pool kind that *is* the root kind was fetched once, above.
+                for label in &pool_aliases_of_root {
+                    pool.extend(roots.iter().map(|o| (label.clone(), o.clone())));
                 }
 
                 let items = xray_flatten(&root_kind, &roots, &pool);

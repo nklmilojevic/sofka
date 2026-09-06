@@ -553,23 +553,51 @@ pub(super) fn osc52_sequence(text: &str) -> String {
     format!("\x1b]52;c;{encoded}\x07")
 }
 
+/// What a log stream shares with the view that opened it.
+pub(super) struct LogStreamCtx {
+    pub(super) generation: u64,
+    pub(super) flag: Arc<AtomicU64>,
+    /// Held only across a connection attempt: an aggregate view opens many
+    /// streams, and letting every one of them dial at once is a burst of API
+    /// load separate from how many end up staying open. Deliberately released
+    /// while waiting for a container to start, so a pod stuck in `Pending`
+    /// cannot hold a slot the other streams need. `None` for a single-pod
+    /// view, which has nothing to queue behind.
+    pub(super) setup: Option<Arc<tokio::sync::Semaphore>>,
+}
+
 pub(super) async fn forward_log_stream(
     api: Api<Pod>,
     pod: String,
     lp: LogParams,
     prefix: String,
     tx: Sender<Msg>,
-    generation: u64,
-    flag: Arc<AtomicU64>,
+    ctx: LogStreamCtx,
 ) {
     use futures_util::{AsyncBufReadExt, TryStreamExt};
     use tokio::time::MissedTickBehavior;
+
+    let LogStreamCtx {
+        generation,
+        flag,
+        setup,
+    } = ctx;
 
     let stream = loop {
         if flag.load(Ordering::SeqCst) != generation || tx.is_closed() {
             return;
         }
-        match api.log_stream(&pod, &lp).await {
+        let attempt = {
+            let _permit = match &setup {
+                Some(sem) => match sem.acquire().await {
+                    Ok(permit) => Some(permit),
+                    Err(_) => return, // semaphore closed: the view is gone
+                },
+                None => None,
+            };
+            api.log_stream(&pod, &lp).await
+        };
+        match attempt {
             Ok(stream) => break stream,
             Err(kube::Error::Api(e))
                 if lp.follow
@@ -1076,6 +1104,77 @@ pub(super) async fn list_or_warn(
             Vec::new()
         }
     }
+}
+
+/// How many dashboard lists may be in flight at once. The dashboards exist to
+/// describe cluster health, so they fan out enough to stop paying for each
+/// round-trip in series without themselves becoming a burst of API load.
+const DASHBOARD_LIST_CONCURRENCY: usize = 4;
+
+/// Whether two discovered kinds are the same resource.
+pub(super) fn same_api_resource(a: &ApiResource, b: &ApiResource) -> bool {
+    a.group == b.group && a.version == b.version && a.kind == b.kind
+}
+
+/// Split the xray pool into the kinds that duplicate the root kind and the
+/// kinds that need a list of their own.
+///
+/// A kind can be both (a replicaset root is listed with replicasets in its
+/// pool). The duplicates come back as bare labels because their objects are
+/// already in the root list — asking the API server for the same inventory a
+/// second time is the part worth avoiding.
+pub(super) fn split_pool_kinds(
+    pool: Vec<(String, ApiResource, bool)>,
+    root: &ApiResource,
+) -> (Vec<String>, Vec<(String, ApiResource, bool)>) {
+    let mut aliases = Vec::new();
+    let mut rest = Vec::new();
+    for kind in pool {
+        if same_api_resource(&kind.1, root) {
+            aliases.push(kind.0);
+        } else {
+            rest.push(kind);
+        }
+    }
+    (aliases, rest)
+}
+
+/// List every resolved kind with bounded concurrency, in the order given.
+/// Unresolved kinds yield an empty list, exactly as skipping them did.
+pub(super) async fn gather_lists<const N: usize>(
+    client: &Client,
+    kinds: &[Option<(ApiResource, bool)>; N],
+    ns: &str,
+) -> [(Vec<DynamicObject>, Option<String>); N] {
+    let mut out = gather_list_vec(client, kinds, ns).await.into_iter();
+    std::array::from_fn(|_| out.next().expect("one result per kind"))
+}
+
+/// [`gather_lists`] for a run-time-sized request list.
+pub(super) async fn gather_list_vec(
+    client: &Client,
+    kinds: &[Option<(ApiResource, bool)>],
+    ns: &str,
+) -> Vec<(Vec<DynamicObject>, Option<String>)> {
+    let pending: Vec<_> = kinds
+        .iter()
+        .map(|kind| {
+            let (kind, client, ns) = (kind.clone(), client.clone(), ns.to_string());
+            async move {
+                let Some((ar, namespaced)) = kind else {
+                    return (Vec::new(), None);
+                };
+                let mut warn = None;
+                let items = list_or_warn(&client, &ar, namespaced, &ns, &mut warn).await;
+                (items, warn)
+            }
+        })
+        .collect();
+    // `buffered` yields in input order, so this is the order of `kinds`.
+    futures_util::stream::iter(pending)
+        .buffered(DASHBOARD_LIST_CONCURRENCY)
+        .collect()
+        .await
 }
 
 /// Prepend an "evidence incomplete" warning to a findings list when one of

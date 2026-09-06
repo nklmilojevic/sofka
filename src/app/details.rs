@@ -405,7 +405,7 @@ impl App {
                                 // otherwise re-list as fast as the stream is
                                 // polled; pace the next attempt.
                                 tokio::time::sleep(
-                                    backoff.next().unwrap_or(WATCH_BACKOFF_CEILING),
+                                    backoff.next().unwrap_or(crate::k8s::WATCH_BACKOFF_CEILING),
                                 )
                                 .await;
                             }

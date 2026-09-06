@@ -138,6 +138,11 @@ pub struct NotifyConfig {
     /// Notifier subprocess (argv). Empty = none configured (herdr panes
     /// auto-detect). `$MESSAGE` substitutes the notification text.
     pub command: Vec<String>,
+    /// How many objects may be watched for notifications at once. Each `:notify`
+    /// target keeps its own watch open for the whole session, independently of
+    /// the table's, so this bounds what a session can accumulate. `0` removes
+    /// the cap.
+    pub max_watches: usize,
 }
 
 impl Default for NotifyConfig {
@@ -146,6 +151,7 @@ impl Default for NotifyConfig {
             bell: true,
             desktop: "osc777".into(),
             command: Vec::new(),
+            max_watches: 25,
         }
     }
 }
@@ -389,6 +395,11 @@ pub struct LogsConfig {
     /// line is marked so the loss is visible rather than silent. `0` keeps
     /// lines whole however long they are.
     pub line_bytes: usize,
+    /// Maximum concurrent streams an aggregate log view (a label selector, or
+    /// a whole workload) opens. Each is a live connection and a task, so a
+    /// broad selector on a large cluster would otherwise open thousands. The
+    /// view says how much of the match it is covering. `0` removes the cap.
+    pub max_streams: usize,
     /// Optional lookback (`30m`, `4h`, `2d`): stream only logs newer than this.
     /// When set it replaces `tail` (Kubernetes accepts one or the other).
     pub since: Option<String>,
@@ -406,6 +417,7 @@ impl Default for LogsConfig {
             // pathological buffer without touching the ordinary one.
             buffer_bytes: 64 * 1024 * 1024,
             line_bytes: 16 * 1024,
+            max_streams: 50,
             since: None,
             fullscreen: false,
         }

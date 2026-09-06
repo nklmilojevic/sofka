@@ -63,15 +63,26 @@ const LOG_BATCH_MS: u64 = 50;
 /// can be sitting in the channel at once.
 const LOG_BATCH_BYTES: usize = 256 * 1024;
 
+/// How many of an aggregate view's streams may be dialling at once. The cap on
+/// how many stay open is `[logs] max_streams`; this bounds the thundering herd
+/// of opening them.
+const LOG_STREAM_SETUP_CONCURRENCY: usize = 8;
+
+/// Notifications held for the next delivery. They are joined into one message
+/// and ellipsized to 300 characters, so past this the extra text would be
+/// built only to be thrown away; the overflow is reported as a count instead.
+const MAX_PENDING_NOTIFY: usize = 32;
+
+/// Notifier subprocesses allowed to be running at once. A rollout across many
+/// notified objects must not be able to fork a process per frame faster than
+/// the notifier can exit.
+const MAX_NOTIFIER_PROCS: usize = 4;
+
 /// The events document coalesces the same way: a rollout can produce dozens of
 /// events in a few milliseconds, and republishing the whole document for each
 /// one only makes the view re-layout. Short enough that a single live event
 /// still lands within one frame of arriving.
 const EVENTS_PUBLISH_MS: u64 = 100;
-
-/// Fallback delay if a watcher backoff ever runs out of steps. `DefaultBackoff`
-/// is unbounded in attempts, so this is belt and braces rather than a real path.
-const WATCH_BACKOFF_CEILING: Duration = Duration::from_secs(30);
 
 /// Initial status-bar hint. Unlike transient action results, this stays visible
 /// until another interaction replaces it.
@@ -1863,6 +1874,12 @@ pub struct App {
     /// joined, so a burst arriving in one batch is one delivery — sinks
     /// rate-limit rapid-fire notifications.
     pub(super) pending_notify: Vec<String>,
+    /// Notifications the queue could not hold, reported as a count with the
+    /// next delivery rather than silently dropped.
+    pub(super) dropped_notify: usize,
+    /// Notifier subprocesses still running, so a slow notifier cannot pile up
+    /// behind a burst.
+    pub(super) notifier_procs: Vec<tokio::process::Child>,
     /// Previous object revisions for the session diff (`:diff` fallback).
     pub(super) prev_revisions: PrevRevisions,
     /// The `(plural, row_key)` the timeline view is showing, and its cursor.
@@ -2083,6 +2100,8 @@ impl App {
             table_hit: RefCell::new(None),
             notify_tasks: HashMap::new(),
             pending_notify: Vec::new(),
+            dropped_notify: 0,
+            notifier_procs: Vec::new(),
             prev_revisions: PrevRevisions::default(),
             timeline_target: None,
             timeline_state: ListState::default(),

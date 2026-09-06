@@ -12170,3 +12170,101 @@ async fn clearing_the_log_buffer_resets_the_byte_count() {
 fn bs_lines(n: usize) -> Vec<String> {
     (0..n).map(|i| format!("line {i}")).collect()
 }
+
+/// A pool kind that is also the root kind is reused from the root list rather
+/// than fetched a second time.
+#[tokio::test]
+async fn an_xray_pool_kind_matching_the_root_is_not_listed_twice() {
+    let (app, _rx) = test_app();
+    let jobs = app.cluster.resolve("jobs").expect("jobs");
+    let pods = app.cluster.resolve("pods").expect("pods");
+    let pool = vec![
+        ("job".to_string(), jobs.ar.clone(), jobs.namespaced),
+        ("pod".to_string(), pods.ar.clone(), pods.namespaced),
+    ];
+
+    // Root is a job: the pool's jobs are the same inventory.
+    let (aliases, rest) = split_pool_kinds(pool.clone(), &jobs.ar);
+    assert_eq!(aliases, vec!["job".to_string()]);
+    assert_eq!(rest.len(), 1);
+    assert_eq!(rest[0].0, "pod");
+
+    // Root is a deployment: nothing overlaps, so both are listed.
+    let deploys = app.cluster.resolve("deployments").expect("deployments");
+    let (aliases, rest) = split_pool_kinds(pool, &deploys.ar);
+    assert!(aliases.is_empty());
+    assert_eq!(rest.len(), 2);
+}
+
+/// Unresolved kinds still occupy their slot, so the caller's fixed ordering
+/// holds however many of them the cluster is missing.
+#[tokio::test]
+async fn gathered_lists_keep_their_slots_when_a_kind_is_missing() {
+    let (app, _rx) = test_app();
+    let kinds: [Option<(ApiResource, bool)>; 3] = [None, None, None];
+    let out = gather_lists(&app.cluster.client, &kinds, "").await;
+    assert_eq!(out.len(), 3);
+    assert!(
+        out.iter()
+            .all(|(items, warn)| items.is_empty() && warn.is_none())
+    );
+}
+
+/// The notify budget bounds how many per-object watches a session can hold,
+/// and toggling one off is always allowed even at the limit.
+#[tokio::test]
+async fn the_notify_budget_bounds_the_watches_a_session_holds() {
+    let (mut app, _rx) = test_app();
+    app.notify_cfg.max_watches = 2;
+    app.switch_kind("pods");
+    for i in 0..3 {
+        apply(
+            &mut app,
+            json!({"apiVersion": "v1", "kind": "Pod",
+                   "metadata": {"name": format!("web-{i}"), "namespace": "default"}}),
+        );
+    }
+
+    for i in 0..2 {
+        app.table_state.select(Some(i));
+        assert!(app.run_palette_command("notify"));
+    }
+    assert_eq!(app.notify_tasks.len(), 2);
+
+    // The third is refused, with a message that says how to proceed.
+    app.table_state.select(Some(2));
+    assert!(app.run_palette_command("notify"));
+    assert_eq!(app.notify_tasks.len(), 2);
+    assert!(app.flash.contains("notify budget"), "{}", app.flash);
+    assert!(app.flash_err);
+
+    // Turning one off frees a slot.
+    app.table_state.select(Some(0));
+    assert!(app.run_palette_command("notify"));
+    assert_eq!(app.notify_tasks.len(), 1);
+    app.table_state.select(Some(2));
+    assert!(app.run_palette_command("notify"));
+    assert_eq!(app.notify_tasks.len(), 2);
+}
+
+/// A burst larger than the queue reports what it dropped rather than losing
+/// it silently — and never builds the text it would only ellipsize away.
+#[tokio::test]
+async fn an_overlong_notification_burst_reports_what_it_dropped() {
+    let (mut app, _rx) = test_app();
+    for i in 0..500 {
+        app.handle_msg(Msg::Notify(format!("pod/pod-{i}: restarts 0 → 1")));
+    }
+    assert_eq!(
+        app.pending_notify.len(),
+        MAX_PENDING_NOTIFY,
+        "the queue is bounded, not the joined string"
+    );
+
+    let text = app.take_notification().unwrap();
+    assert!(text.chars().count() <= 300, "{text}");
+    assert_eq!(app.dropped_notify, 0, "the count is consumed with the text");
+    // A later burst that fits reports no overflow.
+    app.handle_msg(Msg::Notify("pod/a: deleted".into()));
+    assert_eq!(app.take_notification().as_deref(), Some("pod/a: deleted"));
+}
