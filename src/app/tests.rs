@@ -7076,12 +7076,8 @@ fn xray_emits_cronjob_job_pod_container_chain() {
         "spec": {"containers": [{"name": "worker"}]},
         "status": {"phase": "Running"}
     }));
-    let mut children = std::collections::HashMap::new();
-    children.insert("cron-uid".to_string(), vec![("job".to_string(), job)]);
-    children.insert("job-uid".to_string(), vec![("pod".to_string(), pod)]);
-
-    let mut items = Vec::new();
-    emit_xray("cronjob", &cron, 0, &children, &mut items);
+    let pool = vec![("job".to_string(), job), ("pod".to_string(), pod)];
+    let items = xray_flatten("cronjob", std::slice::from_ref(&cron), &pool);
 
     assert_eq!(items.len(), 4);
     assert_eq!(items[0].kind, "cronjob");

@@ -185,7 +185,7 @@ impl App {
     }
 
     /// Render an object as YAML lines, stamping its type if missing.
-    pub(super) fn object_yaml(&self, obj: &DynamicObject) -> Vec<String> {
+    pub fn object_yaml(&self, obj: &DynamicObject) -> Vec<String> {
         let mut obj = obj.clone();
         if let Some(kind) = &self.kind
             && obj.types.is_none()

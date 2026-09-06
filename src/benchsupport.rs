@@ -403,3 +403,205 @@ fn finish_collected(candidates: Vec<(&Service, i32)>) -> Option<(String, String,
         *port,
     ))
 }
+
+/// A `deployment -> replicaset -> pod` ownership tree, the shape the xray view
+/// indexes: `roots` deployments, one replicaset each, `pods_per_root` pods
+/// under that replicaset. Returned as the two lists `spawn_xray` gathers.
+pub fn xray_tree(
+    roots: usize,
+    pods_per_root: usize,
+) -> (Vec<DynamicObject>, Vec<(String, DynamicObject)>) {
+    let mut deployments = Vec::with_capacity(roots);
+    let mut pool = Vec::with_capacity(roots * (pods_per_root + 1));
+    for d in 0..roots {
+        let duid = format!("dep-{d:012}");
+        let ruid = format!("rs-{d:012}");
+        deployments.push(
+            serde_json::from_value(json!({
+                "apiVersion": "apps/v1",
+                "kind": "Deployment",
+                "metadata": {
+                    "name": format!("svc-{d:04}"),
+                    "namespace": format!("ns-{}", d % 24),
+                    "uid": duid,
+                    "creationTimestamp": "2026-08-30T08:00:00Z",
+                },
+                "spec": { "replicas": pods_per_root },
+                "status": { "readyReplicas": pods_per_root },
+            }))
+            .expect("bench deployment fixture is valid"),
+        );
+        pool.push((
+            "replicaset".to_string(),
+            serde_json::from_value(json!({
+                "apiVersion": "apps/v1",
+                "kind": "ReplicaSet",
+                "metadata": {
+                    "name": format!("svc-{d:04}-7d9f8b6c5d"),
+                    "namespace": format!("ns-{}", d % 24),
+                    "uid": ruid,
+                    "creationTimestamp": "2026-08-30T08:00:00Z",
+                    "ownerReferences": [{
+                        "apiVersion": "apps/v1",
+                        "kind": "Deployment",
+                        "name": format!("svc-{d:04}"),
+                        "uid": duid,
+                    }],
+                },
+                "spec": { "replicas": pods_per_root },
+                "status": { "readyReplicas": pods_per_root },
+            }))
+            .expect("bench replicaset fixture is valid"),
+        ));
+        for p in 0..pods_per_root {
+            let mut pod = pod(d * pods_per_root + p);
+            pod.metadata.namespace = Some(format!("ns-{}", d % 24));
+            pod.metadata.owner_references = Some(vec![
+                serde_json::from_value(json!({
+                    "apiVersion": "apps/v1",
+                    "kind": "ReplicaSet",
+                    "name": format!("svc-{d:04}-7d9f8b6c5d"),
+                    "uid": ruid,
+                }))
+                .expect("bench owner reference is valid"),
+            ]);
+            pool.push(("pod".to_string(), pod));
+        }
+    }
+    (deployments, pool)
+}
+
+/// The production owner index + tree flatten for one xray refresh.
+pub fn xray_flatten(
+    root_kind: &str,
+    roots: &[DynamicObject],
+    pool: &[(String, DynamicObject)],
+) -> Vec<crate::store::XrayItem> {
+    crate::app::xray_flatten(root_kind, roots, pool)
+}
+
+/// `n` core/v1 Events for one object, spread over distinct timestamps and
+/// reasons so sorting and formatting see realistic input.
+pub fn events(n: usize) -> Vec<DynamicObject> {
+    (0..n)
+        .map(|i| {
+            let reason = ["Scheduled", "Pulled", "Created", "Started", "BackOff"][i % 5];
+            let typ = if i.is_multiple_of(9) {
+                "Warning"
+            } else {
+                "Normal"
+            };
+            serde_json::from_value(json!({
+                "apiVersion": "v1",
+                "kind": "Event",
+                "metadata": {
+                    "name": format!("workload.{i:08x}"),
+                    "namespace": "ns-0",
+                    "uid": format!("ev-{i:012}"),
+                    "creationTimestamp": "2026-08-30T08:00:00Z",
+                },
+                "type": typ,
+                "reason": reason,
+                "count": (i % 17) + 1,
+                "lastTimestamp": format!("2026-08-30T{:02}:{:02}:{:02}Z", i % 24, i % 60, i % 60),
+                "message": format!(
+                    "Successfully assigned ns-0/workload-{i:05} to node-{:03}; \
+                     reconcile completed in {}ms",
+                    i % 79,
+                    i % 900
+                ),
+                "involvedObject": {
+                    "kind": "Pod",
+                    "name": format!("workload-{i:05}"),
+                    "namespace": "ns-0",
+                    "uid": "00000000-0000-0000-0000-000000000001",
+                },
+            }))
+            .expect("bench event fixture is valid")
+        })
+        .collect()
+}
+
+/// The production event-document render: format every event and sort the rows.
+pub fn format_event_lines(events: &[DynamicObject]) -> Vec<String> {
+    crate::app::format_event_lines(events.iter(), false)
+}
+
+/// A wide object: `entries` status conditions plus a label/annotation block the
+/// size a real CRD carries. Stands in for the big documents the YAML/describe
+/// views build on a keypress.
+pub fn fat_object(entries: usize) -> DynamicObject {
+    let conditions: Vec<_> = (0..entries)
+        .map(|i| {
+            json!({
+                "type": format!("Condition{i}"),
+                "status": if i.is_multiple_of(3) { "False" } else { "True" },
+                "lastTransitionTime": "2026-08-30T08:00:00Z",
+                "reason": format!("Reason{i}"),
+                "message": format!(
+                    "controller {i} reconciled the resource and reported a \
+                     detailed status message about revision {}",
+                    1000 + i
+                ),
+            })
+        })
+        .collect();
+    let labels: serde_json::Map<String, serde_json::Value> = (0..entries / 4)
+        .map(|i| {
+            (
+                format!("example.com/label-{i}"),
+                json!(format!("value-{i}")),
+            )
+        })
+        .collect();
+    serde_json::from_value(json!({
+        "apiVersion": "example.com/v1",
+        "kind": "Widget",
+        "metadata": {
+            "name": "fat-widget",
+            "namespace": "ns-0",
+            "uid": "00000000-0000-0000-0000-000000000042",
+            "resourceVersion": "987654",
+            "creationTimestamp": "2026-08-30T08:00:00Z",
+            "labels": labels,
+            "annotations": { "example.com/notes": "x".repeat(4096) },
+        },
+        "spec": { "replicas": 3, "template": { "conditions": conditions.clone() } },
+        "status": { "conditions": conditions },
+    }))
+    .expect("bench fat object fixture is valid")
+}
+
+/// `n` log lines of `bytes` each — the pathological case a byte budget exists
+/// for: one structured record dumped whole onto a single line.
+pub fn log_lines_long(n: usize, bytes: usize) -> Vec<String> {
+    (0..n)
+        .map(|i| {
+            let mut s = format!("{i:06} ");
+            s.push_str(&"payload=".repeat(bytes / 8));
+            s.truncate(bytes.max(s.find(' ').unwrap_or(0) + 1));
+            s
+        })
+        .collect()
+}
+
+/// Run `lines` through the ingest batching both log paths share, flushing a
+/// full batch the way the stream loop does. Returns the number of batches.
+pub fn ingest_lines(prefix: &str, lines: impl IntoIterator<Item = String>) -> usize {
+    crate::app::ingest_lines(prefix, lines)
+}
+
+/// An app whose follow buffer is already at its retention limit, so the next
+/// push has to trim.
+pub fn logs_app_at_capacity(buffer: usize) -> App {
+    let (mut app, _rx) = app();
+    app.logs_cfg.buffer = buffer;
+    app.logs.follow = true;
+    app.logs.view.lines.extend(log_lines(buffer));
+    app
+}
+
+/// Lines currently retained in the follow buffer.
+pub fn log_line_count(app: &App) -> usize {
+    app.logs.view.lines.len()
+}

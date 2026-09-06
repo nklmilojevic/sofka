@@ -3,7 +3,7 @@ use super::*;
 impl App {
     // ----- selection -----------------------------------------------------
 
-    pub(super) fn push_log_lines<I>(&mut self, lines: I)
+    pub fn push_log_lines<I>(&mut self, lines: I)
     where
         I: IntoIterator<Item = String>,
     {
@@ -692,7 +692,7 @@ async fn provider_log_task(
     // Same batching cadence as the kubelet streams: coalesce bursts, flush
     // quickly when quiet.
     use tokio::time::MissedTickBehavior;
-    let mut batch: Vec<String> = Vec::with_capacity(LOG_BATCH_LINES);
+    let mut batch = LogBatch::new();
     let mut flush = tokio::time::interval(Duration::from_millis(LOG_BATCH_MS));
     flush.set_missed_tick_behavior(MissedTickBehavior::Skip);
     loop {
@@ -707,25 +707,23 @@ async fn provider_log_task(
                     if e.nanos.is_none_or(|n| n > backfill_max) {
                         batch.extend(e.lines(prefix, timestamps));
                     }
-                    if batch.len() >= LOG_BATCH_LINES
-                        && !send_log_batch(&tx, generation, &mut batch).await
-                    {
+                    if batch.is_full() && !batch.flush(&tx, generation).await {
                         return;
                     }
                 }
                 Ok(None) => {
-                    batch.push("[provider] log stream ended".to_string());
-                    let _ = send_log_batch(&tx, generation, &mut batch).await;
+                    batch.push_raw("[provider] log stream ended".to_string());
+                    let _ = batch.flush(&tx, generation).await;
                     return;
                 }
                 Err(e) => {
-                    batch.push(format!("[error] {e}"));
-                    let _ = send_log_batch(&tx, generation, &mut batch).await;
+                    batch.push_raw(format!("[error] {e}"));
+                    let _ = batch.flush(&tx, generation).await;
                     return;
                 }
             },
             _ = flush.tick(), if !batch.is_empty() => {
-                if !send_log_batch(&tx, generation, &mut batch).await {
+                if !batch.flush(&tx, generation).await {
                     return;
                 }
             }

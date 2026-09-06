@@ -595,7 +595,7 @@ pub(super) async fn forward_log_stream(
     };
 
     let mut lines = stream.lines();
-    let mut batch = Vec::with_capacity(LOG_BATCH_LINES);
+    let mut batch = LogBatch::new();
     let mut flush = tokio::time::interval(Duration::from_millis(LOG_BATCH_MS));
     flush.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
@@ -608,22 +608,20 @@ pub(super) async fn forward_log_stream(
             next = lines.try_next() => {
                 match next {
                     Ok(Some(line)) => {
-                        batch.push(format!("{prefix}{line}"));
-                        if batch.len() >= LOG_BATCH_LINES
-                            && !send_log_batch(&tx, generation, &mut batch).await
-                        {
+                        batch.push(&prefix, line);
+                        if batch.is_full() && !batch.flush(&tx, generation).await {
                             break;
                         }
                     }
                     Ok(None) => break,
                     Err(e) => {
-                        batch.push(format!("[error] {e}"));
+                        batch.push_raw(format!("[error] {e}"));
                         break;
                     }
                 }
             }
             _ = flush.tick(), if !batch.is_empty() => {
-                if !send_log_batch(&tx, generation, &mut batch).await {
+                if !batch.flush(&tx, generation).await {
                     break;
                 }
             }
@@ -631,7 +629,7 @@ pub(super) async fn forward_log_stream(
     }
 
     if flag.load(Ordering::SeqCst) == generation {
-        let _ = send_log_batch(&tx, generation, &mut batch).await;
+        let _ = batch.flush(&tx, generation).await;
     }
 }
 
@@ -645,6 +643,76 @@ pub(super) async fn send_log_batch(
     }
     let lines = std::mem::take(batch);
     tx.send(Msg::LogLines { generation, lines }).await.is_ok()
+}
+
+/// Drive `lines` through the ingest batching, flushing whenever a batch fills
+/// — the allocation shape of the stream loop, without the stream. Returns the
+/// batch count so the work cannot be optimized away.
+#[cfg(feature = "bench")]
+pub(crate) fn ingest_lines(prefix: &str, lines: impl IntoIterator<Item = String>) -> usize {
+    let mut batch = LogBatch::new();
+    let mut batches = 0usize;
+    for line in lines {
+        batch.push(prefix, line);
+        if batch.is_full() {
+            std::hint::black_box(batch.take());
+            batches += 1;
+        }
+    }
+    std::hint::black_box(batch.take());
+    batches + 1
+}
+
+/// The pending-line buffer both log ingest paths (kubelet streams and provider
+/// tails) fill between flushes. Owning the mechanics in one place keeps the
+/// prefixing and the hand-off consistent across the two.
+pub(super) struct LogBatch {
+    lines: Vec<String>,
+}
+
+impl LogBatch {
+    pub(super) fn new() -> Self {
+        Self {
+            lines: Vec::with_capacity(LOG_BATCH_LINES),
+        }
+    }
+
+    /// Add one stream line under `prefix` (empty for a single-pod stream).
+    pub(super) fn push(&mut self, prefix: &str, line: String) {
+        self.lines.push(format!("{prefix}{line}"));
+    }
+
+    /// Add one line that is already complete (an error notice, a provider
+    /// record that carried its own prefix).
+    pub(super) fn push_raw(&mut self, line: String) {
+        self.lines.push(line);
+    }
+
+    pub(super) fn extend<I: IntoIterator<Item = String>>(&mut self, lines: I) {
+        self.lines.extend(lines);
+    }
+
+    pub(super) fn is_empty(&self) -> bool {
+        self.lines.is_empty()
+    }
+
+    pub(super) fn is_full(&self) -> bool {
+        self.lines.len() >= LOG_BATCH_LINES
+    }
+
+    /// Hand the pending lines off, leaving an empty batch behind.
+    pub(super) fn take(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.lines)
+    }
+
+    /// Send the pending lines. `false` once the UI is gone.
+    pub(super) async fn flush(&mut self, tx: &Sender<Msg>, generation: u64) -> bool {
+        if self.lines.is_empty() {
+            return true;
+        }
+        let lines = self.take();
+        tx.send(Msg::LogLines { generation, lines }).await.is_ok()
+    }
 }
 
 pub(super) async fn send_event_snapshot(
@@ -663,7 +731,7 @@ pub(super) async fn send_event_snapshot(
     .is_ok()
 }
 
-pub(super) fn format_event_lines<'a, I>(events: I, events_v1: bool) -> Vec<String>
+pub(crate) fn format_event_lines<'a, I>(events: I, events_v1: bool) -> Vec<String>
 where
     I: IntoIterator<Item = &'a DynamicObject>,
 {
@@ -773,6 +841,33 @@ pub(super) fn ivalue(v: &Value, path: &[&str]) -> Option<i64> {
 }
 
 /// Recursively flatten an object and its owned children into xray rows.
+/// Build the owner index over `pool` and flatten the whole tree — the CPU half
+/// of one xray refresh, split out from the polling task so it can be tested and
+/// benchmarked without a cluster.
+pub(crate) fn xray_flatten(
+    root_kind: &str,
+    roots: &[DynamicObject],
+    pool: &[(String, DynamicObject)],
+) -> Vec<XrayItem> {
+    let mut children: std::collections::HashMap<String, Vec<(String, DynamicObject)>> =
+        std::collections::HashMap::new();
+    for (label, o) in pool {
+        if let Some(owners) = &o.metadata.owner_references {
+            for owner in owners {
+                children
+                    .entry(owner.uid.clone())
+                    .or_default()
+                    .push((label.clone(), o.clone()));
+            }
+        }
+    }
+    let mut items = Vec::new();
+    for root in roots {
+        emit_xray(root_kind, root, 0, &children, &mut items);
+    }
+    items
+}
+
 pub(super) fn emit_xray(
     kind: &str,
     obj: &DynamicObject,

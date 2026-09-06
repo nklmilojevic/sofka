@@ -2142,6 +2142,9 @@ mod workspaces;
 
 use helpers::*;
 pub use notify::notification_sequence;
+// Reachable from `benchsupport` so `benches/` can drive the real code paths.
+#[cfg(feature = "bench")]
+pub(crate) use helpers::{format_event_lines, ingest_lines, xray_flatten};
 pub use pickers::DEFAULT_SORT_LABEL;
 
 #[cfg(test)]

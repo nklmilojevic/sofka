@@ -607,8 +607,106 @@ fn dependencies(c: &mut Criterion) {
     g.finish();
 }
 
+/// 3-4/039 — one xray refresh's CPU half: index every child by owner uid, then
+/// walk the roots into the flat row list. The pool is dominated by pods, and
+/// the old index cloned each one once per owner reference.
+fn xray_index(c: &mut Criterion) {
+    let mut g = c.benchmark_group("xray_index");
+    for (roots, per) in [(20usize, 10usize), (100, 20)] {
+        let (deployments, pool) = bs::xray_tree(roots, per);
+        let n = roots * per;
+        g.bench_with_input(BenchmarkId::new("flatten", n), &n, |b, _| {
+            b.iter(|| black_box(bs::xray_flatten("deployment", &deployments, &pool).len()));
+        });
+    }
+    g.finish();
+}
+
+/// 3-4/036 — the events document. `render` is one full format+sort of the
+/// accumulated map; `initial_burst` is what an N-event initial list costs when
+/// every arriving event republishes the whole document, which is the shape the
+/// watcher had: a sequence of growing full rebuilds.
+fn events_doc(c: &mut Criterion) {
+    let mut g = c.benchmark_group("events_doc");
+    for n in [200usize, 1_000] {
+        let events = bs::events(n);
+        g.bench_with_input(BenchmarkId::new("render", n), &n, |b, _| {
+            b.iter(|| black_box(bs::format_event_lines(&events).len()));
+        });
+    }
+    // Quadratic by construction, so it stays small: 200 events already means
+    // 200 rebuilds averaging 100 events each.
+    let n = 200usize;
+    let events = bs::events(n);
+    g.bench_with_input(BenchmarkId::new("initial_burst", n), &n, |b, _| {
+        b.iter(|| {
+            let mut total = 0usize;
+            for i in 1..=events.len() {
+                total += bs::format_event_lines(&events[..i]).len();
+            }
+            black_box(total)
+        });
+    });
+    g.finish();
+}
+
+/// 3-4/037 — the YAML document a keypress builds on the UI thread. The object
+/// is cloned before serializing so `TypeMeta` can be stamped in.
+fn object_yaml(c: &mut Criterion) {
+    let mut g = c.benchmark_group("object_yaml");
+    let (app, _rx) = bs::pods_app(1);
+    for (label, obj) in [("pod", bs::pod(1)), ("fat", bs::fat_object(120))] {
+        g.bench_function(label, |b| {
+            b.iter(|| black_box(app.object_yaml(black_box(&obj)).len()));
+        });
+    }
+    g.finish();
+}
+
+/// 3-4/033 — per-line cost of the kubelet log ingest loop: build the batch
+/// entry, then hand a full batch to the channel. `plain` is the unprefixed
+/// single-pod stream; `prefixed` is the aggregate view's `[pod] ` tag.
+fn log_ingest(c: &mut Criterion) {
+    let mut g = c.benchmark_group("log_ingest");
+    let lines = bs::log_lines(4_096);
+    for (label, prefix) in [("plain", ""), ("prefixed", "[workload-00042:app] ")] {
+        g.bench_function(label, |b| {
+            b.iter(|| black_box(bs::ingest_lines(black_box(prefix), lines.iter().cloned())));
+        });
+    }
+    g.finish();
+}
+
+/// 3-4/031 — appending a batch to the follow buffer, which is already at its
+/// retention limit, so every push also trims. `long` feeds pathological
+/// single-line payloads (a structured log record dumped whole).
+fn log_retain(c: &mut Criterion) {
+    let mut g = c.benchmark_group("log_retain");
+    for (label, batch) in [
+        ("normal", bs::log_lines(64)),
+        ("long", bs::log_lines_long(64, 64 * 1024)),
+    ] {
+        g.bench_function(label, |b| {
+            b.iter_batched_ref(
+                || bs::logs_app_at_capacity(2_000),
+                |app| {
+                    app.push_log_lines(batch.iter().cloned());
+                    black_box(bs::log_line_count(app))
+                },
+                criterion::BatchSize::LargeInput,
+            );
+        });
+    }
+    g.finish();
+}
+
 criterion_group!(
     benches,
+    xray_index,
+    events_doc,
+    object_yaml,
+    log_ingest,
+    log_retain,
     rows_cache,
     filter,
     filter_cmp,

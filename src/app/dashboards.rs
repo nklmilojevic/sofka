@@ -172,23 +172,7 @@ impl App {
                     }
                 }
 
-                // Index children by owner uid.
-                let mut children: HashMap<String, Vec<(String, DynamicObject)>> = HashMap::new();
-                for (label, o) in &pool {
-                    if let Some(owners) = &o.metadata.owner_references {
-                        for owner in owners {
-                            children
-                                .entry(owner.uid.clone())
-                                .or_default()
-                                .push((label.clone(), o.clone()));
-                        }
-                    }
-                }
-
-                let mut items = Vec::new();
-                for root in &roots {
-                    emit_xray(&root_kind, root, 0, &children, &mut items);
-                }
+                let items = xray_flatten(&root_kind, &roots, &pool);
 
                 if tx
                     .send(Msg::XrayData {
