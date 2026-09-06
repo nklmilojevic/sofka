@@ -346,8 +346,6 @@ impl App {
             let mut dirty = false;
             let mut publish = tokio::time::interval(Duration::from_millis(EVENTS_PUBLISH_MS));
             publish.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-            // A watcher that fails before its first list must not leave the
-            // view on "loading events…", so the error path publishes directly.
             let mut backoff = watcher::DefaultBackoff::default();
 
             loop {
@@ -389,6 +387,10 @@ impl App {
                             // re-lists on its own; don't scribble an error line
                             // over the events document.
                             Err(e) if crate::k8s::watch_error_is_benign(&e) => continue,
+                            // A watcher that fails before its first list would
+                            // otherwise leave the view on "loading events…"
+                            // forever, so this publishes directly rather than
+                            // waiting for a tick that needs `synced`.
                             Err(e) => {
                                 if tx
                                     .send(Msg::Events {

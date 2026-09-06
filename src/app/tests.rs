@@ -1,3 +1,4 @@
+use super::logs::{log_stream_targets, partial_coverage_notice};
 use super::*;
 use crate::store::row_key;
 use serde_json::json;
@@ -12267,4 +12268,97 @@ async fn an_overlong_notification_burst_reports_what_it_dropped() {
     // A later burst that fits reports no overflow.
     app.handle_msg(Msg::Notify("pod/a: deleted".into()));
     assert_eq!(app.take_notification().as_deref(), Some("pod/a: deleted"));
+}
+
+/// The document built one event at a time is exactly the one a single render
+/// of the whole set produces — order, header and all.
+#[test]
+fn an_incrementally_built_events_document_matches_a_full_render() {
+    let event = |name: &str, reason: &str, seen: &str, count: i64| {
+        obj(json!({
+            "apiVersion": "v1", "kind": "Event",
+            "metadata": {"name": name, "namespace": "default"},
+            "type": if reason == "BackOff" { "Warning" } else { "Normal" },
+            "reason": reason,
+            "message": format!("{reason} for {name}"),
+            "count": count,
+            "lastTimestamp": seen,
+        }))
+    };
+    let events = [
+        event("web.1", "Scheduled", "2026-07-04T12:00:00Z", 1),
+        event("web.2", "Pulled", "2026-07-04T12:34:56Z", 2),
+        event("web.3", "BackOff", "2026-07-04T11:00:00Z", 9),
+    ];
+
+    let mut doc = EventDoc::new(false);
+    for e in &events {
+        doc.apply(e);
+    }
+    assert_eq!(doc.render(), format_event_lines(events.iter(), false));
+
+    // Newest first, regardless of arrival order.
+    let rows = doc.render();
+    assert!(rows[1].contains("Pulled"), "{:?}", rows[1]);
+    assert!(rows[3].contains("BackOff"), "{:?}", rows[3]);
+
+    // An update replaces its row rather than adding one.
+    doc.apply(&event("web.2", "Pulled", "2026-07-04T12:34:56Z", 7));
+    assert_eq!(doc.render().len(), 4);
+    assert!(doc.render()[1].contains('7'));
+
+    // A delete removes it, and an empty document says so.
+    for e in &events {
+        doc.remove(e);
+    }
+    let empty = doc.render();
+    assert_eq!(empty.len(), 2);
+    assert_eq!(empty[1], "(no events)");
+}
+
+/// An aggregate log view covers containers in a stable order and stops at the
+/// configured budget, saying what it left out.
+#[test]
+fn aggregate_log_targets_are_ordered_and_capped() {
+    let pod = |ns: &str, name: &str, containers: &[&str]| -> k8s_openapi::api::core::v1::Pod {
+        serde_json::from_value(json!({
+            "apiVersion": "v1", "kind": "Pod",
+            "metadata": {"name": name, "namespace": ns},
+            "spec": {"containers": containers.iter().map(|c| json!({"name": c})).collect::<Vec<_>>()},
+        }))
+        .unwrap()
+    };
+    // Deliberately not in listing order, and with a multi-container pod.
+    let pods = vec![
+        pod("b", "web", &["app"]),
+        pod("a", "api", &["sidecar", "app"]),
+        pod("a", "worker", &["app"]),
+    ];
+
+    let (all, total) = log_stream_targets(pods.clone(), 0);
+    assert_eq!(total, 4, "one target per container");
+    let order: Vec<_> = all
+        .iter()
+        .map(|t| format!("{}/{}:{}", t.ns, t.pod, t.container))
+        .collect();
+    assert_eq!(
+        order,
+        ["a/api:app", "a/api:sidecar", "a/worker:app", "b/web:app"]
+    );
+    // Only the multi-container pod's targets get a container-qualified prefix.
+    assert!(all[0].multi && all[1].multi);
+    assert!(!all[2].multi && !all[3].multi);
+    assert!(partial_coverage_notice(&all, total, 0).is_none());
+
+    // Capped: the same first N, every time, and a notice naming the shortfall.
+    let (capped, total) = log_stream_targets(pods, 2);
+    assert_eq!(total, 4);
+    assert_eq!(capped, all[..2]);
+    let notice = partial_coverage_notice(&capped, total, 2).expect("partial coverage is reported");
+    assert!(
+        notice.starts_with("[partial] streaming 2 of 4 containers"),
+        "{notice}"
+    );
+    assert!(notice.contains("(1 pods)"), "{notice}");
+    assert!(notice.contains("max_streams"), "{notice}");
 }

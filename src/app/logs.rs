@@ -564,45 +564,12 @@ impl App {
                     })
                     .await;
             }
-            // Enumerate the whole match first: the fan-out has to be capped
-            // against a known total, and the order has to be stable so that
-            // "the first N containers" means the same set on every restart
-            // rather than whatever the API happened to return first.
-            let mut targets: Vec<(String, String, String, bool)> = Vec::new();
-            for p in pods {
-                let pod_ns = p.metadata.namespace.clone().unwrap_or_default();
-                let pod_name = p.metadata.name.clone().unwrap_or_default();
-                let containers: Vec<String> = p
-                    .spec
-                    .as_ref()
-                    .map(|s| s.containers.iter().map(|c| c.name.clone()).collect())
-                    .unwrap_or_default();
-                let multi = containers.len() > 1;
-                for c in containers {
-                    targets.push((pod_ns.clone(), pod_name.clone(), c, multi));
-                }
-            }
-            targets.sort_by(|a, b| (&a.0, &a.1, &a.2).cmp(&(&b.0, &b.1, &b.2)));
-
-            // Every stream is a live connection and a task of its own, so a
-            // broad selector on a large cluster would open thousands. Cover as
-            // much as the budget allows and say what is not covered — silently
-            // showing part of a match would be worse than showing less.
-            let total = targets.len();
-            if max_streams > 0 && total > max_streams {
-                targets.truncate(max_streams);
-                let pods_covered = targets
-                    .iter()
-                    .map(|(ns, name, _, _)| (ns, name))
-                    .collect::<std::collections::BTreeSet<_>>()
-                    .len();
+            let (targets, total) = log_stream_targets(pods.items, max_streams);
+            if let Some(notice) = partial_coverage_notice(&targets, total, max_streams) {
                 let _ = tx
                     .send(Msg::LogLines {
                         generation: genr,
-                        lines: vec![format!(
-                            "[partial] streaming {max_streams} of {total} containers \
-                             ({pods_covered} pods) — raise [logs] max_streams to widen"
-                        )],
+                        lines: vec![notice],
                     })
                     .await;
             }
@@ -611,7 +578,13 @@ impl App {
             // separate from how many stay open.
             let setup = Arc::new(tokio::sync::Semaphore::new(LOG_STREAM_SETUP_CONCURRENCY));
             let mut streams = tokio::task::JoinSet::new();
-            for (pod_ns, pod_name, c, multi) in targets {
+            for LogTarget {
+                ns: pod_ns,
+                pod: pod_name,
+                container: c,
+                multi,
+            } in targets
+            {
                 let prefix = if multi {
                     format!("[{pod_name}:{c}] ")
                 } else {
@@ -830,4 +803,74 @@ fn truncate_log_line(mut line: String, cap: usize) -> String {
     line.truncate(end);
     line.push_str(&format!("…[{dropped} bytes truncated]"));
     line
+}
+
+/// One container an aggregate log view would stream.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct LogTarget {
+    pub(super) ns: String,
+    pub(super) pod: String,
+    pub(super) container: String,
+    /// Whether its pod has more than one container, which decides the prefix.
+    pub(super) multi: bool,
+}
+
+/// Every container the match would stream, capped to `max_streams` (`0` = no
+/// cap), with the total the match actually had.
+///
+/// The whole match is enumerated before the cap is applied: the fan-out has to
+/// be measured against a known total, and the order has to be stable so that
+/// "the first N containers" means the same set on every restart rather than
+/// whatever the API server happened to return first.
+pub(super) fn log_stream_targets(pods: Vec<Pod>, max_streams: usize) -> (Vec<LogTarget>, usize) {
+    let mut targets: Vec<LogTarget> = Vec::new();
+    for p in pods {
+        let ns = p.metadata.namespace.clone().unwrap_or_default();
+        let pod = p.metadata.name.clone().unwrap_or_default();
+        let containers: Vec<String> = p
+            .spec
+            .as_ref()
+            .map(|s| s.containers.iter().map(|c| c.name.clone()).collect())
+            .unwrap_or_default();
+        let multi = containers.len() > 1;
+        for container in containers {
+            targets.push(LogTarget {
+                ns: ns.clone(),
+                pod: pod.clone(),
+                container,
+                multi,
+            });
+        }
+    }
+    // Unstable: namespace/pod/container is unique, so a tie means the two
+    // entries are indistinguishable.
+    targets
+        .sort_unstable_by(|a, b| (&a.ns, &a.pod, &a.container).cmp(&(&b.ns, &b.pod, &b.container)));
+
+    let total = targets.len();
+    if max_streams > 0 && total > max_streams {
+        targets.truncate(max_streams);
+    }
+    (targets, total)
+}
+
+/// What the view says when it is streaming less than the whole match. Showing
+/// part of a match silently would be worse than showing less on purpose.
+pub(super) fn partial_coverage_notice(
+    targets: &[LogTarget],
+    total: usize,
+    max_streams: usize,
+) -> Option<String> {
+    if targets.len() >= total {
+        return None;
+    }
+    let pods_covered = targets
+        .iter()
+        .map(|t| (&t.ns, &t.pod))
+        .collect::<std::collections::BTreeSet<_>>()
+        .len();
+    Some(format!(
+        "[partial] streaming {max_streams} of {total} containers \
+         ({pods_covered} pods) — raise [logs] max_streams to widen"
+    ))
 }
