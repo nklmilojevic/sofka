@@ -668,12 +668,14 @@ pub(crate) fn ingest_lines(prefix: &str, lines: impl IntoIterator<Item = String>
 /// prefixing and the hand-off consistent across the two.
 pub(super) struct LogBatch {
     lines: Vec<String>,
+    bytes: usize,
 }
 
 impl LogBatch {
     pub(super) fn new() -> Self {
         Self {
             lines: Vec::with_capacity(LOG_BATCH_LINES),
+            bytes: 0,
         }
     }
 
@@ -683,18 +685,21 @@ impl LogBatch {
         // case: move the line the reader already allocated rather than
         // copying it into an identical new one.
         if prefix.is_empty() {
+            self.bytes += line.len();
             self.lines.push(line);
             return;
         }
         let mut prefixed = String::with_capacity(prefix.len() + line.len());
         prefixed.push_str(prefix);
         prefixed.push_str(&line);
+        self.bytes += prefixed.len();
         self.lines.push(prefixed);
     }
 
     /// Add one line that is already complete (an error notice, a provider
     /// record that carried its own prefix).
     pub(super) fn push_raw(&mut self, line: String) {
+        self.bytes += line.len();
         self.lines.push(line);
     }
 
@@ -705,21 +710,25 @@ impl LogBatch {
         prefix: crate::providers::Prefix,
         timestamps: bool,
     ) {
+        let before = self.lines.len();
         entry.render_into(&mut self.lines, prefix, timestamps);
+        self.bytes += self.lines[before..].iter().map(String::len).sum::<usize>();
     }
 
     pub(super) fn is_empty(&self) -> bool {
         self.lines.is_empty()
     }
 
+    /// Whether this batch has reached either limit and should be handed off.
     pub(super) fn is_full(&self) -> bool {
-        self.lines.len() >= LOG_BATCH_LINES
+        self.lines.len() >= LOG_BATCH_LINES || self.bytes >= LOG_BATCH_BYTES
     }
 
     /// Hand the pending lines off, leaving an empty batch behind. The
     /// replacement starts at the batch size, so a steady stream does not
     /// re-grow the same `Vec` from nothing between every flush.
     pub(super) fn take(&mut self) -> Vec<String> {
+        self.bytes = 0;
         std::mem::replace(&mut self.lines, Vec::with_capacity(LOG_BATCH_LINES))
     }
 

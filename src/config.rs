@@ -381,6 +381,14 @@ pub struct LogsConfig {
     /// Maximum lines retained in the follow buffer before the oldest are
     /// dropped (keeps a chatty pod from growing memory without bound).
     pub buffer: usize,
+    /// Maximum bytes retained in the follow buffer, enforced alongside
+    /// `buffer`. A line count alone does not bound memory: one structured-log
+    /// record can be megabytes. `0` disables the byte ceiling.
+    pub buffer_bytes: usize,
+    /// Maximum bytes kept from any one log line; the rest is dropped and the
+    /// line is marked so the loss is visible rather than silent. `0` keeps
+    /// lines whole however long they are.
+    pub line_bytes: usize,
     /// Optional lookback (`30m`, `4h`, `2d`): stream only logs newer than this.
     /// When set it replaces `tail` (Kubernetes accepts one or the other).
     pub since: Option<String>,
@@ -394,6 +402,10 @@ impl Default for LogsConfig {
         Self {
             tail: 300,
             buffer: 5000,
+            // 5000 lines of ordinary logs is a few megabytes; this bounds the
+            // pathological buffer without touching the ordinary one.
+            buffer_bytes: 64 * 1024 * 1024,
+            line_bytes: 16 * 1024,
             since: None,
             fullscreen: false,
         }

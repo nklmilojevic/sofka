@@ -68,9 +68,16 @@ the buffer size, and an optional `since` lookback:
 [logs]
 tail = 300         # initial lines fetched per stream (kubectl --tail)
 buffer = 5000      # max lines kept while following (oldest dropped)
+buffer_bytes = 67108864 # max bytes kept while following (0 = no limit)
+line_bytes = 16384 # max bytes kept per line (0 = keep whole lines)
 since = "1h"       # optional: only logs newer than this — replaces tail
 fullscreen = false # open log views fullscreen (F toggles per session)
 ```
+
+`buffer` and `buffer_bytes` both apply: a line count alone does not bound
+memory, because one structured-log record can be megabytes on its own. A line
+longer than `line_bytes` is cut and marked `…[N bytes truncated]`, so the loss
+is visible in the buffer rather than silent.
 
 In the view, `/` filters with a case-insensitive substring, a `/regex/`, or a
 leading `!` to invert (keep lines that don't match). A malformed regex is flagged

@@ -12059,3 +12059,114 @@ async fn next_diff_msg(rx: &mut Receiver<Msg>) -> Msg {
         }
     }
 }
+
+/// A single oversized record is cut to the configured ceiling and says so, so
+/// a truncated payload is never mistaken for a malformed one.
+#[tokio::test]
+async fn an_oversized_log_line_is_truncated_visibly() {
+    let (mut app, _rx) = test_app();
+    app.logs_cfg.line_bytes = 64;
+    let payload = format!("{{\"msg\":\"{}\"}}", "x".repeat(4096));
+    let dropped = payload.len() - 64;
+    app.handle_msg(Msg::LogLines {
+        generation: app.log_gen,
+        lines: vec![payload.clone(), "short line".into()],
+    });
+
+    let kept = app.logs.view.lines.front().unwrap();
+    assert!(kept.starts_with(&payload[..64]));
+    assert!(
+        kept.ends_with(&format!("…[{dropped} bytes truncated]")),
+        "{kept}"
+    );
+    // Lines within the ceiling are untouched.
+    assert_eq!(app.logs.view.lines.back().unwrap(), "short line");
+}
+
+/// Truncation never splits a character in half.
+#[tokio::test]
+async fn truncation_respects_character_boundaries() {
+    let (mut app, _rx) = test_app();
+    app.logs_cfg.line_bytes = 10;
+    // Each 'é' is two bytes, so a 10-byte cut lands mid-character.
+    app.handle_msg(Msg::LogLines {
+        generation: app.log_gen,
+        lines: vec!["xéééééééééé".into()],
+    });
+    let kept = app.logs.view.lines.back().unwrap();
+    assert!(kept.starts_with("xéééé"), "{kept}");
+    assert!(kept.contains("bytes truncated"), "{kept}");
+}
+
+/// The byte ceiling drops the oldest lines even when the line count is far
+/// below `buffer` — which is the case a count alone cannot bound.
+#[tokio::test]
+async fn the_log_buffer_is_capped_by_bytes_as_well_as_lines() {
+    let (mut app, _rx) = test_app();
+    app.logs_cfg.line_bytes = 0; // keep lines whole; the buffer cap is under test
+    app.logs_cfg.buffer_bytes = 64 * 1024;
+    let big = "y".repeat(16 * 1024);
+    for i in 0..16 {
+        app.handle_msg(Msg::LogLines {
+            generation: app.log_gen,
+            lines: vec![format!("{i:04}{big}")],
+        });
+    }
+
+    let retained: usize = app.logs.view.lines.iter().map(String::len).sum();
+    assert!(
+        retained <= app.logs_cfg.buffer_bytes,
+        "retained {retained} bytes over a {} ceiling",
+        app.logs_cfg.buffer_bytes
+    );
+    assert!(
+        app.logs.view.lines.len() < app.logs_cfg.buffer,
+        "the line count never reached its own cap, so bytes did the trimming"
+    );
+    // Newest kept, oldest dropped.
+    assert!(app.logs.view.lines.back().unwrap().starts_with("0015"));
+    assert!(!app.logs.view.lines.front().unwrap().starts_with("0000"));
+}
+
+/// The byte ceiling still applies while paused, where the line cap is
+/// deliberately loose so indices do not shift under the frozen view.
+#[tokio::test]
+async fn the_byte_ceiling_applies_while_paused() {
+    let (mut app, _rx) = test_app();
+    app.logs.follow = false;
+    app.logs_cfg.line_bytes = 0;
+    app.logs_cfg.buffer_bytes = 32 * 1024;
+    let big = "z".repeat(8 * 1024);
+    for _ in 0..16 {
+        app.handle_msg(Msg::LogLines {
+            generation: app.log_gen,
+            lines: vec![big.clone()],
+        });
+    }
+    let retained: usize = app.logs.view.lines.iter().map(String::len).sum();
+    assert!(retained <= app.logs_cfg.buffer_bytes, "{retained}");
+}
+
+/// Clearing the buffer (`z`) resets the byte accounting with it, so a later
+/// push is not measured against lines that are gone.
+#[tokio::test]
+async fn clearing_the_log_buffer_resets_the_byte_count() {
+    let (mut app, _rx) = test_app();
+    app.handle_msg(Msg::LogLines {
+        generation: app.log_gen,
+        lines: bs_lines(200),
+    });
+    assert!(app.logs.retained_bytes > 0);
+    app.logs.clear_buffer();
+    assert_eq!(app.logs.retained_bytes, 0);
+
+    app.handle_msg(Msg::LogLines {
+        generation: app.log_gen,
+        lines: vec!["one".into()],
+    });
+    assert_eq!(app.logs.retained_bytes, 3);
+}
+
+fn bs_lines(n: usize) -> Vec<String> {
+    (0..n).map(|i| format!("line {i}")).collect()
+}

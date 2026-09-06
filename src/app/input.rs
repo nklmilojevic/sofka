@@ -970,7 +970,8 @@ impl App {
                         .len()
                         .saturating_sub(self.logs_cfg.buffer.max(1));
                     if overflow > 0 {
-                        self.logs.view.drain_front(overflow);
+                        let dropped = self.logs.view.drain_front(overflow);
+                        self.logs.retained_bytes = self.logs.retained_bytes.saturating_sub(dropped);
                     }
                 }
                 self.flash = format!(
@@ -1053,7 +1054,7 @@ impl App {
             }
             // Clear the on-screen buffer (the live stream keeps appending).
             KeyCode::Char('z') => {
-                self.logs.view.clear_lines();
+                self.logs.clear_buffer();
                 self.logs.view.scroll = 0;
                 self.flash = "log buffer cleared".into();
                 self.flash_err = false;

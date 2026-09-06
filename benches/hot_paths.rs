@@ -692,15 +692,16 @@ fn log_retain(c: &mut Criterion) {
         ("normal", bs::log_lines(64)),
         ("long", bs::log_lines_long(64, 64 * 1024)),
     ] {
+        // A buffer already at its limit trims exactly what each push appends,
+        // so this is a genuine steady state: no per-iteration setup to drown
+        // out the microseconds being measured.
+        let mut app = bs::logs_app_at_capacity(2_000);
+        app.push_log_lines(batch.iter().cloned());
         g.bench_function(label, |b| {
-            b.iter_batched_ref(
-                || bs::logs_app_at_capacity(2_000),
-                |app| {
-                    app.push_log_lines(batch.iter().cloned());
-                    black_box(bs::log_line_count(app))
-                },
-                criterion::BatchSize::LargeInput,
-            );
+            b.iter(|| {
+                app.push_log_lines(batch.iter().cloned());
+                black_box(bs::log_line_count(&app))
+            });
         });
     }
     g.finish();

@@ -57,6 +57,12 @@ const MAX_LOG_LINES_PAUSED: usize = 100_000;
 const LOG_BATCH_LINES: usize = 64;
 const LOG_BATCH_MS: u64 = 50;
 
+/// Companion byte ceiling for a batch. 64 lines is a small message for
+/// ordinary logs and a large one for structured records, so a batch flushes on
+/// whichever limit it reaches first — which is what bounds how much log data
+/// can be sitting in the channel at once.
+const LOG_BATCH_BYTES: usize = 256 * 1024;
+
 /// The events document coalesces the same way: a rollout can produce dozens of
 /// events in a few milliseconds, and republishing the whole document for each
 /// one only makes the view re-layout. Short enough that a single live event
@@ -815,12 +821,17 @@ impl Scrollable {
         self.revision
     }
 
-    /// Drop `n` lines from the front (log-buffer trimming). Shifts every
-    /// index, so it bumps the revision.
-    pub fn drain_front(&mut self, n: usize) {
-        self.lines.drain(0..n);
+    /// Drop `n` lines from the front (log-buffer trimming), returning the
+    /// bytes they held. Shifts every index, so it bumps the revision.
+    ///
+    /// The byte total comes from the same pass that drops the lines — the
+    /// caller keeping a running total would otherwise have to walk them a
+    /// second time just to measure what it is about to discard.
+    pub fn drain_front(&mut self, n: usize) -> usize {
+        let dropped = self.lines.drain(0..n).map(|line| line.len()).sum();
         self.revision = self.revision.wrapping_add(1);
         self.viewport = None;
+        dropped
     }
 
     /// Drop every line.
@@ -1011,6 +1022,10 @@ impl LogIndex {
 /// the top-level `App` struct.
 pub struct LogsView {
     pub view: Scrollable,
+    /// Bytes held in `view.lines`. Maintained by `push_log_lines` — the only
+    /// writer — so the byte ceiling costs an add per line instead of a walk of
+    /// the whole buffer on every push.
+    pub(crate) retained_bytes: usize,
     pub follow: bool,
     pub filter: String,
     /// Compiled form of [`Self::filter`] (substring / regex / inverse). Rebuilt
@@ -1048,6 +1063,7 @@ impl Default for LogsView {
     fn default() -> Self {
         Self {
             view: Scrollable::empty(),
+            retained_bytes: 0,
             follow: true,
             filter: String::new(),
             matcher: crate::logfilter::LogMatcher::default(),
@@ -1066,6 +1082,13 @@ impl Default for LogsView {
 }
 
 impl LogsView {
+    /// Drop the buffered lines and the byte count together, so the ceiling
+    /// never accounts for lines that are no longer there.
+    pub fn clear_buffer(&mut self) {
+        self.view.clear_lines();
+        self.retained_bytes = 0;
+    }
+
     /// Replace the filter text and recompile its matcher (substring / regex /
     /// inverse) in one place, so the cached matcher never drifts.
     pub fn set_filter(&mut self, filter: String) {

@@ -7,22 +7,20 @@ impl App {
     where
         I: IntoIterator<Item = String>,
     {
-        // Strip carriage returns so progress output doesn't overwrite a row,
-        // and expand tabs to spaces — many loggers separate timestamp/level/body
-        // with tabs, which some terminals render awkwardly in a TUI cell.
-        // Clean lines (the vast majority) pass through without reallocating.
+        let line_cap = self.logs_cfg.line_bytes;
+        let mut added = 0usize;
         self.logs.view.lines.extend(lines.into_iter().map(|line| {
-            if !line.contains('\r') && !line.contains('\t') {
-                return line;
-            }
-            line.chars()
-                .filter_map(|c| match c {
-                    '\r' => None,
-                    '\t' => Some(' '),
-                    c => Some(c),
-                })
-                .collect()
+            let line = clean_log_line(line);
+            // One record must not be allowed to consume the whole budget.
+            let line = match line_cap {
+                0 => line,
+                cap if line.len() > cap => truncate_log_line(line, cap),
+                _ => line,
+            };
+            added += line.len();
+            line
         }));
+        self.logs.retained_bytes += added;
 
         // While following, keep a tight tail buffer. While paused, avoid
         // trimming so indices don't shift under the frozen view (only a huge
@@ -32,7 +30,23 @@ impl App {
         } else {
             MAX_LOG_LINES_PAUSED
         };
-        let overflow = self.logs.view.lines.len().saturating_sub(cap);
+        let mut overflow = self.logs.view.lines.len().saturating_sub(cap);
+        // The byte ceiling applies whether following or paused: it is what
+        // actually bounds memory, and a paused firehose is exactly the case
+        // a line count fails to catch.
+        let byte_cap = self.logs_cfg.buffer_bytes;
+        if byte_cap > 0 && self.logs.retained_bytes > byte_cap {
+            let mut excess = self.logs.retained_bytes - byte_cap;
+            let mut dropped = 0usize;
+            for line in &self.logs.view.lines {
+                if excess == 0 {
+                    break;
+                }
+                excess = excess.saturating_sub(line.len());
+                dropped += 1;
+            }
+            overflow = overflow.max(dropped);
+        }
         if overflow == 0 {
             return;
         }
@@ -55,7 +69,8 @@ impl App {
                 .sum();
             self.logs.view.scroll = self.logs.view.scroll.saturating_sub(rows);
         }
-        self.logs.view.drain_front(overflow);
+        let dropped = self.logs.view.drain_front(overflow);
+        self.logs.retained_bytes = self.logs.retained_bytes.saturating_sub(dropped);
     }
 
     // ----- containers / logs --------------------------------------------
@@ -263,6 +278,7 @@ impl App {
             lines: VecDeque::new(),
             ..Default::default()
         };
+        self.logs.retained_bytes = 0;
         // A new Scrollable starts at revision 0, which can match the previous
         // buffer's revision. Do not let refresh_index mistake the replacement
         // for an append and retain stale line positions or wrapped heights.
@@ -280,7 +296,7 @@ impl App {
         if self.logs.source.is_none() {
             return;
         }
-        self.logs.view.clear_lines();
+        self.logs.clear_buffer();
         self.logs.view.scroll = 0;
         self.restart_log_stream();
     }
@@ -729,4 +745,42 @@ async fn provider_log_task(
             }
         }
     }
+}
+
+/// Strip carriage returns so progress output doesn't overwrite a row, and
+/// expand tabs to spaces — many loggers separate timestamp/level/body with
+/// tabs, which some terminals render awkwardly in a TUI cell. Clean lines (the
+/// vast majority) pass through without reallocating.
+fn clean_log_line(line: String) -> String {
+    if !line.contains('\r') && !line.contains('\t') {
+        return line;
+    }
+    line.chars()
+        .filter_map(|c| match c {
+            '\r' => None,
+            '\t' => Some(' '),
+            c => Some(c),
+        })
+        .collect()
+}
+
+/// Cut a line to `cap` bytes and say so in the line itself. Silently dropping
+/// the tail of a record would make a truncated JSON payload look like a
+/// malformed one, so the marker names how much went missing.
+///
+/// Kept out of line: an oversized record is the rare case, and inlining its
+/// boundary walk and formatting into the ingest loop would cost every ordinary
+/// line to serve it.
+#[cold]
+#[inline(never)]
+fn truncate_log_line(mut line: String, cap: usize) -> String {
+    // Never split a character in half; back up to the nearest boundary.
+    let mut end = cap;
+    while end > 0 && !line.is_char_boundary(end) {
+        end -= 1;
+    }
+    let dropped = line.len() - end;
+    line.truncate(end);
+    line.push_str(&format!("…[{dropped} bytes truncated]"));
+    line
 }
