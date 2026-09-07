@@ -537,6 +537,19 @@ pub fn current_context_info() -> Option<(String, String, String)> {
     Some((context, cluster_name, server))
 }
 
+/// Name for the pre-connect startup banner. The kubeconfig context is what
+/// `kubectl config current-context` prints and what users recognise, while the
+/// cluster name is an ARN on EKS and `gke_project_zone_name` on GKE, so the
+/// context wins and the cluster name is the fallback. `None` when the
+/// kubeconfig knows neither (in-cluster config, no kubeconfig).
+pub fn connect_label(context: &str, cluster_name: &str) -> Option<String> {
+    match (context.trim(), cluster_name.trim()) {
+        ("", "") => None,
+        ("", cluster) => Some(cluster.to_string()),
+        (context, _) => Some(context.to_string()),
+    }
+}
+
 /// Public wrapper over [`cluster_name_for`] for resolving per-context config
 /// (fleet dashboard read-only policy) without a live connection.
 pub fn cluster_name_for_context(context: &str) -> String {
@@ -1147,6 +1160,25 @@ mod tests {
                 .catalog
                 .contains(&"gadgets.mixed.example.com".into())
         );
+    }
+
+    #[test]
+    fn connect_label_prefers_the_context_over_the_cluster_name() {
+        assert_eq!(
+            connect_label("prod-eu", "arn:aws:eks:eu-west-1:1234:cluster/prod"),
+            Some("prod-eu".into())
+        );
+    }
+
+    #[test]
+    fn connect_label_falls_back_to_the_cluster_name() {
+        assert_eq!(connect_label("", "kind-sofka"), Some("kind-sofka".into()));
+    }
+
+    #[test]
+    fn connect_label_is_none_without_a_kubeconfig() {
+        assert_eq!(connect_label("", ""), None);
+        assert_eq!(connect_label("  ", "\t"), None);
     }
 
     #[tokio::test]

@@ -154,7 +154,16 @@ async fn run_main(args: Args) -> Result<()> {
     // unreachable current context isn't fatal for the interactive TUI: start
     // in the context picker instead (k9s behavior). Headless modes still exit
     // with the error, since there is no picker to fall back to.
-    eprintln!("Connecting to cluster…");
+    let (banner_context, banner_cluster) = match args.context.as_deref() {
+        Some(name) => (name.to_string(), k8s::cluster_name_for_context(name)),
+        None => k8s::current_context_info()
+            .map(|(context, cluster, _)| (context, cluster))
+            .unwrap_or_default(),
+    };
+    match k8s::connect_label(&banner_context, &banner_cluster) {
+        Some(label) => eprintln!("Connecting to cluster: {label}…"),
+        None => eprintln!("Connecting to cluster…"),
+    }
     let connect = match args.context.as_deref() {
         Some(name) => Cluster::connect_context(name).await,
         None => Cluster::connect().await,
