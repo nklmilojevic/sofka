@@ -709,6 +709,13 @@ fn apply(app: &mut App, v: serde_json::Value) {
     });
 }
 
+fn notify(app: &mut App, text: impl Into<String>) {
+    app.handle_msg(Msg::Notify {
+        epoch: app.notify_epoch,
+        text: text.into(),
+    });
+}
+
 /// A Helm release storage Secret, encoded exactly like the real thing
 /// (base64 -> base64 -> gzip -> JSON — see `crate::helm`), for exercising the
 /// helm/helmhistory views without a live cluster.
@@ -2262,9 +2269,49 @@ async fn notify_survives_view_switches() {
 }
 
 #[tokio::test]
+async fn context_switch_releases_the_notification_watch_budget() {
+    let (mut app, _rx) = test_app();
+    app.notify_cfg.max_watches = 1;
+    app.switch_kind("pods");
+    apply(
+        &mut app,
+        json!({"apiVersion": "v1", "kind": "Pod",
+               "metadata": {"name": "old", "namespace": "default"}}),
+    );
+    app.table_state.select(Some(0));
+    plugin_command(&mut app, "notify");
+    assert_eq!(app.notify_tasks.len(), 1);
+
+    let old_epoch = app.notify_epoch;
+    app.pending_notify.push("old pending notification".into());
+    app.pending_notifier = Some("old pending command".into());
+    app.apply_context_switch("prod".into(), Box::new(Cluster::fake()));
+
+    assert!(app.notify_tasks.is_empty());
+    assert!(app.pending_notify.is_empty());
+    assert!(app.pending_notifier.is_none());
+    assert_ne!(app.notify_epoch, old_epoch);
+    app.handle_msg(Msg::Notify {
+        epoch: old_epoch,
+        text: "old queued event".into(),
+    });
+    assert!(app.pending_notify.is_empty(), "stale events are ignored");
+
+    apply(
+        &mut app,
+        json!({"apiVersion": "v1", "kind": "Pod",
+               "metadata": {"name": "new", "namespace": "default"}}),
+    );
+    app.table_state.select(Some(0));
+    plugin_command(&mut app, "notify");
+    assert_eq!(app.notify_tasks.len(), 1, "the new context gets its budget");
+    assert!(app.flash.contains("notify on"), "{}", app.flash);
+}
+
+#[tokio::test]
 async fn notify_msg_flashes_and_queues_bell() {
     let (mut app, _rx) = test_app();
-    app.handle_msg(Msg::Notify("pod/web: Ready True → False".into()));
+    notify(&mut app, "pod/web: Ready True → False");
     assert!(!app.flash_err);
     assert!(app.flash.contains("pod/web"), "{}", app.flash);
     assert_eq!(
@@ -2280,8 +2327,8 @@ async fn notification_bursts_coalesce_into_one_delivery() {
     // the first of a burst) — everything pending in one frame batch must
     // leave as a single bounded delivery.
     let (mut app, _rx) = test_app();
-    app.handle_msg(Msg::Notify("pod/a: Ready True → False".into()));
-    app.handle_msg(Msg::Notify("pod/a: deleted".into()));
+    notify(&mut app, "pod/a: Ready True → False");
+    notify(&mut app, "pod/a: deleted");
     assert_eq!(
         app.take_notification().as_deref(),
         Some("pod/a: Ready True → False · pod/a: deleted")
@@ -2289,7 +2336,7 @@ async fn notification_bursts_coalesce_into_one_delivery() {
     assert_eq!(app.take_notification(), None);
 
     for i in 0..100 {
-        app.handle_msg(Msg::Notify(format!("pod/pod-{i}: restarts 0 → 1")));
+        notify(&mut app, format!("pod/pod-{i}: restarts 0 → 1"));
     }
     let text = app.take_notification().unwrap();
     assert!(text.chars().count() <= 300, "bounded: {}", text.len());
@@ -3989,7 +4036,7 @@ async fn background_status_borrows_the_bar_without_orphaning_an_action() {
     assert_eq!(app.flash, "scaled web → 3");
 
     let claim = app.claim_status("draining node-1…");
-    app.handle_msg(Msg::Notify("pod/web: Ready True → False".into()));
+    notify(&mut app, "pod/web: Ready True → False");
     assert!(app.flash.starts_with('🔔'), "{}", app.flash);
 
     // A transient notification may expire before the action. The pending
@@ -12399,7 +12446,7 @@ async fn the_notify_budget_bounds_the_watches_a_session_holds() {
 async fn an_overlong_notification_burst_reports_what_it_dropped() {
     let (mut app, _rx) = test_app();
     for i in 0..500 {
-        app.handle_msg(Msg::Notify(format!("pod/pod-{i}: restarts 0 → 1")));
+        notify(&mut app, format!("pod/pod-{i}: restarts 0 → 1"));
     }
     assert_eq!(
         app.pending_notify.len(),
@@ -12412,7 +12459,7 @@ async fn an_overlong_notification_burst_reports_what_it_dropped() {
     assert!(text.ends_with("(+468 more)"), "{text}");
     assert_eq!(app.dropped_notify, 0, "the count is consumed with the text");
     // A later burst that fits reports no overflow.
-    app.handle_msg(Msg::Notify("pod/a: deleted".into()));
+    notify(&mut app, "pod/a: deleted");
     assert_eq!(app.take_notification().as_deref(), Some("pod/a: deleted"));
 }
 

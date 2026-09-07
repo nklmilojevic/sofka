@@ -874,7 +874,7 @@ impl App {
                 self.last_error = Some(error.clone());
                 self.borrow_status(format!("internal error: {error}"), true);
             }
-            Msg::Notify(text) => {
+            Msg::Notify { epoch, text } if epoch == self.notify_epoch => {
                 self.borrow_status(format!("🔔 {text}"), false);
                 // Delivery happens once per frame in the run loop (see
                 // `take_notification`), so a batch of these coalesces. The

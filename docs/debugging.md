@@ -38,11 +38,14 @@ browse other views - "tell me when this rollout finishes" and keep working.
 `:notify` on the same row turns it off. Everything is session-local.
 
 Because each one holds a watch for the session, `max_watches` caps how many can
-be active at once; turning one off always works, even at the cap. Delivery is
-coalesced to one message per frame, so a rollout touching many notified objects
-arrives as a single notification rather than a burst the sink would rate-limit
-away. If all notifier subprocess slots are busy, one bounded delivery is kept
-and later changes are counted into its summary until a slot is free.
+be active at once; turning one off always works, even at the cap. A successful
+cluster-context switch stops the previous cluster's notification watches, so
+they cannot consume the new context's budget or report stale changes. Delivery
+is coalesced to one message per frame, so a rollout touching many notified
+objects arrives as a single notification rather than a burst the sink would
+rate-limit away. If all notifier subprocess slots are busy, one bounded
+delivery is kept and later changes are counted into its summary until a slot is
+free.
 
 ```toml
 [notify]

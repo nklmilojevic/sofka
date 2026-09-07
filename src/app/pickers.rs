@@ -788,6 +788,7 @@ impl App {
     /// re-resolved so per-cluster/per-context overrides (aliases, plugins,
     /// skin, defaults) follow the new context.
     pub(super) fn apply_context_switch(&mut self, name: String, mut cluster: Box<Cluster>) {
+        self.stop_context_notifications();
         let resolved = self.config.resolve(&name, &cluster.cluster_name);
         self.user_aliases = resolved.config.aliases;
         self.namespace_favorites = resolved.config.favorite_namespaces;
