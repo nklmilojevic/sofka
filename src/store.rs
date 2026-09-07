@@ -6,6 +6,36 @@ use std::sync::Arc;
 
 use kube::core::DynamicObject;
 
+/// A log payload plus the byte reservation that keeps queued log memory
+/// bounded. The reservation is released when the UI consumes or discards the
+/// message.
+pub struct QueuedLogLines {
+    lines: Vec<String>,
+    _queue_permit: Option<tokio::sync::OwnedSemaphorePermit>,
+}
+
+impl QueuedLogLines {
+    pub(crate) fn new(
+        lines: Vec<String>,
+        queue_permit: Option<tokio::sync::OwnedSemaphorePermit>,
+    ) -> Self {
+        Self {
+            lines,
+            _queue_permit: queue_permit,
+        }
+    }
+
+    pub(crate) fn into_lines(self) -> Vec<String> {
+        self.lines
+    }
+}
+
+impl From<Vec<String>> for QueuedLogLines {
+    fn from(lines: Vec<String>) -> Self {
+        Self::new(lines, None)
+    }
+}
+
 /// Identity of an asynchronous operation's claim on the shared status bar.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct StatusClaim(pub(crate) u64);
@@ -30,7 +60,7 @@ pub enum Msg {
     },
     LogLines {
         generation: u64,
-        lines: Vec<String>,
+        lines: QueuedLogLines,
     },
     /// Point-in-time usage snapshot from the metrics API, keyed by "ns/name"
     /// (pods) or "name" (nodes) -> (cpu millicores, memory bytes).
@@ -110,6 +140,9 @@ pub enum Msg {
     Detail {
         generation: u64,
         claim: StatusClaim,
+        /// Selection identity for key-triggered document work. `None` for
+        /// reports whose result is independent of the table cursor.
+        target: Option<String>,
         title: String,
         lines: Vec<String>,
         /// Set when describe failed and we fell back to YAML.
@@ -120,6 +153,7 @@ pub enum Msg {
     Diff {
         generation: u64,
         claim: StatusClaim,
+        target: String,
         title: String,
         /// The diff rows, or the baseline label when live matched it (which
         /// stays on the current view rather than opening an empty document).

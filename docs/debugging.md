@@ -41,7 +41,8 @@ Because each one holds a watch for the session, `max_watches` caps how many can
 be active at once; turning one off always works, even at the cap. Delivery is
 coalesced to one message per frame, so a rollout touching many notified objects
 arrives as a single notification rather than a burst the sink would rate-limit
-away.
+away. If all notifier subprocess slots are busy, one bounded delivery is kept
+and later changes are counted into its summary until a slot is free.
 
 ```toml
 [notify]
@@ -85,7 +86,10 @@ fullscreen = false # open log views fullscreen (F toggles per session)
 `buffer` and `buffer_bytes` both apply: a line count alone does not bound
 memory, because one structured-log record can be megabytes on its own. A line
 longer than `line_bytes` is cut and marked `…[N bytes truncated]`, so the loss
-is visible in the buffer rather than silent.
+is visible in the buffer rather than silent. `buffer_bytes` also bounds batches
+being assembled by producers or waiting in the UI channel; all streams in the
+view share that queue budget. Multiline provider records stop at the per-batch
+ceiling with an explicit omission marker.
 
 An aggregate view — a label selector, or a workload with many pods — opens one
 stream per container, each a live connection. `max_streams` caps how many run at

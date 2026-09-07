@@ -927,6 +927,16 @@ impl App {
         self.selected_ref().cloned()
     }
 
+    /// The selected store value without cloning its potentially large JSON
+    /// payload. Background document jobs keep this snapshot alive with an
+    /// `Arc` while later watch updates replace the store entry independently.
+    pub(super) fn selected_shared(&self) -> Option<Arc<DynamicObject>> {
+        let idx = self.table_state.selected()?;
+        self.ensure_rows_cache();
+        let key = self.rows_cache.borrow().keys.get(idx)?.clone();
+        self.store.shared(&key)
+    }
+
     /// `(header, value)` pairs for the selected row, mirroring the table's
     /// displayed columns (NAMESPACE prefix, view-spec cells with volatile
     /// overrides, PODS/CPU/MEM suffixes) — but with the full cell values,

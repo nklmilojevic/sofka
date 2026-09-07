@@ -888,7 +888,7 @@ impl App {
                 }
             }
             Msg::LogLines { generation, lines } if generation == self.log_gen => {
-                self.push_log_lines(lines);
+                self.push_log_lines(lines.into_lines());
             }
             Msg::LogProviderDiscovered {
                 generation,
@@ -1173,10 +1173,18 @@ impl App {
             Msg::Detail {
                 generation,
                 claim,
+                target,
                 title,
                 lines,
                 warn,
             } if generation == self.generation => {
+                if target
+                    .as_deref()
+                    .is_some_and(|target| !self.document_result_is_current(claim, target))
+                {
+                    self.clear_claimed_status(claim);
+                    return;
+                }
                 self.detail = Scrollable {
                     title,
                     lines: lines.into(),
@@ -1193,22 +1201,31 @@ impl App {
             Msg::Diff {
                 generation,
                 claim,
+                target,
                 title,
                 result,
-            } if generation == self.generation => match result {
-                Ok(lines) => {
-                    self.detail = Scrollable {
-                        title,
-                        lines: lines.into(),
-                        ..Default::default()
-                    };
-                    self.mode = Mode::Diff;
+            } if generation == self.generation => {
+                if !self.document_result_is_current(claim, &target) {
                     self.clear_claimed_status(claim);
+                    return;
                 }
-                Err(label) => {
-                    self.set_claimed_status(claim, format!("no diff: live matches {label}"), false)
+                match result {
+                    Ok(lines) => {
+                        self.detail = Scrollable {
+                            title,
+                            lines: lines.into(),
+                            ..Default::default()
+                        };
+                        self.mode = Mode::Diff;
+                        self.clear_claimed_status(claim);
+                    }
+                    Err(label) => self.set_claimed_status(
+                        claim,
+                        format!("no diff: live matches {label}"),
+                        false,
+                    ),
                 }
-            },
+            }
             Msg::Events {
                 generation,
                 title,

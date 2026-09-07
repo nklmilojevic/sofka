@@ -31,32 +31,37 @@ impl App {
 
     pub(super) fn open_detail(&mut self) {
         self.set_return_mode();
-        let Some(obj) = self.selected_ref() else {
+        let Some(obj) = self.selected_shared() else {
             return;
         };
+        let target = document_target(&obj);
         // Helm rows are backed by the raw storage Secret — `y` should show
         // the rendered chart manifest, not that Secret's own YAML.
         if matches!(self.kind_plural.as_str(), "helm" | "helmhistory") {
-            match crate::helm::decode(obj) {
-                Some(rel) => {
-                    self.detail = Scrollable {
-                        title: format!("{} v{} — manifest", rel.name, rel.revision),
-                        lines: rel.manifest.lines().map(String::from).collect(),
-                        ..Default::default()
-                    };
-                    self.mode = Mode::Detail;
-                }
-                None => self.flash_warn("could not decode this Helm release revision"),
-            }
+            self.spawn_document(target, "decoding Helm manifest…", move || {
+                let rel = crate::helm::decode(&obj)
+                    .ok_or_else(|| "could not decode this Helm release revision".to_string())?;
+                Ok((
+                    format!("{} v{} — manifest", rel.name, rel.revision),
+                    rel.manifest.lines().map(String::from).collect(),
+                ))
+            });
             return;
         }
-        let title = obj.metadata.name.clone().unwrap_or_else(|| "object".into());
-        self.detail = Scrollable {
-            title: format!("{title} — YAML"),
-            lines: self.object_yaml(obj).into(),
-            ..Default::default()
-        };
-        self.mode = Mode::Detail;
+        let name = obj.metadata.name.clone().unwrap_or_else(|| "object".into());
+        let kind = self.kind.clone();
+        if document_is_expensive(&obj) {
+            self.spawn_document(target, format!("rendering {name}…"), move || {
+                Ok((format!("{name} — YAML"), stamped_yaml(&obj, kind.as_ref())))
+            });
+        } else {
+            self.detail = Scrollable {
+                title: format!("{name} — YAML"),
+                lines: stamped_yaml(&obj, kind.as_ref()).into(),
+                ..Default::default()
+            };
+            self.mode = Mode::Detail;
+        }
     }
 
     /// Show the selected Secret with its `data` base64-decoded (k9s `x`), as
@@ -71,7 +76,7 @@ impl App {
     /// in-document `x` binding lands here, so esc still returns to wherever
     /// the describe/YAML view was opened from.
     pub(super) fn show_decoded_secret(&mut self) {
-        let Some(obj) = self.selected_ref() else {
+        let Some(obj) = self.selected_shared() else {
             return;
         };
         let Some(data) = obj.data.get("data").and_then(Value::as_object) else {
@@ -82,17 +87,17 @@ impl App {
             self.flash_warn("secret has no data");
             return;
         }
-        let mut lines: Vec<String> = Vec::new();
-        for (key, value) in data {
-            lines.extend(decoded_secret_entry(key, value));
-        }
-        let title = obj.metadata.name.clone().unwrap_or_else(|| "secret".into());
-        self.detail = Scrollable {
-            title: format!("{title} — decoded"),
-            lines: lines.into(),
-            ..Default::default()
-        };
-        self.mode = Mode::Detail;
+        let target = document_target(&obj);
+        let name = obj.metadata.name.clone().unwrap_or_else(|| "secret".into());
+        self.spawn_document(target, format!("decoding {name}…"), move || {
+            let mut lines = Vec::new();
+            if let Some(data) = obj.data.get("data").and_then(Value::as_object) {
+                for (key, value) in data {
+                    lines.extend(decoded_secret_entry(key, value));
+                }
+            }
+            Ok((format!("{name} — decoded"), lines))
+        });
     }
 
     /// Describe the selection via `kubectl describe`, off-thread so the UI loop
@@ -100,29 +105,23 @@ impl App {
     /// or fails. The result arrives as `Msg::Detail`.
     pub(super) fn describe(&mut self) {
         self.set_return_mode();
-        let Some(obj) = self.selected_ref() else {
+        let Some(obj) = self.selected_shared() else {
             return;
         };
-        // No `kubectl describe` for a Helm release's storage Secret — show
-        // the rendered NOTES.txt instead, decoded synchronously (cheap, no
-        // subprocess needed).
+        let target = document_target(&obj);
+        // No `kubectl describe` for a Helm release's storage Secret — decode
+        // its NOTES.txt through the same bounded worker as the manifest.
         if matches!(self.kind_plural.as_str(), "helm" | "helmhistory") {
-            match crate::helm::decode(obj) {
-                Some(rel) => {
-                    let lines = if rel.notes.is_empty() {
-                        vec!["<no notes>".to_string()]
-                    } else {
-                        rel.notes.lines().map(String::from).collect()
-                    };
-                    self.detail = Scrollable {
-                        title: format!("{} v{} — notes", rel.name, rel.revision),
-                        lines: lines.into(),
-                        ..Default::default()
-                    };
-                    self.mode = Mode::Detail;
-                }
-                None => self.flash_warn("could not decode this Helm release revision"),
-            }
+            self.spawn_document(target, "decoding Helm notes…", move || {
+                let rel = crate::helm::decode(&obj)
+                    .ok_or_else(|| "could not decode this Helm release revision".to_string())?;
+                let lines = if rel.notes.is_empty() {
+                    vec!["<no notes>".to_string()]
+                } else {
+                    rel.notes.lines().map(String::from).collect()
+                };
+                Ok((format!("{} v{} — notes", rel.name, rel.revision), lines))
+            });
             return;
         }
         let name = obj.metadata.name.clone().unwrap_or_default();
@@ -132,11 +131,12 @@ impl App {
         // The fallback needs the object as it is *now* — the selection may
         // change before the describe completes — but a describe that succeeds
         // never renders it, so carry the object and serialize only on failure.
-        let fallback = Arc::new(obj.clone());
+        let fallback = obj;
         let fallback_kind = self.kind.clone();
         let yaml_title = format!("{name} — YAML");
 
         let tx = self.tx.clone();
+        let workers = Arc::clone(&self.document_workers);
         let genr = self.generation;
         let mut argv = self.kubectl_base();
         argv.extend(["describe".to_string(), plural, name.clone()]);
@@ -154,6 +154,7 @@ impl App {
                 Ok(out) if out.status.success() => Msg::Detail {
                     generation: genr,
                     claim,
+                    target: Some(target.clone()),
                     title: format!("{name} — describe"),
                     lines: String::from_utf8_lossy(&out.stdout)
                         .lines()
@@ -163,24 +164,46 @@ impl App {
                 },
                 Ok(out) => {
                     let err = String::from_utf8_lossy(&out.stderr);
+                    let _permit = match workers.acquire_owned().await {
+                        Ok(permit) => permit,
+                        Err(_) => return,
+                    };
+                    let lines = tokio::task::spawn_blocking(move || {
+                        stamped_yaml(&fallback, fallback_kind.as_ref())
+                    })
+                    .await
+                    .unwrap_or_else(|e| vec![format!("# document preparation failed: {e}")]);
                     Msg::Detail {
                         generation: genr,
                         claim,
+                        target: Some(target.clone()),
                         title: yaml_title,
-                        lines: stamped_yaml(&fallback, fallback_kind.as_ref()),
+                        lines,
                         warn: Some(format!(
                             "kubectl describe failed ({}); showing YAML",
                             err.lines().next().unwrap_or("error")
                         )),
                     }
                 }
-                Err(_) => Msg::Detail {
-                    generation: genr,
-                    claim,
-                    title: yaml_title,
-                    lines: stamped_yaml(&fallback, fallback_kind.as_ref()),
-                    warn: Some("kubectl not found; showing YAML".into()),
-                },
+                Err(_) => {
+                    let _permit = match workers.acquire_owned().await {
+                        Ok(permit) => permit,
+                        Err(_) => return,
+                    };
+                    let lines = tokio::task::spawn_blocking(move || {
+                        stamped_yaml(&fallback, fallback_kind.as_ref())
+                    })
+                    .await
+                    .unwrap_or_else(|e| vec![format!("# document preparation failed: {e}")]);
+                    Msg::Detail {
+                        generation: genr,
+                        claim,
+                        target: Some(target),
+                        title: yaml_title,
+                        lines,
+                        warn: Some("kubectl not found; showing YAML".into()),
+                    }
+                }
             };
             let _ = tx.send(msg).await;
         });
@@ -197,36 +220,31 @@ impl App {
     /// watch saw, so "what just changed?" has an answer on GitOps clusters.
     pub fn open_diff(&mut self) {
         self.set_return_mode();
-        let Some(obj) = self.selected() else {
+        let Some(obj) = self.selected_shared() else {
             return;
         };
+        let target = document_target(&obj);
         let name = obj.metadata.name.clone().unwrap_or_default();
 
-        let last = obj
-            .metadata
-            .annotations
-            .as_ref()
-            .and_then(|a| a.get("kubectl.kubernetes.io/last-applied-configuration"))
-            .cloned();
+        let has_last_applied =
+            obj.metadata.annotations.as_ref().is_some_and(|a| {
+                a.contains_key("kubectl.kubernetes.io/last-applied-configuration")
+            });
 
-        // The baseline side, still cheap: `last-applied` is one annotation,
-        // and a session revision is only cloned, not yet rendered.
-        let (baseline, baseline_label) = match last {
-            Some(last_json) => (Baseline::LastApplied(last_json), "last-applied"),
-            None => {
-                let key = row_key(&obj);
-                let Some(prev) = self.prev_revisions.get(&self.kind_plural, &key) else {
-                    self.flash_warn(
-                        "nothing to diff: no last-applied annotation, \
+        // Carry shared snapshots into the worker. In particular, do not clone
+        // a potentially multi-megabyte last-applied annotation on keypress.
+        let (baseline, baseline_label) = if has_last_applied {
+            (Baseline::LastApplied, "last-applied")
+        } else {
+            let key = row_key(&obj);
+            let Some(prev) = self.prev_revisions.shared(&self.kind_plural, &key) else {
+                self.flash_warn(
+                    "nothing to diff: no last-applied annotation, \
                          and no change seen this session",
-                    );
-                    return;
-                };
-                (
-                    Baseline::Previous(Box::new(prev.clone())),
-                    "session: previous",
-                )
-            }
+                );
+                return;
+            };
+            (Baseline::Previous(prev), "session: previous")
         };
         let title = format!("{name} — diff ({baseline_label} → live)");
 
@@ -255,19 +273,76 @@ impl App {
 
         let claim = self.claim_status(format!("diffing {name}…"));
         let tx = self.tx.clone();
+        let workers = Arc::clone(&self.document_workers);
         let genr = self.generation;
         let label = baseline_label.to_string();
-        tokio::task::spawn_blocking(move || {
-            let result = render_diff(baseline, obj, &label);
-            // The worker thread has no reactor, so hand the result back with
-            // the sender's blocking path rather than awaiting it.
-            let _ = tx.blocking_send(Msg::Diff {
-                generation: genr,
-                claim,
-                title,
-                result,
-            });
+        tokio::spawn(async move {
+            let Ok(_permit) = workers.acquire_owned().await else {
+                return;
+            };
+            let Ok(result) =
+                tokio::task::spawn_blocking(move || render_diff(baseline, obj, &label)).await
+            else {
+                return;
+            };
+            let _ = tx
+                .send(Msg::Diff {
+                    generation: genr,
+                    claim,
+                    target,
+                    title,
+                    result,
+                })
+                .await;
         });
+    }
+
+    /// Run document expansion in a bounded blocking worker and return it only
+    /// if the same selected object and status claim are still current.
+    pub(super) fn spawn_document<F>(&mut self, target: String, progress: impl Into<String>, job: F)
+    where
+        F: FnOnce() -> Result<(String, Vec<String>), String> + Send + 'static,
+    {
+        let claim = self.claim_status(progress);
+        let generation = self.generation;
+        let tx = self.tx.clone();
+        let workers = Arc::clone(&self.document_workers);
+        tokio::spawn(async move {
+            let Ok(_permit) = workers.acquire_owned().await else {
+                return;
+            };
+            let result = tokio::task::spawn_blocking(job).await;
+            let msg = match result {
+                Ok(Ok((title, lines))) => Msg::Detail {
+                    generation,
+                    claim,
+                    target: Some(target),
+                    title,
+                    lines,
+                    warn: None,
+                },
+                Ok(Err(message)) => Msg::Flash {
+                    generation,
+                    claim,
+                    message,
+                    err: true,
+                },
+                Err(e) => Msg::Flash {
+                    generation,
+                    claim,
+                    message: format!("document preparation failed: {e}"),
+                    err: true,
+                },
+            };
+            let _ = tx.send(msg).await;
+        });
+    }
+
+    pub(super) fn document_result_is_current(&self, claim: StatusClaim, target: &str) -> bool {
+        self.owns_status(claim)
+            && self
+                .selected_ref()
+                .is_some_and(|obj| document_target(obj) == target)
     }
 
     /// Live Events for the selected object, filtered by object UID when
@@ -475,23 +550,46 @@ fn stamped_yaml(obj: &DynamicObject, kind: Option<&Kind>) -> Vec<String> {
         .collect()
 }
 
+/// Stable identity for an asynchronous document request. Including the
+/// resource version prevents an old snapshot replacing a document after the
+/// selected row updates in place.
+pub(super) fn document_target(obj: &DynamicObject) -> String {
+    format!(
+        "{}@{}",
+        row_key(obj),
+        obj.metadata.resource_version.as_deref().unwrap_or_default()
+    )
+}
+
 /// What `d` compares the live object against, carried unrendered so the
 /// rendering can happen wherever the diff itself runs.
 pub(crate) enum Baseline {
-    /// The `last-applied-configuration` annotation, verbatim JSON.
-    LastApplied(String),
+    /// Read the `last-applied-configuration` annotation from the shared live
+    /// object only once document work has reached its execution context.
+    LastApplied,
     /// The previous revision this session's watch saw.
-    Previous(Box<DynamicObject>),
+    Previous(Arc<DynamicObject>),
 }
 
 impl Baseline {
-    fn render(self) -> String {
+    fn render(self, live: &DynamicObject) -> String {
         match self {
-            Baseline::LastApplied(json) => serde_json::from_str::<Value>(&json)
-                .ok()
+            Baseline::LastApplied => live
+                .metadata
+                .annotations
+                .as_ref()
+                .and_then(|a| a.get("kubectl.kubernetes.io/last-applied-configuration"))
+                .and_then(|json| serde_json::from_str::<Value>(json).ok())
                 .and_then(|v| serde_yaml::to_string(&v).ok())
-                .unwrap_or(json),
-            Baseline::Previous(obj) => diffable_yaml(*obj),
+                .unwrap_or_else(|| {
+                    live.metadata
+                        .annotations
+                        .as_ref()
+                        .and_then(|a| a.get("kubectl.kubernetes.io/last-applied-configuration"))
+                        .cloned()
+                        .unwrap_or_default()
+                }),
+            Baseline::Previous(obj) => diffable_yaml((*obj).clone()),
         }
     }
 }
@@ -501,11 +599,11 @@ impl Baseline {
 /// status line instead of an empty document.
 pub(crate) fn render_diff(
     baseline: Baseline,
-    live: DynamicObject,
+    live: Arc<DynamicObject>,
     label: &str,
 ) -> Result<Vec<String>, String> {
-    let baseline_yaml = baseline.render();
-    let lines = diff_document(&baseline_yaml, live);
+    let baseline_yaml = baseline.render(&live);
+    let lines = diff_document(&baseline_yaml, (*live).clone());
     if lines.iter().all(|l| l.starts_with(' ')) {
         return Err(label.to_string());
     }
@@ -530,13 +628,47 @@ const DIFF_INLINE_BUDGET: usize = 128 * 1024;
 fn diff_is_expensive(baseline: &Baseline, live: &DynamicObject) -> bool {
     let mut budget = DIFF_INLINE_BUDGET;
     let baseline_fits = match baseline {
-        Baseline::LastApplied(json) => {
-            budget = budget.saturating_sub(json.len());
+        Baseline::LastApplied => {
+            let len = live
+                .metadata
+                .annotations
+                .as_ref()
+                .and_then(|a| a.get("kubectl.kubernetes.io/last-applied-configuration"))
+                .map_or(0, String::len);
+            budget = budget.saturating_sub(len);
             budget > 0
         }
         Baseline::Previous(obj) => object_fits_in(obj, &mut budget),
     };
     !baseline_fits || !object_fits_in(live, &mut budget)
+}
+
+fn document_is_expensive(obj: &DynamicObject) -> bool {
+    let mut budget = DIFF_INLINE_BUDGET;
+    // `object_fits_in` models diff YAML, which deliberately strips these two
+    // fields. A plain YAML view keeps both, so account for the annotation and
+    // send any managed-fields document to the worker: one FieldsV1 tree can be
+    // arbitrarily larger than the rest of the object.
+    if obj
+        .metadata
+        .managed_fields
+        .as_ref()
+        .is_some_and(|fields| !fields.is_empty())
+    {
+        return true;
+    }
+    if let Some(last_applied) = obj
+        .metadata
+        .annotations
+        .as_ref()
+        .and_then(|a| a.get("kubectl.kubernetes.io/last-applied-configuration"))
+    {
+        budget = budget.saturating_sub(last_applied.len());
+        if budget == 0 {
+            return true;
+        }
+    }
+    !object_fits_in(obj, &mut budget)
 }
 
 /// Both halves of an object as `diffable_yaml` will render it.

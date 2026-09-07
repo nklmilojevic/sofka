@@ -33,6 +33,7 @@ impl App {
                 Ok(resp) => Msg::Detail {
                     generation: genr,
                     claim,
+                    target: None,
                     title: format!("can-i · {user} · namespace {ns}"),
                     lines: format_rules(resp.status, &ns),
                     warn: None,
@@ -40,6 +41,7 @@ impl App {
                 Err(e) => Msg::Detail {
                     generation: genr,
                     claim,
+                    target: None,
                     title: format!("can-i · namespace {ns}"),
                     lines: vec![format!("access review failed: {e}")],
                     warn: Some("could not review permissions".into()),

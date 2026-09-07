@@ -1,10 +1,13 @@
+use super::details::document_target;
 use super::*;
 
 impl App {
     // ----- drill-down ----------------------------------------------------
 
     pub(super) fn drill(&mut self) {
-        let Some(obj) = self.selected() else { return };
+        let Some(obj) = self.selected_shared() else {
+            return;
+        };
         let name = obj.metadata.name.clone().unwrap_or_default();
         let ns = obj.metadata.namespace.clone().unwrap_or_default();
 
@@ -40,7 +43,7 @@ impl App {
             "customresourcedefinitions" => self.drill_into_crd(&obj),
             // Helm: release -> every revision, revision -> its values.
             "helm" => self.drill_into_helm_history(&obj),
-            "helmhistory" => self.open_helm_values(&obj),
+            "helmhistory" => self.open_helm_values(obj),
             // A Flux HelmRelease bridges into the same native inspector:
             // enter opens the history of the Helm release it manages.
             "helmreleases" => self.drill_into_helmrelease(&obj),
@@ -179,19 +182,19 @@ impl App {
 
     /// Enter on a single revision (k9s: History view Enter -> Values): show
     /// the user-supplied value overrides for that revision.
-    pub(super) fn open_helm_values(&mut self, obj: &DynamicObject) {
+    pub(super) fn open_helm_values(&mut self, obj: Arc<DynamicObject>) {
         self.set_return_mode();
-        let Some(rel) = crate::helm::decode(obj) else {
-            self.flash_warn("could not decode this Helm release revision");
-            return;
-        };
-        let yaml = serde_yaml::to_string(&rel.config).unwrap_or_else(|e| format!("# error: {e}"));
-        self.detail = Scrollable {
-            title: format!("{} v{} — values", rel.name, rel.revision),
-            lines: yaml.lines().map(String::from).collect(),
-            ..Default::default()
-        };
-        self.mode = Mode::Detail;
+        let target = document_target(&obj);
+        self.spawn_document(target, "decoding Helm values…", move || {
+            let rel = crate::helm::decode(&obj)
+                .ok_or_else(|| "could not decode this Helm release revision".to_string())?;
+            let yaml =
+                serde_yaml::to_string(&rel.config).unwrap_or_else(|e| format!("# error: {e}"));
+            Ok((
+                format!("{} v{} — values", rel.name, rel.revision),
+                yaml.lines().map(String::from).collect(),
+            ))
+        });
     }
 
     /// Drill from a CustomResourceDefinition row into a listing of that CRD's

@@ -566,12 +566,18 @@ pub(super) struct LogStreamCtx {
     pub(super) setup: Option<Arc<tokio::sync::Semaphore>>,
 }
 
+#[derive(Clone)]
+pub(super) struct LogRun {
+    pub(super) queue: LogQueue,
+    pub(super) timestamps: bool,
+}
+
 pub(super) async fn forward_log_stream(
     api: Api<Pod>,
     pod: String,
     lp: LogParams,
     prefix: String,
-    tx: Sender<Msg>,
+    queue: LogQueue,
     ctx: LogStreamCtx,
 ) {
     use futures_util::{AsyncBufReadExt, TryStreamExt};
@@ -584,7 +590,7 @@ pub(super) async fn forward_log_stream(
     } = ctx;
 
     let stream = loop {
-        if flag.load(Ordering::SeqCst) != generation || tx.is_closed() {
+        if flag.load(Ordering::SeqCst) != generation || queue.is_closed() {
             return;
         }
         let attempt = {
@@ -607,23 +613,20 @@ pub(super) async fn forward_log_stream(
             {
                 tokio::select! {
                     _ = tokio::time::sleep(Duration::from_secs(1)) => {}
-                    _ = tx.closed() => return,
+                    _ = queue.closed() => return,
                 }
             }
             Err(e) => {
-                let _ = tx
-                    .send(Msg::LogLines {
-                        generation,
-                        lines: vec![format!("[error] {e}")],
-                    })
-                    .await;
+                let _ = queue.send(vec![format!("[error] {e}")]).await;
                 return;
             }
         }
     };
 
     let mut lines = stream.lines();
-    let mut batch = LogBatch::new();
+    let Some(mut batch) = queue.batch().await else {
+        return;
+    };
     let mut flush = tokio::time::interval(Duration::from_millis(LOG_BATCH_MS));
     flush.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
@@ -637,7 +640,7 @@ pub(super) async fn forward_log_stream(
                 match next {
                     Ok(Some(line)) => {
                         batch.push(&prefix, line);
-                        if batch.is_full() && !batch.flush(&tx, generation).await {
+                        if batch.is_full() && !batch.flush_and_renew(&queue).await {
                             break;
                         }
                     }
@@ -649,7 +652,7 @@ pub(super) async fn forward_log_stream(
                 }
             }
             _ = flush.tick(), if !batch.is_empty() => {
-                if !batch.flush(&tx, generation).await {
+                if !batch.flush_and_renew(&queue).await {
                     break;
                 }
             }
@@ -657,20 +660,126 @@ pub(super) async fn forward_log_stream(
     }
 
     if flag.load(Ordering::SeqCst) == generation {
-        let _ = batch.flush(&tx, generation).await;
+        let _ = batch.flush(&queue).await;
     }
 }
 
-pub(super) async fn send_log_batch(
-    tx: &Sender<Msg>,
-    generation: u64,
-    batch: &mut Vec<String>,
-) -> bool {
+pub(super) async fn send_log_batch(queue: &LogQueue, batch: &mut Vec<String>) -> bool {
     if batch.is_empty() {
         return true;
     }
-    let lines = std::mem::take(batch);
-    tx.send(Msg::LogLines { generation, lines }).await.is_ok()
+    queue.send(std::mem::take(batch)).await
+}
+
+/// Sender shared by every producer in one logs view. A semaphore reservation
+/// travels inside each queued message, so channel depth can no longer multiply
+/// large batches into an unaccounted memory spike.
+#[derive(Clone)]
+pub(super) struct LogQueue {
+    tx: Sender<Msg>,
+    generation: u64,
+    line_bytes: usize,
+    batch_bytes: usize,
+    batch_reservation: usize,
+    byte_budget: Option<Arc<tokio::sync::Semaphore>>,
+}
+
+impl LogQueue {
+    pub(super) fn new(
+        tx: Sender<Msg>,
+        generation: u64,
+        line_bytes: usize,
+        queue_bytes: usize,
+    ) -> Self {
+        let budget_bytes = queue_bytes.min(u32::MAX as usize);
+        let line_bytes = match (line_bytes, budget_bytes) {
+            (0, 0) => 0,
+            (0, queue) => queue,
+            (line, 0) => line,
+            (line, queue) => line.min(queue),
+        };
+        let batch_bytes = if budget_bytes == 0 {
+            LOG_BATCH_BYTES
+        } else {
+            LOG_BATCH_BYTES.min(budget_bytes)
+        };
+        let batch_reservation = batch_bytes
+            .saturating_add(line_bytes)
+            .saturating_add(256)
+            .min(budget_bytes)
+            .max(usize::from(budget_bytes > 0));
+        Self {
+            tx,
+            generation,
+            line_bytes,
+            batch_bytes,
+            batch_reservation,
+            byte_budget: (budget_bytes > 0)
+                .then(|| Arc::new(tokio::sync::Semaphore::new(budget_bytes))),
+        }
+    }
+
+    pub(super) async fn batch(&self) -> Option<LogBatch> {
+        let permit = match &self.byte_budget {
+            Some(budget) => Some(
+                Arc::clone(budget)
+                    .acquire_many_owned(self.batch_reservation as u32)
+                    .await
+                    .ok()?,
+            ),
+            None => None,
+        };
+        Some(LogBatch::with_permit(
+            self.line_bytes,
+            self.batch_bytes,
+            permit,
+        ))
+    }
+
+    pub(super) fn is_closed(&self) -> bool {
+        self.tx.is_closed()
+    }
+
+    pub(super) async fn closed(&self) {
+        self.tx.closed().await;
+    }
+
+    /// Send any number of input lines as bounded batches.
+    pub(super) async fn send(&self, lines: Vec<String>) -> bool {
+        let Some(mut batch) = self.batch().await else {
+            return false;
+        };
+        let mut lines = lines.into_iter().peekable();
+        while let Some(line) = lines.next() {
+            batch.push_raw(line);
+            if batch.is_full() {
+                if !batch.flush(self).await {
+                    return false;
+                }
+                if lines.peek().is_some() {
+                    let Some(next) = self.batch().await else {
+                        return false;
+                    };
+                    batch = next;
+                }
+            }
+        }
+        batch.flush(self).await
+    }
+
+    async fn send_batch(
+        &self,
+        lines: Vec<String>,
+        permit: Option<tokio::sync::OwnedSemaphorePermit>,
+    ) -> bool {
+        self.tx
+            .send(Msg::LogLines {
+                generation: self.generation,
+                lines: crate::store::QueuedLogLines::new(lines, permit),
+            })
+            .await
+            .is_ok()
+    }
 }
 
 /// Drive `lines` through the ingest batching, flushing whenever a batch fills
@@ -678,7 +787,7 @@ pub(super) async fn send_log_batch(
 /// batch count so the work cannot be optimized away.
 #[cfg(feature = "bench")]
 pub(crate) fn ingest_lines(prefix: &str, lines: impl IntoIterator<Item = String>) -> usize {
-    let mut batch = LogBatch::new();
+    let mut batch = LogBatch::new(0, LOG_BATCH_BYTES);
     let mut batches = 0usize;
     for line in lines {
         batch.push(prefix, line);
@@ -697,13 +806,28 @@ pub(crate) fn ingest_lines(prefix: &str, lines: impl IntoIterator<Item = String>
 pub(super) struct LogBatch {
     lines: Vec<String>,
     bytes: usize,
+    line_bytes: usize,
+    batch_bytes: usize,
+    permit: Option<tokio::sync::OwnedSemaphorePermit>,
 }
 
 impl LogBatch {
-    pub(super) fn new() -> Self {
+    #[cfg(any(test, feature = "bench"))]
+    pub(super) fn new(line_bytes: usize, batch_bytes: usize) -> Self {
+        Self::with_permit(line_bytes, batch_bytes, None)
+    }
+
+    fn with_permit(
+        line_bytes: usize,
+        batch_bytes: usize,
+        permit: Option<tokio::sync::OwnedSemaphorePermit>,
+    ) -> Self {
         Self {
             lines: Vec::with_capacity(LOG_BATCH_LINES),
             bytes: 0,
+            line_bytes,
+            batch_bytes,
+            permit,
         }
     }
 
@@ -713,20 +837,19 @@ impl LogBatch {
         // case: move the line the reader already allocated rather than
         // copying it into an identical new one.
         if prefix.is_empty() {
-            self.bytes += line.len();
-            self.lines.push(line);
+            self.push_raw(line);
             return;
         }
         let mut prefixed = String::with_capacity(prefix.len() + line.len());
         prefixed.push_str(prefix);
         prefixed.push_str(&line);
-        self.bytes += prefixed.len();
-        self.lines.push(prefixed);
+        self.push_raw(prefixed);
     }
 
     /// Add one line that is already complete (an error notice, a provider
     /// record that carried its own prefix).
     pub(super) fn push_raw(&mut self, line: String) {
+        let line = bound_log_line(line, self.line_bytes);
         self.bytes += line.len();
         self.lines.push(line);
     }
@@ -738,9 +861,18 @@ impl LogBatch {
         prefix: crate::providers::Prefix,
         timestamps: bool,
     ) {
-        let before = self.lines.len();
-        entry.render_into(&mut self.lines, prefix, timestamps);
-        self.bytes += self.lines[before..].iter().map(String::len).sum::<usize>();
+        let omitted = entry.render_while(prefix, timestamps, |line| {
+            if self.is_full() {
+                return false;
+            }
+            self.push_raw(line);
+            true
+        });
+        if omitted > 0 {
+            self.push_raw(format!(
+                "[truncated] {omitted} lines omitted from oversized provider record"
+            ));
+        }
     }
 
     pub(super) fn is_empty(&self) -> bool {
@@ -749,7 +881,7 @@ impl LogBatch {
 
     /// Whether this batch has reached either limit and should be handed off.
     pub(super) fn is_full(&self) -> bool {
-        self.lines.len() >= LOG_BATCH_LINES || self.bytes >= LOG_BATCH_BYTES
+        self.lines.len() >= LOG_BATCH_LINES || self.bytes >= self.batch_bytes
     }
 
     /// Hand the pending lines off, leaving an empty batch behind. The
@@ -761,13 +893,65 @@ impl LogBatch {
     }
 
     /// Send the pending lines. `false` once the UI is gone.
-    pub(super) async fn flush(&mut self, tx: &Sender<Msg>, generation: u64) -> bool {
+    pub(super) async fn flush(&mut self, queue: &LogQueue) -> bool {
         if self.lines.is_empty() {
             return true;
         }
         let lines = self.take();
-        tx.send(Msg::LogLines { generation, lines }).await.is_ok()
+        let permit = self.permit.take();
+        queue.send_batch(lines, permit).await
     }
+
+    /// Flush this reservation into the channel and obtain another before
+    /// reading more source data. The same semaphore therefore accounts for
+    /// both in-flight producer batches and queued messages.
+    pub(super) async fn flush_and_renew(&mut self, queue: &LogQueue) -> bool {
+        if !self.flush(queue).await {
+            return false;
+        }
+        let Some(next) = queue.batch().await else {
+            return false;
+        };
+        *self = next;
+        true
+    }
+}
+
+/// Normalize and cap a line before it can occupy a producer batch or channel
+/// slot. The UI repeats this defensively for synthetic/test messages.
+pub(super) fn bound_log_line(line: String, cap: usize) -> String {
+    let line = clean_log_line(line);
+    match cap {
+        0 => line,
+        cap if line.len() > cap => truncate_log_line(line, cap),
+        _ => line,
+    }
+}
+
+fn clean_log_line(line: String) -> String {
+    if !line.contains('\r') && !line.contains('\t') {
+        return line;
+    }
+    line.chars()
+        .filter_map(|c| match c {
+            '\r' => None,
+            '\t' => Some(' '),
+            c => Some(c),
+        })
+        .collect()
+}
+
+#[cold]
+#[inline(never)]
+fn truncate_log_line(mut line: String, cap: usize) -> String {
+    let mut end = cap;
+    while end > 0 && !line.is_char_boundary(end) {
+        end -= 1;
+    }
+    let dropped = line.len() - end;
+    line.truncate(end);
+    line.push_str(&format!("…[{dropped} bytes truncated]"));
+    line
 }
 
 /// The events document, maintained incrementally.

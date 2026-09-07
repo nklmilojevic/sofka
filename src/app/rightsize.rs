@@ -63,6 +63,7 @@ impl App {
                             .send(Msg::Detail {
                                 generation: genr,
                                 claim,
+                                target: None,
                                 title,
                                 lines: vec![format!("no metrics backend: {e}")],
                                 warn: Some("right-size needs Prometheus/VictoriaMetrics".into()),
@@ -99,6 +100,7 @@ impl App {
                 .send(Msg::Detail {
                     generation: genr,
                     claim,
+                    target: None,
                     title,
                     lines,
                     warn,

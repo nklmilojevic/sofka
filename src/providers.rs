@@ -216,6 +216,21 @@ impl LogEntry {
     /// ingest loop appends straight into the pending batch instead of taking
     /// a fresh `Vec` per entry, and each line is sized before it is filled.
     pub fn render_into(&self, out: &mut Vec<String>, prefix: Prefix, timestamps: bool) {
+        self.render_while(prefix, timestamps, |line| {
+            out.push(line);
+            true
+        });
+    }
+
+    /// Render until `emit` returns false, returning how many physical lines
+    /// were omitted. Log ingestion uses this to stop a single multiline
+    /// record at its batch byte ceiling without first allocating every line.
+    pub fn render_while(
+        &self,
+        prefix: Prefix,
+        timestamps: bool,
+        mut emit: impl FnMut(String) -> bool,
+    ) -> usize {
         // An empty `String` does not allocate, so the untagged case — the
         // common one — still costs nothing here.
         let tag = match prefix {
@@ -234,7 +249,8 @@ impl LogEntry {
             ""
         };
         let stamp = usize::from(!ts.is_empty());
-        for part in self.msg.split('\n') {
+        let mut parts = self.msg.split('\n');
+        while let Some(part) = parts.next() {
             let mut line = String::with_capacity(tag.len() + ts.len() + stamp + part.len());
             line.push_str(&tag);
             if !ts.is_empty() {
@@ -242,8 +258,11 @@ impl LogEntry {
                 line.push(' ');
             }
             line.push_str(part);
-            out.push(line);
+            if !emit(line) {
+                return 1 + parts.count();
+            }
         }
+        0
     }
 }
 

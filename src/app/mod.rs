@@ -63,6 +63,11 @@ const LOG_BATCH_MS: u64 = 50;
 /// can be sitting in the channel at once.
 const LOG_BATCH_BYTES: usize = 256 * 1024;
 
+/// Document rendering can expand compressed Helm releases and Secrets by a
+/// large factor. Keep that CPU/memory work off the input thread without
+/// letting repeated keypresses grow the blocking pool without bound.
+const DOCUMENT_WORKER_CONCURRENCY: usize = 4;
+
 /// How many of an aggregate view's streams may be dialling at once. The cap on
 /// how many stay open is `[logs] max_streams`; this bounds the thundering herd
 /// of opening them.
@@ -1288,10 +1293,8 @@ impl PrevRevisions {
         }
     }
 
-    pub(super) fn get(&self, kind: &str, key: &str) -> Option<&DynamicObject> {
-        self.map
-            .get(&(kind.to_string(), key.to_string()))
-            .map(Arc::as_ref)
+    pub(super) fn shared(&self, kind: &str, key: &str) -> Option<Arc<DynamicObject>> {
+        self.map.get(&(kind.to_string(), key.to_string())).cloned()
     }
 }
 
@@ -1880,6 +1883,12 @@ pub struct App {
     /// Notifier subprocesses still running, so a slow notifier cannot pile up
     /// behind a burst.
     pub(super) notifier_procs: Vec<tokio::process::Child>,
+    /// One notifier delivery retained while all process slots are occupied.
+    /// Later deliveries merge into its count rather than disappearing.
+    pub(super) pending_notifier: Option<String>,
+    pub(super) merged_notifier: usize,
+    /// Shared cap for YAML/diff/Helm/Secret preparation jobs.
+    pub(super) document_workers: Arc<tokio::sync::Semaphore>,
     /// Previous object revisions for the session diff (`:diff` fallback).
     pub(super) prev_revisions: PrevRevisions,
     /// The `(plural, row_key)` the timeline view is showing, and its cursor.
@@ -2102,6 +2111,9 @@ impl App {
             pending_notify: Vec::new(),
             dropped_notify: 0,
             notifier_procs: Vec::new(),
+            pending_notifier: None,
+            merged_notifier: 0,
+            document_workers: Arc::new(tokio::sync::Semaphore::new(DOCUMENT_WORKER_CONCURRENCY)),
             prev_revisions: PrevRevisions::default(),
             timeline_target: None,
             timeline_state: ListState::default(),

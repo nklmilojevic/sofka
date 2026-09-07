@@ -1,4 +1,5 @@
 use super::logs::{log_stream_targets, partial_coverage_notice};
+use super::notify::notification_summary;
 use super::*;
 use crate::store::row_key;
 use serde_json::json;
@@ -2548,7 +2549,7 @@ async fn logs_pause_freezes_and_survives_new_lines() {
     for i in 0..500 {
         app.handle_msg(Msg::LogLines {
             generation: app.log_gen,
-            lines: vec![format!("line {i}")],
+            lines: vec![format!("line {i}")].into(),
         });
     }
     assert!(!app.logs.follow);
@@ -3487,6 +3488,7 @@ async fn detail_arrival_clears_progress_flash() {
     app.handle_msg(Msg::Detail {
         generation: app.generation,
         claim,
+        target: None,
         title: "web — describe".into(),
         lines: vec!["Name: web".into()],
         warn: None,
@@ -3499,6 +3501,7 @@ async fn detail_arrival_clears_progress_flash() {
     app.handle_msg(Msg::Detail {
         generation: app.generation,
         claim,
+        target: None,
         title: "web — YAML".into(),
         lines: vec!["kind: Pod".into()],
         warn: Some("kubectl not found; showing YAML".into()),
@@ -3690,6 +3693,7 @@ async fn a_finished_report_only_clears_its_own_status_claim() {
     app.handle_msg(Msg::Detail {
         generation: app.generation,
         claim: describe_claim,
+        target: None,
         title: "web — describe".into(),
         lines: vec!["Name: web".into()],
         warn: None,
@@ -3794,6 +3798,7 @@ async fn an_action_failure_is_never_silently_dropped() {
     app.handle_msg(Msg::Detail {
         generation: app.generation,
         claim: describe,
+        target: None,
         title: "api — describe".into(),
         lines: vec!["Name: api".into()],
         warn: None,
@@ -5197,7 +5202,7 @@ async fn log_lines_expand_tabs_and_strip_cr() {
     // Caddy-style tab-separated line (level would be color-wrapped too).
     app.handle_msg(Msg::LogLines {
         generation: app.log_gen,
-        lines: vec!["2026/07/01 09:21:14.062\tINFO\tProvisioning WAF\r".into()],
+        lines: vec!["2026/07/01 09:21:14.062\tINFO\tProvisioning WAF\r".into()].into(),
     });
     assert_eq!(
         app.logs.view.lines.back().unwrap(),
@@ -5212,7 +5217,7 @@ async fn log_buffer_is_capped() {
     for i in 0..(cap + 50) {
         app.handle_msg(Msg::LogLines {
             generation: app.log_gen,
-            lines: vec![format!("line {i}")],
+            lines: vec![format!("line {i}")].into(),
         });
     }
     assert_eq!(app.logs.view.lines.len(), cap);
@@ -5232,7 +5237,8 @@ async fn filtered_log_text_respects_active_filter() {
             "api request started".into(),
             "worker finished".into(),
             "api request finished".into(),
-        ],
+        ]
+        .into(),
     });
 
     assert_eq!(
@@ -5256,7 +5262,8 @@ async fn log_filter_supports_regex_inverse_and_clear() {
             "GET /api 200".into(),
             "GET /healthz 200".into(),
             "GET /api 503".into(),
-        ],
+        ]
+        .into(),
     });
 
     // Regex: keep 5xx.
@@ -6543,7 +6550,7 @@ async fn paused_logs_do_not_trim_below_paused_cap() {
     let lg = app.log_gen;
     let line = |i: usize| Msg::LogLines {
         generation: lg,
-        lines: vec![format!("line {i}")],
+        lines: vec![format!("line {i}")].into(),
     };
     // Well past the *following* cap, but under the paused cap: nothing is
     // dropped, so a frozen view never appears to resume scrolling.
@@ -6569,12 +6576,12 @@ async fn paused_trim_shifts_scroll_in_display_rows() {
     // The first line is the one trimmed later: 25 chars → 3 rows at width 10.
     app.handle_msg(Msg::LogLines {
         generation: lg,
-        lines: vec!["a".repeat(25)],
+        lines: vec!["a".repeat(25)].into(),
     });
     for i in 1..MAX_LOG_LINES_PAUSED {
         app.handle_msg(Msg::LogLines {
             generation: lg,
-            lines: vec![format!("l{i}")],
+            lines: vec![format!("l{i}")].into(),
         });
     }
     assert_eq!(app.logs.view.lines.len(), MAX_LOG_LINES_PAUSED);
@@ -6583,7 +6590,7 @@ async fn paused_trim_shifts_scroll_in_display_rows() {
     // and the frozen anchor shifts by its 3 display rows, not by 1 line.
     app.handle_msg(Msg::LogLines {
         generation: lg,
-        lines: vec!["x".into()],
+        lines: vec!["x".into()].into(),
     });
     assert_eq!(app.logs.view.lines.len(), MAX_LOG_LINES_PAUSED);
     assert_eq!(app.logs.view.scroll, 497);
@@ -7410,7 +7417,7 @@ async fn helm_enter_drills_into_release_history() {
 
 #[tokio::test]
 async fn helm_history_shows_every_revision_and_enter_shows_values() {
-    let (mut app, _rx) = test_app();
+    let (mut app, mut rx) = test_app();
     app.open_helm_releases();
     apply(
         &mut app,
@@ -7435,6 +7442,8 @@ async fn helm_history_shows_every_revision_and_enter_shows_values() {
 
     app.table_state.select(Some(0));
     app.handle_key(press(KeyCode::Enter)).unwrap();
+    assert_eq!(app.mode, Mode::Table, "Helm decoding stays off input");
+    app.handle_msg(next_detail_msg(&mut rx).await);
     assert_eq!(app.mode, Mode::Detail);
     assert!(app.detail.title.contains("values"), "{}", app.detail.title);
     assert!(app.detail.lines.iter().any(|l| l.contains("replicaCount")));
@@ -7442,7 +7451,7 @@ async fn helm_history_shows_every_revision_and_enter_shows_values() {
 
 #[tokio::test]
 async fn helm_describe_shows_notes_and_yaml_key_shows_manifest() {
-    let (mut app, _rx) = test_app();
+    let (mut app, mut rx) = test_app();
     app.open_helm_releases();
     apply(
         &mut app,
@@ -7451,6 +7460,8 @@ async fn helm_describe_shows_notes_and_yaml_key_shows_manifest() {
     app.table_state.select(Some(0));
 
     app.handle_key(press(KeyCode::Char('d'))).unwrap();
+    assert_eq!(app.mode, Mode::Table, "Helm decoding stays off input");
+    app.handle_msg(next_detail_msg(&mut rx).await);
     assert_eq!(app.mode, Mode::Detail);
     assert!(app.detail.title.contains("notes"), "{}", app.detail.title);
     assert!(
@@ -7462,6 +7473,7 @@ async fn helm_describe_shows_notes_and_yaml_key_shows_manifest() {
 
     app.mode = Mode::Table;
     app.handle_key(press(KeyCode::Char('y'))).unwrap();
+    app.handle_msg(next_detail_msg(&mut rx).await);
     assert_eq!(app.mode, Mode::Detail);
     assert!(
         app.detail.title.contains("manifest"),
@@ -8845,7 +8857,7 @@ async fn x_decodes_secret_data_into_detail_view() {
     use base64::Engine;
     use base64::engine::general_purpose::STANDARD as BASE64;
 
-    let (mut app, _rx) = test_app();
+    let (mut app, mut rx) = test_app();
     app.switch_kind("secrets");
     apply(
         &mut app,
@@ -8860,6 +8872,8 @@ async fn x_decodes_secret_data_into_detail_view() {
     );
     app.table_state.select(Some(0));
     app.handle_key(press(KeyCode::Char('x'))).unwrap();
+    assert_eq!(app.mode, Mode::Table, "Secret decoding stays off input");
+    app.handle_msg(next_detail_msg(&mut rx).await);
 
     assert_eq!(app.mode, Mode::Detail);
     assert!(app.detail.title.contains("decoded"), "{}", app.detail.title);
@@ -8885,7 +8899,7 @@ async fn x_decodes_secret_from_inside_the_detail_view() {
     use base64::Engine;
     use base64::engine::general_purpose::STANDARD as BASE64;
 
-    let (mut app, _rx) = test_app();
+    let (mut app, mut rx) = test_app();
     app.switch_kind("secrets");
     apply(
         &mut app,
@@ -8902,6 +8916,7 @@ async fn x_decodes_secret_from_inside_the_detail_view() {
     assert_eq!(app.mode, Mode::Detail);
     assert!(app.detail.title.contains("YAML"), "{}", app.detail.title);
     app.handle_key(press(KeyCode::Char('x'))).unwrap();
+    app.handle_msg(next_detail_msg(&mut rx).await);
     assert_eq!(app.mode, Mode::Detail);
     assert!(app.detail.title.contains("decoded"), "{}", app.detail.title);
     let lines: Vec<&str> = app.detail.lines.iter().map(String::as_str).collect();
@@ -10204,7 +10219,7 @@ async fn provider_logs_from_pod_row() {
     // Provider lines ride the shared log channel/generation.
     app.handle_msg(Msg::LogLines {
         generation: app.log_gen,
-        lines: vec!["hello from vlogs".into()],
+        lines: vec!["hello from vlogs".into()].into(),
     });
     assert_eq!(app.logs.view.lines[0], "hello from vlogs");
 
@@ -11959,6 +11974,66 @@ async fn object_yaml_matches_a_stamped_clone() {
     assert_eq!(app.object_yaml(&typed), direct);
 }
 
+/// Large YAML follows the real `y` binding and arrives from the bounded
+/// document worker rather than being serialized in the key handler.
+#[tokio::test]
+async fn a_large_yaml_document_is_rendered_off_the_ui_thread() {
+    let (mut app, mut rx) = test_app();
+    app.switch_kind("pods");
+    apply(
+        &mut app,
+        json!({
+            "apiVersion": "v1", "kind": "Pod",
+            "metadata": {
+                "name": "large", "namespace": "default", "resourceVersion": "1",
+                "annotations": {
+                    "kubectl.kubernetes.io/last-applied-configuration": "x".repeat(200 * 1024)
+                }
+            }
+        }),
+    );
+    app.table_state.select(Some(0));
+
+    app.handle_key(press(KeyCode::Char('y'))).unwrap();
+    assert_eq!(app.mode, Mode::Table);
+    assert!(app.flash.contains("rendering large"), "{}", app.flash);
+
+    app.handle_msg(next_detail_msg(&mut rx).await);
+    assert_eq!(app.mode, Mode::Detail);
+    assert_eq!(app.detail.title, "large — YAML");
+    assert!(
+        app.detail
+            .lines
+            .iter()
+            .any(|line| line.contains("last-applied-configuration:"))
+    );
+}
+
+/// A completed worker must not replace the view after the selected object
+/// changes while its snapshot is being rendered.
+#[tokio::test]
+async fn a_stale_document_result_is_ignored_after_selection_moves() {
+    let (mut app, mut rx) = test_app();
+    app.switch_kind("pods");
+    for name in ["a", "b"] {
+        apply(
+            &mut app,
+            json!({
+                "apiVersion": "v1", "kind": "Pod",
+                "metadata": {"name": name, "namespace": "default", "resourceVersion": "1"},
+                "spec": {"payload": "x".repeat(200 * 1024)}
+            }),
+        );
+    }
+    app.table_state.select(Some(0));
+    app.handle_key(press(KeyCode::Char('y'))).unwrap();
+    app.table_state.select(Some(1));
+
+    app.handle_msg(next_detail_msg(&mut rx).await);
+    assert_eq!(app.mode, Mode::Table);
+    assert!(app.status_claim.is_none());
+}
+
 /// A large object's diff leaves the UI thread: `open_diff` returns without
 /// switching mode, and the document arrives as a message instead.
 #[tokio::test]
@@ -11981,7 +12056,7 @@ async fn a_large_diff_is_rendered_off_the_ui_thread() {
     apply(&mut app, dep("2", 3, &filler));
     app.table_state.select(Some(0));
 
-    app.open_diff();
+    plugin_command(&mut app, "diff");
     assert_ne!(
         app.mode,
         Mode::Diff,
@@ -12041,7 +12116,7 @@ async fn a_large_unchanged_diff_stays_on_the_current_view() {
     );
     app.table_state.select(Some(0));
 
-    app.open_diff();
+    plugin_command(&mut app, "diff");
     let msg = next_diff_msg(&mut rx).await;
     app.handle_msg(msg);
     assert_ne!(app.mode, Mode::Diff);
@@ -12061,6 +12136,18 @@ async fn next_diff_msg(rx: &mut Receiver<Msg>) -> Msg {
     }
 }
 
+async fn next_detail_msg(rx: &mut Receiver<Msg>) -> Msg {
+    loop {
+        let msg = tokio::time::timeout(Duration::from_secs(10), rx.recv())
+            .await
+            .expect("the document worker must report back")
+            .expect("channel open");
+        if matches!(msg, Msg::Detail { .. }) {
+            return msg;
+        }
+    }
+}
+
 /// A single oversized record is cut to the configured ceiling and says so, so
 /// a truncated payload is never mistaken for a malformed one.
 #[tokio::test]
@@ -12071,7 +12158,7 @@ async fn an_oversized_log_line_is_truncated_visibly() {
     let dropped = payload.len() - 64;
     app.handle_msg(Msg::LogLines {
         generation: app.log_gen,
-        lines: vec![payload.clone(), "short line".into()],
+        lines: vec![payload.clone(), "short line".into()].into(),
     });
 
     let kept = app.logs.view.lines.front().unwrap();
@@ -12084,6 +12171,64 @@ async fn an_oversized_log_line_is_truncated_visibly() {
     assert_eq!(app.logs.view.lines.back().unwrap(), "short line");
 }
 
+/// The reservation stays with a queued message, so another producer cannot
+/// exceed the shared byte budget before the UI consumes the first batch.
+#[tokio::test]
+async fn queued_log_batches_are_bounded_by_bytes() {
+    let (tx, mut rx) = mpsc::channel(8);
+    let queue = LogQueue::new(tx, 7, 64, 128);
+    assert!(queue.send(vec!["x".repeat(4096)]).await);
+    let first = rx.recv().await.expect("first batch");
+
+    let second_queue = queue.clone();
+    let mut second = tokio::spawn(async move { second_queue.send(vec!["y".repeat(4096)]).await });
+    assert!(
+        tokio::time::timeout(Duration::from_millis(20), &mut second)
+            .await
+            .is_err(),
+        "the second batch must wait for the first byte reservation"
+    );
+
+    drop(first);
+    assert!(
+        tokio::time::timeout(Duration::from_secs(1), second)
+            .await
+            .expect("the released budget wakes the producer")
+            .expect("producer task")
+    );
+    let Msg::LogLines { lines, .. } = rx.recv().await.expect("second batch") else {
+        unreachable!()
+    };
+    let lines = lines.into_lines();
+    assert!(lines[0].contains("bytes truncated"), "{}", lines[0]);
+}
+
+/// One provider record may contain thousands of physical lines. Rendering it
+/// stops at the batch ceiling and leaves an explicit omission marker.
+#[test]
+fn a_multiline_provider_record_cannot_overfill_one_batch() {
+    let entry = crate::providers::LogEntry {
+        time: String::new(),
+        nanos: None,
+        msg: std::iter::repeat_n("x".repeat(2048), 100)
+            .collect::<Vec<_>>()
+            .join("\n"),
+        pod: "web".into(),
+        container: "app".into(),
+    };
+    let mut batch = LogBatch::new(1024, 4 * 1024);
+    batch.render_entry(&entry, crate::providers::Prefix::PodContainer, false);
+    let lines = batch.take();
+    let bytes = lines.iter().map(String::len).sum::<usize>();
+    assert!(bytes < 6 * 1024, "{bytes}");
+    assert!(
+        lines
+            .last()
+            .is_some_and(|line| line.contains("lines omitted")),
+        "{lines:?}"
+    );
+}
+
 /// Truncation never splits a character in half.
 #[tokio::test]
 async fn truncation_respects_character_boundaries() {
@@ -12092,7 +12237,7 @@ async fn truncation_respects_character_boundaries() {
     // Each 'é' is two bytes, so a 10-byte cut lands mid-character.
     app.handle_msg(Msg::LogLines {
         generation: app.log_gen,
-        lines: vec!["xéééééééééé".into()],
+        lines: vec!["xéééééééééé".into()].into(),
     });
     let kept = app.logs.view.lines.back().unwrap();
     assert!(kept.starts_with("xéééé"), "{kept}");
@@ -12110,7 +12255,7 @@ async fn the_log_buffer_is_capped_by_bytes_as_well_as_lines() {
     for i in 0..16 {
         app.handle_msg(Msg::LogLines {
             generation: app.log_gen,
-            lines: vec![format!("{i:04}{big}")],
+            lines: vec![format!("{i:04}{big}")].into(),
         });
     }
 
@@ -12141,7 +12286,7 @@ async fn the_byte_ceiling_applies_while_paused() {
     for _ in 0..16 {
         app.handle_msg(Msg::LogLines {
             generation: app.log_gen,
-            lines: vec![big.clone()],
+            lines: vec![big.clone()].into(),
         });
     }
     let retained: usize = app.logs.view.lines.iter().map(String::len).sum();
@@ -12155,7 +12300,7 @@ async fn clearing_the_log_buffer_resets_the_byte_count() {
     let (mut app, _rx) = test_app();
     app.handle_msg(Msg::LogLines {
         generation: app.log_gen,
-        lines: bs_lines(200),
+        lines: bs_lines(200).into(),
     });
     assert!(app.logs.retained_bytes > 0);
     app.logs.clear_buffer();
@@ -12163,7 +12308,7 @@ async fn clearing_the_log_buffer_resets_the_byte_count() {
 
     app.handle_msg(Msg::LogLines {
         generation: app.log_gen,
-        lines: vec!["one".into()],
+        lines: vec!["one".into()].into(),
     });
     assert_eq!(app.logs.retained_bytes, 3);
 }
@@ -12228,23 +12373,23 @@ async fn the_notify_budget_bounds_the_watches_a_session_holds() {
 
     for i in 0..2 {
         app.table_state.select(Some(i));
-        assert!(app.run_palette_command("notify"));
+        plugin_command(&mut app, "notify");
     }
     assert_eq!(app.notify_tasks.len(), 2);
 
     // The third is refused, with a message that says how to proceed.
     app.table_state.select(Some(2));
-    assert!(app.run_palette_command("notify"));
+    plugin_command(&mut app, "notify");
     assert_eq!(app.notify_tasks.len(), 2);
     assert!(app.flash.contains("notify budget"), "{}", app.flash);
     assert!(app.flash_err);
 
     // Turning one off frees a slot.
     app.table_state.select(Some(0));
-    assert!(app.run_palette_command("notify"));
+    plugin_command(&mut app, "notify");
     assert_eq!(app.notify_tasks.len(), 1);
     app.table_state.select(Some(2));
-    assert!(app.run_palette_command("notify"));
+    plugin_command(&mut app, "notify");
     assert_eq!(app.notify_tasks.len(), 2);
 }
 
@@ -12264,10 +12409,44 @@ async fn an_overlong_notification_burst_reports_what_it_dropped() {
 
     let text = app.take_notification().unwrap();
     assert!(text.chars().count() <= 300, "{text}");
+    assert!(text.ends_with("(+468 more)"), "{text}");
     assert_eq!(app.dropped_notify, 0, "the count is consumed with the text");
     // A later burst that fits reports no overflow.
     app.handle_msg(Msg::Notify("pod/a: deleted".into()));
     assert_eq!(app.take_notification().as_deref(), Some("pod/a: deleted"));
+}
+
+/// Saturating the process cap retains one bounded delivery and counts later
+/// ones until a slot becomes available.
+#[tokio::test]
+async fn a_slow_notifier_does_not_silently_drop_deliveries() {
+    let (mut app, _rx) = test_app();
+    app.notify_cfg.command = vec!["true".into()];
+    for _ in 0..MAX_NOTIFIER_PROCS {
+        app.notifier_procs.push(spawn_test_child("sleep", "30"));
+    }
+
+    app.run_notify_command("pod/a: ready");
+    app.run_notify_command("pod/b: ready");
+    assert_eq!(app.pending_notifier.as_deref(), Some("pod/a: ready"));
+    assert_eq!(app.merged_notifier, 1);
+    assert!(
+        notification_summary(
+            app.pending_notifier.as_deref().unwrap(),
+            app.merged_notifier
+        )
+        .ends_with("(+1 more)")
+    );
+
+    let mut children = std::mem::take(&mut app.notifier_procs);
+    for child in &mut children {
+        child.start_kill().expect("kill test notifier");
+        child.wait().await.expect("reap test notifier");
+    }
+    app.retry_notify_command();
+    assert!(app.pending_notifier.is_none());
+    assert_eq!(app.merged_notifier, 0);
+    assert_eq!(app.notifier_procs.len(), 1);
 }
 
 /// The document built one event at a time is exactly the one a single render

@@ -155,13 +155,10 @@ impl App {
         if self.pending_notify.is_empty() {
             return None;
         }
-        let mut text = self.pending_notify.join(" · ");
+        let text = self.pending_notify.join(" · ");
         self.pending_notify.clear();
-        if self.dropped_notify > 0 {
-            text.push_str(&format!(" · (+{} more)", self.dropped_notify));
-            self.dropped_notify = 0;
-        }
-        Some(crate::text::ellipsize(&text, 300))
+        let dropped = std::mem::take(&mut self.dropped_notify);
+        Some(notification_summary(&text, dropped))
     }
 
     /// Deliver one `:notify` event through the notifier subprocess, when one
@@ -170,28 +167,66 @@ impl App {
     /// sequences. Fire-and-forget with nulled stdio; a notifier that can't
     /// even start is worth one warning, not a broken TUI.
     pub fn run_notify_command(&mut self, text: &str) {
-        let Some(argv) = notification_command(&self.notify_cfg, in_herdr_pane(), text) else {
+        if notification_command(&self.notify_cfg, in_herdr_pane(), text).is_none() {
             return;
-        };
-        // A slow notifier must not accumulate processes behind a burst. Reap
-        // the finished ones first; if the rest are still at the limit, skip
-        // this delivery — the flash and the bell already fired, and the merged
-        // text will carry the next one anyway.
+        }
+        if self.pending_notifier.is_some() {
+            self.merged_notifier = self.merged_notifier.saturating_add(1);
+        } else {
+            self.pending_notifier = Some(text.to_string());
+        }
+        self.retry_notify_command();
+    }
+
+    /// Reap notifier subprocesses and deliver the retained summary as soon as
+    /// one slot is free. Called on quiet frames too, so a saturated burst does
+    /// not need another state change to make progress.
+    pub fn retry_notify_command(&mut self) {
         self.notifier_procs
             .retain_mut(|child| !matches!(child.try_wait(), Ok(Some(_)) | Err(_)));
         if self.notifier_procs.len() >= MAX_NOTIFIER_PROCS {
             return;
         }
+        let Some(pending) = self.pending_notifier.as_deref() else {
+            return;
+        };
+        let text = notification_summary(pending, self.merged_notifier);
+        let Some(argv) = notification_command(&self.notify_cfg, in_herdr_pane(), &text) else {
+            self.pending_notifier = None;
+            self.merged_notifier = 0;
+            return;
+        };
         let mut cmd = tokio::process::Command::new(&argv[0]);
         cmd.args(&argv[1..])
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null());
         match cmd.spawn() {
-            Ok(child) => self.notifier_procs.push(child),
-            Err(e) => self.flash_warn(&format!("notify command '{}' failed: {e}", argv[0])),
+            Ok(child) => {
+                self.notifier_procs.push(child);
+                self.pending_notifier = None;
+                self.merged_notifier = 0;
+            }
+            Err(e) => {
+                self.pending_notifier = None;
+                self.merged_notifier = 0;
+                self.flash_warn(&format!("notify command '{}' failed: {e}", argv[0]));
+            }
         }
     }
+}
+
+/// Ellipsize the detail while reserving room for the overflow count. Appending
+/// the suffix after a full 300-character message made the count itself the
+/// first thing truncation removed.
+pub(super) fn notification_summary(text: &str, merged: usize) -> String {
+    const LIMIT: usize = 300;
+    if merged == 0 {
+        return crate::text::ellipsize(text, LIMIT);
+    }
+    let suffix = format!(" · (+{merged} more)");
+    let detail_limit = LIMIT.saturating_sub(suffix.chars().count());
+    format!("{}{}", crate::text::ellipsize(text, detail_limit), suffix)
 }
 
 /// Whether this process runs inside a herdr pane (herdr exports its socket

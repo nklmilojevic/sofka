@@ -755,6 +755,8 @@ async fn run(
                 if let Some(text) = app.take_notification() {
                     app.run_notify_command(&text);
                     ring_notification(&text, &app.notify_cfg);
+                } else {
+                    app.retry_notify_command();
                 }
                 terminal.draw(|f| ui::draw(f, app))?;
                 dirty = false;

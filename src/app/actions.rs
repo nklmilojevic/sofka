@@ -2280,7 +2280,7 @@ impl App {
         claim
     }
 
-    fn owns_status(&self, claim: StatusClaim) -> bool {
+    pub(super) fn owns_status(&self, claim: StatusClaim) -> bool {
         self.status_claim
             .as_ref()
             .is_some_and(|owner| owner.claim == claim && self.flash == owner.text)
