@@ -3300,7 +3300,7 @@ fn views_with_drill(key: &str, kind: &str, labels: &str) -> HashMap<String, crat
             drill: Some(crate::config::DrillConfig {
                 kind: kind.to_string(),
                 labels: Some(labels.to_string()),
-                fields: None,
+                ..Default::default()
             }),
             ..Default::default()
         },
@@ -3504,8 +3504,8 @@ async fn enter_on_externalsecret_opens_the_secret_it_writes() {
         crate::config::ViewConfig {
             drill: Some(crate::config::DrillConfig {
                 kind: "secrets".to_string(),
-                labels: None,
                 fields: Some("metadata.name={name}".to_string()),
+                ..Default::default()
             }),
             ..Default::default()
         },
@@ -3544,6 +3544,7 @@ async fn builtin_drill_list_matches_the_enter_arms() {
                     kind: "secrets".to_string(),
                     labels: None,
                     fields: None,
+                    filter: None,
                 }),
                 ..Default::default()
             },
@@ -3562,6 +3563,137 @@ async fn builtin_drill_list_matches_the_enter_arms() {
             "{plural} honoured a configured drill"
         );
     }
+}
+
+/// A PVC names its VolumeAttributesClass in `spec`, not in metadata, and a
+/// class knows nothing about its claims: the pair needs a pointer placeholder
+/// one way and a client-side filter the other.
+fn register_pvc_and_vac(app: &mut App) {
+    app.cluster
+        .register_kind("", "PersistentVolumeClaim", "persistentvolumeclaims", true);
+    app.cluster.register_kind(
+        "storage.k8s.io",
+        "VolumeAttributesClass",
+        "volumeattributesclasses",
+        false,
+    );
+}
+
+fn pvc_to_vac_views() -> HashMap<String, crate::views::View> {
+    views_for(
+        "persistentvolumeclaims",
+        crate::config::ViewConfig {
+            drill: Some(crate::config::DrillConfig {
+                kind: "volumeattributesclasses".to_string(),
+                fields: Some("metadata.name={/spec/volumeAttributesClassName}".to_string()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        },
+    )
+}
+
+#[tokio::test]
+async fn enter_on_pvc_opens_its_volume_attributes_class() {
+    let (mut app, _rx) = test_app();
+    register_pvc_and_vac(&mut app);
+    app.user_views = pvc_to_vac_views();
+    app.switch_kind("persistentvolumeclaims");
+    apply(
+        &mut app,
+        json!({"apiVersion": "v1", "kind": "PersistentVolumeClaim",
+               "metadata": {"name": "data-db-0", "namespace": "db"},
+               "spec": {"volumeAttributesClassName": "gold"}}),
+    );
+    app.table_state.select(Some(0));
+
+    app.handle_key(press(KeyCode::Enter)).unwrap();
+    assert_eq!(app.kind_plural, "volumeattributesclasses");
+    assert_eq!(app.fields.as_deref(), Some("metadata.name=gold"));
+    assert_eq!(
+        app.namespace, "",
+        "cluster-scoped target ignores the row's namespace"
+    );
+    assert_eq!(
+        app.scope_label.as_deref(),
+        Some("persistentvolumeclaim/data-db-0")
+    );
+    assert!(!app.flash_err);
+
+    app.handle_key(press(KeyCode::Esc)).unwrap();
+    assert_eq!(app.kind_plural, "persistentvolumeclaims");
+}
+
+#[tokio::test]
+async fn pvc_without_a_class_warns_instead_of_drilling() {
+    let (mut app, _rx) = test_app();
+    register_pvc_and_vac(&mut app);
+    app.user_views = pvc_to_vac_views();
+    app.switch_kind("persistentvolumeclaims");
+    apply(
+        &mut app,
+        json!({"apiVersion": "v1", "kind": "PersistentVolumeClaim",
+               "metadata": {"name": "scratch", "namespace": "db"},
+               "spec": {"storageClassName": "standard"}}),
+    );
+    app.table_state.select(Some(0));
+
+    app.handle_key(press(KeyCode::Enter)).unwrap();
+    assert_eq!(app.kind_plural, "persistentvolumeclaims");
+    assert!(app.stack.is_empty());
+    assert!(app.flash_err);
+    assert_eq!(
+        app.flash,
+        "/spec/volumeAttributesClassName is empty on scratch"
+    );
+}
+
+#[tokio::test]
+async fn enter_on_volume_attributes_class_filters_its_claims() {
+    let (mut app, _rx) = test_app();
+    register_pvc_and_vac(&mut app);
+    app.user_views = views_for(
+        "volumeattributesclasses",
+        crate::config::ViewConfig {
+            drill: Some(crate::config::DrillConfig {
+                kind: "persistentvolumeclaims".to_string(),
+                // No label points back and the apiserver indexes no PVC
+                // field but name/namespace: filter client-side by the name.
+                filter: Some("{name}".to_string()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        },
+    );
+    app.switch_kind("volumeattributesclasses");
+    apply(
+        &mut app,
+        json!({"apiVersion": "storage.k8s.io/v1", "kind": "VolumeAttributesClass",
+               "metadata": {"name": "gold"}, "driverName": "ebs.csi.aws.com"}),
+    );
+    app.table_state.select(Some(0));
+
+    app.handle_key(press(KeyCode::Enter)).unwrap();
+    assert_eq!(app.kind_plural, "persistentvolumeclaims");
+    assert_eq!(
+        app.namespace, "",
+        "a cluster-scoped row opens the target across namespaces"
+    );
+    assert_eq!((app.labels.as_deref(), app.fields.as_deref()), (None, None));
+    assert_eq!(app.filter, "gold");
+    assert_eq!(
+        app.scope_label.as_deref(),
+        Some("volumeattributesclass/gold")
+    );
+    assert!(!app.flash_err);
+
+    // `esc` behaves as it does for any filter: the first press clears it,
+    // widening to every claim; the second pops back to the classes.
+    app.handle_key(press(KeyCode::Esc)).unwrap();
+    assert_eq!(app.kind_plural, "persistentvolumeclaims");
+    assert_eq!(app.filter, "");
+    app.handle_key(press(KeyCode::Esc)).unwrap();
+    assert_eq!(app.kind_plural, "volumeattributesclasses");
 }
 
 #[tokio::test]
@@ -3597,7 +3729,7 @@ async fn configured_drill_wins_over_node_on_enter_but_o_still_jumps() {
             drill: Some(crate::config::DrillConfig {
                 kind: "secrets".to_string(),
                 labels: Some("cert={name}".to_string()),
-                fields: None,
+                ..Default::default()
             }),
             ..Default::default()
         },

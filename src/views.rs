@@ -85,40 +85,77 @@ pub struct View {
     pub drill: Option<Drill>,
 }
 
-/// A configured drill-down: `enter` on a row opens `kind`, scoped by the
-/// selectors `labels` and `fields` yield for that row.
+/// A configured drill-down: `enter` on a row opens `kind`, scoped by what
+/// `labels`, `fields`, and `filter` yield for that row.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Drill {
     /// Target kind as the user named it (alias, plural, or kind); resolved
     /// against the cluster when the drill happens.
     pub kind: String,
-    /// Label selector template with `{name}` / `{namespace}` placeholders.
+    /// Label selector template — see [`fill_placeholders`] for the tokens.
     pub labels: Option<String>,
     /// Field selector template, same placeholders.
     pub fields: Option<String>,
+    /// Row filter applied after landing (the `/` key's syntax), same
+    /// placeholders. For a target no server-side selector can express — the
+    /// apiserver indexes few fields, and not every relationship is labelled.
+    pub filter: Option<String>,
+}
+
+/// A [`Drill`]'s templates filled in for one row.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct DrillTarget {
+    pub labels: Option<String>,
+    pub fields: Option<String>,
+    pub filter: Option<String>,
 }
 
 impl Drill {
-    /// The label selector for one row: placeholders filled from its metadata.
-    pub fn labels_for(&self, obj: &DynamicObject) -> Option<String> {
-        self.labels.as_deref().map(|t| fill_placeholders(t, obj))
-    }
-
-    /// The field selector for one row, likewise.
-    pub fn fields_for(&self, obj: &DynamicObject) -> Option<String> {
-        self.fields.as_deref().map(|t| fill_placeholders(t, obj))
+    /// Fill every template from the row. Fails, with a message fit for the
+    /// status line, when a pointer placeholder finds nothing usable — the row
+    /// then has nowhere to drill to, and saying why beats an empty list.
+    pub fn resolve(&self, obj: &DynamicObject) -> Result<DrillTarget, String> {
+        let fill = |t: &Option<String>| t.as_deref().map(|t| fill_placeholders(t, obj)).transpose();
+        Ok(DrillTarget {
+            labels: fill(&self.labels)?,
+            fields: fill(&self.fields)?,
+            filter: fill(&self.filter)?,
+        })
     }
 }
 
-fn fill_placeholders(template: &str, obj: &DynamicObject) -> String {
+/// Fill a drill template's `{…}` tokens from a row: `{name}` and
+/// `{namespace}` from its metadata, and `{/json/pointer}` from anywhere in
+/// the object via [`extract`] — which must land on a non-empty string, since
+/// a selector or filter has nowhere to put anything else.
+fn fill_placeholders(template: &str, obj: &DynamicObject) -> Result<String, String> {
     let name = obj.metadata.name.as_deref().unwrap_or_default();
     let namespace = obj.metadata.namespace.as_deref().unwrap_or_default();
-    template
-        .replace("{name}", name)
-        .replace("{namespace}", namespace)
+    let mut out = String::with_capacity(template.len());
+    let mut rest = template;
+    while let Some(start) = rest.find('{') {
+        let after = &rest[start + 1..];
+        let Some(end) = after.find('}') else { break };
+        out.push_str(&rest[..start]);
+        match &after[..end] {
+            "name" => out.push_str(name),
+            "namespace" => out.push_str(namespace),
+            pointer => match extract(obj, pointer) {
+                Some(Value::String(s)) if !s.is_empty() => out.push_str(&s),
+                Some(Value::String(_)) | None => {
+                    return Err(format!("{pointer} is empty on {name}"));
+                }
+                Some(_) => return Err(format!("{pointer} on {name} is not a string")),
+            },
+        }
+        rest = &after[end + 1..];
+    }
+    out.push_str(rest);
+    Ok(out)
 }
 
-/// The placeholders a drill's `labels` template may use.
+/// The named placeholders a drill template may use; any `{/…}` token is a
+/// JSON Pointer into the row and is accepted too.
 const DRILL_PLACEHOLDERS: &[&str] = &["name", "namespace"];
 
 /// Kinds whose `enter` has a built-in drill-down (the arms of `App::drill`),
@@ -149,7 +186,8 @@ fn key_plural(key: &str) -> &str {
     key.rsplit('/').next().unwrap_or(key)
 }
 
-/// The `{…}` tokens in a template that aren't in [`DRILL_PLACEHOLDERS`].
+/// The `{…}` tokens in a template that are neither in [`DRILL_PLACEHOLDERS`]
+/// nor a JSON Pointer.
 fn unknown_placeholders(template: &str) -> Vec<String> {
     let mut unknown = Vec::new();
     let mut rest = template;
@@ -157,7 +195,7 @@ fn unknown_placeholders(template: &str) -> Vec<String> {
         let after = &rest[start + 1..];
         let Some(end) = after.find('}') else { break };
         let token = &after[..end];
-        if !DRILL_PLACEHOLDERS.contains(&token) {
+        if !DRILL_PLACEHOLDERS.contains(&token) && !token.starts_with('/') {
             unknown.push(token.to_string());
         }
         rest = &after[end + 1..];
@@ -331,14 +369,26 @@ pub fn compile(
                 warnings.push(format!("views.\"{key}\": drill.kind is empty; ignored"));
                 return None;
             }
-            let labels = d.labels.as_deref().map(str::trim).filter(|l| !l.is_empty());
-            let fields = d.fields.as_deref().map(str::trim).filter(|f| !f.is_empty());
-            for (what, template) in [("labels", labels), ("fields", fields)] {
-                let unknown = template.map(unknown_placeholders).unwrap_or_default();
+            let clean = |t: &Option<String>| {
+                t.as_deref()
+                    .map(str::trim)
+                    .filter(|t| !t.is_empty())
+                    .map(str::to_string)
+            };
+            let (labels, fields, filter) = (clean(&d.labels), clean(&d.fields), clean(&d.filter));
+            for (what, template) in [
+                ("labels", &labels),
+                ("fields", &fields),
+                ("filter", &filter),
+            ] {
+                let unknown = template
+                    .as_deref()
+                    .map(unknown_placeholders)
+                    .unwrap_or_default();
                 if !unknown.is_empty() {
                     warnings.push(format!(
                         "views.\"{key}\": drill.{what} has unknown placeholder(s) {} \
-                         (only {{name}} and {{namespace}}); ignored",
+                         (only {{name}}, {{namespace}}, and {{/json/pointer}}); ignored",
                         unknown.join(", ")
                     ));
                     return None;
@@ -346,8 +396,9 @@ pub fn compile(
             }
             Some(Drill {
                 kind: kind.to_string(),
-                labels: labels.map(str::to_string),
-                fields: fields.map(str::to_string),
+                labels,
+                fields,
+                filter,
             })
         });
         views.insert(
@@ -1216,11 +1267,12 @@ mod tests {
         let drill = drill_for(&views, &pools).expect("drill configured");
         assert_eq!(drill.kind, "nodeclaims");
         let pool = obj(json!({"metadata": {"name": "default"}}));
+        let target = drill.resolve(&pool).unwrap();
         assert_eq!(
-            drill.labels_for(&pool).as_deref(),
+            target.labels.as_deref(),
             Some("karpenter.sh/nodepool=default")
         );
-        assert_eq!(drill.fields_for(&pool), None);
+        assert_eq!((target.fields, target.filter), (None, None));
         // A target that needs no selector is allowed.
         let (views, warnings) = compile_toml(
             r#"
@@ -1229,7 +1281,69 @@ mod tests {
             "#,
         );
         assert!(warnings.is_empty(), "{warnings:?}");
-        assert_eq!(drill_for(&views, &pools).unwrap().labels_for(&pool), None);
+        assert_eq!(
+            drill_for(&views, &pools).unwrap().resolve(&pool).unwrap(),
+            DrillTarget::default()
+        );
+    }
+
+    #[test]
+    fn drill_pointer_placeholders_read_the_row() {
+        let (views, warnings) = compile_toml(
+            r#"
+            [views.persistentvolumeclaims]
+            drill = { kind = "volumeattributesclasses", fields = "metadata.name={/spec/volumeAttributesClassName}" }
+
+            [views.volumeattributesclasses]
+            drill = { kind = "persistentvolumeclaims", filter = "{name}" }
+            "#,
+        );
+        assert!(warnings.is_empty(), "{warnings:?}");
+        let pvc_drill = views["persistentvolumeclaims"].drill.as_ref().unwrap();
+        let pvc = obj(json!({
+            "metadata": {"name": "data", "namespace": "db"},
+            "spec": {"volumeAttributesClassName": "gold", "resources": {}}
+        }));
+        assert_eq!(
+            pvc_drill.resolve(&pvc).unwrap().fields.as_deref(),
+            Some("metadata.name=gold")
+        );
+        // A pointer that finds nothing, or something other than a string, is
+        // a message for the status line — not an empty or bogus selector.
+        let unset = obj(json!({"metadata": {"name": "scratch"}, "spec": {}}));
+        assert_eq!(
+            pvc_drill.resolve(&unset).unwrap_err(),
+            "/spec/volumeAttributesClassName is empty on scratch"
+        );
+        let (views, _) = compile_toml(
+            r#"
+            [views.persistentvolumeclaims]
+            drill = { kind = "volumeattributesclasses", fields = "metadata.name={/spec/resources}" }
+            "#,
+        );
+        assert_eq!(
+            views["persistentvolumeclaims"]
+                .drill
+                .as_ref()
+                .unwrap()
+                .resolve(&pvc)
+                .unwrap_err(),
+            "/spec/resources on data is not a string"
+        );
+        // `filter` fills the same way, and metadata pointers work like `path`.
+        let (views, warnings) = compile_toml(
+            r#"
+            [views.volumeattributesclasses]
+            drill = { kind = "persistentvolumeclaims", filter = "{name} {/metadata/name}" }
+            "#,
+        );
+        assert!(warnings.is_empty(), "{warnings:?}");
+        let vac_drill = views["volumeattributesclasses"].drill.as_ref().unwrap();
+        let vac = obj(json!({"metadata": {"name": "gold"}}));
+        assert_eq!(
+            vac_drill.resolve(&vac).unwrap().filter.as_deref(),
+            Some("gold gold")
+        );
     }
 
     #[test]
@@ -1277,14 +1391,16 @@ mod tests {
         );
         let drill = views["externalsecrets"].drill.as_ref().unwrap();
         let es = obj(json!({"metadata": {"name": "db-creds", "namespace": "shop"}}));
+        let target = drill.resolve(&es).unwrap();
         assert_eq!(
-            drill.fields_for(&es).as_deref(),
+            target.fields.as_deref(),
             Some("metadata.name=db-creds,metadata.namespace=shop")
         );
-        assert_eq!(drill.labels_for(&es), None);
+        assert_eq!(target.labels, None);
         assert_eq!(views["widgets"].drill, None);
         assert_eq!(warnings.len(), 1, "{warnings:?}");
         assert!(warnings[0].contains("drill.fields"), "{}", warnings[0]);
+        assert!(warnings[0].contains("{/json/pointer}"), "{}", warnings[0]);
     }
 
     #[test]

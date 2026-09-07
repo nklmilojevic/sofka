@@ -75,16 +75,34 @@ impl App {
     /// Drill from a row into the kind its view's `drill` names, scoped by the
     /// selector the row fills in — a NodePool into its NodeClaims, say.
     fn drill_configured(&mut self, obj: &DynamicObject, drill: &crate::views::Drill) {
+        let target = match drill.resolve(obj) {
+            Ok(target) => target,
+            Err(why) => {
+                self.flash_warn(&why);
+                return;
+            }
+        };
         let name = obj.metadata.name.clone().unwrap_or_default();
         let ns = obj.metadata.namespace.clone().unwrap_or_default();
-        let scope = format!("{}/{name}", trim_s(&self.kind_plural));
-        self.drill_to(
-            &drill.kind,
-            ns,
-            drill.labels_for(obj),
-            drill.fields_for(obj),
-            scope,
-        );
+        // The kind name is the singular; `trim_s` would leave `-es` plurals
+        // (volumeattributesclasses, ingresses) one letter off.
+        let singular = self
+            .kind
+            .as_ref()
+            .map(|k| k.ar.kind.to_lowercase())
+            .unwrap_or_else(|| trim_s(&self.kind_plural).to_string());
+        let scope = format!("{singular}/{name}");
+        if !self.drill_to(&drill.kind, ns, target.labels, target.fields, scope) {
+            return;
+        }
+        // The client-side filter goes on after landing, the way a bookmark's
+        // does: `drill_to` cleared the filter along with the rest of the view.
+        if let Some(filter) = target.filter {
+            self.filter = filter;
+            self.sync_filter_selectors();
+            self.invalidate_rows();
+            self.table_state.select(Some(0));
+        }
     }
 
     pub(super) fn drop_owner_scope(&mut self) {
@@ -282,7 +300,8 @@ impl App {
 
     /// Push the current view and open `kind` (alias, plural, or kind name)
     /// under the given selectors — the shared tail of every drill that lands
-    /// on a list. A cluster-scoped target ignores `ns`.
+    /// on a list. A cluster-scoped target ignores `ns`. False when the kind
+    /// doesn't resolve; the view is then untouched and a warning is up.
     pub(super) fn drill_to(
         &mut self,
         kind: &str,
@@ -290,10 +309,10 @@ impl App {
         labels: Option<String>,
         fields: Option<String>,
         scope: String,
-    ) {
+    ) -> bool {
         let Some(target) = self.cluster.resolve(kind) else {
             self.flash_warn(&format!("{kind} kind unavailable"));
-            return;
+            return false;
         };
         let plural = target.ar.plural.to_lowercase();
         self.push_frame();
@@ -310,6 +329,7 @@ impl App {
         self.flash = format!("↳ drilled into {plural}");
         self.flash_err = false;
         self.start_watch();
+        true
     }
 
     /// Scope the nodes list to one node by name — the shared tail of every

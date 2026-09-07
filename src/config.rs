@@ -740,8 +740,8 @@ pub struct ViewConfig {
 }
 
 /// The `drill` of a [`ViewConfig`]: `enter` on a row of this kind opens
-/// `kind`, filtered by `labels` and/or `fields` with `{name}` and
-/// `{namespace}` filled in from the row.
+/// `kind`, scoped by `labels`, `fields`, and/or `filter`, with `{name}`,
+/// `{namespace}`, and any `{/json/pointer}` filled in from the row.
 ///
 /// ```toml
 /// [views."karpenter.sh/v1/nodepools"]
@@ -749,6 +749,9 @@ pub struct ViewConfig {
 ///
 /// [views.externalsecrets]
 /// drill = { kind = "secrets", fields = "metadata.name={name}" }
+///
+/// [views.persistentvolumeclaims]
+/// drill = { kind = "volumeattributesclasses", fields = "metadata.name={/spec/volumeAttributesClassName}" }
 /// ```
 #[derive(Debug, Default, Clone, Deserialize)]
 #[serde(default)]
@@ -759,6 +762,9 @@ pub struct DrillConfig {
     pub labels: Option<String>,
     /// Field selector template, same placeholders (e.g. `metadata.name={name}`).
     pub fields: Option<String>,
+    /// Row filter applied after landing, in the `/` key's syntax, same
+    /// placeholders — for a target no server-side selector can express.
+    pub filter: Option<String>,
 }
 
 /// One column of a [`ViewConfig`]. Everything is optional at parse time so a

@@ -118,8 +118,10 @@ list; a pointer that lands on something other than a string warns that the
 pointer is wrong.
 
 **A row selects other objects** - `drill` names the kind `enter` should open and
-how to scope it: a label selector (`labels`), a field selector (`fields`), or
-both, with `{name}` and `{namespace}` filled in from the row:
+how to scope it: a label selector (`labels`), a field selector (`fields`), a
+client-side row filter (`filter`, the `/` key's syntax), or any mix. Templates
+take `{name}` and `{namespace}` from the row's metadata and `{/json/pointer}`
+from anywhere in the object:
 
 ```toml
 # children carry the parent's name in a label
@@ -129,15 +131,28 @@ drill = { kind = "nodeclaims", labels = "karpenter.sh/nodepool={name}" }
 # the target is a single object with a known name and nothing labelling it back
 [views.externalsecrets]
 drill = { kind = "secrets", fields = "metadata.name={name}" }
+
+# the target's name sits in the row's spec
+[views.persistentvolumeclaims]
+drill = { kind = "volumeattributesclasses", fields = "metadata.name={/spec/volumeAttributesClassName}" }
+
+# nothing server-side expresses the relationship: filter the rows after landing
+[views.volumeattributesclasses]
+drill = { kind = "persistentvolumeclaims", filter = "{name}" }
 ```
 
 Prefer `labels` when the target carries a label pointing back at the row -
 that's how most operators mark what they own. Use `fields` when it doesn't:
 `metadata.name` and `metadata.namespace` are selectable on every kind, other
-fields only where the apiserver indexes them. `kind` is anything `:` accepts
-(alias, plural, or kind) and is resolved when you press `enter`, so an unknown
-kind warns and stays put. A namespaced target opens in the row's namespace; a
-cluster-scoped one ignores it.
+fields only where the apiserver indexes them. When neither applies, `filter`
+narrows the list in the TUI instead, matching text in the visible columns
+(give the target view a column for the field if it has none); as with any
+filter, the first `esc` clears it to show the whole list and the second comes
+back. A pointer placeholder must land on a non-empty string; a row where it
+doesn't warns and stays put. `kind` is anything `:` accepts (alias, plural, or kind) and is
+resolved when you press `enter`, so an unknown kind warns and stays put. A
+namespaced target opens in the row's namespace; a cluster-scoped one ignores
+it.
 
 Kinds with a built-in drill-down keep it - a `drill` on pods won't replace the
 container picker, and `:config` warns that the stanza is ignored. When a view
