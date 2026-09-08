@@ -28,6 +28,7 @@ pub mod helm;
 pub mod journal;
 pub mod k8s;
 pub mod keys;
+pub mod kubeconfigs;
 mod legacy_tls;
 pub mod logfilter;
 pub mod nsmem;

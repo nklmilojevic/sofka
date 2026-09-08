@@ -164,6 +164,8 @@ impl App {
                 let request = speaks_protocol.then(|| {
                     let mut request = serde_json::json!({
                         "schema_version": 1, "context": self.cluster.kubectl_context(),
+                        "kubeconfig": self.cluster.kubectl_kubeconfig()
+                            .map(|p| p.to_string_lossy().into_owned()),
                         "cluster": cluster, "namespace": ns, "resource": res,
                         "name": name, "filter": filter, "inputs": inputs, "forward": null
                     });

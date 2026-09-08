@@ -45,6 +45,17 @@ fn alt(code: KeyCode) -> KeyEvent {
     KeyEvent::new(code, KeyModifiers::ALT)
 }
 
+/// Switcher rows as the labels they render, for comparing against a plain
+/// list of names.
+fn ctx_labels(entries: &[crate::kubeconfigs::Entry]) -> Vec<String> {
+    entries.iter().map(|e| e.label.clone()).collect()
+}
+
+/// Fleet membership as plain context names.
+fn fleet_names(ids: &[crate::kubeconfigs::ClusterId]) -> Vec<String> {
+    ids.iter().map(|id| id.context.clone()).collect()
+}
+
 /// A stand-in API server for the nodes view's pod counter: the *watch* is
 /// refused, the plain *list* succeeds. That is the RBAC shape — `list` granted,
 /// `watch` not — the poll fallback exists for. Records every request path.
@@ -8909,17 +8920,18 @@ async fn stale_async_picker_results_are_dropped() {
     });
     assert_eq!(app.ns_list, vec!["<all>".to_string()]);
 
-    app.ctx_list = vec!["test".into()];
+    app.ctx_list = vec![crate::kubeconfigs::Entry::named("test")];
     app.handle_msg(Msg::Contexts {
         generation: stale,
-        list: vec!["stale-context".into()],
+        list: vec![crate::kubeconfigs::Entry::named("stale-context")],
+        warnings: Vec::new(),
     });
-    assert_eq!(app.ctx_list, vec!["test".to_string()]);
+    assert_eq!(ctx_labels(&app.ctx_list), vec!["test".to_string()]);
 
     let flash = app.flash.clone();
     app.handle_msg(Msg::ContextSwitched {
         generation: stale,
-        name: "old-context".into(),
+        id: crate::kubeconfigs::ClusterId::new("old-context"),
         result: Err("old failure".into()),
     });
     assert_eq!(app.flash, flash);
@@ -8930,9 +8942,16 @@ async fn context_list_result_selects_current_context() {
     let (mut app, _rx) = test_app();
     app.handle_msg(Msg::Contexts {
         generation: app.generation,
-        list: vec!["prod".into(), "test".into()],
+        list: vec![
+            crate::kubeconfigs::Entry::named("prod"),
+            crate::kubeconfigs::Entry::named("test"),
+        ],
+        warnings: Vec::new(),
     });
-    assert_eq!(app.ctx_list, vec!["prod".to_string(), "test".to_string()]);
+    assert_eq!(
+        ctx_labels(&app.ctx_list),
+        vec!["prod".to_string(), "test".to_string()]
+    );
     assert_eq!(app.ctx_state.selected(), Some(1));
 }
 
@@ -8942,7 +8961,12 @@ async fn context_picker_typing_filters_and_backspace_widens() {
     app.mode = Mode::Contexts;
     app.handle_msg(Msg::Contexts {
         generation: app.generation,
-        list: vec!["dev".into(), "prod".into(), "test".into()],
+        list: vec![
+            crate::kubeconfigs::Entry::named("dev"),
+            crate::kubeconfigs::Entry::named("prod"),
+            crate::kubeconfigs::Entry::named("test"),
+        ],
+        warnings: Vec::new(),
     });
 
     app.handle_key(press(KeyCode::Char('k'))).unwrap();
@@ -8954,19 +8978,22 @@ async fn context_picker_typing_filters_and_backspace_widens() {
     app.handle_key(press(KeyCode::Char('p'))).unwrap();
     assert!(app.ctx_filtering);
     assert_eq!(app.ctx_filter, "p");
-    assert_eq!(app.filtered_contexts().to_vec(), vec!["prod".to_string()]);
+    assert_eq!(
+        ctx_labels(&app.filtered_contexts()),
+        vec!["prod".to_string()]
+    );
     assert_eq!(app.ctx_state.selected(), Some(0));
 
     app.handle_key(press(KeyCode::Backspace)).unwrap();
     assert!(app.ctx_filter.is_empty());
     assert_eq!(
-        app.filtered_contexts().to_vec(),
+        ctx_labels(&app.filtered_contexts()),
         vec!["dev".to_string(), "prod".to_string(), "test".to_string()]
     );
     assert_eq!(app.ctx_state.selected(), Some(0));
 
     app.handle_key(press(KeyCode::Char('z'))).unwrap();
-    assert!(app.filtered_contexts().to_vec().is_empty());
+    assert!(ctx_labels(&app.filtered_contexts()).is_empty());
     assert_eq!(app.ctx_state.selected(), None);
     app.handle_key(press(KeyCode::Backspace)).unwrap();
     assert_eq!(app.ctx_state.selected(), Some(0));
@@ -9049,7 +9076,11 @@ async fn context_picker_matches_a_name_with_a_combining_accent() {
     let accented = "pre\u{0301}prod";
     app.handle_msg(Msg::Contexts {
         generation: app.generation,
-        list: vec![accented.into(), "staging".into()],
+        list: vec![
+            crate::kubeconfigs::Entry::named(accented),
+            crate::kubeconfigs::Entry::named("staging"),
+        ],
+        warnings: Vec::new(),
     });
 
     for c in accented.chars() {
@@ -9057,7 +9088,7 @@ async fn context_picker_matches_a_name_with_a_combining_accent() {
     }
     assert_eq!(app.ctx_filter, accented);
     assert_eq!(
-        app.filtered_contexts().to_vec(),
+        ctx_labels(&app.filtered_contexts()),
         vec![accented.to_string()],
         "a context name must match itself"
     );
@@ -9068,7 +9099,7 @@ async fn context_picker_matches_a_name_with_a_combining_accent() {
     }
     assert_eq!(app.ctx_filter, "pre\u{0301}");
     assert_eq!(
-        app.filtered_contexts().to_vec(),
+        ctx_labels(&app.filtered_contexts()),
         vec![accented.to_string()],
         "a prefix ending at the accent must still match"
     );
@@ -9080,12 +9111,17 @@ async fn context_picker_enter_switches_to_filtered_selection() {
     app.mode = Mode::Contexts;
     app.handle_msg(Msg::Contexts {
         generation: app.generation,
-        list: vec!["prod-east".into(), "prod-west".into(), "test".into()],
+        list: vec![
+            crate::kubeconfigs::Entry::named("prod-east"),
+            crate::kubeconfigs::Entry::named("prod-west"),
+            crate::kubeconfigs::Entry::named("test"),
+        ],
+        warnings: Vec::new(),
     });
 
     app.handle_key(press(KeyCode::Char('p'))).unwrap();
     assert_eq!(
-        app.filtered_contexts().to_vec(),
+        ctx_labels(&app.filtered_contexts()),
         vec!["prod-east".to_string(), "prod-west".to_string()]
     );
     app.handle_key(press(KeyCode::Down)).unwrap();
@@ -9104,7 +9140,11 @@ async fn context_picker_esc_while_typing_cancels_filter() {
     app.mode = Mode::Contexts;
     app.handle_msg(Msg::Contexts {
         generation: app.generation,
-        list: vec!["dev".into(), "test".into()],
+        list: vec![
+            crate::kubeconfigs::Entry::named("dev"),
+            crate::kubeconfigs::Entry::named("test"),
+        ],
+        warnings: Vec::new(),
     });
     app.handle_key(press(KeyCode::Char('d'))).unwrap();
     app.handle_key(press(KeyCode::Esc)).unwrap();
@@ -9123,7 +9163,11 @@ async fn context_rename_prompt_opens_prefilled_and_returns_to_picker() {
     app.mode = Mode::Contexts;
     app.handle_msg(Msg::Contexts {
         generation: app.generation,
-        list: vec!["prod".into(), "test".into()],
+        list: vec![
+            crate::kubeconfigs::Entry::named("prod"),
+            crate::kubeconfigs::Entry::named("test"),
+        ],
+        warnings: Vec::new(),
     });
 
     app.key_contexts(press(KeyCode::Char('r')));
@@ -9144,7 +9188,11 @@ async fn context_rename_to_existing_name_warns() {
     app.mode = Mode::Contexts;
     app.handle_msg(Msg::Contexts {
         generation: app.generation,
-        list: vec!["prod".into(), "test".into()],
+        list: vec![
+            crate::kubeconfigs::Entry::named("prod"),
+            crate::kubeconfigs::Entry::named("test"),
+        ],
+        warnings: Vec::new(),
     });
 
     app.key_contexts(press(KeyCode::Char('r')));
@@ -9161,9 +9209,16 @@ async fn context_renamed_updates_lists_and_current_context() {
     app.mode = Mode::Contexts;
     app.handle_msg(Msg::Contexts {
         generation: app.generation,
-        list: vec!["prod".into(), "test".into()],
+        list: vec![
+            crate::kubeconfigs::Entry::named("prod"),
+            crate::kubeconfigs::Entry::named("test"),
+        ],
+        warnings: Vec::new(),
     });
-    app.all_contexts = vec!["prod".into(), "test".into()];
+    app.all_contexts = vec![
+        crate::kubeconfigs::Entry::named("prod"),
+        crate::kubeconfigs::Entry::named("test"),
+    ];
     app.note_recent_namespace("shop");
 
     let claim = app.claim_status("renaming test → staging…");
@@ -9175,11 +9230,11 @@ async fn context_renamed_updates_lists_and_current_context() {
         result: Ok(()),
     });
     assert_eq!(
-        app.ctx_list,
+        ctx_labels(&app.ctx_list),
         vec!["prod".to_string(), "staging".to_string()]
     );
     assert_eq!(
-        app.all_contexts,
+        ctx_labels(&app.all_contexts),
         vec!["prod".to_string(), "staging".to_string()]
     );
     assert_eq!(
@@ -9213,7 +9268,7 @@ async fn context_renamed_updates_lists_and_current_context() {
     });
     assert!(app.flash_err);
     assert_eq!(
-        app.ctx_list,
+        ctx_labels(&app.ctx_list),
         vec!["prod".to_string(), "staging".to_string()]
     );
 }
@@ -9474,7 +9529,11 @@ async fn command_with_unlisted_namespace_is_freeform() {
 #[tokio::test]
 async fn command_completes_context_argument() {
     let (mut app, _rx) = test_app();
-    app.all_contexts = vec!["prod-eu".into(), "staging".into(), "dev".into()];
+    app.all_contexts = vec![
+        crate::kubeconfigs::Entry::named("prod-eu"),
+        crate::kubeconfigs::Entry::named("staging"),
+        crate::kubeconfigs::Entry::named("dev"),
+    ];
     app.handle_key(press(KeyCode::Char(':'))).unwrap();
     for c in "ctx prod".chars() {
         app.handle_key(press(KeyCode::Char(c))).unwrap();
@@ -9874,6 +9933,38 @@ async fn helm_r_key_opens_rollback_confirm_with_selected_revision() {
 async fn helm_base_pins_to_active_context() {
     let (app, _rx) = test_app();
     assert_eq!(app.helm_base(), vec!["helm", "--kube-context", "test"]);
+}
+
+#[tokio::test]
+async fn shell_outs_name_the_kubeconfig_a_context_came_from() {
+    let (mut app, _rx) = test_app();
+    // The default kubeconfig needs no file: kubectl resolves the same one.
+    assert_eq!(app.kubectl_base(), vec!["kubectl", "--context", "test"]);
+
+    // A context from an added kubeconfig does not exist in the file kubectl
+    // would read on its own, so `--context` alone fails with "context does
+    // not exist"; the file has to travel with it.
+    app.cluster.source = crate::kubeconfigs::Source::File("/tmp/work.yaml".into());
+    assert_eq!(
+        app.kubectl_base(),
+        vec![
+            "kubectl",
+            "--kubeconfig",
+            "/tmp/work.yaml",
+            "--context",
+            "test"
+        ]
+    );
+    assert_eq!(
+        app.helm_base(),
+        vec![
+            "helm",
+            "--kubeconfig",
+            "/tmp/work.yaml",
+            "--kube-context",
+            "test"
+        ]
+    );
 }
 
 #[tokio::test]
@@ -11045,7 +11136,7 @@ async fn failed_switch_while_disconnected_reopens_picker() {
 
     app.handle_msg(Msg::ContextSwitched {
         generation: app.generation,
-        name: "prod".into(),
+        id: crate::kubeconfigs::ClusterId::new("prod"),
         result: Err("connection refused".into()),
     });
     assert!(app.flash.contains("context switch failed"), "{}", app.flash);
@@ -11056,7 +11147,7 @@ async fn failed_switch_while_disconnected_reopens_picker() {
     app.mode = Mode::Table;
     app.handle_msg(Msg::ContextSwitched {
         generation: app.generation,
-        name: "prod".into(),
+        id: crate::kubeconfigs::ClusterId::new("prod"),
         result: Err("connection refused".into()),
     });
     assert_eq!(app.mode, Mode::Table);
@@ -12147,18 +12238,21 @@ async fn fleet_toggle_in_context_switcher_edits_marks() {
     };
 
     // Space on a non-member adds it after the config entries.
-    app.ctx_list = vec!["prod".into(), "staging".into()];
+    app.ctx_list = vec![
+        crate::kubeconfigs::Entry::named("prod"),
+        crate::kubeconfigs::Entry::named("staging"),
+    ];
     app.ctx_state.select(Some(1));
     app.mode = Mode::Contexts;
     app.key_contexts(press(KeyCode::Char(' ')));
-    assert_eq!(app.fleet_contexts(), vec!["prod", "staging"]);
-    assert!(app.is_fleet_context("staging"));
+    assert_eq!(fleet_names(&app.fleet_contexts()), vec!["prod", "staging"]);
+    assert!(app.is_fleet_context(&"staging".into()));
     assert!(app.flash.contains("fleet + staging"), "{}", app.flash);
     assert_eq!(app.mode, Mode::Contexts, "toggling stays in the switcher");
 
     // Space again removes it.
     app.key_contexts(press(KeyCode::Char(' ')));
-    assert_eq!(app.fleet_contexts(), vec!["prod"]);
+    assert_eq!(fleet_names(&app.fleet_contexts()), vec!["prod"]);
     assert!(app.flash.contains("fleet − staging"), "{}", app.flash);
 
     // A config-listed context can be masked out for the session too…
@@ -12167,7 +12261,7 @@ async fn fleet_toggle_in_context_switcher_edits_marks() {
     assert!(app.fleet_contexts().is_empty());
     // …and re-added.
     app.key_contexts(press(KeyCode::Char(' ')));
-    assert_eq!(app.fleet_contexts(), vec!["prod"]);
+    assert_eq!(fleet_names(&app.fleet_contexts()), vec!["prod"]);
 }
 
 #[tokio::test]
@@ -12178,7 +12272,7 @@ async fn fleet_opens_with_marked_contexts_only() {
     app.open_fleet();
     assert_eq!(app.mode, Mode::Fleet);
     assert_eq!(app.fleet_rows.len(), 1);
-    assert_eq!(app.fleet_rows[0].context, "staging");
+    assert_eq!(app.fleet_rows[0].label, "staging");
 }
 
 #[tokio::test]
@@ -12190,7 +12284,10 @@ async fn fleet_marks_persist_across_restarts() {
     // Toggling with a persist path saves the marks…
     let (mut app, _rx) = test_app();
     app.fleet_marks_path = Some(path.clone());
-    app.ctx_list = vec!["prod".into(), "staging".into()];
+    app.ctx_list = vec![
+        crate::kubeconfigs::Entry::named("prod"),
+        crate::kubeconfigs::Entry::named("staging"),
+    ];
     app.ctx_state.select(Some(1));
     app.mode = Mode::Contexts;
     app.key_contexts(press(KeyCode::Char(' ')));
@@ -12206,6 +12303,232 @@ async fn fleet_marks_persist_across_restarts() {
     std::fs::write(&path, "not toml [[[").unwrap();
     assert_eq!(crate::fleet::FleetMarks::load(&path), Default::default());
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A kubeconfig file with one context, for the multi-kubeconfig tests.
+fn write_kubeconfig(dir: &std::path::Path, file: &str, context: &str) -> std::path::PathBuf {
+    std::fs::create_dir_all(dir).unwrap();
+    let path = dir.join(file);
+    std::fs::write(
+        &path,
+        format!(
+            "apiVersion: v1\nkind: Config\ncurrent-context: {context}\n\
+             clusters:\n  - name: c\n    cluster:\n      server: https://{context}.example:6443\n\
+             contexts:\n  - name: {context}\n    context:\n      cluster: c\n      namespace: apps\n"
+        ),
+    )
+    .unwrap();
+    path
+}
+
+fn scratch(tag: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!("sofka-{tag}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+#[tokio::test]
+async fn same_named_contexts_in_different_kubeconfigs_keep_separate_namespaces() {
+    let (mut app, _rx) = test_app();
+    let file = write_kubeconfig(&scratch("kc-nsmem"), "work.yaml", "prod");
+    let default = crate::kubeconfigs::ClusterId::new("prod");
+    let added = crate::kubeconfigs::ClusterId::in_file(&file, "prod");
+
+    // Land on the default kubeconfig's `prod` and pick a namespace there.
+    let mut cluster = Cluster::fake();
+    cluster.context = "prod".into();
+    app.apply_context_switch(default.clone(), Box::new(cluster));
+    app.set_namespace("payments".into());
+
+    // The identically-named context in the added file must not inherit it.
+    let mut other = Cluster::fake();
+    other.context = "prod".into();
+    other.source = crate::kubeconfigs::Source::File(file.clone());
+    app.apply_context_switch(added.clone(), Box::new(other));
+    assert_ne!(
+        app.namespace, "payments",
+        "a same-named context in another kubeconfig is a different cluster"
+    );
+
+    app.set_namespace("lab".into());
+    assert_eq!(
+        app.namespace_memory.get(&default.state_key()),
+        Some("payments".into())
+    );
+    assert_eq!(
+        app.namespace_memory.get(&added.state_key()),
+        Some("lab".into())
+    );
+}
+
+#[tokio::test]
+async fn numbered_keys_switch_to_a_cluster_in_the_strip() {
+    let (mut app, mut rx) = test_app();
+    app.note_recent_cluster(crate::kubeconfigs::ClusterId::new("dev"));
+    app.note_recent_cluster(crate::kubeconfigs::ClusterId::new("test"));
+    assert_eq!(
+        app.recent_clusters,
+        vec![
+            crate::kubeconfigs::ClusterId::new("test"),
+            crate::kubeconfigs::ClusterId::new("dev"),
+        ],
+        "most recent first, no duplicates"
+    );
+
+    // Slot 1 is the live cluster, so it does nothing…
+    let idle = app.flash.clone();
+    app.handle_key(ctrl(KeyCode::Char('1'))).unwrap();
+    assert_eq!(app.flash, idle);
+    // …slot 2 starts a switch.
+    app.handle_key(ctrl(KeyCode::Char('2'))).unwrap();
+    assert!(app.flash.contains("switching to dev"), "{}", app.flash);
+    // An empty slot is inert rather than an error.
+    let flash = app.flash.clone();
+    app.handle_key(ctrl(KeyCode::Char('9'))).unwrap();
+    assert_eq!(app.flash, flash);
+
+    // macOS terminals swallow ctrl-<digit>, so the shifted digits — ordinary
+    // characters every terminal sends — reach the same slots.
+    let (mut app, _rx2) = test_app();
+    app.note_recent_cluster(crate::kubeconfigs::ClusterId::new("dev"));
+    app.note_recent_cluster(crate::kubeconfigs::ClusterId::new("test"));
+    app.handle_key(press(KeyCode::Char('@'))).unwrap();
+    assert!(app.flash.contains("switching to dev"), "{}", app.flash);
+    rx.close();
+}
+
+#[tokio::test]
+async fn kubeconfig_manager_adds_and_removes_sources() {
+    let (mut app, _rx) = test_app();
+    let dir = scratch("kc-manage");
+    let file = write_kubeconfig(&dir, "work.yaml", "work-prod");
+    app.kubeconfig_marks_path = Some(dir.join("kubeconfigs.toml"));
+
+    assert!(app.run_palette_command("kubeconfig"));
+    assert_eq!(app.mode, Mode::Kubeconfigs);
+
+    // `a` prompts for a path; a bad one is refused without changing the set.
+    app.handle_key(press(KeyCode::Char('a'))).unwrap();
+    assert_eq!(app.mode, Mode::Prompt);
+    app.prompt_input = dir.join("nope.yaml").to_string_lossy().to_string();
+    app.handle_key(press(KeyCode::Enter)).unwrap();
+    assert!(app.flash_err, "{}", app.flash);
+    assert!(app.kubeconfig_sources().is_empty());
+
+    // A real kubeconfig is added, persisted, and contributes its contexts.
+    app.handle_key(press(KeyCode::Char('a'))).unwrap();
+    app.prompt_input = file.to_string_lossy().to_string();
+    app.handle_key(press(KeyCode::Enter)).unwrap();
+    assert_eq!(app.mode, Mode::Kubeconfigs);
+    assert_eq!(app.kubeconfig_sources(), vec![file.clone()]);
+    assert!(
+        app.all_contexts.iter().any(|e| e.label == "work-prod"),
+        "an unambiguous context keeps its bare name"
+    );
+    assert!(app.kubeconfig_marks_path.as_ref().unwrap().exists());
+
+    // Row 0 is the default kubeconfig and cannot be removed.
+    app.kubeconfig_state.select(Some(0));
+    app.handle_key(press(KeyCode::Char('d'))).unwrap();
+    assert_eq!(app.kubeconfig_sources(), vec![file.clone()]);
+    assert!(app.flash_err, "{}", app.flash);
+
+    app.kubeconfig_state.select(Some(1));
+    app.handle_key(press(KeyCode::Char('d'))).unwrap();
+    assert!(app.kubeconfig_sources().is_empty());
+    assert!(!app.all_contexts.iter().any(|e| e.id.path().is_some()));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn a_directory_source_contributes_every_kubeconfig_under_it() {
+    let (mut app, _rx) = test_app();
+    let dir = scratch("kc-dir");
+    let configs = dir.join("configs");
+    write_kubeconfig(&configs, "alpha.yaml", "alpha");
+    write_kubeconfig(&configs.join("nested"), "beta.yaml", "beta");
+    std::fs::write(configs.join("notes.txt"), "not a kubeconfig").unwrap();
+
+    app.kubeconfigs_cfg = crate::config::KubeconfigsConfig {
+        paths: vec![configs.to_string_lossy().to_string()],
+    };
+    app.refresh_context_cache();
+
+    let labels: Vec<String> = app
+        .all_contexts
+        .iter()
+        .filter(|e| e.id.path().is_some())
+        .map(|e| e.label.clone())
+        .collect();
+    assert_eq!(labels, vec!["alpha", "beta"]);
+    assert!(!app.flash_err, "{}", app.flash);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn a_name_two_kubeconfigs_share_is_qualified_and_stays_selectable() {
+    let (mut app, _rx) = test_app();
+    let dir = scratch("kc-collide");
+    write_kubeconfig(&dir.join("a"), "work.yaml", "prod");
+    write_kubeconfig(&dir.join("b"), "home.yaml", "prod");
+    write_kubeconfig(&dir.join("b"), "solo.yaml", "lab");
+
+    app.kubeconfigs_cfg = crate::config::KubeconfigsConfig {
+        paths: vec![dir.to_string_lossy().to_string()],
+    };
+    app.refresh_context_cache();
+
+    let labels: Vec<String> = app
+        .all_contexts
+        .iter()
+        .filter(|e| e.id.path().is_some())
+        .map(|e| e.label.clone())
+        .collect();
+    assert_eq!(
+        labels,
+        // Source order: files sorted by path, contexts sorted within each.
+        vec!["prod@work", "prod@home", "lab"],
+        "only the shared name is qualified"
+    );
+
+    // Each qualified name selects its own file, and the plain one still works.
+    for (label, file) in [
+        ("prod@work", "work.yaml"),
+        ("prod@home", "home.yaml"),
+        ("lab", "solo.yaml"),
+    ] {
+        let id = crate::kubeconfigs::resolve_label(&app.all_contexts, label);
+        assert!(
+            id.path().is_some_and(|p| p.ends_with(file)),
+            "{label} resolved to {:?}",
+            id.path()
+        );
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn renaming_is_refused_for_a_context_from_an_added_kubeconfig() {
+    let (mut app, _rx) = test_app();
+    app.mode = Mode::Contexts;
+    app.ctx_list = vec![crate::kubeconfigs::Entry {
+        id: crate::kubeconfigs::ClusterId::in_file("/tmp/work.yaml", "prod"),
+        cluster: "c".into(),
+        server: String::new(),
+        namespace: None,
+        source_label: "work".into(),
+        label: "prod@work".into(),
+        current: false,
+    }];
+    app.ctx_state.select(Some(0));
+    app.handle_key(press(KeyCode::Char('r'))).unwrap();
+    assert_eq!(app.mode, Mode::Contexts, "no prompt opens");
+    assert!(
+        app.flash.contains("default kubeconfig only"),
+        "{}",
+        app.flash
+    );
 }
 
 #[tokio::test]
@@ -12225,7 +12548,8 @@ async fn fleet_seeds_connecting_rows_and_applies_summaries() {
     );
 
     // A gathered summary lands and replaces the matching row by context name.
-    let mut row = crate::fleet::FleetRow::connecting("staging".into(), false);
+    let mut row =
+        crate::fleet::FleetRow::connecting("staging".into(), "staging".to_string(), false);
     row.status = crate::fleet::FleetStatus::Ok;
     row.version = "v1.31.0".into();
     row.nodes_ready = 3;
@@ -12237,7 +12561,7 @@ async fn fleet_seeds_connecting_rows_and_applies_summaries() {
     let staging = app
         .fleet_rows
         .iter()
-        .find(|r| r.context == "staging")
+        .find(|r| r.label == "staging")
         .unwrap();
     assert_eq!(staging.status, crate::fleet::FleetStatus::Ok);
     assert_eq!(staging.version, "v1.31.0");
@@ -12245,7 +12569,7 @@ async fn fleet_seeds_connecting_rows_and_applies_summaries() {
     assert_eq!(
         app.fleet_rows
             .iter()
-            .find(|r| r.context == "prod")
+            .find(|r| r.label == "prod")
             .unwrap()
             .status,
         crate::fleet::FleetStatus::Connecting
@@ -12293,7 +12617,8 @@ async fn fleet_command_counts_terminating_pods_as_unhealthy() {
                 },
             }))
         });
-        let mut row = crate::fleet::FleetRow::connecting("staging".into(), false);
+        let mut row =
+            crate::fleet::FleetRow::connecting("staging".into(), "staging".to_string(), false);
         super::fleet::update_pod_counts(&mut row, &pods);
         row.status = crate::fleet::FleetStatus::Ok;
         app.handle_msg(Msg::FleetRow {
@@ -12888,7 +13213,7 @@ fn land_context(app: &mut App, name: &str) {
     cluster.context = name.into();
     app.handle_msg(Msg::ContextSwitched {
         generation: app.generation,
-        name: name.into(),
+        id: crate::kubeconfigs::ClusterId::new(name),
         result: Ok(Box::new(cluster)),
     });
 }
@@ -12902,7 +13227,7 @@ async fn landing_a_context_flashes_skipped_discovery_groups() {
         vec!["API discovery could not read odd.example.com/v1alpha3: expected v1".into()];
     app.handle_msg(Msg::ContextSwitched {
         generation: app.generation,
-        name: "dev".into(),
+        id: crate::kubeconfigs::ClusterId::new("dev"),
         result: Ok(Box::new(cluster)),
     });
     assert_eq!(
@@ -12934,7 +13259,7 @@ async fn discovery_flash_yields_to_a_config_warning_on_context_switch() {
         vec!["API discovery could not read odd.example.com/v1alpha3: expected v1".into()];
     app.handle_msg(Msg::ContextSwitched {
         generation: app.generation,
-        name: "dev".into(),
+        id: crate::kubeconfigs::ClusterId::new("dev"),
         result: Ok(Box::new(cluster)),
     });
     assert!(app.flash_err);
@@ -12979,13 +13304,17 @@ async fn info_lists_skipped_discovery_groups() {
 
 /// Choose `name` in the context switcher, through the switcher's own keys.
 fn pick_context(app: &mut App, name: &str) {
-    let mut list = vec![app.cluster.context.clone(), name.to_string()];
-    list.sort();
-    list.dedup();
+    let mut names = vec![app.cluster.context.clone(), name.to_string()];
+    names.sort();
+    names.dedup();
     app.mode = Mode::Contexts;
     app.handle_msg(Msg::Contexts {
         generation: app.generation,
-        list,
+        list: names
+            .into_iter()
+            .map(crate::kubeconfigs::Entry::named)
+            .collect(),
+        warnings: Vec::new(),
     });
     for c in name.chars() {
         app.handle_key(press(KeyCode::Char(c))).unwrap();
@@ -13127,7 +13456,7 @@ async fn palette_query_waits_for_context_and_rejects_invalid_input() {
     cluster.context = "west".into();
     app.handle_msg(Msg::ContextSwitched {
         generation: app.generation,
-        name: "west".into(),
+        id: crate::kubeconfigs::ClusterId::new("west"),
         result: Ok(Box::new(cluster)),
     });
     assert_eq!(app.cluster.context, "west");
@@ -19626,7 +19955,7 @@ async fn local_bookmark_rejects_original_context_connection_result() {
     cluster.context = "west".into();
     app.handle_msg(Msg::ContextSwitched {
         generation,
-        name: "west".into(),
+        id: crate::kubeconfigs::ClusterId::new("west"),
         result: Ok(Box::new(cluster)),
     });
     assert_eq!(app.cluster.context, home);
@@ -19669,7 +19998,7 @@ async fn local_query_clears_canceled_workspace_destination() {
     assert!(app.pending_workspace.is_none());
     app.handle_msg(Msg::ContextSwitched {
         generation,
-        name: "west".into(),
+        id: crate::kubeconfigs::ClusterId::new("west"),
         result: Err("connection failed".into()),
     });
     assert_eq!(app.kind_plural, "pods");

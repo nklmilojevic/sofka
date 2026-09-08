@@ -52,6 +52,8 @@ Milestone status. Longer-form thinking on direction lives in
 ## Milestone 6: fleet and integrations
 
 - [x] Opt-in cross-context health dashboard (`:fleet`).
+- [x] Contexts from several kubeconfigs, including directories of them
+      (`[kubeconfigs] paths`, `:kubeconfig`).
 - [x] Historical metrics provider interface (Prometheus/VictoriaMetrics:
       autodiscovery or configured URL).
 - [x] Log provider interface (VictoriaLogs: autodiscovery or configured URL).

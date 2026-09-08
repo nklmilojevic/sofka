@@ -88,8 +88,10 @@ sofka [RESOURCE] [-n NAMESPACE] [-A] [--context NAME] [--kubeconfig PATH] [--rea
   RESOURCE          resource to open (alias/plural/kind), default: pods
   -n, --namespace   namespace to start in
   -A, --all-namespaces
-  --context         kubeconfig context to start in (default: current context)
-  --kubeconfig      kubeconfig file to use (sets $KUBECONFIG for the session)
+  --context         context to start in (default: current context; `name@file`
+                    for a context from an added kubeconfig)
+  --kubeconfig      kubeconfig file (sets $KUBECONFIG) or directory of them;
+                    repeatable
   --allow-v1-client-cert  allow X.509 v1 client certificates for this run
   --readonly        disable every mutating action for the session
   --write           force write mode, overriding any config `readonly`
@@ -123,7 +125,8 @@ The essentials. `?` in the app shows everything, or see the
 | `enter` / `esc`      | drill down / go back                                                                              |
 | `j`/`k`, `g`/`G`     | navigate                                                                                          |
 | `ctrl-f` / `ctrl-b`  | page forward / back (also `PgDn` / `PgUp`)                                                        |
-| `n` / `0` / `:ctx`   | namespace switcher / all namespaces / context switcher                                            |
+| `n` / `0` / `:ctx`   | namespace switcher / all namespaces / context switcher (every kubeconfig)                         |
+| `shift-1`…`shift-9`  | switch cluster from the header strip (`:kubeconfig` manages the files it reads)                   |
 | `space`              | mark row for bulk actions                                                                         |
 | `y` / `d` / `E`      | YAML / describe / live events                                                                     |
 | `l` / `L`            | logs / VictoriaLogs history                                                                       |
@@ -150,13 +153,19 @@ favorite_namespaces = ["kube-system", "monitoring"]
 [aliases]
 dep = "deployments"
 
+[kubeconfigs]
+paths = ["~/.kube/configs"]   # extra kubeconfig files, or directories of them
+
 [skin]
 name = "gruvbox-dark"   # omit to auto-detect dark/light
 ```
 
-Any option can be overridden per cluster or per kubeconfig context, so prod can
-be read-only in a light skin while everything else stays as is. See the
-[configuration reference](docs/configuration.md) for the rest.
+Contexts come from the kubeconfig `kubectl` itself uses plus anything in
+`[kubeconfigs] paths`, so a directory of per-cluster files is one entry rather
+than a restart each time. Any option can be overridden per cluster or per
+kubeconfig context, so prod can be read-only in a light skin while everything
+else stays as is. See the [configuration reference](docs/configuration.md) for
+the rest.
 
 ## Docs
 

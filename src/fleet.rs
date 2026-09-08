@@ -61,10 +61,14 @@ pub enum FleetStatus {
     Error(String),
 }
 
-/// One context's summary row.
+/// One cluster's summary row.
 #[derive(Clone, Debug)]
 pub struct FleetRow {
-    pub context: String,
+    /// Which context in which kubeconfig this row summarizes.
+    pub id: crate::kubeconfigs::ClusterId,
+    /// How the cluster is named on screen (qualified when it came from an
+    /// added kubeconfig).
+    pub label: String,
     pub status: FleetStatus,
     /// API-server version (`git_version`), empty until known.
     pub version: String,
@@ -82,9 +86,10 @@ pub struct FleetRow {
 
 impl FleetRow {
     /// A freshly-seeded row shown while the gather is in flight.
-    pub fn connecting(context: String, readonly: bool) -> Self {
+    pub fn connecting(id: crate::kubeconfigs::ClusterId, label: String, readonly: bool) -> Self {
         FleetRow {
-            context,
+            id,
+            label,
             status: FleetStatus::Connecting,
             version: String::new(),
             nodes_ready: 0,
@@ -112,7 +117,8 @@ mod tests {
 
     fn ok_row() -> FleetRow {
         FleetRow {
-            context: "prod".into(),
+            id: crate::kubeconfigs::ClusterId::new("prod"),
+            label: "prod".into(),
             status: FleetStatus::Ok,
             version: "v1.30.2".into(),
             nodes_ready: 3,
@@ -126,7 +132,11 @@ mod tests {
 
     #[test]
     fn connecting_row_is_not_healthy() {
-        let r = FleetRow::connecting("staging".into(), false);
+        let r = FleetRow::connecting(
+            crate::kubeconfigs::ClusterId::new("staging"),
+            "staging".into(),
+            false,
+        );
         assert_eq!(r.status, FleetStatus::Connecting);
         assert!(!r.is_healthy());
     }

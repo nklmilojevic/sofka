@@ -2474,10 +2474,16 @@ impl App {
         }
     }
 
-    /// Base argv for a `kubectl` shell-out, pinned to the active context so it
-    /// can't target a different cluster than the one we're viewing.
+    /// Base argv for a `kubectl` shell-out, pinned to the active cluster so it
+    /// can't target a different one than the one we're viewing. `--context`
+    /// alone is not enough: a context from an added kubeconfig does not exist
+    /// in the file kubectl resolves on its own, so the file goes with it.
     pub(super) fn kubectl_base(&self) -> Vec<String> {
         let mut argv = vec!["kubectl".to_string()];
+        if let Some(path) = self.cluster.kubectl_kubeconfig() {
+            argv.push("--kubeconfig".to_string());
+            argv.push(path.to_string_lossy().into_owned());
+        }
         if let Some(ctx) = self.cluster.kubectl_context() {
             argv.push("--context".to_string());
             argv.push(ctx.to_string());
@@ -2485,13 +2491,17 @@ impl App {
         argv
     }
 
-    /// Base argv for a `helm` shell-out, pinned to the active context exactly
+    /// Base argv for a `helm` shell-out, pinned to the active cluster exactly
     /// like [`Self::kubectl_base`]. Rollback and uninstall are the only two
     /// Helm actions sofka can't do natively (see `crate::helm`) — Helm's own
     /// three-way-merge apply/delete logic is delegated to the real `helm`
     /// binary rather than reimplemented.
     pub(super) fn helm_base(&self) -> Vec<String> {
         let mut argv = vec!["helm".to_string()];
+        if let Some(path) = self.cluster.kubectl_kubeconfig() {
+            argv.push("--kubeconfig".to_string());
+            argv.push(path.to_string_lossy().into_owned());
+        }
         if let Some(ctx) = self.cluster.kubectl_context() {
             argv.push("--kube-context".to_string());
             argv.push(ctx.to_string());

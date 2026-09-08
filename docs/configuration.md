@@ -19,6 +19,8 @@ mouse             = true   # false keeps the terminal's native mouse behavior
                            # (text selection) instead of scroll/click/sort
 remember_sort     = true   # save and restore sort choices per resource kind
                            # false makes sort changes temporary
+cluster_strip     = true   # show the quick-switch cluster strip under the header
+                           # it hides itself until a second cluster has been visited
 
 # Namespaces pinned to the top of the `n` switcher (★); session recents (·)
 # follow them.
@@ -80,6 +82,39 @@ Every semantic color - row status, severity badges, headers, borders - is derive
 from the active palette, so one skin change lands everywhere at once. `:skin`
 switches live, `:skin gruvbox-dark` applies directly.
 
+## Kubeconfigs
+
+sofka always reads the kubeconfig `kubectl` itself would use - `$KUBECONFIG`,
+or `~/.kube/config` if that's unset. `[kubeconfigs] paths` lists extra
+kubeconfigs to read contexts from as well. A path is either a kubeconfig file
+or a directory of them:
+
+```toml
+[kubeconfigs]
+paths = ["~/.kube/work.yaml", "~/.kube/configs"]
+```
+
+A directory contributes every kubeconfig found under it, up to three levels
+deep, skipping dotfiles and anything that doesn't parse - which is how
+collections managed by tools like kubeswitch are laid out. It is re-read every
+time you open `:ctx` or `:kubeconfig`, so a file dropped into the directory
+shows up without a restart or an index rebuild. Nothing outside the paths you
+list is ever scanned.
+
+Each extra file is read on its own rather than merged with the default
+kubeconfig or with each other, so a context in it is never shadowed by a
+same-named context elsewhere; it is shown and typed as `context@file`. A
+leading `~/` is expanded.
+
+`:kubeconfig` (also `:kubeconfigs`, `:kc`) adds and removes paths at runtime.
+Those edits persist to `<state-dir>/kubeconfigs.toml` and overlay this list
+on every start rather than rewriting `config.toml` - exactly like fleet
+marks; see [Fleet dashboard](providers.md#fleet-dashboard).
+
+`--kubeconfig` takes a file or a directory and may be repeated. Files replace
+the session's own kubeconfig (they set `$KUBECONFIG`, so `kubectl` shell-outs
+agree); directories are added as extra sources for that session only.
+
 ## Other sections
 
 Each of these is documented where the feature itself is:
@@ -103,6 +138,7 @@ Each of these is documented where the feature itself is:
 | `[providers.metrics]` | Prometheus/VictoriaMetrics for `:rightsize` | [Providers](providers.md#right-sizing-metrics-provider)    |
 | `[providers.logs]`    | VictoriaLogs backend for `L`                | [Providers](providers.md#log-provider-victorialogs)        |
 | `[fleet]`             | contexts in the cross-cluster dashboard     | [Providers](providers.md#fleet-dashboard)                  |
+| `[kubeconfigs]`       | extra kubeconfig files and directories      | [Kubeconfigs](#kubeconfigs)                                |
 
 ## Per-cluster and per-context overrides
 
@@ -141,6 +177,10 @@ A skin in an override sets the colors for that context. A context with no skin
 keeps the session skin (config `skin.name`, the auto-detected default, or your
 last `:skin` choice). Overrides are re-read on every `:ctx` switch, so edits
 apply without a restart.
+
+Overrides key off the context and cluster names as reported by the
+kubeconfig, not the file it came from, so a same-named context in a
+different kubeconfig file resolves to the same override directory.
 
 ## Plugin packages
 

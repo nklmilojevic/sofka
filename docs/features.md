@@ -131,9 +131,16 @@ The full list. For how sofka compares to k9s, see [vs k9s](vs-k9s.md).
   `list`. An explicit search checks the full discovery catalog, because some
   delegated authorizers return incomplete rule reviews.
 - **Namespace switcher** (`n`) with pinned favourites (★) and per-context
-  session recents (·) above the rest, plus a context switcher (`:ctx`). The
-  last namespace picked in each context is remembered across restarts
-  (`<state-dir>/namespaces.toml`); `-n`/`-A` override it for a session.
+  session recents (·) above the rest, plus a context switcher (`:ctx`) that
+  lists contexts from the default kubeconfig and from any extra file or
+  directory of kubeconfigs added with `:kubeconfig`, showing each context's
+  cluster, server, namespace, and source file. Same-named contexts in
+  different kubeconfigs stay distinct (`prod@work`), down to their remembered
+  namespace. The last namespace picked in each cluster is remembered across
+  restarts (`<state-dir>/namespaces.toml`); `-n`/`-A` override it for a
+  session. `shift-1`…`shift-9` (or `ctrl-1`…`ctrl-9`, where the terminal
+  sends it) and the header's cluster strip jump straight to a recently used
+  cluster.
 - **Default sort** - `[views."*"].sort` sets a global initial sort, with
   resource-specific overrides. Sort choices are saved per kind by default.
   Set `remember_sort = false` to make user sort changes temporary.

@@ -209,6 +209,7 @@ The adapter must read the request before it writes its report.
 {
   "schema_version": 1,
   "context": "development",
+  "kubeconfig": null,
   "cluster": "development",
   "namespace": "default",
   "resource": "pods",
@@ -228,6 +229,10 @@ The adapter inherits sofka's environment, including `KUBECONFIG`.
 The `context` value is `null` when sofka has no explicit kubeconfig context name.
 In that case, let the external tool use its configuration.
 Do not pass a synthetic context name to the tool.
+The `kubeconfig` value names the file that context lives in, and is `null` when
+that file is the one the environment already resolves.
+When it is set, pass it to the tool as well: the context does not exist in the
+kubeconfig the tool would read on its own.
 
 For `target = "selection"`, sofka starts one job for each marked resource.
 If no resources are marked, it uses the selected resource.

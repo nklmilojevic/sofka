@@ -51,7 +51,7 @@ impl App {
         if let Some(ctx) = ws.context.clone()
             && ctx != self.cluster.context
         {
-            self.switch_context(ctx);
+            self.switch_context_labeled(&ctx);
             self.pending_resource_query = None;
             self.pending_bookmark = None;
             self.pending_workspace = Some(ws);

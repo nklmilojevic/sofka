@@ -12,6 +12,10 @@ app.rs       All application state + input handling (a mode state machine:
              log/port-forward tasks.
 k8s.rs       Cluster connect, API discovery, alias registry + group-priority
              resolution, watch-task spawning, namespace listing.
+kubeconfigs.rs Which kubeconfig files (and directories of them) contexts are
+             read from, and ClusterId — the (source, context) pair that keys
+             per-cluster state so same-named contexts in different files stay
+             distinct. Pure and unit-tested.
 keys.rs      Key-chord parsing + matching (ctrl-/alt-/shift-, function keys)
              for plugin, bookmark, and workspace bindings, with unit tests.
 store.rs     In-memory resource store + the Msg enum that watch tasks send to

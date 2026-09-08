@@ -29,6 +29,7 @@ const SHUTDOWN_GRACE: Duration = Duration::from_millis(500);
 
 enum Write {
     Fleet(crate::fleet::FleetMarks, PathBuf),
+    Kubeconfigs(crate::kubeconfigs::SourceMarks, PathBuf),
     Namespace(crate::nsmem::NamespaceMemory, PathBuf),
     Sort(crate::sortmem::SortMemory, PathBuf),
     /// Test-only: a write of known duration, so teardown's grace period can be
@@ -40,7 +41,10 @@ enum Write {
 impl Write {
     fn path(&self) -> &Path {
         match self {
-            Write::Fleet(_, path) | Write::Namespace(_, path) | Write::Sort(_, path) => path,
+            Write::Fleet(_, path)
+            | Write::Kubeconfigs(_, path)
+            | Write::Namespace(_, path)
+            | Write::Sort(_, path) => path,
             #[cfg(test)]
             Write::Stall(_, path) => path,
         }
@@ -54,6 +58,9 @@ impl Write {
                 Ok(())
             }
             Write::Fleet(state, path) => state
+                .save(&path)
+                .map_err(|e| format!("{}: {e}", path.display())),
+            Write::Kubeconfigs(state, path) => state
                 .save(&path)
                 .map_err(|e| format!("{}: {e}", path.display())),
             Write::Namespace(state, path) => state
@@ -179,6 +186,14 @@ impl StateWriter {
 
     pub fn save_fleet(&self, state: crate::fleet::FleetMarks, path: PathBuf) -> Result<(), String> {
         self.send(Write::Fleet(state, path))
+    }
+
+    pub fn save_kubeconfigs(
+        &self,
+        state: crate::kubeconfigs::SourceMarks,
+        path: PathBuf,
+    ) -> Result<(), String> {
+        self.send(Write::Kubeconfigs(state, path))
     }
 
     pub fn save_namespace(

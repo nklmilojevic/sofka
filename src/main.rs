@@ -14,8 +14,8 @@ use tokio::sync::mpsc;
 use sofka::app::App;
 use sofka::k8s::Cluster;
 use sofka::{
-    altscroll, app, applog, config, diagnostics, fleet, k8s, nsmem, providers, sortmem, store,
-    theme, thresholds, ui, views,
+    altscroll, app, applog, config, diagnostics, fleet, k8s, kubeconfigs, nsmem, providers,
+    sortmem, store, theme, thresholds, ui, views,
 };
 
 const EVENT_CHANNEL_CAP: usize = 4096;
@@ -39,14 +39,17 @@ struct Args {
     #[arg(short = 'A', long)]
     all_namespaces: bool,
 
-    /// Kubeconfig context to start in (defaults to the current context).
+    /// Context to start in (defaults to the current context). A context from
+    /// a kubeconfig other than the default one is named `context@file`.
     #[arg(long)]
     context: Option<String>,
 
-    /// Path to the kubeconfig file (sets $KUBECONFIG for the whole session,
-    /// including kubectl shell-outs).
+    /// Kubeconfig to read contexts from. A file replaces the session's
+    /// kubeconfig (sets $KUBECONFIG, so kubectl shell-outs agree); a
+    /// directory is searched for kubeconfigs and added alongside it. Repeat
+    /// the flag for several.
     #[arg(long, value_name = "PATH")]
-    kubeconfig: Option<PathBuf>,
+    kubeconfig: Vec<PathBuf>,
 
     /// Allow X.509 v1 client certificates for this run. Does not disable server checks.
     #[arg(long)]
@@ -125,18 +128,31 @@ fn main() -> Result<()> {
     let _profiler = dhat::Profiler::new_heap();
 
     let args = Args::parse();
-    // `--kubeconfig`: export for the whole process so every kubeconfig read
-    // (kube-rs config inference, context listing/switching, `--info`) and
-    // every kubectl shell-out sees the same file.
-    // SAFETY: single-threaded here — the tokio runtime only spawns below.
-    if let Some(path) = &args.kubeconfig {
-        unsafe { std::env::set_var("KUBECONFIG", path) };
+    // `--kubeconfig <file>`: export for the whole process so every kubeconfig
+    // read (kube-rs config inference, context listing/switching, `--info`) and
+    // every kubectl shell-out sees the same file. Several files join with the
+    // platform separator, exactly as kubectl's own `$KUBECONFIG` merging
+    // expects. Directories cannot go in the variable — they become extra
+    // sources instead, resolved once config is loaded.
+    let (files, _dirs) = split_kubeconfig_args(&args.kubeconfig);
+    if !files.is_empty() {
+        let joined = std::env::join_paths(&files).context("joining --kubeconfig paths")?;
+        // SAFETY: single-threaded here — the tokio runtime only spawns below.
+        unsafe { std::env::set_var("KUBECONFIG", joined) };
     }
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
         .context("starting tokio runtime")?
         .block_on(run_main(args))
+}
+
+/// Split `--kubeconfig` paths into the files that make up the session's own
+/// kubeconfig and the directories searched alongside it. A path that is
+/// neither yet (a typo, or a file not created) is treated as a file so the
+/// connect attempt reports it, rather than being dropped here.
+fn split_kubeconfig_args(paths: &[PathBuf]) -> (Vec<PathBuf>, Vec<PathBuf>) {
+    paths.iter().cloned().partition(|p| !p.is_dir())
 }
 
 async fn run_main(args: Args) -> Result<()> {
@@ -181,13 +197,39 @@ async fn run_main(args: Args) -> Result<()> {
         return result;
     }
 
+    // Which kubeconfigs contexts come from: the one kubectl itself reads,
+    // plus `[kubeconfigs] paths`, the runtime `:kubeconfig` additions, and any
+    // directory passed to `--kubeconfig`. Resolved before connecting so
+    // `--context` can name a context in one of them (`--context prod@work`).
+    let base = loader.resolve("", "");
+    let kubeconfig_marks_path = kubeconfigs::SourceMarks::default_path();
+    let kubeconfig_marks = kubeconfigs::SourceMarks::load(&kubeconfig_marks_path);
+    let mut kubeconfig_paths =
+        kubeconfigs::active_paths(&base.config.kubeconfigs.paths, &kubeconfig_marks);
+    // Session-only: a directory named on the command line is not persisted,
+    // the way `--context` isn't. `:kubeconfig` is how you keep one.
+    for dir in split_kubeconfig_args(&args.kubeconfig).1 {
+        if !kubeconfig_paths.contains(&dir) {
+            kubeconfig_paths.push(dir);
+        }
+    }
+    let (contexts, kubeconfig_warnings) = kubeconfigs::list(&kubeconfig_paths);
+    for w in &kubeconfig_warnings {
+        eprintln!("\x1b[33mwarning:\x1b[0m {w}");
+    }
+    config_warnings.extend(kubeconfig_warnings);
+    let requested = args
+        .context
+        .as_deref()
+        .map(|label| kubeconfigs::resolve_label(&contexts, label));
+
     // Connect before taking over the terminal so errors are readable. An
     // unreachable current context isn't fatal for the interactive TUI: start
     // in the context picker instead (k9s behavior). Headless modes still exit
     // with the error, since there is no picker to fall back to.
     eprintln!("Connecting to cluster…");
-    let connect = match args.context.as_deref() {
-        Some(name) => Cluster::connect_context(name, args.allow_v1_client_cert).await,
+    let connect = match &requested {
+        Some(id) => Cluster::connect_context(id, args.allow_v1_client_cert).await,
         None => Cluster::connect(args.allow_v1_client_cert).await,
     };
     let (mut cluster, connect_error) = match connect {
@@ -197,13 +239,10 @@ async fn run_main(args: Args) -> Result<()> {
             applog::shutdown();
             std::process::exit(1);
         }
-        Err(e) => {
-            eprintln!("\x1b[33mwarning:\x1b[0m {e:#}");
-            (
-                Cluster::disconnected(args.context.as_deref()),
-                Some(format!("{e:#}")),
-            )
-        }
+        Err(e) => (
+            Cluster::disconnected(requested.as_ref()),
+            Some(format!("{e:#}")),
+        ),
     };
     cluster.allow_v1_client_cert = args.allow_v1_client_cert;
     for w in cluster
@@ -309,15 +348,17 @@ async fn run_main(args: Args) -> Result<()> {
     let namespace_memory_path = nsmem::NamespaceMemory::default_path();
     app.namespace_memory = nsmem::NamespaceMemory::load(&namespace_memory_path);
     app.namespace_memory_path = Some(namespace_memory_path);
-    // Kubeconfig contexts are stable for the session; cache them once so the
-    // palette can complete `:ctx <name>` without re-reading the file per keystroke.
-    match Cluster::list_contexts() {
-        Ok(contexts) => app.all_contexts = contexts,
-        Err(e) => {
-            eprintln!("warning: {e}");
-            config_warnings.push(e);
-        }
-    }
+    // Contexts were listed before connecting; hand that list to the palette so
+    // `:ctx <name>` completes without re-reading every kubeconfig per
+    // keystroke. `:kubeconfig` refreshes it when the file set changes.
+    app.all_contexts = contexts;
+    app.session_kubeconfig_paths = split_kubeconfig_args(&args.kubeconfig).1;
+    app.kubeconfigs_cfg = cfg.kubeconfigs.clone();
+    app.kubeconfig_marks = kubeconfig_marks;
+    app.kubeconfig_marks_path = Some(kubeconfig_marks_path);
+    app.cluster_strip = cfg.cluster_strip.unwrap_or(true);
+    // Slot 1 of the quick-switch strip is where we launched.
+    app.note_recent_cluster(app.cluster.id());
     app.user_aliases = cfg.aliases.clone();
     app.namespace_favorites = cfg.favorite_namespaces.clone();
     app.plugins = cfg.plugins.clone();
@@ -395,7 +436,7 @@ async fn run_main(args: Args) -> Result<()> {
         app.namespace = String::new();
     } else if let Some(ns) = args.namespace {
         app.namespace = ns;
-    } else if let Some(ns) = app.namespace_memory.get(&app.cluster.context) {
+    } else if let Some(ns) = app.namespace_memory.get(&app.cluster.id().state_key()) {
         app.namespace = ns;
     } else if let Some(ns) = cfg.default_namespace.clone() {
         app.namespace = ns;
@@ -686,12 +727,23 @@ async fn run_info(
     loader: &config::ConfigLoader,
     warnings: &mut Vec<String>,
 ) -> Result<()> {
+    let base = loader.resolve("", "");
+    let kubeconfig_files = kubeconfigs::active_paths(
+        &base.config.kubeconfigs.paths,
+        &kubeconfigs::SourceMarks::load(&kubeconfigs::SourceMarks::default_path()),
+    );
+    let (contexts, kubeconfig_warnings) = kubeconfigs::list(&kubeconfig_files);
+    warnings.extend(kubeconfig_warnings);
+    let requested = args
+        .context
+        .as_deref()
+        .map(|label| kubeconfigs::resolve_label(&contexts, label));
     let cluster = if info.offline {
         None
     } else {
         eprintln!("Connecting to cluster…");
-        match args.context.as_deref() {
-            Some(name) => Cluster::connect_context(name, args.allow_v1_client_cert).await,
+        match &requested {
+            Some(id) => Cluster::connect_context(id, args.allow_v1_client_cert).await,
             None => Cluster::connect(args.allow_v1_client_cert).await,
         }
         .inspect_err(|e| {
@@ -712,7 +764,7 @@ async fn run_info(
             c.cluster_name.clone(),
             c.cluster_url.clone(),
         ),
-        None => k8s::context_info(args.context.as_deref())
+        None => k8s::context_info(requested.as_ref())
             .unwrap_or_else(|| ("(none)".into(), String::new(), String::new())),
     };
 
@@ -727,14 +779,19 @@ async fn run_info(
         .clone()
         .or_else(|| cfg.default_resource.clone())
         .unwrap_or_else(|| "pods".into());
+    let id = cluster
+        .as_ref()
+        .map(|c| c.id())
+        .or_else(|| requested.clone())
+        .unwrap_or_else(|| kubeconfigs::ClusterId::new(&context));
     let namespace = starting_namespace(
         args,
         &cfg,
-        &context,
+        &id,
         cluster
             .as_ref()
             .map(|c| c.default_namespace.clone())
-            .or_else(|| k8s::context_namespace(&context)),
+            .or_else(|| k8s::context_namespace(&id)),
     );
 
     let mut lines = diagnostics::version_lines();
@@ -889,7 +946,7 @@ async fn run_info(
 fn starting_namespace(
     args: &Args,
     cfg: &config::Config,
-    context: &str,
+    id: &kubeconfigs::ClusterId,
     kubeconfig_default: Option<String>,
 ) -> String {
     if args.all_namespaces {
@@ -899,7 +956,7 @@ fn starting_namespace(
         return ns.clone();
     }
     if let Some(ns) =
-        nsmem::NamespaceMemory::load(&nsmem::NamespaceMemory::default_path()).get(context)
+        nsmem::NamespaceMemory::load(&nsmem::NamespaceMemory::default_path()).get(&id.state_key())
     {
         return ns;
     }

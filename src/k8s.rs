@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result};
 use futures_util::StreamExt;
 use kube::api::{Api, ListParams};
-use kube::config::{KubeConfigOptions, Kubeconfig};
+use kube::config::KubeConfigOptions;
 use kube::core::{DynamicObject, GroupVersionResource};
 use kube::discovery::ApiResource;
 use kube::runtime::{WatchStreamExt, watcher};
@@ -234,6 +234,10 @@ pub struct Cluster {
     /// when disconnected or when the optional version request fails.
     pub server_version: String,
     pub default_namespace: String,
+    /// Kubeconfig this context was read from. Pins `kubectl --kubeconfig` for
+    /// shell-outs and keys per-cluster state, so a context named `prod` in an
+    /// added file never collides with a `prod` in the default kubeconfig.
+    pub source: crate::kubeconfigs::Source,
     /// Context name to pass to `kubectl` shell-outs (`--context`). `None` when
     /// we connected without a named kubeconfig context (e.g. in-cluster), in
     /// which case kubectl falls back to its own default.
@@ -283,24 +287,35 @@ impl Cluster {
         // default; pass it explicitly so shell-outs can't drift from us.
         let cli_context = current_context_name();
         let context = cli_context.clone().unwrap_or_else(|| "default".into());
-        Self::from_config(config, context, cli_context, allow_v1_client_cert).await
+        Self::from_config(
+            config,
+            crate::kubeconfigs::ClusterId::new(context),
+            cli_context,
+            allow_v1_client_cert,
+        )
+        .await
     }
 
     /// Connect using a specific kubeconfig context (for the `:ctx` switcher).
-    pub async fn connect_context(name: &str, allow_v1_client_cert: bool) -> Result<Self> {
-        let kubeconfig = Kubeconfig::read().context("reading kubeconfig")?;
+    /// A context from an added file is built from that file alone, so a
+    /// same-named context in the default kubeconfig cannot shadow it.
+    pub async fn connect_context(
+        id: &crate::kubeconfigs::ClusterId,
+        allow_v1_client_cert: bool,
+    ) -> Result<Self> {
+        let kubeconfig = id.source.read().map_err(anyhow::Error::msg)?;
         let opts = KubeConfigOptions {
-            context: Some(name.to_string()),
+            context: Some(id.context.clone()),
             cluster: None,
             user: None,
         };
         let config = Config::from_custom_kubeconfig(kubeconfig, &opts)
             .await
-            .with_context(|| format!("building config for context '{name}'"))?;
+            .with_context(|| format!("building config for context '{}'", id.context))?;
         Self::from_config(
             config,
-            name.to_string(),
-            Some(name.to_string()),
+            id.clone(),
+            Some(id.context.clone()),
             allow_v1_client_cert,
         )
         .await
@@ -308,7 +323,7 @@ impl Cluster {
 
     async fn from_config(
         config: Config,
-        context: String,
+        id: crate::kubeconfigs::ClusterId,
         cli_context: Option<String>,
         allow_v1_client_cert: bool,
     ) -> Result<Self> {
@@ -317,14 +332,15 @@ impl Cluster {
         let client = build_client(config, allow_v1_client_cert).context("building kube client")?;
         let version_client = client.clone();
 
-        let cluster_name = cluster_name_for(&context).unwrap_or_default();
+        let cluster_name = cluster_name_for(&id).unwrap_or_default();
         let mut cluster = Self {
             client,
-            context,
+            context: id.context,
             cluster_name,
             cluster_url,
             server_version: String::new(),
             default_namespace,
+            source: id.source,
             cli_context,
             registry: HashMap::new(),
             catalog: Vec::new(),
@@ -362,7 +378,7 @@ impl Cluster {
         Ok(cluster)
     }
 
-    /// A placeholder for launching when the current context's API server is
+    /// A placeholder for launching when the requested context's API server is
     /// unreachable (k9s drops you into the context picker in this situation
     /// instead of exiting). Identity fields come straight from the kubeconfig
     /// so the header still names the broken context; the client points at the
@@ -370,10 +386,11 @@ impl Cluster {
     /// `requested` is the `--context` flag when the failed connect targeted a
     /// named context, so the header names what the user asked for instead of
     /// the kubeconfig current-context.
-    pub fn disconnected(requested: Option<&str>) -> Self {
-        let kubeconfig = Kubeconfig::read().ok();
+    pub fn disconnected(requested: Option<&crate::kubeconfigs::ClusterId>) -> Self {
+        let source = requested.map(|id| id.source.clone()).unwrap_or_default();
+        let kubeconfig = source.read().ok();
         let context = requested
-            .map(str::to_owned)
+            .map(|id| id.context.clone())
             .or_else(|| kubeconfig.as_ref().and_then(|k| k.current_context.clone()))
             .unwrap_or_default();
         let cluster_name = kubeconfig
@@ -411,6 +428,7 @@ impl Cluster {
             cluster_url,
             server_version: String::new(),
             default_namespace: "default".into(),
+            source,
             registry: HashMap::new(),
             catalog: Vec::new(),
             connected: false,
@@ -422,6 +440,14 @@ impl Cluster {
         }
     }
 
+    /// Which context and kubeconfig this connection belongs to.
+    pub fn id(&self) -> crate::kubeconfigs::ClusterId {
+        crate::kubeconfigs::ClusterId {
+            source: self.source.clone(),
+            context: self.context.clone(),
+        }
+    }
+
     /// Context name to pass to `kubectl` (`--context`), when known. Keeps
     /// shell-outs (edit/describe/exec/attach/port-forward) on the same cluster
     /// sofka is connected to, even after an in-app `:ctx` switch.
@@ -429,14 +455,11 @@ impl Cluster {
         self.cli_context.as_deref()
     }
 
-    /// All context names from the kubeconfig.
-    /// Context names from the kubeconfig. A read/parse failure is an error,
-    /// not an empty list — "no contexts" and "your kubeconfig is invalid"
-    /// must not look the same in the picker.
-    pub fn list_contexts() -> Result<Vec<String>, String> {
-        Kubeconfig::read()
-            .map(|k| k.contexts.into_iter().map(|c| c.name).collect())
-            .map_err(|e| format!("reading kubeconfig: {e}"))
+    /// File to pass to `kubectl --kubeconfig`, when the active context came
+    /// from one sofka added rather than from kubectl's own resolution. Without
+    /// it a shell-out would look up `--context` in the wrong kubeconfig.
+    pub fn kubectl_kubeconfig(&self) -> Option<&std::path::Path> {
+        self.source.path()
     }
 
     /// Merge user-defined aliases (alias -> canonical) into the registry.
@@ -844,12 +867,16 @@ fn current_context_name() -> Option<String> {
     kubeconfig.current_context
 }
 
-/// A requested kubeconfig context (or the current one when none was requested),
-/// its cluster name, and API-server URL, read offline. For `sofka info` when no
-/// live connection is available. The server URL never carries credentials.
-pub fn context_info(requested: Option<&str>) -> Option<(String, String, String)> {
-    let kubeconfig = kube::config::Kubeconfig::read().ok();
-    context_info_from(kubeconfig.as_ref(), requested)
+/// A requested context (or the default kubeconfig's current one when none was
+/// requested), its cluster name, and API-server URL, read offline. For
+/// `sofka info` when no live connection is available. The server URL never
+/// carries credentials.
+pub fn context_info(
+    requested: Option<&crate::kubeconfigs::ClusterId>,
+) -> Option<(String, String, String)> {
+    let source = requested.map(|id| id.source.clone()).unwrap_or_default();
+    let kubeconfig = source.read().ok();
+    context_info_from(kubeconfig.as_ref(), requested.map(|id| id.context.as_str()))
 }
 
 fn context_info_from(
@@ -872,14 +899,15 @@ fn context_info_from(
     Some((context, cluster_name, server))
 }
 
-/// The namespace a kubeconfig context pins, if any. For the offline
-/// diagnostics report, which has no live client to ask.
-pub fn context_namespace(context: &str) -> Option<String> {
-    let kubeconfig = kube::config::Kubeconfig::read().ok()?;
-    kubeconfig
+/// The namespace a context pins, if any. For the offline diagnostics report,
+/// which has no live client to ask.
+pub fn context_namespace(id: &crate::kubeconfigs::ClusterId) -> Option<String> {
+    id.source
+        .read()
+        .ok()?
         .contexts
         .iter()
-        .find(|c| c.name == context)?
+        .find(|c| c.name == id.context)?
         .context
         .as_ref()?
         .namespace
@@ -889,17 +917,18 @@ pub fn context_namespace(context: &str) -> Option<String> {
 
 /// Public wrapper over [`cluster_name_for`] for resolving per-context config
 /// (fleet dashboard read-only policy) without a live connection.
-pub fn cluster_name_for_context(context: &str) -> String {
-    cluster_name_for(context).unwrap_or_default()
+pub fn cluster_name_for_context(id: &crate::kubeconfigs::ClusterId) -> String {
+    cluster_name_for(id).unwrap_or_default()
 }
 
-/// Kubeconfig cluster name a context points at, when the kubeconfig knows it.
-fn cluster_name_for(context: &str) -> Option<String> {
-    let kubeconfig = kube::config::Kubeconfig::read().ok()?;
-    kubeconfig
+/// Kubeconfig cluster name a context points at, when its kubeconfig knows it.
+fn cluster_name_for(id: &crate::kubeconfigs::ClusterId) -> Option<String> {
+    id.source
+        .read()
+        .ok()?
         .contexts
         .iter()
-        .find(|c| c.name == context)?
+        .find(|c| c.name == id.context)?
         .context
         .as_ref()
         .map(|c| c.cluster.clone())
@@ -963,6 +992,7 @@ impl Cluster {
             cluster_url: "https://127.0.0.1:6443".into(),
             server_version: String::new(),
             default_namespace: "default".into(),
+            source: crate::kubeconfigs::Source::Default,
             cli_context: Some("test".into()),
             connected: true,
             allow_v1_client_cert: false,
@@ -1229,7 +1259,7 @@ pub(crate) mod tests {
 
     #[test]
     fn offline_context_info_prefers_the_requested_context() {
-        let kubeconfig: Kubeconfig = serde_yaml::from_str(
+        let kubeconfig: kube::config::Kubeconfig = serde_yaml::from_str(
             r#"
 current-context: dev
 contexts:

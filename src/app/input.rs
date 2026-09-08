@@ -113,6 +113,13 @@ impl App {
                     self.move_page(-1);
                     return Ok(());
                 }
+                // `ctrl-1`…`ctrl-9` jump to a slot in the header's cluster
+                // strip. Reserved before the plugin-chord fallthrough below,
+                // like the other built-in ctrl keys.
+                KeyCode::Char(c @ '1'..='9') if key.modifiers == KeyModifiers::CONTROL => {
+                    self.switch_recent_cluster(c as usize - '0' as usize);
+                    return Ok(());
+                }
                 _ => {}
             }
         }
@@ -161,6 +168,7 @@ impl App {
             Mode::Help => self.key_help(key),
             Mode::Namespaces => self.key_namespaces(key),
             Mode::Contexts => self.key_contexts(key),
+            Mode::Kubeconfigs => self.key_kubeconfigs(key),
             Mode::SortPicker => self.key_sort_picker(key),
             Mode::CopyPicker => self.key_copy_picker(key),
             Mode::Containers => self.key_containers(key),
@@ -223,6 +231,13 @@ impl App {
 
     pub(super) fn key_table(&mut self, key: KeyEvent) {
         match key.code {
+            // Shifted digits jump to a slot in the header's cluster strip.
+            // `ctrl-<digit>` does the same where the terminal transmits it,
+            // which macOS terminals largely do not — these are ordinary
+            // characters, so they arrive everywhere.
+            KeyCode::Char(c) if cluster_slot(c).is_some() => {
+                self.switch_recent_cluster(cluster_slot(c).unwrap_or_default());
+            }
             KeyCode::Char('/') => self.mode = Mode::Filter,
             KeyCode::Char('q') => self.should_quit = true,
             KeyCode::Esc => {
@@ -478,7 +493,7 @@ impl App {
             }
             Some(SuggestKind::Context) => {
                 if let Some(s) = picked {
-                    self.switch_context(s.label);
+                    self.switch_context_labeled(&s.label);
                 }
             }
             Some(SuggestKind::Bookmark) => {
@@ -551,6 +566,7 @@ impl App {
         match action {
             PaletteAction::Quit => self.should_quit = true,
             PaletteAction::Ctx => self.open_contexts(),
+            PaletteAction::Kubeconfigs => self.open_kubeconfigs(),
             PaletteAction::Pulse => self.open_pulse(),
             PaletteAction::Xray => self.open_xray(),
             PaletteAction::Explain => self.open_explain(),
@@ -891,19 +907,22 @@ impl App {
         self.cmd_sel = 0;
     }
 
-    /// Palette completions for `:ctx <name>`: cached kubeconfig contexts
-    /// fuzzy-matched against the partial argument (empty lists all).
+    /// Palette completions for `:ctx <name>`: cached contexts from every
+    /// active kubeconfig, fuzzy-matched against the partial argument (empty
+    /// lists all). A context whose name another kubeconfig also defines
+    /// completes as `name@file`; matching always considers that qualified
+    /// form, so typing a kubeconfig's name narrows to its contexts.
     fn suggest_contexts(&mut self, arg: &str) {
         let mut scored: Vec<(i64, String)> = Vec::new();
         for c in &self.all_contexts {
             let score = if arg.is_empty() {
                 0
-            } else if let Some(s) = self.matcher.score(c, arg) {
+            } else if let Some(s) = self.matcher.score(&c.search_key(), arg) {
                 s
             } else {
                 continue;
             };
-            scored.push((score, c.clone()));
+            scored.push((score, c.label.clone()));
         }
         rank_completions(&mut scored, |s| s.as_str(), !arg.is_empty());
         self.cmd_suggestions = scored
@@ -915,6 +934,13 @@ impl App {
             })
             .collect();
         self.cmd_sel = 0;
+    }
+
+    /// Switch to the cluster a palette label names. Matching is by label, so
+    /// `prod` and `prod@work` select different clusters.
+    pub(super) fn switch_context_labeled(&mut self, label: &str) {
+        let id = crate::kubeconfigs::resolve_label(&self.all_contexts, label);
+        self.switch_context(id);
     }
 
     /// Type the row filter. Local terms (fuzzy/inverse/column comparisons)
@@ -1294,6 +1320,17 @@ impl App {
             &mut self.detail.filter
         }
     }
+}
+
+/// Keys that jump to a cluster-strip slot, in slot order: the shifted digits.
+/// Written out rather than derived, since the character a shifted digit
+/// produces is keyboard-layout specific, and this is the US row every
+/// terminal agrees on. Shared with the renderer so the strip can label each
+/// slot with the key that actually selects it.
+pub const SLOT_KEYS: &str = "!@#$%^&*(";
+
+fn cluster_slot(c: char) -> Option<usize> {
+    SLOT_KEYS.find(c).map(|i| i + 1)
 }
 
 /// True when `head` is one of the `:ctx` command's names, i.e. the argument

@@ -184,15 +184,18 @@ pub enum Msg {
         generation: u64,
         list: Vec<String>,
     },
-    /// Kubeconfig context names for the switcher, fetched off-thread.
+    /// Selectable contexts for the switcher, from every active kubeconfig,
+    /// fetched off-thread. `warnings` names sources that could not be read —
+    /// a missing file must say so rather than silently drop its contexts.
     Contexts {
         generation: u64,
-        list: Vec<String>,
+        list: Vec<crate::kubeconfigs::Entry>,
+        warnings: Vec<String>,
     },
     /// Result of an off-thread context switch (rebuilds client + discovery).
     ContextSwitched {
         generation: u64,
-        name: String,
+        id: crate::kubeconfigs::ClusterId,
         result: Result<Box<crate::k8s::Cluster>, String>,
     },
     /// Result of an off-thread `kubectl config rename-context` (`r` in the

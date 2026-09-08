@@ -132,11 +132,11 @@ impl App {
         value
     }
 
-    /// The recent namespaces for the current context, newest first. Borrowed:
+    /// The recent namespaces for the current cluster, newest first. Borrowed:
     /// every caller only reads them.
     fn recent_namespaces_for_context(&self) -> impl Iterator<Item = &str> + Clone {
         self.recent_namespaces
-            .get(&self.cluster.context)
+            .get(&self.cluster.id().state_key())
             .into_iter()
             .flat_map(|dq| dq.iter().map(String::as_str))
     }
@@ -146,14 +146,14 @@ impl App {
         self.namespace_favorites.iter().any(|f| f == n)
     }
 
-    /// Whether `n` is a session-recent namespace for the current context.
+    /// Whether `n` is a session-recent namespace for the current cluster.
     pub fn is_recent_namespace(&self, n: &str) -> bool {
         self.recent_namespaces
-            .get(&self.cluster.context)
+            .get(&self.cluster.id().state_key())
             .is_some_and(|dq| dq.iter().any(|r| r == n))
     }
 
-    /// Record a real namespace selection into the current context's recents
+    /// Record a real namespace selection into the current cluster's recents
     /// (newest first, deduped, bounded). `<all>`/empty are not recorded.
     pub(super) fn note_recent_namespace(&mut self, ns: &str) {
         if ns.is_empty() || ns == "<all>" {
@@ -161,7 +161,7 @@ impl App {
         }
         let dq = self
             .recent_namespaces
-            .entry(self.cluster.context.clone())
+            .entry(self.cluster.id().state_key())
             .or_default();
         dq.retain(|r| r != ns);
         dq.push_front(ns.to_string());
@@ -170,14 +170,14 @@ impl App {
         }
     }
 
-    /// Persist the active namespace as the current context's last pick, so
+    /// Persist the active namespace as the current cluster's last pick, so
     /// the next launch (and the next `:ctx` back here) restores it. Called
     /// after every explicit namespace choice — not after drill-downs,
     /// history, or bookmarks, which scope a view rather than pick a home.
     pub(super) fn remember_namespace(&mut self) {
         if !self
             .namespace_memory
-            .set(&self.cluster.context, &self.namespace)
+            .set(&self.cluster.id().state_key(), &self.namespace)
         {
             return;
         }
@@ -548,6 +548,21 @@ impl App {
         self.flash_warn(&format!("{label}: {error} — pick another context"));
     }
 
+    /// Extra kubeconfig sources in effect — files and directories from
+    /// `[kubeconfigs] paths`, overlaid with the runtime `:kubeconfig` marks,
+    /// then any directory this session was started with. The default
+    /// kubeconfig is always read and is not in this list.
+    pub fn kubeconfig_sources(&self) -> Vec<std::path::PathBuf> {
+        let mut out =
+            crate::kubeconfigs::active_paths(&self.kubeconfigs_cfg.paths, &self.kubeconfig_marks);
+        for path in &self.session_kubeconfig_paths {
+            if !out.contains(path) {
+                out.push(path.clone());
+            }
+        }
+        out
+    }
+
     pub(super) fn open_contexts(&mut self) {
         self.ctx_filter.clear();
         self.ctx_filtering = false;
@@ -556,34 +571,29 @@ impl App {
         self.mode = Mode::Contexts;
         let tx = self.tx.clone();
         let genr = self.generation;
+        let files = self.kubeconfig_sources();
         tokio::spawn(async move {
-            match Cluster::list_contexts() {
-                Ok(mut list) => {
-                    list.sort();
-                    let _ = tx
-                        .send(Msg::Contexts {
-                            generation: genr,
-                            list,
-                        })
-                        .await;
-                }
-                // An unreadable kubeconfig must say so — an empty picker
-                // over a parse error looks like "you have no contexts".
-                Err(e) => {
-                    let _ = tx
-                        .send(Msg::Error {
-                            generation: genr,
-                            error: e,
-                        })
-                        .await;
-                }
-            }
+            // Reading and parsing every kubeconfig is blocking file I/O; keep
+            // it off the runtime's async workers like any other disk read.
+            let listed = tokio::task::spawn_blocking(move || crate::kubeconfigs::list(&files))
+                .await
+                .unwrap_or_else(|e| (Vec::new(), vec![format!("listing contexts: {e}")]));
+            let (list, warnings) = listed;
+            let _ = tx
+                .send(Msg::Contexts {
+                    generation: genr,
+                    list,
+                    warnings,
+                })
+                .await;
         });
     }
 
     /// Contexts for the switcher, fuzzy-matched against the type-to-filter
-    /// buffer (see `filtered_namespaces` for the same pattern).
-    pub fn filtered_contexts(&self) -> Rc<Vec<String>> {
+    /// buffer (see `filtered_namespaces` for the same pattern). Matching runs
+    /// over the qualified label, so typing a file name narrows to that
+    /// kubeconfig's contexts.
+    pub fn filtered_contexts(&self) -> Rc<Vec<crate::kubeconfigs::Entry>> {
         if let Some(m) = self.picker_memos.borrow().contexts.as_ref()
             && m.filter == self.ctx_filter
             && m.ctx_list == self.ctx_list
@@ -593,16 +603,23 @@ impl App {
         if self.ctx_filter.is_empty() {
             return self.remember_contexts(self.ctx_list.clone());
         }
-        let mut scored: Vec<(i64, &String)> = self
+        let mut scored: Vec<(i64, &crate::kubeconfigs::Entry)> = self
             .ctx_list
             .iter()
-            .filter_map(|c| self.matcher.score(c, &self.ctx_filter).map(|s| (s, c)))
+            .filter_map(|c| {
+                self.matcher
+                    .score(&c.search_key(), &self.ctx_filter)
+                    .map(|s| (s, c))
+            })
             .collect();
-        scored.sort_unstable_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(b.1)));
+        scored.sort_unstable_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.label.cmp(&b.1.label)));
         self.remember_contexts(scored.into_iter().map(|(_, c)| c.clone()).collect())
     }
 
-    fn remember_contexts(&self, out: Vec<String>) -> Rc<Vec<String>> {
+    fn remember_contexts(
+        &self,
+        out: Vec<crate::kubeconfigs::Entry>,
+    ) -> Rc<Vec<crate::kubeconfigs::Entry>> {
         let value = Rc::new(out);
         self.picker_memos.borrow_mut().contexts = Some(ContextMemo {
             filter: self.ctx_filter.clone(),
@@ -657,12 +674,12 @@ impl App {
             // Space toggles the highlighted context in/out of the `:fleet`
             // dashboard for this session (the bulk-mark idiom).
             KeyCode::Char(' ') => {
-                if let Some(name) = self
+                if let Some(entry) = self
                     .ctx_state
                     .selected()
                     .and_then(|i| self.filtered_contexts().get(i).cloned())
                 {
-                    self.toggle_fleet_context(&name);
+                    self.toggle_fleet_context(&entry.id);
                 }
             }
             KeyCode::Down | KeyCode::Char('j') => list_step(&mut self.ctx_state, len, true),
@@ -683,7 +700,7 @@ impl App {
     }
 
     fn switch_selected_context(&mut self) {
-        if let Some(name) = self
+        if let Some(entry) = self
             .ctx_state
             .selected()
             .and_then(|i| self.filtered_contexts().get(i).cloned())
@@ -691,16 +708,17 @@ impl App {
             self.mode = Mode::Table;
             self.ctx_filter.clear();
             self.ctx_filtering = false;
-            self.switch_context(name);
+            self.switch_context(entry.id);
         }
     }
 
-    /// Put the switcher cursor on the active context (fallback: the top).
+    /// Put the switcher cursor on the active cluster (fallback: the top).
     fn select_current_context(&mut self) {
+        let current = self.cluster.id();
         let idx = self
             .filtered_contexts()
             .iter()
-            .position(|c| *c == self.cluster.context)
+            .position(|c| c.id == current)
             .unwrap_or(0);
         self.ctx_state.select(Some(idx));
     }
@@ -711,13 +729,21 @@ impl App {
         if self.deny_readonly() {
             return;
         }
-        let Some(old) = self
+        let Some(entry) = self
             .ctx_state
             .selected()
             .and_then(|i| self.filtered_contexts().get(i).cloned())
         else {
             return;
         };
+        // `kubectl config rename-context` writes to the kubeconfig it resolves
+        // on its own; renaming inside an added file would silently target the
+        // wrong one, so offer it only where the two agree.
+        if entry.id.path().is_some() {
+            self.flash_warn("rename applies to the default kubeconfig only");
+            return;
+        }
+        let old = entry.id.context.clone();
         self.prompt_label = format!("Rename context {old} to:");
         self.prompt_input = old.clone();
         self.prompt_kind = Some(PromptKind::RenameContext { old });
@@ -731,7 +757,11 @@ impl App {
         if new == old {
             return;
         }
-        if self.ctx_list.contains(&new) {
+        if self
+            .ctx_list
+            .iter()
+            .any(|c| c.id == crate::kubeconfigs::ClusterId::new(&new))
+        {
             self.flash_warn(&format!("context '{new}' already exists"));
             return;
         }
@@ -763,10 +793,10 @@ impl App {
     /// Rebuild the cluster connection against a different kubeconfig context.
     /// Reconnecting re-runs API discovery, which can take seconds, so it runs
     /// off-thread; the new cluster (or error) arrives as `Msg::ContextSwitched`.
-    pub(super) fn switch_context(&mut self, name: String) {
-        // Re-selecting the current context is a no-op — unless we never
+    pub(super) fn switch_context(&mut self, id: crate::kubeconfigs::ClusterId) {
+        // Re-selecting the current cluster is a no-op — unless we never
         // connected to it, in which case picking it again is a retry.
-        if name == self.cluster.context && self.cluster.connected {
+        if id == self.cluster.id() && self.cluster.connected {
             return;
         }
         // Re-selecting the target of the live connection is also a no-op. A
@@ -775,7 +805,7 @@ impl App {
         if self
             .context_switch_target
             .as_ref()
-            .is_some_and(|(generation, target)| *generation == self.generation && target == &name)
+            .is_some_and(|(generation, target)| *generation == self.generation && *target == id)
         {
             return;
         }
@@ -798,8 +828,8 @@ impl App {
         // being left: nothing in the new one can serve it.
         self.leave_pvc_explore();
         self.bump_generation();
-        self.context_switch_target = Some((self.generation, name.clone()));
-        self.set_flash(format!("switching to {name}…"));
+        self.context_switch_target = Some((self.generation, id.clone()));
+        self.set_flash(format!("switching to {}…", self.cluster_label(&id)));
         self.stash_view_snapshot();
         self.store.clear();
         self.invalidate_rows();
@@ -807,14 +837,14 @@ impl App {
         let genr = self.generation;
         let allow_v1_client_cert = self.cluster.allow_v1_client_cert;
         tokio::spawn(async move {
-            let result = Cluster::connect_context(&name, allow_v1_client_cert)
+            let result = Cluster::connect_context(&id, allow_v1_client_cert)
                 .await
                 .map(Box::new)
                 .map_err(|e| e.to_string());
             let _ = tx
                 .send(Msg::ContextSwitched {
                     generation: genr,
-                    name,
+                    id,
                     result,
                 })
                 .await;
@@ -824,9 +854,13 @@ impl App {
     /// Install a freshly-connected cluster from a context switch. Config is
     /// re-resolved so per-cluster/per-context overrides (aliases, plugins,
     /// skin, defaults) follow the new context.
-    pub(super) fn apply_context_switch(&mut self, name: String, mut cluster: Box<Cluster>) {
+    pub(super) fn apply_context_switch(
+        &mut self,
+        id: crate::kubeconfigs::ClusterId,
+        mut cluster: Box<Cluster>,
+    ) {
         self.stop_notifications();
-        let resolved = self.config.resolve(&name, &cluster.cluster_name);
+        let resolved = self.config.resolve(&id.context, &cluster.cluster_name);
         self.user_aliases = resolved.config.aliases;
         self.namespace_favorites = resolved.config.favorite_namespaces;
         self.remember_sort = resolved.config.remember_sort.unwrap_or(true);
@@ -840,6 +874,8 @@ impl App {
         self.pvc_cfg = resolved.config.pvc_explore;
         self.logs_cfg = resolved.config.logs;
         self.fleet_cfg = resolved.config.fleet;
+        self.kubeconfigs_cfg = resolved.config.kubeconfigs;
+        self.cluster_strip = resolved.config.cluster_strip.unwrap_or(true);
         // Tracked debuggers belong to the previous cluster/context.
         self.launched_node_debuggers.clear();
         let mut plugin_warnings = crate::config::plugin_warnings(&self.plugins);
@@ -872,13 +908,14 @@ impl App {
         self.readonly = self.readonly_override.unwrap_or(resolved.config.readonly);
         cluster.add_aliases(&self.user_aliases);
         self.bump_generation();
-        // Where you last were in this context beats its config default.
+        // Where you last were in this cluster beats its config default.
         self.namespace = self
             .namespace_memory
-            .get(&cluster.context)
+            .get(&id.state_key())
             .or(resolved.config.default_namespace)
             .unwrap_or_else(|| cluster.default_namespace.clone());
         self.cluster = *cluster;
+        self.note_recent_cluster(id.clone());
         self.stack.clear();
         // View history references the old cluster's kinds and namespaces.
         self.history.clear();
@@ -898,7 +935,7 @@ impl App {
         self.last_rbac_ns = None;
         crate::theme::set_background(resolved.config.skin.background);
         self.apply_context_skin(resolved.skin_override);
-        self.flash = format!("context: {name}");
+        self.flash = format!("context: {}", self.cluster_label(&id));
         self.flash_err = false;
         let first_warning = resolved
             .warnings
@@ -938,5 +975,175 @@ impl App {
         self.forwards_cfg = resolved.config.forwards;
         self.notify_cfg = resolved.config.notify;
         self.start_autostart_forwards();
+    }
+
+    /// How a cluster is named in flashes and the header strip: the label the
+    /// context listing computed, which qualifies a name only where another
+    /// kubeconfig defines it too.
+    pub fn cluster_label(&self, id: &crate::kubeconfigs::ClusterId) -> String {
+        match self
+            .all_contexts
+            .iter()
+            .chain(self.ctx_list.iter())
+            .find(|e| e.id == *id)
+        {
+            Some(entry) => entry.label.clone(),
+            // Not in the cached list (a `--context` from the CLI, or a file
+            // removed since): name the file it came from, unless the file is
+            // named after the context and would only repeat it.
+            None => match id.path().and_then(|p| p.file_stem()) {
+                Some(stem) if *stem != *id.context => {
+                    format!("{}@{}", id.context, stem.to_string_lossy())
+                }
+                _ => id.context.clone(),
+            },
+        }
+    }
+
+    /// Push a cluster to the front of the quick-switch strip, newest first.
+    pub fn note_recent_cluster(&mut self, id: crate::kubeconfigs::ClusterId) {
+        self.recent_clusters.retain(|c| *c != id);
+        self.recent_clusters.insert(0, id);
+        // The strip is addressed by `ctrl-1`…`ctrl-9`; anything past that is
+        // unreachable and would only be noise.
+        self.recent_clusters.truncate(9);
+    }
+
+    /// Jump to the nth quick-switch slot (`ctrl-1`…`ctrl-9`, 1-based).
+    pub(super) fn switch_recent_cluster(&mut self, slot: usize) {
+        let Some(id) = slot
+            .checked_sub(1)
+            .and_then(|i| self.recent_clusters.get(i))
+            .cloned()
+        else {
+            return;
+        };
+        self.switch_context(id);
+    }
+
+    /// Kubeconfig source manager (`:kubeconfig`).
+    pub(super) fn open_kubeconfigs(&mut self) {
+        self.mode = Mode::Kubeconfigs;
+        self.rebuild_kubeconfig_rows();
+        let selected = self.kubeconfig_state.selected().unwrap_or(0);
+        // Row 0 is always the default kubeconfig, which is never removable.
+        self.kubeconfig_state
+            .select(Some(selected.min(self.kubeconfig_rows.len())));
+    }
+
+    /// Recount what each extra source provides. Reads every kubeconfig it
+    /// names, so it runs on source changes only — never per frame.
+    fn rebuild_kubeconfig_rows(&mut self) {
+        self.kubeconfig_rows = self
+            .kubeconfig_sources()
+            .into_iter()
+            .map(|path| {
+                let directory = path.is_dir();
+                let files = crate::kubeconfigs::files_in(&path);
+                let contexts = files
+                    .iter()
+                    .filter_map(|f| crate::kubeconfigs::Source::File(f.clone()).read().ok())
+                    .map(|k| k.contexts.len())
+                    .sum();
+                super::KubeconfigRow {
+                    path,
+                    directory,
+                    files: files.len(),
+                    contexts,
+                }
+            })
+            .collect();
+    }
+
+    pub(super) fn key_kubeconfigs(&mut self, key: KeyEvent) {
+        let len = self.kubeconfig_rows.len() + 1;
+        match key.code {
+            KeyCode::Esc => self.mode = Mode::Table,
+            KeyCode::Down | KeyCode::Char('j') => list_step(&mut self.kubeconfig_state, len, true),
+            KeyCode::Up | KeyCode::Char('k') => list_step(&mut self.kubeconfig_state, len, false),
+            KeyCode::Char('a') => {
+                self.prompt_label = "Add kubeconfig file or directory:".into();
+                self.prompt_input.clear();
+                self.prompt_kind = Some(PromptKind::AddKubeconfig);
+                self.mode = Mode::Prompt;
+            }
+            KeyCode::Char('d') => self.remove_selected_kubeconfig(),
+            // Enter goes where you were headed anyway: the contexts these
+            // files provide.
+            KeyCode::Enter => self.open_contexts(),
+            _ => {}
+        }
+    }
+
+    pub(super) fn add_kubeconfig(&mut self, path: String) {
+        match self.kubeconfig_marks.add(&path) {
+            Ok(true) => {
+                self.persist_kubeconfig_marks();
+                self.refresh_context_cache();
+                self.rebuild_kubeconfig_rows();
+                let contexts: usize = self.kubeconfig_rows.iter().map(|r| r.contexts).sum();
+                self.set_flash(format!(
+                    "kubeconfig added — {} extra {}, {contexts} contexts",
+                    self.kubeconfig_rows.len(),
+                    if self.kubeconfig_rows.len() == 1 {
+                        "source"
+                    } else {
+                        "sources"
+                    }
+                ));
+            }
+            Ok(false) => self.set_flash("kubeconfig already listed".to_string()),
+            Err(e) => self.flash_warn(&e),
+        }
+        self.mode = Mode::Kubeconfigs;
+    }
+
+    fn remove_selected_kubeconfig(&mut self) {
+        let Some(path) = self
+            .kubeconfig_state
+            .selected()
+            .and_then(|i| i.checked_sub(1))
+            .and_then(|i| self.kubeconfig_rows.get(i))
+            .map(|r| r.path.clone())
+        else {
+            self.flash_warn("the default kubeconfig cannot be removed");
+            return;
+        };
+        if !self.kubeconfig_marks.remove(&path) {
+            return;
+        }
+        self.persist_kubeconfig_marks();
+        self.set_flash(format!("kubeconfig removed: {}", path.display()));
+        // Contexts that source provided are gone; anything remembering them
+        // (the strip, the completion cache) must stop offering them.
+        self.recent_clusters
+            .retain(|id| id.path().is_none_or(|p| !p.starts_with(&path)));
+        self.refresh_context_cache();
+        self.rebuild_kubeconfig_rows();
+        let selected = self.kubeconfig_state.selected().unwrap_or(0);
+        self.kubeconfig_state
+            .select(Some(selected.min(self.kubeconfig_rows.len())));
+    }
+
+    fn persist_kubeconfig_marks(&mut self) {
+        let Some(path) = self.kubeconfig_marks_path.clone() else {
+            return;
+        };
+        let result = match &self.state_writer {
+            Some(writer) => writer.save_kubeconfigs(self.kubeconfig_marks.clone(), path),
+            None => self.kubeconfig_marks.save(&path),
+        };
+        if let Err(e) = result {
+            self.flash_warn(&format!("kubeconfig list not saved: {e}"));
+        }
+    }
+
+    /// Re-read every active kubeconfig into the palette-completion cache.
+    pub(super) fn refresh_context_cache(&mut self) {
+        let (list, warnings) = crate::kubeconfigs::list(&self.kubeconfig_sources());
+        self.all_contexts = list;
+        if let Some(w) = warnings.first() {
+            self.flash_warn(w);
+        }
     }
 }

@@ -10,7 +10,9 @@ use ratatui::widgets::{
 };
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use crate::app::{App, DEFAULT_SORT_LABEL, Mode, Pane, SuggestKind, TRANSFER_MENU_ITEMS};
+use crate::app::{
+    App, DEFAULT_SORT_LABEL, Mode, Pane, SLOT_KEYS, SuggestKind, TRANSFER_MENU_ITEMS,
+};
 use crate::{columns, theme};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -110,14 +112,14 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         }
         return;
     }
+    let header_h: u16 = if compact { 1 } else { 7 };
+    let strip_h = cluster_strip_height(app);
     let mut constraints = vec![
         Constraint::Length(if app.hide_header {
             0
-        } else if compact {
-            1
         } else {
-            7
-        }), // header
+            header_h + strip_h
+        }), // header (+ cluster strip)
         Constraint::Min(3), // body
     ];
     let prompt_idx = if !compact || needs_prompt {
@@ -138,10 +140,25 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         .split(frame.area());
 
     if !app.hide_header {
-        if compact {
-            draw_compact_header(frame, app, chunks[0]);
+        // The strip is a nested row inside the header's own constraint slot, so
+        // every other chunk index (body, prompt, status) stays exactly as it was
+        // whether or not the strip is showing.
+        let (header_area, strip_area) = if strip_h > 0 {
+            let split =
+                Layout::vertical([Constraint::Length(header_h), Constraint::Length(strip_h)])
+                    .split(chunks[0]);
+            (split[0], Some(split[1]))
         } else {
-            draw_header(frame, app, chunks[0]);
+            (chunks[0], None)
+        };
+
+        if compact {
+            draw_compact_header(frame, app, header_area);
+        } else {
+            draw_header(frame, app, header_area);
+        }
+        if let Some(strip) = strip_area {
+            draw_cluster_strip(frame, app, strip);
         }
     }
 
@@ -228,6 +245,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     match app.mode {
         Mode::Namespaces => draw_namespaces(frame, app, chunks[1]),
         Mode::Contexts => draw_contexts(frame, app, chunks[1]),
+        Mode::Kubeconfigs => draw_kubeconfigs(frame, app, chunks[1]),
         Mode::SortPicker => draw_sort_picker(frame, app, chunks[1]),
         Mode::CopyPicker => draw_copy_picker(frame, app, chunks[1]),
         Mode::Containers => draw_containers(frame, app, chunks[1]),
@@ -289,6 +307,21 @@ fn diagnostic_value<'a>(app: &App, value: &'a str) -> std::borrow::Cow<'a, str> 
     }
 }
 
+/// Dimmed chip naming which kubeconfig a cluster came from — the file's
+/// stem, e.g. `⟨work⟩` — so a same-named context in an added file is never
+/// mistaken for the one in the default kubeconfig. `None` for the default
+/// kubeconfig, which needs no disambiguating, and for a per-cluster file
+/// named after its one context, where the chip would only repeat the name
+/// already printed beside it.
+fn cluster_source_chip(cluster: &crate::k8s::Cluster) -> Option<String> {
+    let path = cluster.source.path()?;
+    let stem = path.file_stem().and_then(|s| s.to_str())?;
+    if stem.is_empty() || stem == cluster.context {
+        return None;
+    }
+    Some(format!("⟨{stem}⟩"))
+}
+
 fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
     let cols = Layout::default()
         .direction(Direction::Horizontal)
@@ -316,6 +349,9 @@ fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
     };
 
     let mut context_line = field("Context:", app.cluster.context.clone(), theme::mauve());
+    if let Some(chip) = cluster_source_chip(&app.cluster) {
+        context_line.push_span(Span::styled(format!("  {chip}"), theme::dim()));
+    }
     if app.readonly {
         context_line.push_span(Span::styled(
             "  [read-only]",
@@ -422,6 +458,13 @@ fn draw_compact_header(frame: &mut Frame, app: &App, area: Rect) {
             Style::default().fg(theme::mauve()),
         ),
     ];
+    if let Some(chip) = cluster_source_chip(&app.cluster) {
+        let used: usize = spans.iter().map(|s| s.width()).sum();
+        let text = format!("  {chip}");
+        if used + text.width() < area.width as usize {
+            spans.push(Span::styled(text, theme::dim()));
+        }
+    }
     if app.readonly {
         spans.push(Span::styled(" [ro]", Style::default().fg(theme::red())));
     }
@@ -464,6 +507,58 @@ fn draw_compact_header(frame: &mut Frame, app: &App, area: Rect) {
 /// logo (26) + box borders (2) + info cluster + hints.
 fn header_hints_fit(frame_width: u16) -> bool {
     frame_width.saturating_sub(26 + 2) >= HEADER_INFO_MIN + HEADER_HINTS_WIDTH
+}
+
+/// Height of the recent-clusters quick-switch strip: one row when there's
+/// something to switch between and the user hasn't turned it off, otherwise
+/// none — a single-cluster session looks exactly as it always has, with no
+/// wasted row. Suppressed in compact mode too: compact already trades every
+/// header row it can for table space.
+fn cluster_strip_height(app: &App) -> u16 {
+    if app.compact || !app.cluster_strip || app.recent_clusters.len() < 2 {
+        0
+    } else {
+        1
+    }
+}
+
+/// The quick-switch strip under the header: `recent_clusters` labelled with
+/// the key that jumps to each, the active one picked out with `▸` and the
+/// selection style, the rest dim. Never wraps — a narrow terminal just clips
+/// the tail of the line, same as every other single-line header text here.
+///
+/// The slot key is the shifted digit rather than the digit, because that is
+/// what the binding actually is: `ctrl-<digit>` works too, but macOS
+/// terminals largely refuse to transmit it, so showing it would be a lie on
+/// the platform most likely to be reading this row.
+fn draw_cluster_strip(frame: &mut Frame, app: &App, area: Rect) {
+    // One long name (an EKS ARN, an OpenShift `user/server` context) must not
+    // push every other slot off the row: the key is what you press, so the
+    // name only has to be recognizable.
+    const SLOT_LABEL_MAX: usize = 24;
+    let current = app.cluster.id();
+    let mut spans = vec![Span::raw("  ")];
+    for (i, id) in app.recent_clusters.iter().enumerate() {
+        if i > 0 {
+            spans.push(Span::raw("  "));
+        }
+        let active = *id == current;
+        let text = format!(
+            "{}{} {}",
+            if active { "▸" } else { " " },
+            SLOT_KEYS.chars().nth(i).unwrap_or('·'),
+            truncate_cols(&app.cluster_label(id), SLOT_LABEL_MAX)
+        );
+        spans.push(Span::styled(
+            text,
+            if active {
+                theme::selected_row()
+            } else {
+                theme::dim()
+            },
+        ));
+    }
+    frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
 /// One hint row of fixed-width cells (right-aligned key, padded label) so
@@ -2191,6 +2286,14 @@ fn draw_help(frame: &mut Frame, app: &mut App, area: Rect) {
         ),
         bind(":ctx · :pulse", "switch context · cluster-health dashboard"),
         bind(
+            ":kubeconfig",
+            "manage which kubeconfig files/directories contexts come from (a add · d remove)",
+        ),
+        bind(
+            "shift-1…9",
+            "switch to a cluster in the header quick-switch strip (also ctrl-1…9)",
+        ),
+        bind(
             ":fleet",
             "cross-context health dashboard ([fleet] contexts or space in :ctx; ⏎ switches)",
         ),
@@ -2359,6 +2462,17 @@ fn draw_help(frame: &mut Frame, app: &mut App, area: Rect) {
         bind(
             ":pvc-clean",
             "delete helper pods left behind by a session that exited uncleanly (:pvc-cleanup)",
+        ),
+        Line::from(""),
+        Line::from(Span::styled("  Kubeconfigs (:kubeconfig)", theme::title())),
+        bind("a", "add a kubeconfig file or directory of kubeconfigs"),
+        bind(
+            "d",
+            "remove the selected source (the default kubeconfig can't be removed)",
+        ),
+        bind(
+            "⏎ · esc",
+            "open the contexts it provides · back to the table",
         ),
         Line::from(""),
         Line::from(Span::styled("  Logs view", theme::title())),
@@ -2541,30 +2655,144 @@ fn draw_namespaces(frame: &mut Frame, app: &mut App, area: Rect) {
     );
 }
 
+/// The API-server host without its scheme, e.g. `https://api.prod:6443` ->
+/// `api.prod:6443`. Empty (a context with no server on record) stays empty
+/// rather than printing a placeholder box.
+fn server_host(server: &str) -> &str {
+    server
+        .split_once("://")
+        .map_or(server, |(_, rest)| rest)
+        .trim_end_matches('/')
+}
+
+/// Kubeconfig paths are long and nearly always under `$HOME`; showing the
+/// home-relative form keeps the row readable without hiding anything.
+fn home_relative(path: &std::path::Path) -> String {
+    let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+    match home.and_then(|h| path.strip_prefix(h).ok().map(std::path::Path::to_path_buf)) {
+        Some(rest) => format!("~/{}", rest.display()),
+        None => path.display().to_string(),
+    }
+}
+
 fn draw_contexts(frame: &mut Frame, app: &mut App, area: Rect) {
-    let current = app.cluster.context.clone();
-    let items: Vec<ListItem> = app
-        .filtered_contexts()
+    let current = app.cluster.id();
+    let entries = app.filtered_contexts();
+
+    // Widened via `render_popup_list`'s own percentage/minimum scaling;
+    // mirror that math here so the column budget matches the box the popup
+    // is actually about to get.
+    const PERCENT_X: u16 = 80;
+    const PERCENT_Y: u16 = 60;
+    const MIN_WIDTH: u16 = 40;
+    let popup_w = scaled_dim(PERCENT_X, MIN_WIDTH, area.width);
+    // Borders (2 cols) + the list's own highlight gutter ("▌ ", 2 cols).
+    let budget = popup_w.saturating_sub(4) as usize;
+
+    let name_cap = (budget / 2).clamp(8, 28);
+    let name_width = entries
         .iter()
-        .map(|c| {
-            let marker = if *c == current { "● " } else { "  " };
+        .map(|e| e.context().chars().count())
+        .max()
+        .unwrap_or(4)
+        .clamp(4, name_cap);
+    let ns_width = entries
+        .iter()
+        .filter_map(|e| e.namespace.as_deref())
+        .map(|n| n.chars().count() + 3) // "ns:" prefix
+        .max()
+        .unwrap_or(0)
+        .min(18);
+    let source_width = entries
+        .iter()
+        .filter(|e| e.source_label != e.id.context)
+        .map(|e| e.source_label.chars().count())
+        .max()
+        .unwrap_or(0)
+        .min(16);
+    // Server names are long and the interesting part is the host, so the
+    // column takes whatever the other columns leave rather than a fixed cap —
+    // with no namespaces or sources to show, that is most of the row.
+    let fixed = 4 + name_width // fleet mark (2) + current marker (2)
+        + if ns_width > 0 { 1 + ns_width } else { 0 }
+        + if source_width > 0 { 1 + source_width } else { 0 };
+    let server_width = entries
+        .iter()
+        .map(|e| server_host(&e.server).chars().count())
+        .max()
+        .unwrap_or(0)
+        .min(budget.saturating_sub(fixed + 1));
+
+    // Degrade by dropping whole columns from the right — source, then
+    // namespace, then server — instead of wrapping or spilling a column into
+    // the next one on a narrow terminal.
+    let mut show_server = server_width > 0;
+    let mut show_ns = ns_width > 0;
+    let mut show_source = source_width > 0;
+    let mut used = fixed + if show_server { 1 + server_width } else { 0 };
+    if used > budget && show_source {
+        used -= 1 + source_width;
+        show_source = false;
+    }
+    if used > budget && show_ns {
+        used -= 1 + ns_width;
+        show_ns = false;
+    }
+    if used > budget && show_server {
+        show_server = false;
+    }
+
+    let items: Vec<ListItem> = entries
+        .iter()
+        .map(|entry| {
+            let is_current = entry.id == current;
+            let marker = if is_current { "● " } else { "  " };
             // Fleet membership (`space` toggles) in the bulk-mark style.
-            let fleet = if app.is_fleet_context(c) {
+            let fleet = if app.is_fleet_context(&entry.id) {
                 "✓ "
             } else {
                 "  "
             };
-            ListItem::new(Line::from(vec![
+            let name = truncate_cols(entry.context(), name_width);
+            let mut spans = vec![
                 Span::styled(fleet, Style::default().fg(theme::mark())),
                 Span::styled(
-                    format!("{marker}{c}"),
-                    Style::default().fg(if *c == current {
+                    format!("{marker}{name:<name_width$}"),
+                    Style::default().fg(if is_current {
                         theme::green()
                     } else {
                         theme::text()
                     }),
                 ),
-            ]))
+            ];
+            if show_server {
+                let host = truncate_cols(server_host(&entry.server), server_width);
+                spans.push(Span::styled(
+                    format!(" {host:<server_width$}"),
+                    theme::dim(),
+                ));
+            }
+            if show_ns {
+                let ns = entry
+                    .namespace
+                    .as_deref()
+                    .map(|n| truncate_cols(&format!("ns:{n}"), ns_width))
+                    .unwrap_or_default();
+                spans.push(Span::styled(format!(" {ns:<ns_width$}"), theme::dim()));
+            }
+            // A per-cluster kubeconfig is usually named after its one context;
+            // repeating that as a source chip is noise. Show the source where
+            // it says something the name doesn't.
+            if show_source
+                && !entry.source_label.is_empty()
+                && entry.source_label != entry.context()
+            {
+                spans.push(Span::styled(
+                    format!(" {}", entry.source_label),
+                    theme::dim(),
+                ));
+            }
+            ListItem::new(Line::from(spans))
         })
         .collect();
     // While typing, show the filter buffer in the title so it reads like an
@@ -2574,16 +2802,91 @@ fn draw_contexts(frame: &mut Frame, app: &mut App, area: Rect) {
     } else if !app.ctx_filter.is_empty() {
         format!(" Contexts · /{} ", app.ctx_filter)
     } else {
-        " Contexts (type to filter · r rename · space fleet · ⏎ switch) ".to_string()
+        " Contexts (type to filter · r rename · space fleet · ⏎ switch · :kubeconfig files) "
+            .to_string()
     };
     render_popup_list(
         frame,
         area,
-        50,
-        60,
+        PERCENT_X,
+        PERCENT_Y,
         items,
         Span::styled(title, theme::title()),
         &mut app.ctx_state,
+    );
+}
+
+/// Kubeconfig source manager (`:kubeconfig`): the default kubeconfig (row 0,
+/// never removable) plus every extra file or directory in
+/// `app.kubeconfig_rows`. Counts come from the row cache rebuilt on open and
+/// on add/remove — never read a kubeconfig from here, that IO belongs off the
+/// render path entirely.
+fn draw_kubeconfigs(frame: &mut Frame, app: &mut App, area: Rect) {
+    let active_path = app.cluster.source.path();
+    let mut items = Vec::with_capacity(app.kubeconfig_rows.len() + 1);
+
+    let default_active = active_path.is_none();
+    let default_color = if default_active {
+        theme::green()
+    } else {
+        theme::text()
+    };
+    items.push(ListItem::new(Line::from(vec![
+        Span::styled(
+            format!(
+                "{}default kubeconfig ($KUBECONFIG / ~/.kube/config)",
+                if default_active { "● " } else { "  " }
+            ),
+            Style::default().fg(default_color),
+        ),
+        Span::styled("  (fixed)", theme::dim()),
+    ])));
+
+    for row in &app.kubeconfig_rows {
+        let active = active_path.is_some_and(|p| p.starts_with(&row.path));
+        let missing = row.files == 0;
+        let label_color = if missing {
+            theme::red()
+        } else if active {
+            theme::green()
+        } else {
+            theme::text()
+        };
+        let mut spans = vec![Span::styled(
+            format!(
+                "{}{}",
+                if active { "● " } else { "  " },
+                home_relative(&row.path)
+            ),
+            Style::default().fg(label_color),
+        )];
+        if missing {
+            spans.push(Span::styled("  missing", Style::default().fg(theme::red())));
+        } else if row.directory {
+            spans.push(Span::styled(
+                format!("  dir · {} files · {} contexts", row.files, row.contexts),
+                theme::dim(),
+            ));
+        } else {
+            spans.push(Span::styled(
+                format!("  {} contexts", row.contexts),
+                theme::dim(),
+            ));
+        }
+        items.push(ListItem::new(Line::from(spans)));
+    }
+
+    render_popup_list(
+        frame,
+        area,
+        80,
+        60,
+        items,
+        Span::styled(
+            " Kubeconfigs (a add file or directory · d remove · ⏎ contexts · esc back) ",
+            theme::title(),
+        ),
+        &mut app.kubeconfig_state,
     );
 }
 
@@ -3393,7 +3696,7 @@ fn draw_fleet(frame: &mut Frame, app: &mut App, area: Rect) {
             let mut spans = vec![
                 Span::styled(format!("{glyph} "), Style::default().fg(gcolor)),
                 Span::styled(
-                    format!("{:<26}", truncate_cols(&r.context, 26)),
+                    format!("{:<26}", truncate_cols(&r.label, 26)),
                     Style::default().fg(theme::text()),
                 ),
             ];
@@ -4213,6 +4516,15 @@ fn centered_rect_exact(width: u16, height: u16, r: Rect) -> Rect {
     }
 }
 
+/// A percentage of `total`, floored at `min` and capped at `total` itself —
+/// the same scaling `centered_rect_with_min` uses for width and height,
+/// exposed so a popup can size its own content to the box it's about to get
+/// instead of guessing.
+fn scaled_dim(percent: u16, min: u16, total: u16) -> u16 {
+    let scaled = (u32::from(total) * u32::from(percent.min(100)) / 100) as u16;
+    scaled.max(min).min(total)
+}
+
 fn centered_rect_with_min(
     percent_x: u16,
     percent_y: u16,
@@ -4220,10 +4532,8 @@ fn centered_rect_with_min(
     min_height: u16,
     r: Rect,
 ) -> Rect {
-    let pct_w = (u32::from(r.width) * u32::from(percent_x.min(100)) / 100) as u16;
-    let pct_h = (u32::from(r.height) * u32::from(percent_y.min(100)) / 100) as u16;
-    let width = pct_w.max(min_width).min(r.width);
-    let height = pct_h.max(min_height).min(r.height);
+    let width = scaled_dim(percent_x, min_width, r.width);
+    let height = scaled_dim(percent_y, min_height, r.height);
     Rect {
         x: r.x + (r.width - width) / 2,
         y: r.y + (r.height - height) / 2,

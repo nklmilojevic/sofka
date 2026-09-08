@@ -10,55 +10,65 @@ const FLEET_CONCURRENCY: usize = 4;
 const FLEET_TIMEOUT_SECS: u64 = 8;
 
 impl App {
-    /// The fleet contexts in effect: the `[fleet] contexts` config list plus
-    /// contexts marked with `space` in the context switcher, minus config
+    /// The fleet clusters in effect: the `[fleet] contexts` config list plus
+    /// clusters marked with `space` in the context switcher, minus config
     /// entries unmarked the same way. Marks persist across restarts (see
     /// [`crate::fleet::FleetMarks`]); the config file is never rewritten.
-    pub fn fleet_contexts(&self) -> Vec<String> {
-        let mut out: Vec<String> = self
+    ///
+    /// Config entries are plain context names, which name a context in the
+    /// default kubeconfig; marks carry the kubeconfig too, so a context from
+    /// an added file can join the fleet without colliding with a same-named
+    /// one elsewhere.
+    pub fn fleet_contexts(&self) -> Vec<crate::kubeconfigs::ClusterId> {
+        let mut out: Vec<crate::kubeconfigs::ClusterId> = self
             .fleet_cfg
             .contexts
             .iter()
             .filter(|c| !self.fleet_marks.removed.contains(c))
-            .cloned()
+            .map(crate::kubeconfigs::ClusterId::new)
             .collect();
         for c in &self.fleet_marks.added {
-            if !out.contains(c) {
-                out.push(c.clone());
+            let id = crate::kubeconfigs::ClusterId::from_state_key(c);
+            if !out.contains(&id) {
+                out.push(id);
             }
         }
         out
     }
 
-    /// Whether `ctx` is currently part of the fleet (config + marks).
+    /// Whether `id` is currently part of the fleet (config + marks).
     ///
     /// Answers the membership question directly rather than materializing
     /// [`Self::fleet_contexts`]: the context switcher asks this once per row
     /// per frame, and building (and cloning into) a `Vec` per row made that
     /// draw quadratic in allocations.
-    pub fn is_fleet_context(&self, ctx: &str) -> bool {
-        let listed = self.fleet_cfg.contexts.iter().any(|c| c == ctx)
-            && !self.fleet_marks.removed.iter().any(|c| c == ctx);
-        listed || self.fleet_marks.added.iter().any(|c| c == ctx)
+    pub fn is_fleet_context(&self, id: &crate::kubeconfigs::ClusterId) -> bool {
+        let key = id.state_key();
+        let listed = id.path().is_none()
+            && self.fleet_cfg.contexts.contains(&id.context)
+            && !self.fleet_marks.removed.contains(&key);
+        listed || self.fleet_marks.added.contains(&key)
     }
 
-    /// Toggle a context in/out of the fleet (`space` in the context
+    /// Toggle a cluster in/out of the fleet (`space` in the context
     /// switcher), saving the marks so the fleet survives restarts.
-    pub(super) fn toggle_fleet_context(&mut self, ctx: &str) {
-        if self.is_fleet_context(ctx) {
-            self.fleet_marks.added.retain(|c| c != ctx);
+    pub(super) fn toggle_fleet_context(&mut self, id: &crate::kubeconfigs::ClusterId) {
+        let key = id.state_key();
+        let label = self.cluster_label(id);
+        if self.is_fleet_context(id) {
+            self.fleet_marks.added.retain(|c| *c != key);
             // A config-listed context can't be dropped from the config Vec
             // (it comes back on every re-resolve), so it's masked instead.
-            if self.fleet_cfg.contexts.iter().any(|c| c == ctx)
-                && !self.fleet_marks.removed.iter().any(|c| c == ctx)
+            if self.fleet_cfg.contexts.contains(&id.context)
+                && !self.fleet_marks.removed.contains(&key)
             {
-                self.fleet_marks.removed.push(ctx.to_string());
+                self.fleet_marks.removed.push(key);
             }
-            self.flash = format!("fleet − {ctx}");
+            self.flash = format!("fleet − {label}");
         } else {
-            self.fleet_marks.removed.retain(|c| c != ctx);
-            self.fleet_marks.added.push(ctx.to_string());
-            self.flash = format!("fleet + {ctx}");
+            self.fleet_marks.removed.retain(|c| *c != key);
+            self.fleet_marks.added.push(key);
+            self.flash = format!("fleet + {label}");
         }
         self.flash_err = false;
         if let Some(path) = self.fleet_marks_path.clone() {
@@ -95,12 +105,12 @@ impl App {
         // policy up front (the CLI flag wins; else the per-context config).
         self.fleet_rows = contexts
             .iter()
-            .map(|ctx| {
-                let cluster = crate::k8s::cluster_name_for_context(ctx);
+            .map(|id| {
+                let cluster = crate::k8s::cluster_name_for_context(id);
                 let readonly = self
                     .readonly_override
-                    .unwrap_or_else(|| self.config.resolve(ctx, &cluster).config.readonly);
-                FleetRow::connecting(ctx.clone(), readonly)
+                    .unwrap_or_else(|| self.config.resolve(&id.context, &cluster).config.readonly);
+                FleetRow::connecting(id.clone(), self.cluster_label(id), readonly)
             })
             .collect();
         self.fleet_state.select(Some(0));
@@ -114,7 +124,8 @@ impl App {
         let allow_v1_client_cert = self.cluster.allow_v1_client_cert;
         let sema = Arc::new(tokio::sync::Semaphore::new(FLEET_CONCURRENCY));
         for row in &self.fleet_rows {
-            let ctx = row.context.clone();
+            let id = row.id.clone();
+            let label = row.label.clone();
             let readonly = row.readonly;
             let tx = self.tx.clone();
             let genr = self.generation;
@@ -125,13 +136,13 @@ impl App {
                 let dur = Duration::from_secs(FLEET_TIMEOUT_SECS);
                 let row = match tokio::time::timeout(
                     dur,
-                    gather_context(&ctx, readonly, allow_v1_client_cert),
+                    gather_context(&id, label.clone(), readonly, allow_v1_client_cert),
                 )
                 .await
                 {
                     Ok(row) => row,
                     Err(_) => {
-                        let mut r = FleetRow::connecting(ctx.clone(), readonly);
+                        let mut r = FleetRow::connecting(id.clone(), label, readonly);
                         r.status = FleetStatus::Error("timed out".into());
                         r
                     }
@@ -147,13 +158,9 @@ impl App {
         }
     }
 
-    /// Apply a gathered summary to its row (matched by context name).
+    /// Apply a gathered summary to its row (matched by cluster).
     pub(super) fn apply_fleet_row(&mut self, row: FleetRow) {
-        if let Some(slot) = self
-            .fleet_rows
-            .iter_mut()
-            .find(|r| r.context == row.context)
-        {
+        if let Some(slot) = self.fleet_rows.iter_mut().find(|r| r.id == row.id) {
             *slot = row;
         }
     }
@@ -167,21 +174,21 @@ impl App {
             KeyCode::Char('r') => {
                 // Re-gather: reset rows to connecting, keeping resolved policy.
                 for r in &mut self.fleet_rows {
-                    *r = FleetRow::connecting(r.context.clone(), r.readonly);
+                    *r = FleetRow::connecting(r.id.clone(), r.label.clone(), r.readonly);
                 }
                 self.spawn_fleet_gathers();
             }
-            // Enter switches to the highlighted context via the normal
+            // Enter switches to the highlighted cluster via the normal
             // context-switch path, landing on its default view.
             KeyCode::Enter => {
-                if let Some(ctx) = self
+                if let Some(id) = self
                     .fleet_state
                     .selected()
                     .and_then(|i| self.fleet_rows.get(i))
-                    .map(|r| r.context.clone())
+                    .map(|r| r.id.clone())
                 {
                     self.mode = Mode::Table;
-                    self.switch_context(ctx);
+                    self.switch_context(id);
                 }
             }
             _ => {}
@@ -189,12 +196,17 @@ impl App {
     }
 }
 
-/// Gather one context's summary: connect, then read version, node readiness,
+/// Gather one cluster's summary: connect, then read version, node readiness,
 /// unhealthy pods, and Flux failures. Any connection/auth error becomes an
 /// `Error` row rather than propagating.
-async fn gather_context(ctx: &str, readonly: bool, allow_v1_client_cert: bool) -> FleetRow {
-    let mut row = FleetRow::connecting(ctx.to_string(), readonly);
-    let cluster = match Cluster::connect_context(ctx, allow_v1_client_cert).await {
+async fn gather_context(
+    id: &crate::kubeconfigs::ClusterId,
+    label: String,
+    readonly: bool,
+    allow_v1_client_cert: bool,
+) -> FleetRow {
+    let mut row = FleetRow::connecting(id.clone(), label, readonly);
+    let cluster = match Cluster::connect_context(id, allow_v1_client_cert).await {
         Ok(c) => c,
         Err(e) => {
             row.status = FleetStatus::Error(short_error(&format!("{e:#}")));

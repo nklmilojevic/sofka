@@ -22,7 +22,7 @@ impl App {
             && (context != &self.cluster.context || !self.cluster.connected)
         {
             let context = context.clone();
-            self.switch_context(context);
+            self.switch_context_labeled(&context);
             self.pending_bookmark = None;
             self.pending_workspace = None;
             self.pending_resource_query = Some(query);
@@ -1497,15 +1497,27 @@ impl App {
                 self.ns_state
                     .select(Some(keep.min(self.ns_list.len().saturating_sub(1))));
             }
-            Msg::Contexts { generation, list } if generation == self.generation => {
+            Msg::Contexts {
+                generation,
+                list,
+                warnings,
+            } if generation == self.generation => {
                 if list.is_empty() {
                     self.mode = Mode::Table;
                     self.flash_warn("no contexts found in kubeconfig");
                 } else {
-                    let cur = self.cluster.context.clone();
-                    let idx = list.iter().position(|c| *c == cur).unwrap_or(0);
-                    self.ctx_list = list;
+                    let cur = self.cluster.id();
+                    let idx = list.iter().position(|c| c.id == cur).unwrap_or(0);
+                    self.ctx_list = list.clone();
+                    // The switcher's list is also what `:ctx <name>`
+                    // completes against, so keep the two from drifting.
+                    self.all_contexts = list;
                     self.ctx_state.select(Some(idx));
+                }
+                // A file that could not be read is reported rather than
+                // silently contributing nothing.
+                if let Some(w) = warnings.first() {
+                    self.flash_warn(w);
                 }
             }
             Msg::ContextRenamed {
@@ -1519,17 +1531,28 @@ impl App {
                     // Patch the cached lists in place — kubectl already
                     // rewrote the kubeconfig, so a re-read would say the same.
                     for list in [&mut self.ctx_list, &mut self.all_contexts] {
-                        if let Some(c) = list.iter_mut().find(|c| **c == old) {
-                            *c = new.clone();
+                        if let Some(c) = list
+                            .iter_mut()
+                            .find(|c| c.id.path().is_none() && c.id.context == old)
+                        {
+                            c.id.context = new.clone();
+                            // Rename only ever touches the default kubeconfig,
+                            // where the label is the bare name.
+                            c.label = new.clone();
                         }
-                        list.sort();
+                        list.sort_by_key(|c| c.label.clone());
                     }
                     if self.mode == Mode::Contexts {
-                        let idx = self.filtered_contexts().iter().position(|c| *c == new);
+                        let idx = self
+                            .filtered_contexts()
+                            .iter()
+                            .position(|c| c.id.path().is_none() && c.id.context == new);
                         self.ctx_state.select(Some(idx.unwrap_or(0)));
                     }
                     // The live connection is unaffected; only the name moves.
-                    if self.cluster.context == old {
+                    // Rename applies to the default kubeconfig only, so the
+                    // state key is the bare name on both sides.
+                    if self.cluster.source.path().is_none() && self.cluster.context == old {
                         self.cluster.context = new.clone();
                         if let Some(recents) = self.recent_namespaces.remove(&old) {
                             self.recent_namespaces.insert(new.clone(), recents);
@@ -1541,12 +1564,12 @@ impl App {
             },
             Msg::ContextSwitched {
                 generation,
-                name,
+                id,
                 result,
             } if generation == self.generation => {
                 self.context_switch_target = None;
                 match result {
-                    Ok(cluster) => self.apply_context_switch(name, cluster),
+                    Ok(cluster) => self.apply_context_switch(id, cluster),
                     Err(e) => {
                         self.pending_resource_query = None;
                         self.pending_bookmark = None;

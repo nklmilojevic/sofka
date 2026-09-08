@@ -258,6 +258,8 @@ impl App {
                     Mode::Logs
                 } else if self.prompt_over_contexts() {
                     Mode::Contexts
+                } else if self.prompt_over_kubeconfigs() {
+                    Mode::Kubeconfigs
                 } else if self.prompt_over_pvc() {
                     Mode::PvcExplore
                 } else {
@@ -279,6 +281,8 @@ impl App {
                     Mode::Logs
                 } else if self.prompt_over_contexts() {
                     Mode::Contexts
+                } else if self.prompt_over_kubeconfigs() {
+                    Mode::Kubeconfigs
                 } else if self.prompt_over_pvc() {
                     Mode::PvcExplore
                 } else {
@@ -385,6 +389,11 @@ impl App {
                         self.rename_context(old, input);
                     }
                     Some(PromptKind::RenameContext { .. }) => {}
+                    // Empty input = cancel, add nothing.
+                    Some(PromptKind::AddKubeconfig) if !input.is_empty() => {
+                        self.add_kubeconfig(input);
+                    }
+                    Some(PromptKind::AddKubeconfig) => self.mode = Mode::Kubeconfigs,
                     None => {}
                 }
                 // The prompt is done with, whichever way it went; leaving the
