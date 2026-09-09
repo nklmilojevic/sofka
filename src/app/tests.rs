@@ -9789,6 +9789,32 @@ async fn command_with_unlisted_namespace_is_freeform() {
 }
 
 #[tokio::test]
+async fn ns_command_stays_on_current_view() {
+    let (mut app, _rx) = test_app();
+    app.switch_kind("deployments");
+    app.handle_key(press(KeyCode::Char(':'))).unwrap();
+    for c in "namespaces social".chars() {
+        app.handle_key(press(KeyCode::Char(c))).unwrap();
+    }
+    app.handle_key(press(KeyCode::Enter)).unwrap();
+    assert_eq!(app.kind_plural, "deployments");
+    assert_eq!(app.namespace, "social");
+}
+
+#[tokio::test]
+async fn ns_command_from_namespaces_list_falls_back_to_pods() {
+    let (mut app, _rx) = test_app();
+    app.switch_kind("namespaces");
+    app.handle_key(press(KeyCode::Char(':'))).unwrap();
+    for c in "namespaces social".chars() {
+        app.handle_key(press(KeyCode::Char(c))).unwrap();
+    }
+    app.handle_key(press(KeyCode::Enter)).unwrap();
+    assert_eq!(app.kind_plural, "pods");
+    assert_eq!(app.namespace, "social");
+}
+
+#[tokio::test]
 async fn command_completes_context_argument() {
     let (mut app, _rx) = test_app();
     app.all_contexts = vec!["prod-eu".into(), "staging".into(), "dev".into()];

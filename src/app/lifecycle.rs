@@ -60,6 +60,16 @@ impl App {
     pub fn switch_kind_ns(&mut self, input: &str, ns: Option<&str>) {
         match self.cluster.resolve(input) {
             Some(kind) => {
+                if let Some(name) = ns
+                    && kind.ar.plural.eq_ignore_ascii_case("namespaces")
+                {
+                    if self.kind_plural == "namespaces" {
+                        self.set_namespace_and_return(name);
+                    } else {
+                        self.set_namespace(name.to_string());
+                    }
+                    return;
+                }
                 self.save_history_filter();
                 if let Some(ns) = ns {
                     self.namespace = normalize_ns(ns);
