@@ -23737,6 +23737,78 @@ async fn favorite_namespace_keys_ignore_empty_slots_and_preserve_text_input() {
 }
 
 #[tokio::test]
+async fn namespace_digits_fall_back_to_recent_namespaces() {
+    let (mut app, _rx) = test_app();
+    app.namespace = "default".into();
+    app.switch_kind("pods");
+    // Visit two namespaces so they land in the context's recents.
+    app.namespace_favorites = vec!["zulu".into(), "alpha".into()];
+    app.handle_key(press(KeyCode::Char('1'))).unwrap();
+    app.handle_key(press(KeyCode::Char('2'))).unwrap();
+
+    // Without configured favourites the recents take the slots, sorted so a
+    // digit keeps its namespace instead of reshuffling on every switch.
+    app.namespace_favorites.clear();
+    assert_eq!(app.namespace_shortcuts()[..2], ["alpha", "zulu"]);
+    app.handle_key(press(KeyCode::Char('2'))).unwrap();
+    assert_eq!(app.namespace, "zulu");
+
+    // A configured favourite keeps its configured slot; recents fill around
+    // it and never duplicate one.
+    app.namespace_favorites = vec![String::new(), "zulu".into()];
+    assert_eq!(app.namespace_shortcuts()[..3], ["alpha", "zulu", ""]);
+    app.handle_key(press(KeyCode::Char('1'))).unwrap();
+    assert_eq!(app.namespace, "alpha");
+}
+
+#[tokio::test]
+async fn header_shows_namespace_shortcuts_until_the_terminal_is_too_narrow() {
+    use ratatui::{Terminal, backend::TestBackend};
+
+    let header = |terminal: &Terminal<TestBackend>, width: u16| -> String {
+        (1..6)
+            .map(|y| {
+                (0..width)
+                    .map(|x| terminal.backend().buffer()[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    let (mut app, _rx) = test_app();
+    app.namespace = "default".into();
+    app.switch_kind("pods");
+    app.namespace_favorites = vec!["monitoring".into(), "checkout".into()];
+
+    let mut wide = Terminal::new(TestBackend::new(180, 24)).unwrap();
+    wide.draw(|frame| crate::ui::draw(frame, &mut app)).unwrap();
+    let shown = header(&wide, 180);
+    assert!(shown.contains("0 <all>"), "{shown}");
+    assert!(shown.contains("1 monitoring"), "{shown}");
+    assert!(shown.contains("2 checkout"), "{shown}");
+    // What the header advertises is what the key does.
+    app.handle_key(press(KeyCode::Char('2'))).unwrap();
+    assert_eq!(app.namespace, "checkout");
+
+    // A tenth cell (`0` plus nine slots) needs the second column.
+    app.namespace_favorites = (1..=9).map(|i| format!("team-{i}")).collect();
+    wide.draw(|frame| crate::ui::draw(frame, &mut app)).unwrap();
+    let shown = header(&wide, 180);
+    assert!(shown.contains("4 team-4"), "{shown}");
+    assert!(shown.contains("9 team-9"), "{shown}");
+
+    // Too narrow for a column: the shortcuts fold away, the per-kind hints
+    // stay (`n` still lists the same mapping).
+    let mut narrow = Terminal::new(TestBackend::new(120, 24)).unwrap();
+    narrow
+        .draw(|frame| crate::ui::draw(frame, &mut app))
+        .unwrap();
+    let shown = header(&narrow, 120);
+    assert!(!shown.contains("1 team-1"), "{shown}");
+    assert!(shown.contains("logs"), "{shown}");
+}
+
+#[tokio::test]
 async fn favorite_namespace_key_clears_drill_scope() {
     let (mut app, _rx) = test_app();
     app.namespace_favorites = vec!["target".into()];
@@ -23794,12 +23866,12 @@ async fn favorite_namespace_shortcuts_follow_key_configuration_in_picker_and_hel
     app.handle_key(press(KeyCode::Esc)).unwrap();
     app.handle_key(press(KeyCode::Char('?'))).unwrap();
     app.handle_key(press(KeyCode::Char('/'))).unwrap();
-    for c in "favourite namespace".chars() {
+    for c in "namespace shortcut".chars() {
         app.handle_key(press(KeyCode::Char(c))).unwrap();
     }
     let text = screen(&mut app, &mut terminal);
     assert!(
-        text.contains("select configured favourite namespace 1"),
+        text.contains("select namespace shortcut 1 (favourite, else recent)"),
         "{text}"
     );
     assert!(text.contains("f1"), "{text}");

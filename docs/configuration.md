@@ -28,7 +28,8 @@ remember_sort     = true   # save and restore sort choices per resource kind
                            # false makes sort changes temporary
 
 # Namespaces pinned to the top of the `n` switcher (★); session recents (·)
-# follow them. Keys 1 to 9 select the first nine entries in this fixed order.
+# follow them. Keys 1 to 9 select the first nine entries in this fixed order;
+# slots left open are filled with session recents.
 favorite_namespaces = ["kube-system", "monitoring"]
 
 [aliases]
@@ -83,8 +84,12 @@ md = "machinedeployments.cluster.x-k8s.io"
 
 The resource table actions `favorite_namespace_1` through
 `favorite_namespace_9` select entries from `favorite_namespaces` in configuration
-order. Recent namespace changes do not change these assignments. Extra entries
-remain available through `n`. Empty or unconfigured slots do nothing.
+order. Slots that list leaves empty are filled with the current context's
+session recents, sorted alphabetically so an assignment does not move while you
+switch namespaces; a configured entry never loses its slot to a recent. Extra entries
+remain available through `n`. Slots with neither a favourite nor a recent do
+nothing. The header lists the resulting mapping while the terminal is wide
+enough for it.
 
 To change or disable a shortcut, use the existing key configuration:
 

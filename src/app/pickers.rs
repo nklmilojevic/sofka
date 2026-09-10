@@ -141,6 +141,39 @@ impl App {
             .flat_map(|dq| dq.iter().map(String::as_str))
     }
 
+    /// The namespaces bound to the digit keys `1`-`9`, one entry per key
+    /// (empty = that digit selects nothing). Configured favourites keep their
+    /// configured slot; the context's session recents fill whatever is left,
+    /// so the digits still do something without a `favorite_namespaces` list.
+    /// Recents are placed alphabetically, not newest-first: a slot that
+    /// reshuffled on every namespace switch would move under the user's
+    /// fingers, and the header advertises this mapping permanently.
+    pub fn namespace_shortcuts(&self) -> Vec<String> {
+        let mut slots: Vec<String> = self
+            .namespace_favorites
+            .iter()
+            .take(Action::FAVORITE_NAMESPACES.len())
+            .cloned()
+            .collect();
+        slots.resize(Action::FAVORITE_NAMESPACES.len(), String::new());
+        if slots.iter().all(|s| !s.is_empty()) {
+            return slots;
+        }
+        let mut recents: Vec<&str> = self
+            .recent_namespaces_for_context()
+            .filter(|r| !slots.iter().any(|s| s == r))
+            .collect();
+        recents.sort_unstable();
+        let mut recents = recents.into_iter();
+        for slot in slots.iter_mut().filter(|s| s.is_empty()) {
+            match recents.next() {
+                Some(r) => *slot = r.to_string(),
+                None => break,
+            }
+        }
+        slots
+    }
+
     /// Whether `n` is a configured favourite namespace.
     pub fn is_favorite_namespace(&self, n: &str) -> bool {
         self.namespace_favorites.iter().any(|f| f == n)

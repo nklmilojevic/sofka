@@ -299,7 +299,7 @@ impl App {
             .position(|action| Some(*action) == key.action)
         {
             if let Some(namespace) = self
-                .namespace_favorites
+                .namespace_shortcuts()
                 .get(index)
                 .filter(|n| !n.is_empty())
                 .cloned()

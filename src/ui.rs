@@ -331,6 +331,11 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
 const HEADER_HINTS_WIDTH: u16 = 44;
 /// Minimum width the info cluster keeps before the hint column may appear.
 const HEADER_INFO_MIN: u16 = 44;
+/// Width of one namespace-shortcut cell in the header: the key label, a
+/// space, the namespace, and a 2-space gap to whatever follows.
+const HEADER_NS_CELL: u16 = 20;
+/// Body lines the header box has for namespace-shortcut cells.
+const HEADER_NS_ROWS: usize = 5;
 
 fn header_title(server_version: &str) -> Line<'static> {
     let mut spans = vec![Span::styled(" sofka ", theme::title())];
@@ -416,15 +421,28 @@ fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
     // line at the bottom instead.
     let hints = header_hints(app);
     if !hints.is_empty() && header_hints_fit(area.width) {
+        // The digit shortcuts sit between the two, as they do in k9s. They
+        // are the first block to go when the terminal narrows: `n` lists the
+        // same mapping, the per-kind verbs have no such second home.
+        let cells = namespace_shortcut_cells(app);
+        let ns_columns = header_namespace_columns(area.width, cells.len());
+        let mut constraints = vec![Constraint::Min(HEADER_INFO_MIN)];
+        if ns_columns > 0 {
+            constraints.push(Constraint::Length(ns_columns * HEADER_NS_CELL));
+        }
+        constraints.push(Constraint::Length(HEADER_HINTS_WIDTH));
         let sub = Layout::default()
             .direction(Direction::Horizontal)
-            .constraints([
-                Constraint::Min(HEADER_INFO_MIN),
-                Constraint::Length(HEADER_HINTS_WIDTH),
-            ])
+            .constraints(constraints)
             .split(inner);
         frame.render_widget(Paragraph::new(info), sub[0]);
-        frame.render_widget(Paragraph::new(hints), sub[1]);
+        if ns_columns > 0 {
+            frame.render_widget(
+                Paragraph::new(namespace_shortcut_lines(app, &cells, ns_columns)),
+                sub[1],
+            );
+        }
+        frame.render_widget(Paragraph::new(hints), sub[sub.len() - 1]);
     } else {
         frame.render_widget(Paragraph::new(info), inner);
     }
@@ -535,6 +553,80 @@ fn draw_compact_header(frame: &mut Frame, app: &App, area: Rect) {
 /// logo (26) + box borders (2) + info cluster + hints.
 fn header_hints_fit(frame_width: u16) -> bool {
     frame_width.saturating_sub(26 + 2) >= HEADER_INFO_MIN + HEADER_HINTS_WIDTH
+}
+
+/// How many namespace-shortcut columns fit beside the info cluster and the
+/// key hints. Zero when the terminal is too narrow for any of them.
+fn header_namespace_columns(frame_width: u16, cells: usize) -> u16 {
+    let free = frame_width
+        .saturating_sub(26 + 2)
+        .saturating_sub(HEADER_INFO_MIN + HEADER_HINTS_WIDTH);
+    let wanted = cells.div_ceil(HEADER_NS_ROWS).min(2) as u16;
+    (free / HEADER_NS_CELL).min(wanted)
+}
+
+/// The digit-to-namespace map, as key/namespace pairs: `0` for all
+/// namespaces, then whatever `1`-`9` are currently bound to. Unbound digits
+/// are left out — an empty slot has nothing to advertise.
+fn namespace_shortcut_cells(app: &App) -> Vec<(String, String)> {
+    let mut cells = vec![(
+        app.keymap
+            .first_label("table", Action::AllNamespaces)
+            .to_string(),
+        "<all>".to_string(),
+    )];
+    for (index, namespace) in app.namespace_shortcuts().iter().enumerate() {
+        if let Some(action) = Action::FAVORITE_NAMESPACES.get(index)
+            && !namespace.is_empty()
+        {
+            cells.push((
+                app.keymap.first_label("table", *action).to_string(),
+                namespace.clone(),
+            ));
+        }
+    }
+    cells
+}
+
+/// Lay the shortcut cells out column-major over the header's body lines, so
+/// the list reads top to bottom. The namespace the view is on is highlighted
+/// like the `Namespace:` field it mirrors.
+fn namespace_shortcut_lines(
+    app: &App,
+    cells: &[(String, String)],
+    columns: u16,
+) -> Vec<Line<'static>> {
+    let key_style = Style::default()
+        .fg(theme::sky())
+        .add_modifier(Modifier::BOLD);
+    (0..HEADER_NS_ROWS)
+        .map(|row| {
+            let mut spans = Vec::new();
+            for column in 0..usize::from(columns) {
+                let Some((key, namespace)) = cells.get(column * HEADER_NS_ROWS + row) else {
+                    continue;
+                };
+                let active = if namespace == "<all>" {
+                    app.all_namespaces()
+                } else {
+                    !app.all_namespaces() && *namespace == app.namespace
+                };
+                let width = usize::from(HEADER_NS_CELL)
+                    .saturating_sub(key.chars().count() + 3)
+                    .max(1);
+                spans.push(Span::styled(key.clone(), key_style));
+                spans.push(Span::styled(
+                    format!(" {:<width$}  ", crate::text::ellipsize(namespace, width)),
+                    if active {
+                        Style::default().fg(theme::green())
+                    } else {
+                        theme::dim()
+                    },
+                ));
+            }
+            Line::from(spans)
+        })
+        .collect()
 }
 
 /// Show the first effective binding for each action.
@@ -2900,6 +2992,7 @@ fn draw_namespaces(frame: &mut Frame, app: &mut App, area: Rect) {
     let show_scrollbars = app.scrollbars_visible();
     let names = app.filtered_namespaces();
     let browsing = app.ns_filter.is_empty();
+    let shortcuts = app.namespace_shortcuts();
     let items: Vec<ListItem> = names
         .iter()
         .map(|n| {
@@ -2918,9 +3011,9 @@ fn draw_namespaces(frame: &mut Frame, app: &mut App, area: Rect) {
                 ("", theme::text())
             };
             let shortcut = if browsing {
-                app.namespace_favorites
+                shortcuts
                     .iter()
-                    .position(|favorite| favorite == n)
+                    .position(|shortcut| shortcut == n)
                     .and_then(|index| Action::FAVORITE_NAMESPACES.get(index))
                     .map(|action| format!(" [{}]", app.keymap.label("table", *action)))
                     .unwrap_or_default()
