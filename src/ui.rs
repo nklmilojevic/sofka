@@ -2609,6 +2609,8 @@ fn build_help(app: &App, width: usize) -> (Vec<Line<'static>>, String) {
         }
         let description = if scope == "table" && action == Action::Logs {
             "logs (marked pods, or current row)"
+        } else if scope == "port_forward_picker" && action == Action::Edit {
+            "edit local port of the selected mapping"
         } else if action == Action::LogMarker {
             "add visual marker at the log tail (excluded from copy/save)"
         } else if action == Action::Fullscreen {
@@ -4658,6 +4660,17 @@ fn navigation_hint(app: &App, width: u16) -> String {
             (Action::Back, "back"),
         ]);
         return format!("{cycle}  {}", key_hint(app, scope, &actions));
+    }
+    if scope == "port_forward_picker" {
+        return key_hint(
+            app,
+            scope,
+            &[
+                (Action::Accept, "start"),
+                (Action::Edit, "edit local port"),
+                (Action::Back, "back"),
+            ],
+        );
     }
     let preferred = match scope {
         "logs" => &[

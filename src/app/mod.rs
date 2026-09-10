@@ -451,6 +451,11 @@ enum PromptKind {
         ns: String,
         name: String,
     },
+    PortForwardLocal {
+        ns: String,
+        target: String,
+        remote: String,
+    },
     SetImage {
         ns: String,
         name: String,

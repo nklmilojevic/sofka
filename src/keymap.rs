@@ -398,6 +398,7 @@ const DEFAULTS: &[(&str, Action, &[&str])] = &[
     ("port_forward_picker", Action::Back, &["esc"]),
     ("port_forward_picker", Action::Close, &["q"]),
     ("port_forward_picker", Action::Down, &["j", "down"]),
+    ("port_forward_picker", Action::Edit, &["e"]),
     ("port_forward_picker", Action::Up, &["k", "up"]),
     ("port_forwards", Action::Back, &["esc"]),
     ("port_forwards", Action::Close, &["q"]),

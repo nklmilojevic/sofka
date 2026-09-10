@@ -2001,6 +2001,108 @@ async fn port_forward_picker_keeps_selection_when_local_port_is_in_use() {
 }
 
 #[tokio::test]
+async fn port_forward_conflict_can_be_fixed_by_editing_only_the_local_port() {
+    let listeners = occupy_forward_port();
+    let remote = listeners.0.local_addr().unwrap().port();
+    let (mut app, _rx) = test_app();
+    app.switch_kind("services");
+    apply(
+        &mut app,
+        json!({
+            "apiVersion": "v1", "kind": "Service",
+            "metadata": {"name": "web", "namespace": "default", "resourceVersion": "1"},
+            "spec": {"ports": [{"port": remote}]}
+        }),
+    );
+    app.table_state.select(Some(0));
+    app.handle_key(press(KeyCode::Char('f'))).unwrap();
+    app.handle_key(press(KeyCode::Enter)).unwrap();
+    assert_eq!(app.mode, Mode::PortForwardPicker);
+    assert!(app.port_forwards.is_empty());
+
+    app.handle_key(press(KeyCode::Char('e'))).unwrap();
+    assert_eq!(app.mode, Mode::Prompt);
+    assert_eq!(app.prompt_input, remote.to_string());
+    assert!(app.prompt_label.contains(&format!("remote {remote}")));
+    app.handle_key(press(KeyCode::Enter)).unwrap();
+    assert_eq!(app.mode, Mode::Prompt);
+    assert_eq!(app.prompt_input, remote.to_string());
+    assert_eq!(app.flash, format!("port {remote} is already in use"));
+    assert!(app.port_forwards.is_empty());
+
+    let free = occupy_forward_port();
+    let local = free.0.local_addr().unwrap().port();
+    drop(free);
+    for _ in 0..app.prompt_input.len() {
+        app.handle_key(press(KeyCode::Backspace)).unwrap();
+    }
+    for ch in local.to_string().chars() {
+        app.handle_key(press(KeyCode::Char(ch))).unwrap();
+    }
+    app.handle_key(press(KeyCode::Enter)).unwrap();
+    assert_eq!(app.mode, Mode::Table);
+    assert_eq!(app.port_forwards.len(), 1);
+    assert_eq!(app.port_forwards[0].ports, format!("{local}:{remote}"));
+    assert_eq!(app.port_forwards[0].target, "svc/web");
+    assert_eq!(app.port_forwards[0].ns, "default");
+}
+
+#[tokio::test]
+async fn port_forward_local_edit_validates_input_and_returns_to_selected_row() {
+    let (mut app, _rx) = test_app();
+    let cfg: crate::config::Config =
+        toml::from_str("[keys.port_forward_picker]\nedit = 'f24'\n").unwrap();
+    app.keymap = Keymap::compile(&cfg.keys).unwrap();
+    app.switch_kind("pods");
+    apply(
+        &mut app,
+        json!({
+            "apiVersion": "v1", "kind": "Pod",
+            "metadata": {"name": "web", "namespace": "default", "resourceVersion": "1"},
+            "spec": {"containers": [{"name": "web", "ports": [{"containerPort": 8080}, {"containerPort": 9090}]}]}
+        }),
+    );
+    app.table_state.select(Some(0));
+    app.handle_key(press(KeyCode::Char('f'))).unwrap();
+    app.handle_key(press(KeyCode::Down)).unwrap();
+    app.handle_key(press(KeyCode::F(24))).unwrap();
+    assert_eq!(app.mode, Mode::Prompt);
+    assert_eq!(app.prompt_input, "9090");
+    assert!(
+        matches!(&app.prompt_kind, Some(PromptKind::PortForwardLocal { target, remote, .. }) if target == "pod/web" && remote == "9090")
+    );
+    for input in ["", "0", "65536", "abc", "8081:9090"] {
+        for _ in 0..app.prompt_input.len() {
+            app.handle_key(press(KeyCode::Backspace)).unwrap();
+        }
+        for ch in input.chars() {
+            app.handle_key(press(KeyCode::Char(ch))).unwrap();
+        }
+        app.handle_key(press(KeyCode::Enter)).unwrap();
+        assert_eq!(app.mode, Mode::Prompt);
+        assert_eq!(app.prompt_input, input);
+        assert_eq!(app.flash, "local port must be a number from 1 to 65535");
+        assert!(app.port_forwards.is_empty());
+    }
+    app.handle_key(press(KeyCode::Esc)).unwrap();
+    assert_eq!(app.mode, Mode::PortForwardPicker);
+    assert_eq!(app.pf_picker_state.selected(), Some(1));
+    app.handle_key(press(KeyCode::F(24))).unwrap();
+    assert_eq!(app.prompt_input, "9090");
+    app.handle_key(press(KeyCode::Esc)).unwrap();
+    app.handle_key(press(KeyCode::Down)).unwrap();
+    app.handle_key(press(KeyCode::F(24))).unwrap();
+    assert_eq!(app.mode, Mode::PortForwardPicker);
+    app.handle_key(press(KeyCode::Enter)).unwrap();
+    assert_eq!(app.mode, Mode::Prompt);
+    assert!(matches!(
+        app.prompt_kind,
+        Some(PromptKind::PortForward { .. })
+    ));
+    assert!(app.prompt_input.is_empty());
+}
+
+#[tokio::test]
 async fn port_forward_prompt_preserves_input_and_allows_correction() {
     let listeners = occupy_forward_port();
     let port = listeners.0.local_addr().unwrap().port();

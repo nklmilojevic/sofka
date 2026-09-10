@@ -90,6 +90,19 @@ the range and keeps separate marks made with `space`. Other keys end the range
 operation. Normal movement keeps marked rows. Filtering, sorting, view changes,
 and changes to the row order reset the range before the next Shift+Arrow press.
 
+## Port-forward picker (`f` on a pod or service)
+
+| Key                  | Action                                                         |
+| -------------------- | -------------------------------------------------------------- |
+| `enter`              | start the selected mapping, or open manual input for "Custom…" |
+| `e`                  | edit only the local port of a declared mapping                 |
+| `j` / `k`, `↓` / `↑` | select a mapping                                               |
+| `esc` / `q`          | close the picker                                               |
+
+The local-port prompt contains the current value. `enter` starts the forward;
+`esc` returns to the same picker row. Invalid or unavailable ports keep the
+prompt open for correction.
+
 ## PVC explore (`x` on a PVC)
 
 A two-pane file browser over a PersistentVolumeClaim: your local filesystem on
