@@ -579,10 +579,13 @@ fn namespace_shortcut_cells(app: &App) -> Vec<(String, String)> {
         if let Some(action) = Action::FAVORITE_NAMESPACES.get(index)
             && !namespace.is_empty()
         {
-            cells.push((
-                app.keymap.first_label("table", *action).to_string(),
-                namespace.clone(),
-            ));
+            let key = app.keymap.first_label("table", *action);
+            // A slot whose key was unbound (`favorite_namespace_2 = []`) has
+            // no shortcut to advertise. The switcher still tags it, where the
+            // point is the namespace rather than the key.
+            if key != "unbound" {
+                cells.push((key.to_string(), namespace.clone()));
+            }
         }
     }
     cells
@@ -611,10 +614,11 @@ fn namespace_shortcut_lines(
                 } else {
                     !app.all_namespaces() && *namespace == app.namespace
                 };
-                let width = usize::from(HEADER_NS_CELL)
-                    .saturating_sub(key.chars().count() + 3)
-                    .max(1);
-                spans.push(Span::styled(key.clone(), key_style));
+                // Leave room for a couple of namespace characters, however
+                // long the key was rebound to.
+                let key = crate::text::ellipsize(key, usize::from(HEADER_NS_CELL) - 6);
+                let width = usize::from(HEADER_NS_CELL).saturating_sub(key.chars().count() + 3);
+                spans.push(Span::styled(key, key_style));
                 spans.push(Span::styled(
                     format!(" {:<width$}  ", crate::text::ellipsize(namespace, width)),
                     if active {

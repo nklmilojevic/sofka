@@ -23781,6 +23781,36 @@ async fn namespace_digits_fall_back_to_visited_namespaces_and_keep_their_slot() 
 }
 
 #[tokio::test]
+async fn configured_favourites_shrink_the_slots_a_visit_can_claim() {
+    let (mut app, _rx) = test_app();
+    app.namespace = "default".into();
+    app.switch_kind("pods");
+    app.namespace_favorites = vec!["fav-1".into(), "fav-2".into()];
+    // Two favourites leave seven slots, so the seventh visit fills the last
+    // one — a namespace must never be parked past the advertised mapping.
+    for i in 1..=7 {
+        pick_namespace(&mut app, &format!("ns-{i:02}"));
+    }
+    let visited: Vec<String> = (1..=7).map(|i| format!("ns-{i:02}")).collect();
+    assert_eq!(app.namespace_shortcuts()[..2], ["fav-1", "fav-2"]);
+    assert_eq!(app.namespace_shortcuts()[2..], visited[..]);
+
+    // `3` is the oldest visit until it is used again.
+    app.handle_key(press(KeyCode::Char('3'))).unwrap();
+    assert_eq!(app.namespace, "ns-01");
+
+    // The eighth visit takes the least recently used of those seven slots,
+    // and leaves the favourites alone.
+    pick_namespace(&mut app, "ns-08");
+    let mut expected = visited.clone();
+    expected[1] = "ns-08".into();
+    assert_eq!(app.namespace_shortcuts()[..2], ["fav-1", "fav-2"]);
+    assert_eq!(app.namespace_shortcuts()[2..], expected[..]);
+    app.handle_key(press(KeyCode::Char('4'))).unwrap();
+    assert_eq!(app.namespace, "ns-08");
+}
+
+#[tokio::test]
 async fn a_full_namespace_shortcut_list_hands_over_only_its_oldest_slot() {
     let (mut app, _rx) = test_app();
     app.namespace = "default".into();
@@ -23803,6 +23833,21 @@ async fn a_full_namespace_shortcut_list_hands_over_only_its_oldest_slot() {
     assert_eq!(app.namespace_shortcuts(), expected);
     app.handle_key(press(KeyCode::Char('2'))).unwrap();
     assert_eq!(app.namespace, "ns-10");
+}
+
+#[tokio::test]
+async fn all_namespaces_never_takes_a_namespace_shortcut_slot() {
+    let (mut app, _rx) = test_app();
+    app.namespace = "default".into();
+    app.switch_kind("pods");
+    pick_namespace(&mut app, "alpha");
+    // Every spelling of the all-namespaces scope reaches the recents as the
+    // literal the user typed; none of them is a namespace to bind a digit to.
+    for spelling in ["all", "*", "<all>"] {
+        palette(&mut app, &format!("pods {spelling}"));
+        assert!(app.all_namespaces(), "{spelling}");
+    }
+    assert_eq!(app.namespace_shortcuts()[..2], ["alpha", ""]);
 }
 
 #[tokio::test]
@@ -23907,6 +23952,10 @@ async fn favorite_namespace_shortcuts_follow_key_configuration_in_picker_and_hel
     let text = screen(&mut app, &mut terminal);
     assert!(text.contains("production [f1]"), "{text}");
     assert!(text.contains("staging [unbound]"), "{text}");
+    // The header only advertises what a key actually triggers, so the
+    // deliberately unbound slot has no cell there.
+    assert!(text.contains("f1 production"), "{text}");
+    assert!(!text.contains("unbound staging"), "{text}");
     app.handle_key(press(KeyCode::Esc)).unwrap();
     app.handle_key(press(KeyCode::Char('?'))).unwrap();
     app.handle_key(press(KeyCode::Char('/'))).unwrap();

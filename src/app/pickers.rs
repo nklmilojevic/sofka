@@ -184,15 +184,34 @@ impl App {
         if self.is_favorite_namespace(ns) {
             return;
         }
+        // Favourites hold their own slots, so what is left to hand out is the
+        // nine digits minus them — counting all nine would park a namespace
+        // past the last slot [`Self::namespace_shortcuts`] can show.
+        let free = Action::FAVORITE_NAMESPACES.len().saturating_sub(
+            self.namespace_favorites
+                .iter()
+                .take(Action::FAVORITE_NAMESPACES.len())
+                .filter(|f| !f.is_empty())
+                .count(),
+        );
+        if free == 0 {
+            return;
+        }
         let assigned = self.recent_shortcuts.get(&self.cluster.context);
         if assigned.is_some_and(|list| list.iter().any(|a| a == ns)) {
             return;
         }
-        let victim = assigned
-            .filter(|list| list.len() >= Action::FAVORITE_NAMESPACES.len())
-            .and_then(|list| {
-                list.iter()
-                    .enumerate()
+        // An entry a favourite has since swallowed holds no slot of its own,
+        // so it neither counts against `free` nor can be handed over.
+        let held: Vec<(usize, &String)> = assigned
+            .into_iter()
+            .flatten()
+            .enumerate()
+            .filter(|(_, a)| !self.is_favorite_namespace(a))
+            .collect();
+        let victim = (held.len() >= free)
+            .then(|| {
+                held.iter()
                     // Absent from the recents entirely (it fell out of that
                     // shorter list) ranks as oldest.
                     .max_by_key(|(_, a)| {
@@ -200,8 +219,9 @@ impl App {
                             .position(|r| r == a.as_str())
                             .unwrap_or(usize::MAX)
                     })
-                    .map(|(index, _)| index)
-            });
+                    .map(|(index, _)| *index)
+            })
+            .flatten();
         let list = self
             .recent_shortcuts
             .entry(self.cluster.context.clone())
@@ -227,18 +247,22 @@ impl App {
     /// Record a real namespace selection into the current context's recents
     /// (newest first, deduped, bounded). `<all>`/empty are not recorded.
     pub(super) fn note_recent_namespace(&mut self, ns: &str) {
-        if ns.is_empty() || ns == "<all>" {
+        // Callers pass what the user typed, which may spell all-namespaces
+        // (`all`, `*`, `<all>`) — that scope is not a namespace and must not
+        // take a slot in the recents or in the digit shortcuts.
+        let ns = normalize_ns(ns);
+        if ns.is_empty() {
             return;
         }
         // Before the deque moves: the slot handed over must be the one that
         // was least recently used at the time of this pick.
-        self.assign_namespace_shortcut(ns);
+        self.assign_namespace_shortcut(&ns);
         let dq = self
             .recent_namespaces
             .entry(self.cluster.context.clone())
             .or_default();
-        dq.retain(|r| r != ns);
-        dq.push_front(ns.to_string());
+        dq.retain(|r| *r != ns);
+        dq.push_front(ns);
         while dq.len() > MAX_RECENT_NAMESPACES {
             dq.pop_back();
         }
