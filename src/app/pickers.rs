@@ -143,11 +143,9 @@ impl App {
 
     /// The namespaces bound to the digit keys `1`-`9`, one entry per key
     /// (empty = that digit selects nothing). Configured favourites keep their
-    /// configured slot; the context's session recents fill whatever is left,
-    /// so the digits still do something without a `favorite_namespaces` list.
-    /// Recents are placed alphabetically, not newest-first: a slot that
-    /// reshuffled on every namespace switch would move under the user's
-    /// fingers, and the header advertises this mapping permanently.
+    /// configured slot; visited namespaces fill whatever is left in the order
+    /// they were given a slot, so the digits still do something without a
+    /// `favorite_namespaces` list.
     pub fn namespace_shortcuts(&self) -> Vec<String> {
         let mut slots: Vec<String> = self
             .namespace_favorites
@@ -159,19 +157,59 @@ impl App {
         if slots.iter().all(|s| !s.is_empty()) {
             return slots;
         }
-        let mut recents: Vec<&str> = self
-            .recent_namespaces_for_context()
-            .filter(|r| !slots.iter().any(|s| s == r))
+        let assigned: Vec<&str> = self
+            .recent_shortcuts
+            .get(&self.cluster.context)
+            .into_iter()
+            .flatten()
+            .map(String::as_str)
+            .filter(|a| !slots.iter().any(|s| s == a))
             .collect();
-        recents.sort_unstable();
-        let mut recents = recents.into_iter();
+        let mut assigned = assigned.into_iter();
         for slot in slots.iter_mut().filter(|s| s.is_empty()) {
-            match recents.next() {
-                Some(r) => *slot = r.to_string(),
+            match assigned.next() {
+                Some(a) => *slot = a.to_string(),
                 None => break,
             }
         }
         slots
+    }
+
+    /// Give `ns` a digit slot, leaving every slot already handed out where it
+    /// is: the header advertises this mapping permanently, so picking one
+    /// namespace must not move another one's digit. Once every slot is taken,
+    /// the least recently used of them is handed over — one digit changes,
+    /// the rest stay put.
+    fn assign_namespace_shortcut(&mut self, ns: &str) {
+        if self.is_favorite_namespace(ns) {
+            return;
+        }
+        let assigned = self.recent_shortcuts.get(&self.cluster.context);
+        if assigned.is_some_and(|list| list.iter().any(|a| a == ns)) {
+            return;
+        }
+        let victim = assigned
+            .filter(|list| list.len() >= Action::FAVORITE_NAMESPACES.len())
+            .and_then(|list| {
+                list.iter()
+                    .enumerate()
+                    // Absent from the recents entirely (it fell out of that
+                    // shorter list) ranks as oldest.
+                    .max_by_key(|(_, a)| {
+                        self.recent_namespaces_for_context()
+                            .position(|r| r == a.as_str())
+                            .unwrap_or(usize::MAX)
+                    })
+                    .map(|(index, _)| index)
+            });
+        let list = self
+            .recent_shortcuts
+            .entry(self.cluster.context.clone())
+            .or_default();
+        match victim {
+            Some(index) => list[index] = ns.to_string(),
+            None => list.push(ns.to_string()),
+        }
     }
 
     /// Whether `n` is a configured favourite namespace.
@@ -192,6 +230,9 @@ impl App {
         if ns.is_empty() || ns == "<all>" {
             return;
         }
+        // Before the deque moves: the slot handed over must be the one that
+        // was least recently used at the time of this pick.
+        self.assign_namespace_shortcut(ns);
         let dq = self
             .recent_namespaces
             .entry(self.cluster.context.clone())

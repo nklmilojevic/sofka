@@ -193,8 +193,10 @@ The full list. For how sofka compares to k9s, see [vs k9s](vs-k9s.md).
   session recents (·) above the rest, plus a context switcher (`:ctx`). In the
   resource table, `1` to `9` select a namespace and `0` selects all namespaces.
   Configured favourites keep their configured slot; the slots they leave open
-  are filled with this context's session recents, in alphabetical order so a
-  digit keeps pointing at the same namespace. The header shows the mapping
+  go to the namespaces you visit, in the order they were given one. A digit
+  keeps its namespace: picking another one never reshuffles the rest, and only
+  once every slot is taken does a new namespace claim the least recently used
+  of them. The header shows the mapping
   permanently (it folds away on narrow terminals), and the picker repeats each
   shortcut beside its namespace. The last namespace picked in each context is
   remembered across restarts (`<state-dir>/namespaces.toml`); `-n`/`-A`

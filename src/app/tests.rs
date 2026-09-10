@@ -23736,29 +23736,73 @@ async fn favorite_namespace_keys_ignore_empty_slots_and_preserve_text_input() {
     assert_eq!(app.namespace, "team-2");
 }
 
+/// Switch namespace the way a user does: the switcher takes the typed name
+/// verbatim, so the namespace need not be listed.
+fn pick_namespace(app: &mut App, namespace: &str) {
+    app.handle_key(press(KeyCode::Char('n'))).unwrap();
+    for c in namespace.chars() {
+        app.handle_key(press(KeyCode::Char(c))).unwrap();
+    }
+    app.handle_key(press(KeyCode::Enter)).unwrap();
+    assert_eq!(app.namespace, namespace);
+}
+
 #[tokio::test]
-async fn namespace_digits_fall_back_to_recent_namespaces() {
+async fn namespace_digits_fall_back_to_visited_namespaces_and_keep_their_slot() {
     let (mut app, _rx) = test_app();
     app.namespace = "default".into();
     app.switch_kind("pods");
-    // Visit two namespaces so they land in the context's recents.
-    app.namespace_favorites = vec!["zulu".into(), "alpha".into()];
-    app.handle_key(press(KeyCode::Char('1'))).unwrap();
-    app.handle_key(press(KeyCode::Char('2'))).unwrap();
+    pick_namespace(&mut app, "charlie");
+    pick_namespace(&mut app, "alpha");
 
-    // Without configured favourites the recents take the slots, sorted so a
-    // digit keeps its namespace instead of reshuffling on every switch.
-    app.namespace_favorites.clear();
-    assert_eq!(app.namespace_shortcuts()[..2], ["alpha", "zulu"]);
-    app.handle_key(press(KeyCode::Char('2'))).unwrap();
-    assert_eq!(app.namespace, "zulu");
-
-    // A configured favourite keeps its configured slot; recents fill around
-    // it and never duplicate one.
-    app.namespace_favorites = vec![String::new(), "zulu".into()];
-    assert_eq!(app.namespace_shortcuts()[..3], ["alpha", "zulu", ""]);
+    // Without configured favourites the visited namespaces take the slots, in
+    // the order they were given one.
+    assert_eq!(app.namespace_shortcuts()[..2], ["charlie", "alpha"]);
     app.handle_key(press(KeyCode::Char('1'))).unwrap();
+    assert_eq!(app.namespace, "charlie");
+
+    // A further namespace takes the next free slot and moves nothing: the
+    // header advertises these digits, so they have to hold still.
+    pick_namespace(&mut app, "bravo");
+    assert_eq!(
+        app.namespace_shortcuts()[..3],
+        ["charlie", "alpha", "bravo"]
+    );
+
+    // A configured favourite claims its configured slot; the visited ones
+    // fill around it, in their order and without duplicating it.
+    app.namespace_favorites = vec![String::new(), "bravo".into()];
+    assert_eq!(
+        app.namespace_shortcuts()[..3],
+        ["charlie", "bravo", "alpha"]
+    );
+    app.handle_key(press(KeyCode::Char('3'))).unwrap();
     assert_eq!(app.namespace, "alpha");
+}
+
+#[tokio::test]
+async fn a_full_namespace_shortcut_list_hands_over_only_its_oldest_slot() {
+    let (mut app, _rx) = test_app();
+    app.namespace = "default".into();
+    app.switch_kind("pods");
+    for i in 1..=9 {
+        pick_namespace(&mut app, &format!("ns-{i:02}"));
+    }
+    let filled: Vec<String> = (1..=9).map(|i| format!("ns-{i:02}")).collect();
+    assert_eq!(app.namespace_shortcuts(), filled);
+
+    // `1` is the oldest pick until it is used again.
+    app.handle_key(press(KeyCode::Char('1'))).unwrap();
+    assert_eq!(app.namespace, "ns-01");
+
+    // With every slot taken, a tenth namespace takes the least recently used
+    // slot — and only that one.
+    pick_namespace(&mut app, "ns-10");
+    let mut expected = filled.clone();
+    expected[1] = "ns-10".into();
+    assert_eq!(app.namespace_shortcuts(), expected);
+    app.handle_key(press(KeyCode::Char('2'))).unwrap();
+    assert_eq!(app.namespace, "ns-10");
 }
 
 #[tokio::test]
@@ -23871,7 +23915,7 @@ async fn favorite_namespace_shortcuts_follow_key_configuration_in_picker_and_hel
     }
     let text = screen(&mut app, &mut terminal);
     assert!(
-        text.contains("select namespace shortcut 1 (favourite, else recent)"),
+        text.contains("select namespace shortcut 1 (favourite, else visited)"),
         "{text}"
     );
     assert!(text.contains("f1"), "{text}");
