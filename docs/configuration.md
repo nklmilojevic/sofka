@@ -29,7 +29,8 @@ remember_sort     = true   # save and restore sort choices per resource kind
 
 # Namespaces pinned to the top of the `n` switcher (★); session recents (·)
 # follow them. Keys 1 to 9 select the first nine entries in this fixed order;
-# slots left open are filled with session recents.
+# slots left open are filled with session recents. The keys are rebindable —
+# see "Namespace shortcuts" below.
 favorite_namespaces = ["kube-system", "monitoring"]
 
 [aliases]
@@ -82,14 +83,16 @@ under `[aliases]`. Use a group-qualified target when resource names overlap:
 md = "machinedeployments.cluster.x-k8s.io"
 ```
 
+### Namespace shortcuts
+
 The resource table actions `favorite_namespace_1` through
-`favorite_namespace_9` select entries from `favorite_namespaces` in configuration
-order. Slots that list leaves empty are filled with the current context's
-session recents, sorted alphabetically so an assignment does not move while you
-switch namespaces; a configured entry never loses its slot to a recent. Extra entries
-remain available through `n`. Slots with neither a favourite nor a recent do
-nothing. The header lists the resulting mapping while the terminal is wide
-enough for it.
+`favorite_namespace_9` select entries from `favorite_namespaces` in
+configuration order. Slots that list leaves empty are filled with the current
+context's session recents, sorted alphabetically so an assignment does not move
+while you switch namespaces; a configured entry never loses its slot to a
+recent. Extra entries remain available through `n`. Slots with neither a
+favourite nor a recent do nothing. The header lists the resulting mapping while
+the terminal is wide enough for it.
 
 To change or disable a shortcut, use the existing key configuration:
 
@@ -98,6 +101,8 @@ To change or disable a shortcut, use the existing key configuration:
 favorite_namespace_1 = "f1"
 favorite_namespace_2 = []
 ```
+
+### Other key overrides
 
 The age sort, selected namespace, and log marker actions can also be changed:
 
