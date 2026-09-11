@@ -141,6 +141,18 @@ pub enum Msg {
         source: Option<Box<DynamicObject>>,
         findings: Vec<crate::explain::Finding>,
     },
+    /// Application state and managed resources for the Argo CD view, gathered
+    /// off-thread. `destination` travels with the findings so the view can say
+    /// where the managed objects live when they are not in this cluster.
+    Argocd {
+        generation: u64,
+        request: u64,
+        claim: StatusClaim,
+        title: String,
+        source: Option<Box<DynamicObject>>,
+        destination: crate::argocd::Destination,
+        findings: Vec<crate::explain::Finding>,
+    },
     /// Captured output of an `output = "popup"` plugin run.
     PluginOutput {
         run: u64,

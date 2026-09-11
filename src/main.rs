@@ -609,6 +609,18 @@ async fn snapshot(app: &mut App, rx: &mut mpsc::Receiver<store::Msg>) -> Result<
                 app.mode = app::Mode::Diff;
             }
         }
+        Ok("argocd") => {
+            app.table_state.select(Some(0));
+            app.open_argocd();
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(8);
+            while app.argocd_items.is_empty() && tokio::time::Instant::now() < deadline {
+                match tokio::time::timeout(Duration::from_millis(250), rx.recv()).await {
+                    Ok(Some(msg)) => app.handle_msg(msg),
+                    Ok(None) => break,
+                    Err(_) => {}
+                }
+            }
+        }
         // Built last so the latency table has the session's real requests in
         // it — the numbers are half of what this view is for.
         Ok("info") => app.open_info(),

@@ -1325,6 +1325,31 @@ impl App {
                     .select((!self.gitops_items.is_empty()).then_some(first));
                 self.clear_claimed_status(claim);
             }
+            Msg::Argocd {
+                generation,
+                request,
+                claim,
+                title,
+                source,
+                destination,
+                findings,
+            } if generation == self.generation && request == self.argocd_request => {
+                self.argocd_claim = None;
+                if let Some(source) = source {
+                    self.argocd_source = Some(*source);
+                }
+                self.argocd_items = findings;
+                self.argocd_title = title;
+                self.argocd_destination = destination;
+                let first = self
+                    .argocd_items
+                    .iter()
+                    .position(|f| f.target.is_some())
+                    .unwrap_or(0);
+                self.argocd_state
+                    .select((!self.argocd_items.is_empty()).then_some(first));
+                self.clear_claimed_status(claim);
+            }
             Msg::PluginOutput {
                 run,
                 generation,

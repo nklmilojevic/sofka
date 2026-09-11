@@ -100,6 +100,16 @@ fn cells(c: &mut Criterion) {
         });
     });
 
+    let apps: Vec<_> = (0..256).map(bs::application).collect();
+    let app_spec = columns::build_spec("argoproj.io", "applications", None, None, false);
+    g.bench_function("applications_256", |b| {
+        b.iter(|| {
+            for o in &apps {
+                black_box(app_spec.cells(o, now));
+            }
+        });
+    });
+
     // Helm is two orders of magnitude slower per row, so it gets far fewer.
     let helm: Vec<_> = (0..16).map(bs::helm_secret).collect();
     let helm_spec = columns::build_spec("", "helm", None, None, false);

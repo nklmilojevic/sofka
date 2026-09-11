@@ -177,8 +177,8 @@ The tables below list local defaults without the shifted navigation aliases. Eve
 
 Navigation screens also have `command = ":"` and `help = "?"`. These are the
 table, documents, logs, help, containers, confirm, dashboards, explain, timeline,
-gitops, adjacent, action menus, port-forwards, skins, snapshots, fleet, find, and
-PVC browser. In help, `?` closes the view instead.
+gitops, argocd, adjacent, action menus, port-forwards, skins, snapshots, fleet,
+find, and PVC browser. In help, `?` closes the view instead.
 
 `back` clears a search or returns to the previous view, depending on the mode.
 `close` leaves the view directly. `accept` uses the selected item or input.
@@ -194,7 +194,6 @@ for those operations.
 | `back`              | `esc`            |
 | `close`             | `q`              |
 | `describe`          | `d`              |
-| `discover_children` | `c`              |
 | `down`              | `j`, `down`      |
 | `first`             | `g`, `home`      |
 | `last`              | `G`, `end`       |
@@ -393,6 +392,19 @@ for those operations.
 | `close`  | `q`              |
 | `down`   | `j`, `down`      |
 | `up`     | `k`, `up`        |
+
+### `[keys.argocd]`
+
+| Action              | Default bindings |
+| ------------------- | ---------------- |
+| `accept`            | `enter`          |
+| `back`              | `esc`            |
+| `close`             | `q`              |
+| `down`              | `j`, `down`      |
+| `first`             | `g`, `home`      |
+| `last`              | `G`, `end`       |
+| `refresh`           | `r`              |
+| `up`                | `k`, `up`        |
 
 ### `[keys.gitops]`
 

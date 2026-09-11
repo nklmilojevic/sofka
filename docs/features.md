@@ -145,7 +145,8 @@ The full list. For how sofka compares to k9s, see [vs k9s](vs-k9s.md).
   view history.
 - **Command palette** (`:`) - fuzzy search over the full resource catalog, your
   saved bookmarks and workspaces, and the built-in commands (`ctx`, `helm`,
-  `pulse`, `xray`, `explain`, `timeline`, `gitops`, `adjacent`, `can-i`, `journal`, `debug`,
+  `pulse`, `xray`, `explain`, `timeline`, `gitops`, `argocd`, `adjacent`, `can-i`, `journal`,
+  `debug`,
   `debug-clean`, `bundle`, `bundle-save`, `snapshot`, `snapshots`, `diff`,
   `events`, `pf`, `notify`, `find`, `vlogs`, `rightsize`, `fleet`, `skin`,
   `reload`, `config`, `info`). `:` and `?` open the palette and help from every
@@ -363,6 +364,27 @@ The full list. For how sofka compares to k9s, see [vs k9s](vs-k9s.md).
   with `esc` or `q` cancels pending results and clears the report progress
   message. Navigation to a target resource or a palette destination also
   cancels pending results.
+- **Argo CD view** (`:argocd` / `:argo`) - the state of the selected Application:
+  sync and health, the project and destination, the source repository with the
+  revision actually deployed, every object in `status.resources[]` with its own
+  sync and health, and a summary of what is blocking - a suspended sync policy, a
+  `ComparisonError`, a failed sync operation, degraded or missing objects, or
+  drift. Each managed resource is a finding you can `⏎` into. Read entirely from
+  the Application CRD: no Argo CD API server, no token, no `argocd` binary.
+  Applications deploying to a **remote cluster** are handled honestly - the
+  destination is resolved against your kubeconfig and shown by context name, and
+  because those objects do not live in the cluster you are connected to, `⏎`
+  reports where they are instead of searching here. Opened on any **other**
+  object, the view follows Argo's tracking metadata the other way: the
+  `argocd.argoproj.io/tracking-id` annotation (preferred, since it is exact) or
+  the `app.kubernetes.io/instance` label (truncated at 63 characters) names the
+  Application, which is looked up by name. An object Argo does not manage says
+  so, and a tracking reference whose Application no longer exists is reported as
+  a dangling reference rather than as unmanaged. Where several Argo CD instances
+  share a cluster and each holds an Application of the same name, the one that
+  actually lists the object among its managed resources wins. `r` re-reads the resource and
+  follows its tracking metadata again. These reads require `get` and `list`
+  access.
 - **Native Helm inspector** (`:helm` / `:hm`) - sofka decodes Helm's release
   storage Secrets directly (double base64 → gunzip → JSON, same as Helm) and
   lists one row per release at its latest revision, like `helm list`. `⏎` opens

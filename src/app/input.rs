@@ -150,6 +150,7 @@ impl App {
             Mode::Explain => self.key_explain(key),
             Mode::Timeline => self.key_timeline(key),
             Mode::Gitops => self.key_gitops(key),
+            Mode::Argocd => self.key_argocd(key),
             Mode::Adjacent => self.key_adjacent(key),
             Mode::FluxMenu => self.key_flux_menu(key),
             Mode::TransferMenu => self.key_transfer_menu(key),
@@ -190,6 +191,7 @@ impl App {
             Mode::Explain => "explain",
             Mode::Timeline => "timeline",
             Mode::Gitops => "gitops",
+            Mode::Argocd => "argocd",
             Mode::Adjacent => "adjacent",
             Mode::FluxMenu => "flux_menu",
             Mode::TransferMenu => "transfer_menu",
@@ -551,6 +553,7 @@ impl App {
         }
         self.cancel_explain_request();
         self.cancel_gitops_request();
+        self.cancel_argocd_request();
         self.cancel_adjacent_request();
         self.help_return = Mode::Table;
         self.palette_return = Mode::Table;
@@ -675,6 +678,7 @@ impl App {
             PaletteAction::Explain => self.open_explain(),
             PaletteAction::Timeline => self.open_timeline(),
             PaletteAction::Gitops => self.open_gitops(),
+            PaletteAction::Argocd => self.open_argocd(),
             PaletteAction::Adjacent => self.open_adjacent(),
             PaletteAction::CanI => self.open_can_i(),
             PaletteAction::Journal => self.open_journal(),

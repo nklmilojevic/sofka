@@ -520,13 +520,15 @@ pub fn status_color(s: &str) -> Color {
     match s.strip_suffix(",SchedulingDisabled").unwrap_or(s) {
         s if failure_status(s) => red(),
         s if s.starts_with("Init:") => yellow(),
-        "Running" | "Ready" | "Active" | "Bound" | "True" | "deployed" => green(),
+        "Running" | "Ready" | "Active" | "Bound" | "True" | "deployed" | "Synced" | "Healthy" => {
+            green()
+        }
         // Faded, not "healthy green" — a finished pod isn't running, and a
         // scaled-to-zero workload isn't serving.
         "Succeeded" | "Completed" | "superseded" | "uninstalled" | "ScaledDown" => overlay0(),
         "Pending" | "Suspended" | "Completing" | "ContainerCreating" | "PodInitializing"
         | "SchedulingGated" | "Progressing" | "pending-install" | "pending-upgrade"
-        | "pending-rollback" => yellow(),
+        | "pending-rollback" | "OutOfSync" => yellow(),
         // Matches row_color's killColor — a distinct "on its way out" hue,
         // not the same bucket as Pending.
         "Terminating" | "uninstalling" => mauve(),
@@ -551,6 +553,7 @@ fn failure_status(status: &str) -> bool {
             | "False"
             | "failed"
             | "Degraded"
+            | "Missing"
             | "Unavailable"
             | "Stalled"
             | "CreateContainerConfigError"

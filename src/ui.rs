@@ -265,6 +265,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         Mode::Xray => draw_xray(frame, app, chunks[1]),
         Mode::Explain => draw_explain(frame, app, chunks[1]),
         Mode::Gitops => draw_gitops(frame, app, chunks[1]),
+        Mode::Argocd => draw_argocd(frame, app, chunks[1]),
         Mode::Adjacent => draw_adjacent(frame, app, chunks[1]),
         Mode::Timeline => draw_timeline(frame, app, chunks[1]),
         Mode::PortForwards => draw_port_forwards(frame, app, chunks[1]),
@@ -304,6 +305,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
             Mode::Xray => draw_xray(frame, app, chunks[1]),
             Mode::Explain => draw_explain(frame, app, chunks[1]),
             Mode::Gitops => draw_gitops(frame, app, chunks[1]),
+            Mode::Argocd => draw_argocd(frame, app, chunks[1]),
             Mode::Adjacent => draw_adjacent(frame, app, chunks[1]),
             Mode::Timeline => draw_timeline(frame, app, chunks[1]),
             Mode::PortForwards => draw_port_forwards(frame, app, chunks[1]),
@@ -681,6 +683,7 @@ fn header_hints(app: &App) -> Vec<Line<'static>> {
             | Mode::Explain
             | Mode::Timeline
             | Mode::Gitops
+            | Mode::Argocd
             | Mode::Adjacent
             | Mode::PortForwards
     ) {
@@ -2738,6 +2741,10 @@ fn build_help(app: &App, width: usize) -> (Vec<Line<'static>>, String) {
         "Flux owner, source, revisions & reconciliation chain",
     ));
     lines.push(bind(
+        ":argocd · :argo",
+        "Argo CD Application sync/health, source, managed resources & what's blocking",
+    ));
+    lines.push(bind(
         ":journal · :audit",
         "session-local log of the mutating actions you've taken",
     ));
@@ -4324,6 +4331,20 @@ fn draw_explain(frame: &mut Frame, app: &mut App, area: Rect) {
         &app.explain_items,
         "gathering evidence…",
         &mut app.explain_state,
+    );
+}
+
+fn draw_argocd(frame: &mut Frame, app: &mut App, area: Rect) {
+    let show_scrollbars = app.scrollbars_visible();
+    let title = format!(" {} ", app.argocd_title);
+    draw_findings(
+        frame,
+        show_scrollbars,
+        area,
+        title,
+        &app.argocd_items,
+        "reading the Application…",
+        &mut app.argocd_state,
     );
 }
 

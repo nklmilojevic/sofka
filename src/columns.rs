@@ -320,6 +320,16 @@ const HELM_HISTORY_COLUMNS: &[Column] = &[
     column("UPDATED", col_helm_updated),
 ];
 
+const ARGOCD_APP_COLUMNS: &[Column] = &[
+    column("NAME", col_name),
+    status_column("SYNC", col_argocd_sync),
+    column("HEALTH", col_argocd_health),
+    column("REVISION", col_argocd_revision),
+    column("AUTO-SYNC", col_argocd_auto_sync),
+    wide_column("PROJECT", col_argocd_project),
+    column("AGE", col_age),
+];
+
 fn columns_for(group: &str, plural: &str) -> &'static [Column] {
     match (group, plural) {
         ("", "pods") => POD_COLUMNS,
@@ -348,6 +358,7 @@ fn columns_for(group: &str, plural: &str) -> &'static [Column] {
             "source.toolkit.fluxcd.io",
             "gitrepositories" | "helmrepositories" | "ocirepositories" | "buckets",
         ) => FLUX_SOURCE_COLUMNS,
+        ("argoproj.io", "applications") => ARGOCD_APP_COLUMNS,
         ("", "helm") => HELM_COLUMNS,
         ("", "helmhistory") => HELM_HISTORY_COLUMNS,
         _ => DEFAULT_COLUMNS,
@@ -1420,6 +1431,42 @@ fn col_flux_source_url<'a>(ctx: &CellContext<'a>) -> Cow<'a, str> {
 
 fn col_flux_suspended<'a>(ctx: &CellContext<'a>) -> Cow<'a, str> {
     Cow::Owned(bget(ctx.data, &["spec", "suspend"]).to_string())
+}
+
+fn col_argocd_sync<'a>(ctx: &CellContext<'a>) -> Cow<'a, str> {
+    Cow::Borrowed(sget(ctx.data, &["status", "sync", "status"]).unwrap_or_default())
+}
+
+fn col_argocd_health<'a>(ctx: &CellContext<'a>) -> Cow<'a, str> {
+    Cow::Borrowed(sget(ctx.data, &["status", "health", "status"]).unwrap_or_default())
+}
+
+fn col_argocd_revision<'a>(ctx: &CellContext<'a>) -> Cow<'a, str> {
+    let rev = sget(ctx.data, &["status", "sync", "revision"])
+        .or_else(|| {
+            ctx.data
+                .pointer("/status/operationState/syncResult/revision")
+                .and_then(Value::as_str)
+        })
+        .unwrap_or_default();
+    // Full commit SHAs are abbreviated; chart versions and branch names are not
+    // SHAs and must stay readable.
+    if rev.len() >= 40 && rev.chars().all(|c| c.is_ascii_hexdigit()) {
+        Cow::Borrowed(&rev[..7])
+    } else {
+        Cow::Borrowed(rev)
+    }
+}
+
+/// Three states, not a boolean: an Application with no `automated` block is
+/// normally configured for manual syncs, and only reads as suspended when
+/// sofka is the one holding its original policy.
+fn col_argocd_auto_sync<'a>(ctx: &CellContext<'a>) -> Cow<'a, str> {
+    Cow::Borrowed(crate::argocd::auto_sync(ctx.obj).label())
+}
+
+fn col_argocd_project<'a>(ctx: &CellContext<'a>) -> Cow<'a, str> {
+    Cow::Borrowed(sget(ctx.data, &["spec", "project"]).unwrap_or_default())
 }
 
 // A Helm release row's underlying object is the raw storage `Secret`
@@ -3216,6 +3263,50 @@ mod tests {
     }
 
     #[test]
+    fn argocd_application_cells_read_sync_health_and_revision() {
+        let a = obj(json!({
+            "apiVersion": "argoproj.io/v1alpha1", "kind": "Application",
+            "metadata": {"name": "guestbook", "namespace": "argocd"},
+            "spec": {"project": "default",
+                     "syncPolicy": {"automated": {"prune": true, "selfHeal": true}}},
+            "status": {
+                "sync": {"status": "OutOfSync",
+                         "revision": "53e28ff20cc530b9ada2173fbbd64d48338583ba"},
+                "health": {"status": "Degraded"}
+            }
+        }));
+        let (cells, status_idx) = cells(&a, "argoproj.io", "applications", now_secs());
+        let headers = headers("argoproj.io", "applications");
+        let at = |h: &str| cells[headers.iter().position(|x| *x == h).expect(h)].clone();
+        assert_eq!(at("SYNC"), "OutOfSync");
+        assert_eq!(at("HEALTH"), "Degraded");
+        // A full SHA is abbreviated; a chart version is not.
+        assert_eq!(at("REVISION"), "53e28ff");
+        assert_eq!(at("AUTO-SYNC"), "on (prune,selfHeal)");
+        assert_eq!(at("PROJECT"), "default");
+        assert_eq!(status_idx, headers.iter().position(|x| *x == "SYNC"));
+    }
+
+    /// Argo writes chart versions and branch names into the same field; only a
+    /// full commit SHA may be shortened.
+    #[test]
+    fn argocd_revision_leaves_non_sha_revisions_intact() {
+        let with = |rev: &str| {
+            let a = obj(json!({
+                "apiVersion": "argoproj.io/v1alpha1", "kind": "Application",
+                "metadata": {"name": "a"},
+                "status": {"sync": {"status": "Synced", "revision": rev}}
+            }));
+            let (cells, _) = cells(&a, "argoproj.io", "applications", now_secs());
+            let headers = headers("argoproj.io", "applications");
+            cells[headers.iter().position(|x| *x == "REVISION").unwrap()].clone()
+        };
+        assert_eq!(with("1.2.3"), "1.2.3");
+        assert_eq!(with("HEAD"), "HEAD");
+        assert_eq!(with("main"), "main");
+    }
+
+    #[test]
     fn curated_headers_and_cells_stay_aligned() {
         let o = obj(json!({
             "apiVersion": "v1",
@@ -3243,6 +3334,7 @@ mod tests {
             ("gateway.networking.k8s.io", "httproutes"),
             ("", "endpoints"),
             ("apiextensions.k8s.io", "customresourcedefinitions"),
+            ("argoproj.io", "applications"),
             ("kustomize.toolkit.fluxcd.io", "kustomizations"),
             ("helm.toolkit.fluxcd.io", "helmreleases"),
             ("source.toolkit.fluxcd.io", "gitrepositories"),

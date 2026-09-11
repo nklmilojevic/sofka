@@ -12,6 +12,7 @@ pub mod adjacent;
 pub mod altscroll;
 pub mod app;
 pub mod applog;
+pub mod argocd;
 pub mod atomicfile;
 #[cfg(feature = "bench")]
 pub mod benchsupport;

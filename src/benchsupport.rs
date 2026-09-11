@@ -92,6 +92,66 @@ pub fn pod(i: usize) -> DynamicObject {
 
 /// A Helm release storage Secret, encoded exactly like the real thing
 /// (base64 -> base64 -> gzip -> JSON), so `helm::decode` does its real work.
+/// An Argo CD Application with a realistic spread of sync/health states, a
+/// sync policy, and a managed-resource list.
+pub fn application(i: usize) -> DynamicObject {
+    let sync = match i % 5 {
+        0 => "OutOfSync",
+        1 => "Unknown",
+        _ => "Synced",
+    };
+    let health = match i % 7 {
+        0 => "Degraded",
+        1 => "Progressing",
+        2 => "Missing",
+        _ => "Healthy",
+    };
+    let policy = match i % 3 {
+        0 => json!({}),
+        1 => json!({ "automated": {} }),
+        _ => json!({ "automated": { "prune": true, "selfHeal": true } }),
+    };
+    let resources: Vec<_> = (0..(i % 9))
+        .map(|r| {
+            json!({
+                "group": "apps", "version": "v1", "kind": "Deployment",
+                "namespace": format!("ns-{}", i % 24),
+                "name": format!("app-{i}-{r}"),
+                "status": "Synced", "health": { "status": "Healthy" }
+            })
+        })
+        .collect();
+
+    serde_json::from_value(json!({
+        "apiVersion": "argoproj.io/v1alpha1",
+        "kind": "Application",
+        "metadata": {
+            "name": format!("application-{i:05}"),
+            "namespace": "argocd",
+            "creationTimestamp": "2026-06-01T00:00:00Z"
+        },
+        "spec": {
+            "project": format!("project-{}", i % 12),
+            "source": {
+                "repoURL": "https://gitlab.example.com/group/subgroup/repository",
+                "path": "deploy/overlays/production",
+                "targetRevision": "HEAD"
+            },
+            "destination": {
+                "server": "https://kubernetes.default.svc",
+                "namespace": format!("ns-{}", i % 24)
+            },
+            "syncPolicy": policy
+        },
+        "status": {
+            "sync": { "status": sync, "revision": "53e28ff20cc530b9ada2173fbbd64d48338583ba" },
+            "health": { "status": health },
+            "resources": resources
+        }
+    }))
+    .expect("valid Application")
+}
+
 pub fn helm_secret(i: usize) -> DynamicObject {
     use base64::Engine as _;
     use base64::engine::general_purpose::STANDARD as BASE64;

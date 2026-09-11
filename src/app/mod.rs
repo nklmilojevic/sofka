@@ -200,6 +200,8 @@ pub enum Mode {
     Timeline,
     /// Flux GitOps ownership + reconciliation chain for the selection.
     Gitops,
+    /// Argo CD Application sync/health state and the objects it manages.
+    Argocd,
     /// The objects directly connected to the selection (`u`).
     Adjacent,
     Diff,
@@ -612,6 +614,7 @@ enum PaletteAction {
     Explain,
     Timeline,
     Gitops,
+    Argocd,
     Adjacent,
     CanI,
     Journal,
@@ -670,6 +673,10 @@ const PALETTE_COMMANDS: &[PaletteCommand] = &[
     PaletteCommand {
         action: PaletteAction::Gitops,
         names: &["gitops", "flux", "reconcile", "recon"],
+    },
+    PaletteCommand {
+        action: PaletteAction::Argocd,
+        names: &["argocd", "argo"],
     },
     PaletteCommand {
         action: PaletteAction::CanI,
@@ -2146,6 +2153,18 @@ pub struct App {
     /// Latest GitOps request, independent of the table watch generation.
     gitops_request: u64,
     gitops_claim: Option<StatusClaim>,
+    /// Argo CD view: the Application findings, cursor, title, and the
+    /// Application being inspected (kept so `r` can re-gather).
+    pub argocd_items: Vec<crate::explain::Finding>,
+    pub argocd_state: ListState,
+    pub argocd_title: String,
+    pub argocd_source: Option<DynamicObject>,
+    /// Where the inspected Application deploys, so the view can say where a
+    /// managed resource lives when it is not in this cluster.
+    pub argocd_destination: crate::argocd::Destination,
+    /// Latest Argo CD request, independent of the table watch generation.
+    argocd_request: u64,
+    argocd_claim: Option<StatusClaim>,
     /// Session-local per-object state-change history, fed by the table watch.
     pub timeline: crate::timeline::Timeline,
     /// Table geometry from the last frame, for mouse hit-testing. A RefCell
@@ -2432,6 +2451,13 @@ impl App {
             gitops_source: None,
             gitops_request: 0,
             gitops_claim: None,
+            argocd_items: Vec::new(),
+            argocd_state: ListState::default(),
+            argocd_title: String::new(),
+            argocd_source: None,
+            argocd_destination: crate::argocd::Destination::Current,
+            argocd_request: 0,
+            argocd_claim: None,
             timeline: crate::timeline::Timeline::default(),
             table_hit: RefCell::new(None),
             notify_tasks: HashMap::new(),
@@ -2531,6 +2557,7 @@ impl App {
 
 mod actions;
 mod adjacent;
+mod argocd;
 mod authz;
 mod bookmarks;
 mod bundle;
