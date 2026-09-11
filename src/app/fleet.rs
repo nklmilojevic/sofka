@@ -241,11 +241,69 @@ async fn gather_context(
     }
     row.flux_failed = flux_failed;
 
+    // Argo CD Applications, counted a page at a time. Unlike the Flux kinds
+    // above, a cluster routinely holds thousands of these and each object runs
+    // to several KiB, so materialising the whole list the way `list_or_warn`
+    // does would pull tens of MiB per context — and the fleet gathers contexts
+    // concurrently. Only the count is kept; each page is dropped as it goes.
+    if let Some(k) = cluster.resolve("applications") {
+        row.argocd_degraded = count_degraded_applications(&client, &k.ar, &mut warn).await;
+    }
+
     row.status = match warn {
         Some(w) => FleetStatus::Error(short_error(&w)),
         None => FleetStatus::Ok,
     };
     row
+}
+
+/// How many Applications to pull per request while counting.
+const APPLICATION_PAGE: u32 = 500;
+
+/// Count Applications that are `OutOfSync` or not `Healthy`, paging so the
+/// whole collection is never held at once.
+///
+/// `None` on a failed read: a denied or timed-out list must not summarise as a
+/// confident zero, which is also why the error is recorded in `warn`.
+async fn count_degraded_applications(
+    client: &Client,
+    ar: &ApiResource,
+    warn: &mut Option<String>,
+) -> Option<usize> {
+    let api: Api<DynamicObject> = Api::all_with(client.clone(), ar);
+    let mut degraded = 0;
+    let mut token: Option<String> = None;
+    loop {
+        let mut params = ListParams::default().limit(APPLICATION_PAGE);
+        if let Some(t) = &token {
+            params = params.continue_token(t);
+        }
+        let page = match api.list(&params).await {
+            Ok(page) => page,
+            Err(e) => {
+                warn.get_or_insert(format!("listing {}: {e}", ar.plural));
+                return None;
+            }
+        };
+        degraded += page
+            .items
+            .iter()
+            .filter(|o| application_degraded(o))
+            .count();
+        token = page.metadata.continue_.filter(|t| !t.is_empty());
+        if token.is_none() {
+            return Some(degraded);
+        }
+    }
+}
+
+/// An Application counts against the fleet when it has drifted or is not
+/// healthy. An empty status is a freshly created Application Argo has not
+/// compared yet, which is not a fault.
+pub(super) fn application_degraded(obj: &DynamicObject) -> bool {
+    let sync = crate::argocd::sync_status(obj);
+    let health = crate::argocd::health_status(obj);
+    sync == "OutOfSync" || (!health.is_empty() && health != "Healthy")
 }
 
 pub(super) fn update_pod_counts(row: &mut FleetRow, pods: &[DynamicObject]) {

@@ -21219,6 +21219,43 @@ async fn gitops_refresh_reads_current_owner_and_source_reference() {
     assert!(requests.contains(&format!("{source_path}/new-source")));
 }
 
+/// What the fleet dashboard counts against a cluster. A status Argo has not
+/// filled in yet is a new Application, not a fault.
+#[test]
+fn fleet_counts_drifted_and_unhealthy_applications_only() {
+    let app = |sync: &str, health: &str| {
+        let mut status = json!({});
+        if !sync.is_empty() {
+            status["sync"] = json!({"status": sync});
+        }
+        if !health.is_empty() {
+            status["health"] = json!({"status": health});
+        }
+        let value = json!({"apiVersion": "argoproj.io/v1alpha1", "kind": "Application",
+                           "metadata": {"name": "a", "namespace": "argocd"}, "status": status});
+        serde_json::from_value::<DynamicObject>(value).expect("valid Application")
+    };
+    assert!(!super::fleet::application_degraded(&app(
+        "Synced", "Healthy"
+    )));
+    assert!(super::fleet::application_degraded(&app(
+        "OutOfSync",
+        "Healthy"
+    )));
+    assert!(super::fleet::application_degraded(&app(
+        "Synced", "Degraded"
+    )));
+    assert!(super::fleet::application_degraded(&app(
+        "Synced",
+        "Progressing"
+    )));
+    assert!(super::fleet::application_degraded(&app(
+        "Synced", "Missing"
+    )));
+    // Not yet compared by Argo — not a fault.
+    assert!(!super::fleet::application_degraded(&app("", "")));
+}
+
 fn argocd_application(destination: serde_json::Value) -> serde_json::Value {
     json!({
         "apiVersion": "argoproj.io/v1alpha1", "kind": "Application",
