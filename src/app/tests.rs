@@ -5592,6 +5592,65 @@ async fn delete_confirm_cascade_can_cycle() {
     ));
 }
 
+/// A label longer than the dialog's minimum width has to stay readable: the
+/// drain question on a node with an ordinary name is 67 characters, which the
+/// fixed 56-column popup truncated mid-word.
+#[tokio::test]
+async fn confirm_dialog_fits_its_label_at_any_terminal_size() {
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    for (width, height) in [(80u16, 24u16), (120, 32), (200, 40)] {
+        let (mut app, _rx) = test_app();
+        app.switch_kind("nodes");
+        apply(
+            &mut app,
+            json!({"apiVersion": "v1", "kind": "Node",
+                   "metadata": {"name": "bastion-expert-lizard-1"}}),
+        );
+        app.table_state.select(Some(0));
+        app.handle_key(press(KeyCode::Char('D'))).unwrap();
+        assert_eq!(app.mode, Mode::Confirm);
+
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        terminal.draw(|f| crate::ui::draw(f, &mut app)).unwrap();
+        let screen: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .chunks(usize::from(width))
+            .map(|row| row.iter().map(|cell| cell.symbol()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        // Every word of the label and of the key hints is on screen.
+        for expected in ["bastion-expert-lizard-1", "eligible pods.", "esc:cancel"] {
+            assert!(
+                screen.contains(expected),
+                "{width}x{height} lost {expected:?}:\n{screen}"
+            );
+        }
+
+        // And the dialog is no wider than the text needs, so a large terminal
+        // does not get a mostly empty box.
+        let title = screen
+            .lines()
+            .find(|line| line.contains("Confirm"))
+            .expect("the dialog is on screen");
+        let chars: Vec<char> = title.chars().collect();
+        let at = title.chars().count() - title.rsplit("Confirm").next().unwrap().chars().count();
+        let start = chars[..at].iter().rposition(|&c| c == '╭').unwrap();
+        let end = at + chars[at..].iter().position(|&c| c == '╮').unwrap();
+        let dialog_width = end - start + 1;
+        let label_width = app.confirm_label.chars().count();
+        assert!(
+            dialog_width <= label_width + 4,
+            "{width}x{height}: dialog is {dialog_width} columns for a \
+{label_width}-character label:\n{screen}"
+        );
+    }
+}
+
 #[tokio::test]
 async fn node_drain_key_opens_confirm_for_marked_nodes() {
     let (mut app, _rx) = test_app();

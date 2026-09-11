@@ -3999,29 +3999,64 @@ fn draw_set_image(frame: &mut Frame, app: &mut App, area: Rect) {
     );
 }
 
+/// Floor for the confirm dialog, so a short question still reads as a dialog.
+const MIN_CONFIRM_WIDTH: u16 = 56;
+const MIN_CONFIRM_HEIGHT: u16 = 7;
+
 fn draw_confirm(frame: &mut Frame, app: &App, area: Rect) {
-    let popup = centered_rect_with_min(50, 20, 56, 7, area);
+    // Sized from its own text: a share of the frame is too narrow for a long
+    // label on a small terminal, which truncated it mid-word, and mostly empty
+    // on a large one.
+    let hint = confirm_action_hint(app, app.confirm_allows_force_toggle());
+    // Two border columns plus the block's one column of padding on each side.
+    const CHROME: usize = 4;
+    let longest = app
+        .confirm_label
+        .split('\n')
+        .chain(std::iter::once(&*hint))
+        .map(|line| line.chars().count())
+        .max()
+        .unwrap_or(0);
+    let width = u16::try_from(longest + CHROME)
+        .unwrap_or(u16::MAX)
+        .clamp(MIN_CONFIRM_WIDTH.min(area.width), area.width);
+    let inner = usize::from(width).saturating_sub(CHROME).max(1);
+    // Whatever still does not fit wraps, and the dialog grows by those rows.
+    let rows: usize = app
+        .confirm_label
+        .split('\n')
+        .chain(std::iter::once(&*hint))
+        .map(|line| line.chars().count().div_ceil(inner).max(1))
+        .sum();
+    // Two borders, a leading blank row, and the blank between label and hint.
+    let height = u16::try_from(rows + 4)
+        .unwrap_or(u16::MAX)
+        .clamp(MIN_CONFIRM_HEIGHT.min(area.height), area.height);
+    let popup = centered_rect_with_min(0, 0, width, height, area);
     clear_region(frame, popup);
-    let lines = vec![
-        Line::from(""),
+    let mut lines = vec![Line::from("")];
+    lines.extend(app.confirm_label.split('\n').map(|line| {
         Line::from(Span::styled(
-            format!("  {}", app.confirm_label),
+            line.to_string(),
             Style::default().fg(theme::text()),
-        )),
-        Line::from(""),
-        Line::from(Span::styled(
-            confirm_action_hint(app, app.confirm_allows_force_toggle()),
-            Style::default().fg(theme::yellow()),
-        )),
-    ];
+        ))
+    }));
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        hint,
+        Style::default().fg(theme::yellow()),
+    )));
     frame.render_widget(
-        Paragraph::new(lines).block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_type(BorderType::Rounded)
-                .border_style(Style::default().fg(theme::red()))
-                .title(Span::styled(" Confirm ", Style::default().fg(theme::red()))),
-        ),
+        Paragraph::new(lines)
+            .wrap(ratatui::widgets::Wrap { trim: true })
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_type(BorderType::Rounded)
+                    .border_style(Style::default().fg(theme::red()))
+                    .padding(ratatui::widgets::Padding::horizontal(1))
+                    .title(Span::styled(" Confirm ", Style::default().fg(theme::red()))),
+            ),
         popup,
     );
 }
