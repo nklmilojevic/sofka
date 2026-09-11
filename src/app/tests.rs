@@ -5667,12 +5667,15 @@ async fn node_drain_key_opens_confirm_for_marked_nodes() {
 
     app.handle_key(press(KeyCode::Char('D'))).unwrap();
     assert_eq!(app.mode, Mode::Confirm);
-    assert_eq!(
-        app.confirm_label,
-        "Drain 2 nodes? Cordon and evict eligible pods."
+    assert!(
+        app.confirm_label
+            .starts_with("Drain 2 nodes? Cordon and evict eligible pods."),
+        "{}",
+        app.confirm_label
     );
     assert!(!app.confirm_allows_force_toggle());
-    let Some(ConfirmAction::Drain { mut targets }) = app.confirm_action.take() else {
+    assert!(app.confirm_allows_drain_toggles());
+    let Some(ConfirmAction::Drain { mut targets, .. }) = app.confirm_action.take() else {
         panic!("expected drain confirm action");
     };
     targets.sort();
@@ -11006,31 +11009,49 @@ fn containers_include_init_and_main() {
     assert!(names.contains(&"init".to_string()));
 }
 
+/// The default options: what sofka did before the flags existed.
+fn drain_defaults() -> crate::app::helpers::DrainOptions {
+    crate::config::DrainConfig::default().into()
+}
+
 #[test]
 fn drainable_pod_skips_daemonset_mirror_and_completed_pods() {
+    let opts = drain_defaults();
     let pod = |v| serde_json::from_value::<Pod>(v).unwrap();
-    assert!(drainable_pod(&pod(json!({
-        "metadata": {"name": "web", "namespace": "default"},
-        "status": {"phase": "Running"}
-    }))));
-    assert!(!drainable_pod(&pod(json!({
-        "metadata": {
-            "name": "ds",
-            "ownerReferences": [{"kind": "DaemonSet", "name": "agent", "uid": "ds"}]
-        },
-        "status": {"phase": "Running"}
-    }))));
-    assert!(!drainable_pod(&pod(json!({
-        "metadata": {
-            "name": "static",
-            "annotations": {"kubernetes.io/config.mirror": "mirror"}
-        },
-        "status": {"phase": "Running"}
-    }))));
-    assert!(!drainable_pod(&pod(json!({
-        "metadata": {"name": "done"},
-        "status": {"phase": "Succeeded"}
-    }))));
+    assert!(drainable_pod(
+        &pod(json!({
+            "metadata": {"name": "web", "namespace": "default"},
+            "status": {"phase": "Running"}
+        })),
+        opts
+    ));
+    assert!(!drainable_pod(
+        &pod(json!({
+            "metadata": {
+                "name": "ds",
+                "ownerReferences": [{"kind": "DaemonSet", "name": "agent", "uid": "ds"}]
+            },
+            "status": {"phase": "Running"}
+        })),
+        opts
+    ));
+    assert!(!drainable_pod(
+        &pod(json!({
+            "metadata": {
+                "name": "static",
+                "annotations": {"kubernetes.io/config.mirror": "mirror"}
+            },
+            "status": {"phase": "Running"}
+        })),
+        opts
+    ));
+    assert!(!drainable_pod(
+        &pod(json!({
+            "metadata": {"name": "done"},
+            "status": {"phase": "Succeeded"}
+        })),
+        opts
+    ));
 }
 
 #[test]
@@ -20255,6 +20276,17 @@ async fn drain_api_case(
     eviction_code: u16,
     pod_missing: bool,
 ) -> (String, bool, Vec<serde_json::Value>) {
+    drain_api_case_with(pods, eviction_code, pod_missing, &[]).await
+}
+
+/// As [`drain_api_case`], pressing `toggles` in the confirm dialog first —
+/// the `kubectl drain` options the dialog offers.
+async fn drain_api_case_with(
+    pods: serde_json::Value,
+    eviction_code: u16,
+    pod_missing: bool,
+    toggles: &[char],
+) -> (String, bool, Vec<serde_json::Value>) {
     use http_body_util::BodyExt;
     let (mut app, mut rx) = test_app();
     app.switch_kind("nodes");
@@ -20306,6 +20338,10 @@ async fn drain_api_case(
     );
     app.handle_key(press(KeyCode::Char('D'))).unwrap();
     assert_eq!(app.mode, Mode::Confirm);
+    for &toggle in toggles {
+        app.handle_key(press(KeyCode::Char(toggle))).unwrap();
+        assert_eq!(app.mode, Mode::Confirm, "toggle {toggle} closed the dialog");
+    }
     app.handle_key(press(KeyCode::Enter)).unwrap();
     let (message, err) = tokio::time::timeout(std::time::Duration::from_secs(5), async {
         loop {
@@ -20376,6 +20412,197 @@ async fn drain_key_blocks_emptydir_before_any_evictions() {
     assert!(err);
     assert!(message.contains("emptyDir data"), "{message}");
     assert_eq!(requests.len(), 2);
+}
+
+/// The dialog toggles waive the blockers, one `kubectl drain` flag each.
+#[tokio::test]
+async fn drain_toggles_waive_the_emptydir_and_force_blockers() {
+    let mut emptydir = drain_managed_pod();
+    emptydir["spec"]["volumes"] = json!([{"name":"data","emptyDir":{}}]);
+    let (message, err, requests) = drain_api_case_with(json!([emptydir]), 201, false, &['e']).await;
+    assert!(!err, "{message}");
+    assert!(message.starts_with("drain requested"), "{message}");
+    assert!(
+        requests
+            .iter()
+            .any(|r| r["path"].as_str().is_some_and(|p| p.ends_with("/eviction"))),
+        "{requests:?}"
+    );
+
+    let mut standalone = drain_managed_pod();
+    standalone["metadata"]["ownerReferences"][0]["controller"] = json!(false);
+    let (message, err, requests) =
+        drain_api_case_with(json!([standalone]), 201, false, &['f']).await;
+    assert!(!err, "{message}");
+    assert!(
+        requests
+            .iter()
+            .any(|r| r["path"].as_str().is_some_and(|p| p.ends_with("/eviction"))),
+        "{requests:?}"
+    );
+}
+
+/// DaemonSet pods are skipped by default and are never evicted; turning the
+/// option off refuses the node instead, the way `kubectl drain` does without
+/// `--ignore-daemonsets`.
+#[tokio::test]
+async fn drain_ignore_daemonsets_toggle_refuses_instead_of_skipping() {
+    let mut ds = drain_managed_pod();
+    ds["metadata"]["name"] = json!("agent");
+    ds["metadata"]["ownerReferences"] = json!([
+        {"apiVersion":"apps/v1","kind":"DaemonSet","name":"agent","uid":"ds-uid","controller":true}
+    ]);
+
+    let (message, err, requests) = drain_api_case(json!([ds.clone()]), 201, false).await;
+    assert!(!err, "{message}");
+    assert!(
+        !requests
+            .iter()
+            .any(|r| r["path"].as_str().is_some_and(|p| p.ends_with("/eviction"))),
+        "a DaemonSet pod must never be evicted: {requests:?}"
+    );
+
+    let (message, err, _) = drain_api_case_with(json!([ds]), 201, false, &['i']).await;
+    assert!(err);
+    assert!(message.contains("managed by a DaemonSet"), "{message}");
+}
+
+/// The dialog text follows the toggles, so the options are visible before `y`.
+#[tokio::test]
+async fn drain_dialog_text_follows_the_option_toggles() {
+    let (mut app, _rx) = test_app();
+    app.switch_kind("nodes");
+    apply(
+        &mut app,
+        json!({"apiVersion": "v1", "kind": "Node", "metadata": {"name": "node-a"}}),
+    );
+    app.table_state.select(Some(0));
+
+    app.handle_key(press(KeyCode::Char('D'))).unwrap();
+    assert!(
+        app.confirm_label.contains("ignore daemonsets: yes")
+            && app.confirm_label.contains("delete emptyDir data: no")
+            && app.confirm_label.contains("force: no"),
+        "{}",
+        app.confirm_label
+    );
+
+    for (key, expected) in [
+        ('e', "delete emptyDir data: yes"),
+        ('f', "force: yes"),
+        ('i', "ignore daemonsets: no"),
+    ] {
+        app.handle_key(press(KeyCode::Char(key))).unwrap();
+        assert_eq!(app.mode, Mode::Confirm);
+        assert!(
+            app.confirm_label.contains(expected),
+            "{}",
+            app.confirm_label
+        );
+    }
+
+    // Toggles flip back, and the dialog still runs the drain it describes.
+    app.handle_key(press(KeyCode::Char('e'))).unwrap();
+    assert!(
+        app.confirm_label.contains("delete emptyDir data: no"),
+        "{}",
+        app.confirm_label
+    );
+    let Some(ConfirmAction::Drain { opts, .. }) = &app.confirm_action else {
+        panic!("expected a drain confirm action");
+    };
+    assert!(!opts.delete_emptydir_data && opts.force && !opts.ignore_daemonsets);
+}
+
+/// Every option value has to be on screen: appended to the question, they ran
+/// off the right edge of the dialog on a node with a long name.
+#[tokio::test]
+async fn drain_dialog_shows_all_options_without_clipping() {
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    for (width, height) in [(80u16, 24u16), (120, 32), (72, 20)] {
+        let (mut app, _rx) = test_app();
+        app.switch_kind("nodes");
+        apply(
+            &mut app,
+            json!({"apiVersion": "v1", "kind": "Node",
+                   "metadata": {"name": "bastion-expert-lizard-1"}}),
+        );
+        app.table_state.select(Some(0));
+        app.handle_key(press(KeyCode::Char('D'))).unwrap();
+
+        let mut term = Terminal::new(TestBackend::new(width, height)).unwrap();
+        term.draw(|f| crate::ui::draw(f, &mut app)).unwrap();
+        let screen: String = term
+            .backend()
+            .buffer()
+            .content()
+            .chunks(usize::from(width))
+            .map(|row| {
+                row.iter()
+                    .map(|cell| cell.symbol())
+                    .collect::<String>()
+                    .trim_end()
+                    .to_string()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        // Sized from the text, not the frame: a wide terminal must not leave
+        // the dialog mostly empty.
+        let title = screen
+            .lines()
+            .find(|line| line.contains("Confirm"))
+            .expect("the dialog is on screen");
+        let chars: Vec<char> = title.chars().collect();
+        let at = title.chars().count() - title.rsplit("Confirm").next().unwrap().chars().count();
+        let start = chars[..at].iter().rposition(|&c| c == '╭').unwrap();
+        let end = at + chars[at..].iter().position(|&c| c == '╮').unwrap();
+        let dialog_width = end - start + 1;
+        assert!(
+            dialog_width <= usize::from(width).min(76),
+            "{width}x{height}: dialog is {dialog_width} columns wide:\n{screen}"
+        );
+        for expected in [
+            "bastion-expert-lizard-1",
+            "ignore daemonsets: yes",
+            "delete emptyDir data: no",
+            "force: no",
+            // The hint names every toggle, including the last one.
+            "f:force",
+        ] {
+            assert!(
+                screen.contains(expected),
+                "{width}x{height} clipped {expected:?}:\n{screen}"
+            );
+        }
+    }
+}
+
+/// `[drain]` supplies the dialog's starting point.
+#[tokio::test]
+async fn drain_config_defaults_seed_the_dialog() {
+    let (mut app, _rx) = test_app();
+    app.drain_cfg = toml::from_str(
+        r#"
+        delete_emptydir_data = true
+        force = true
+        ignore_daemonsets = false
+    "#,
+    )
+    .unwrap();
+    app.switch_kind("nodes");
+    apply(
+        &mut app,
+        json!({"apiVersion": "v1", "kind": "Node", "metadata": {"name": "node-a"}}),
+    );
+    app.table_state.select(Some(0));
+
+    app.handle_key(press(KeyCode::Char('D'))).unwrap();
+    let Some(ConfirmAction::Drain { opts, .. }) = &app.confirm_action else {
+        panic!("expected a drain confirm action");
+    };
+    assert!(opts.delete_emptydir_data && opts.force && !opts.ignore_daemonsets);
 }
 
 #[tokio::test]

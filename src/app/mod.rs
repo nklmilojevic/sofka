@@ -329,7 +329,10 @@ enum ConfirmAction {
         dest: String,
     },
     /// One or more node names to cordon and drain.
-    Drain { targets: Vec<String> },
+    Drain {
+        targets: Vec<String>,
+        opts: crate::app::helpers::DrainOptions,
+    },
     /// Rollout-restart a workload by stamping the pod template's
     /// `restartedAt` annotation (k9s `r`). Single-target — acts on the
     /// selected row, never bulk.
@@ -1946,6 +1949,8 @@ pub struct App {
     pub logs_cfg: crate::config::LogsConfig,
     /// Cross-context fleet dashboard config (`[fleet]`).
     pub fleet_cfg: crate::config::FleetConfig,
+    /// Drain policy defaults (`[drain]`); the confirm dialog toggles a copy.
+    pub drain_cfg: crate::config::DrainConfig,
     /// Fleet dashboard rows (one per configured context), filled in as each
     /// context's summary lands.
     pub fleet_rows: Vec<crate::fleet::FleetRow>,
@@ -2339,6 +2344,7 @@ impl App {
             bundle_cfg: crate::config::BundleConfig::default(),
             logs_cfg: crate::config::LogsConfig::default(),
             fleet_cfg: crate::config::FleetConfig::default(),
+            drain_cfg: crate::config::DrainConfig::default(),
             fleet_rows: Vec::new(),
             fleet_state: ListState::default(),
             fleet_marks: crate::fleet::FleetMarks::default(),

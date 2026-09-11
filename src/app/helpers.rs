@@ -282,7 +282,41 @@ pub(super) fn delete_confirm_label(
     }
 }
 
-pub(super) fn drainable_pod(pod: &Pod) -> bool {
+/// What a drain may evict, mirroring the `kubectl drain` flags of the same
+/// names. Seeded from `[drain]` in the config and toggled per drain in the
+/// confirm dialog.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct DrainOptions {
+    pub ignore_daemonsets: bool,
+    pub delete_emptydir_data: bool,
+    pub force: bool,
+}
+
+impl From<crate::config::DrainConfig> for DrainOptions {
+    fn from(cfg: crate::config::DrainConfig) -> Self {
+        Self {
+            ignore_daemonsets: cfg.ignore_daemonsets,
+            delete_emptydir_data: cfg.delete_emptydir_data,
+            force: cfg.force,
+        }
+    }
+}
+
+fn daemonset_pod(pod: &Pod) -> bool {
+    pod.metadata
+        .owner_references
+        .as_ref()
+        .is_some_and(|owners| {
+            owners
+                .iter()
+                .any(|owner| owner.kind.eq_ignore_ascii_case("DaemonSet"))
+        })
+}
+
+/// Whether a drain considers this pod at all. Pods already terminating, the
+/// mirror pods of a static manifest, and pods that have finished are outside
+/// every flag: `kubectl` neither evicts them nor refuses because of them.
+fn drain_relevant(pod: &Pod) -> bool {
     if pod.metadata.deletion_timestamp.is_some() {
         return false;
     }
@@ -294,18 +328,6 @@ pub(super) fn drainable_pod(pod: &Pod) -> bool {
     {
         return false;
     }
-    if pod
-        .metadata
-        .owner_references
-        .as_ref()
-        .is_some_and(|owners| {
-            owners
-                .iter()
-                .any(|owner| owner.kind.eq_ignore_ascii_case("DaemonSet"))
-        })
-    {
-        return false;
-    }
     !matches!(
         pod.status
             .as_ref()
@@ -314,27 +336,67 @@ pub(super) fn drainable_pod(pod: &Pod) -> bool {
     )
 }
 
-pub(super) fn drain_blocker(pod: &Pod) -> Option<&'static str> {
+/// Pods the drain will actually evict. DaemonSet pods are never evicted — the
+/// controller would immediately recreate them — so `ignore_daemonsets` decides
+/// whether they are skipped quietly or refuse the drain, never whether they go.
+pub(super) fn drainable_pod(pod: &Pod, _opts: DrainOptions) -> bool {
+    drain_relevant(pod) && !daemonset_pod(pod)
+}
+
+/// Why the drain must not proceed, if anything. Each reason names the option
+/// that waives it, since the whole node is refused rather than the pod.
+pub(super) fn drain_blocker(pod: &Pod, opts: DrainOptions) -> Option<&'static str> {
+    if !drain_relevant(pod) {
+        return None;
+    }
+    if daemonset_pod(pod) {
+        return (!opts.ignore_daemonsets)
+            .then_some("pod is managed by a DaemonSet (needs ignore daemonsets)");
+    }
     if !pod
         .metadata
         .owner_references
         .as_ref()
         .is_some_and(|owners| owners.iter().any(|owner| owner.controller == Some(true)))
+        && !opts.force
     {
-        return Some("pod has no controller and will not be replaced");
+        return Some("pod has no controller and will not be replaced (needs force)");
     }
     if pod
         .spec
         .as_ref()
         .and_then(|spec| spec.volumes.as_ref())
         .is_some_and(|volumes| volumes.iter().any(|volume| volume.empty_dir.is_some()))
+        && !opts.delete_emptydir_data
     {
-        return Some("pod has emptyDir data that eviction would delete");
+        return Some(
+            "pod has emptyDir data that eviction would delete (needs delete emptyDir data)",
+        );
     }
     if pod.metadata.uid.as_deref().is_none_or(str::is_empty) {
         return Some("pod UID is missing; cannot verify the eviction target");
     }
     None
+}
+
+/// Confirm-dialog text for a drain, listing the options it will run with so
+/// the toggles show their effect before `y`.
+pub(super) fn drain_confirm_label(targets: &[String], opts: DrainOptions) -> String {
+    let what = if targets.len() == 1 {
+        format!("node {}", targets[0])
+    } else {
+        format!("{} nodes", targets.len())
+    };
+    let yes_no = |on: bool| if on { "yes" } else { "no" };
+    // The options go on their own line: appended to the question they ran off
+    // the edge of the dialog on a node with a long name.
+    format!(
+        "Drain {what}? Cordon and evict eligible pods.\n\
+ignore daemonsets: {}  ·  delete emptyDir data: {}  ·  force: {}",
+        yes_no(opts.ignore_daemonsets),
+        yes_no(opts.delete_emptydir_data),
+        yes_no(opts.force),
+    )
 }
 
 /// Pick a version name to query a CRD's custom resources: the storage version

@@ -266,23 +266,26 @@ impl App {
         let Some(level) = self.guard("drain", "nodes", &pairs, ConfirmLevel::Plain) else {
             return;
         };
-        let label = if targets.len() == 1 {
-            format!("Drain node {}? Cordon and evict eligible pods.", targets[0])
-        } else {
-            format!(
-                "Drain {} nodes? Cordon and evict eligible pods.",
-                targets.len()
-            )
-        };
+        let opts = crate::app::helpers::DrainOptions::from(self.drain_cfg);
+        let label = drain_confirm_label(&targets, opts);
         let name_hint = if targets.len() == 1 {
             targets[0].clone()
         } else {
             targets.len().to_string()
         };
-        self.begin_guarded(ConfirmAction::Drain { targets }, label, level, name_hint);
+        self.begin_guarded(
+            ConfirmAction::Drain { targets, opts },
+            label,
+            level,
+            name_hint,
+        );
     }
 
-    pub(super) fn do_drain_nodes(&mut self, targets: Vec<String>) {
+    pub(super) fn do_drain_nodes(
+        &mut self,
+        targets: Vec<String>,
+        opts: crate::app::helpers::DrainOptions,
+    ) {
         let Some(kind) = self.kind.clone() else {
             return;
         };
@@ -348,9 +351,8 @@ impl App {
                 let blocked: Vec<String> = pod_list
                     .items
                     .iter()
-                    .filter(|pod| drainable_pod(pod))
                     .filter_map(|pod| {
-                        drain_blocker(pod).map(|reason| {
+                        drain_blocker(pod, opts).map(|reason| {
                             format!(
                                 "{}/{}: {reason}",
                                 pod.metadata.namespace.as_deref().unwrap_or("default"),
@@ -370,7 +372,7 @@ impl App {
                     continue;
                 }
 
-                for pod in pod_list.items.iter().filter(|pod| drainable_pod(pod)) {
+                for pod in pod_list.items.iter().filter(|pod| drainable_pod(pod, opts)) {
                     let Some(name) = pod.metadata.name.as_deref() else {
                         continue;
                     };
@@ -1499,6 +1501,7 @@ impl App {
         self.pvc_cfg = resolved.config.pvc_explore;
         self.logs_cfg = resolved.config.logs;
         self.fleet_cfg = resolved.config.fleet;
+        self.drain_cfg = resolved.config.drain;
         // Running forwards keep running; :reload only refreshes what's saved.
         self.forwards_cfg = resolved.config.forwards;
         self.notify_cfg = resolved.config.notify;

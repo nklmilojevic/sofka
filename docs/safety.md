@@ -123,14 +123,39 @@ See [Plugin safety controls](plugin-authoring.md#safety-controls).
 ## Node drain
 
 A drain first cordons the node, then checks its pods. It stops for that node
-if an eligible pod has no controller, uses an `emptyDir` volume, or has no UID.
-The error identifies the pod and the reason. No pods on that node are evicted
-when this check fails. The node remains cordoned. Other selected nodes can
-still be processed.
+if an eligible pod is blocked by one of the options below, or has no UID. The
+error identifies the pod and the reason. No pods on that node are evicted when
+this check fails. The node remains cordoned. Other selected nodes can still be
+processed.
+
+Three options decide what a drain may evict, named after the `kubectl drain`
+flags they mirror. The confirm dialog shows their current values and toggles
+them for this drain only:
+
+| Option                 | Dialog key | Off (default)                                      | On                                        |
+| ---------------------- | ---------- | -------------------------------------------------- | ----------------------------------------- |
+| `ignore_daemonsets`    | `i`        | a DaemonSet pod refuses the node, as `kubectl` does | DaemonSet pods are skipped (**default**)  |
+| `delete_emptydir_data` | `e`        | a pod with an `emptyDir` volume refuses the node   | those pods are evicted and their data is lost |
+| `force`                | `f`        | a pod no controller will recreate refuses the node | those pods are evicted and not replaced   |
+
+`ignore_daemonsets` defaults to on, the others to off, which is what drain did
+before the options existed. `[drain]` in `config.toml` sets the defaults the
+dialog opens with:
+
+```toml
+[drain]
+ignore_daemonsets    = true
+delete_emptydir_data = false
+force                = false
+```
+
+DaemonSet pods are never evicted whichever way `ignore_daemonsets` is set:
+their controller would recreate them on the cordoned node. The option decides
+only whether they are skipped or refuse the drain. A missing pod UID always
+refuses, since the eviction could not be pinned to the pod that was listed.
 
 Drain uses the eviction API with the listed pod's UID. It does not use direct
 pod deletion if eviction fails. This preserves PodDisruptionBudget checks and
 prevents eviction of a replacement pod with the same name. A pod-specific
 not-found response means the original pod is already gone. Other API errors
-are reported, including an unavailable eviction endpoint. Drain has no override
-for unmanaged pods or `emptyDir` data loss.
+are reported, including an unavailable eviction endpoint.

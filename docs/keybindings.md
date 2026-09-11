@@ -214,12 +214,14 @@ for those operations.
 
 ### `[keys.confirm]`
 
-| Action    | Default bindings     |
-| --------- | -------------------- |
-| `accept`  | `y`, `Y`, `enter`    |
-| `back`    | `esc`, `n`, `N`, `q` |
-| `cascade` | `c`, `C`             |
-| `force`   | `f`, `F`             |
+| Action                    | Default bindings     |
+| ------------------------- | -------------------- |
+| `accept`                  | `y`, `Y`, `enter`    |
+| `back`                    | `esc`, `n`, `N`, `q` |
+| `cascade`                 | `c`, `C`             |
+| `drain_emptydir_data`     | `e`, `E`             |
+| `drain_ignore_daemonsets` | `i`, `I`             |
+| `force`                   | `f`, `F`             |
 
 ### `[keys.containers]`
 

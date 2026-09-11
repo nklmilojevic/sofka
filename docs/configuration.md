@@ -260,6 +260,7 @@ Each of these is documented where the feature itself is:
 | `[providers.metrics]` | Prometheus/VictoriaMetrics for `:rightsize` | [Providers](providers.md#right-sizing-metrics-provider)    |
 | `[providers.logs]`    | VictoriaLogs backend for `L`                | [Providers](providers.md#log-provider-victorialogs)        |
 | `[fleet]`             | contexts in the cross-cluster dashboard     | [Providers](providers.md#fleet-dashboard)                  |
+| `[drain]`             | what a node drain may evict                 | [Safety](safety.md#node-drain)                             |
 
 ## Action journal files
 

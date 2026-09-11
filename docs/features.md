@@ -92,7 +92,9 @@ The full list. For how sofka compares to k9s, see [vs k9s](vs-k9s.md).
   vertical scrolling does not move the columns. Node ROLES combines
   `node-role.kubernetes.io/` labels with the legacy `kubernetes.io/role` value
   and removes duplicate roles. Node STATUS adds `SchedulingDisabled` when
-  the Node is cordoned and keeps its readiness color.
+  the Node is cordoned and keeps its readiness color. `D` drains, with the
+  `kubectl drain` options for DaemonSet pods, `emptyDir` data and unmanaged
+  pods toggled in the confirm dialog - see [Node drain](safety.md#node-drain).
 - **Event timing** - LAST-SEEN shows the most recent reported occurrence for
   core and events.k8s.io Events. It advances with time and sorts by occurrence
   timestamp. AGE continues to show object creation age.

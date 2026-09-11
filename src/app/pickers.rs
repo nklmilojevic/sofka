@@ -868,6 +868,7 @@ impl App {
         self.pvc_cfg = resolved.config.pvc_explore;
         self.logs_cfg = resolved.config.logs;
         self.fleet_cfg = resolved.config.fleet;
+        self.drain_cfg = resolved.config.drain;
         // Tracked debuggers belong to the previous cluster/context.
         self.launched_node_debuggers.clear();
         let mut plugin_warnings = crate::config::plugin_warnings(&self.plugins);

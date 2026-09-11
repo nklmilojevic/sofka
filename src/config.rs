@@ -96,6 +96,8 @@ pub struct Config {
     pub logs: LogsConfig,
     /// Cross-context fleet dashboard (`:fleet`) — see [`FleetConfig`].
     pub fleet: FleetConfig,
+    /// Node drain policy — see [`DrainConfig`].
+    pub drain: DrainConfig,
     /// Saved port-forwards — see [`Forward`]. Validated by
     /// [`forward_warnings`].
     pub forwards: Vec<Forward>,
@@ -279,6 +281,42 @@ pub fn forward_warnings(forwards: &[Forward]) -> Vec<String> {
 pub struct FleetConfig {
     /// Kubeconfig context names to summarize. Empty = the dashboard is off.
     pub contexts: Vec<String>,
+}
+
+/// What a node drain is allowed to evict, mirroring the `kubectl drain`
+/// flags of the same names. These are the defaults the drain dialog opens
+/// with; `i`, `e` and `f` toggle them per drain.
+///
+/// ```toml
+/// [drain]
+/// ignore_daemonsets    = true   # skip DaemonSet pods instead of refusing
+/// delete_emptydir_data = false  # evict pods whose emptyDir data is lost
+/// force                = false  # evict pods no controller will recreate
+/// ```
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(default)]
+pub struct DrainConfig {
+    /// Skip DaemonSet-managed pods (`--ignore-daemonsets`). Off means a node
+    /// running any DaemonSet pod refuses to drain, as `kubectl` does.
+    pub ignore_daemonsets: bool,
+    /// Evict pods with an `emptyDir` volume, whose contents are deleted with
+    /// the pod (`--delete-emptydir-data`).
+    pub delete_emptydir_data: bool,
+    /// Evict pods that no controller will recreate — bare pods, and pods left
+    /// by a deleted owner (`--force`).
+    pub force: bool,
+}
+
+impl Default for DrainConfig {
+    fn default() -> Self {
+        // Matches what sofka did before the flags existed: DaemonSet pods were
+        // always skipped, emptyDir and uncontrolled pods always blocked.
+        Self {
+            ignore_daemonsets: true,
+            delete_emptydir_data: false,
+            force: false,
+        }
+    }
 }
 
 /// Log-view controls (kubelet streams).

@@ -124,8 +124,8 @@ impl App {
             } => {
                 self.start_transfer(ns, pod, container, upload, src, dest);
             }
-            ConfirmAction::Drain { targets } => {
-                self.do_drain_nodes(targets);
+            ConfirmAction::Drain { targets, opts } => {
+                self.do_drain_nodes(targets, opts);
                 self.marked.clear();
             }
             ConfirmAction::Restart { kind, name, ns } => {
@@ -171,6 +171,16 @@ impl App {
         }
     }
 
+    /// Flip one drain option on the open dialog and rebuild its text, so the
+    /// effect of the toggle is visible before the drain is confirmed.
+    fn toggle_drain_option(&mut self, flip: impl FnOnce(&mut crate::app::helpers::DrainOptions)) {
+        let Some(ConfirmAction::Drain { targets, opts }) = self.confirm_action.as_mut() else {
+            return;
+        };
+        flip(opts);
+        self.confirm_label = crate::app::helpers::drain_confirm_label(&targets.clone(), *opts);
+    }
+
     pub(super) fn key_confirm(&mut self, key: KeyInput) {
         match (key.action, key.code) {
             (Some(Action::Accept), _) => {
@@ -185,6 +195,9 @@ impl App {
                     self.mode = back;
                 }
                 self.confirm_return = Mode::Table;
+            }
+            (Some(Action::Force), _) if self.confirm_allows_drain_toggles() => {
+                self.toggle_drain_option(|opts| opts.force = !opts.force);
             }
             (Some(Action::Force), _) => {
                 let update = match self.confirm_action.as_mut() {
@@ -209,6 +222,12 @@ impl App {
                     );
                 }
             }
+            (Some(Action::DrainEmptyDir), _) => self.toggle_drain_option(|opts| {
+                opts.delete_emptydir_data = !opts.delete_emptydir_data;
+            }),
+            (Some(Action::DrainIgnoreDaemonsets), _) => self.toggle_drain_option(|opts| {
+                opts.ignore_daemonsets = !opts.ignore_daemonsets;
+            }),
             (Some(Action::Cascade), _) => {
                 let update = match self.confirm_action.as_mut() {
                     Some(ConfirmAction::Delete {

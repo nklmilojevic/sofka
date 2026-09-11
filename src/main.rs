@@ -392,6 +392,7 @@ async fn run_main(args: Args) -> Result<()> {
     // reloads) don't fight the user's in-session choice.
     app.logs.fullscreen = cfg.logs.fullscreen;
     app.fleet_cfg = cfg.fleet.clone();
+    app.drain_cfg = cfg.drain;
     app.forwards_cfg = cfg.forwards.clone();
     app.notify_cfg = cfg.notify.clone();
     for w in config::plugin_warnings(&app.plugins)

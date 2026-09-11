@@ -1248,6 +1248,12 @@ impl App {
         matches!(self.confirm_action, Some(ConfirmAction::Delete { .. }))
     }
 
+    /// Whether the open dialog is a drain, whose three `kubectl drain` options
+    /// the hint line offers to toggle.
+    pub fn confirm_allows_drain_toggles(&self) -> bool {
+        matches!(self.confirm_action, Some(ConfirmAction::Drain { .. }))
+    }
+
     /// Toggle the mark on the current row (SPACE).
     pub(super) fn toggle_mark(&mut self) {
         let Some(obj) = self.selected_ref() else {
