@@ -194,6 +194,7 @@ for those operations.
 | `back`              | `esc`            |
 | `close`             | `q`              |
 | `describe`          | `d`              |
+| `discover_children` | `c`              |
 | `down`              | `j`, `down`      |
 | `first`             | `g`, `home`      |
 | `last`              | `G`, `end`       |
@@ -400,6 +401,7 @@ for those operations.
 | `accept`            | `enter`          |
 | `back`              | `esc`            |
 | `close`             | `q`              |
+| `discover_children` | `c`              |
 | `down`              | `j`, `down`      |
 | `first`             | `g`, `home`      |
 | `last`              | `G`, `end`       |

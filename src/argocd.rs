@@ -324,6 +324,39 @@ pub fn owner_ref(obj: &DynamicObject) -> Option<OwnerRef> {
     Some(parse_instance(instance, false))
 }
 
+/// Whether `obj` names `uid` among its `ownerReferences`.
+///
+/// `status.resources[]` is flat: it holds what the Application applies, not what
+/// those objects went on to create. The parent/child edges exist only on the
+/// children themselves.
+pub fn owned_by(obj: &DynamicObject, uid: &str) -> bool {
+    !uid.is_empty()
+        && obj
+            .metadata
+            .owner_references
+            .as_ref()
+            .is_some_and(|refs| refs.iter().any(|r| r.uid == uid))
+}
+
+/// A one-word state for a descendant, or empty when the kind has nothing worth
+/// summarising on a tree line.
+pub fn descendant_state(obj: &DynamicObject) -> std::borrow::Cow<'_, str> {
+    let phase = str_at(&obj.data, "/status/phase");
+    if !phase.is_empty() {
+        return std::borrow::Cow::Borrowed(phase);
+    }
+    let replicas = obj.data.pointer("/status/replicas").and_then(Value::as_i64);
+    let ready = obj
+        .data
+        .pointer("/status/readyReplicas")
+        .and_then(Value::as_i64);
+    match (ready, replicas) {
+        (_, Some(0)) | (_, None) => std::borrow::Cow::Borrowed(""),
+        (Some(r), Some(n)) => std::borrow::Cow::Owned(format!("{r}/{n} ready")),
+        (None, Some(n)) => std::borrow::Cow::Owned(format!("0/{n} ready")),
+    }
+}
+
 /// Whether `app` lists this object in `status.resources[]`.
 ///
 /// Two Argo CD instances in one cluster can hold same-named Applications, and
