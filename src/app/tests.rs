@@ -22259,6 +22259,129 @@ async fn gitops_refresh_reads_current_owner_and_source_reference() {
     assert!(requests.contains(&format!("{source_path}/new-source")));
 }
 
+/// What the fleet dashboard counts against a cluster. A status Argo has not
+/// filled in yet is a new Application, not a fault.
+#[test]
+fn fleet_counts_drifted_and_unhealthy_applications_only() {
+    let app = |sync: &str, health: &str| {
+        let mut status = json!({});
+        if !sync.is_empty() {
+            status["sync"] = json!({"status": sync});
+        }
+        if !health.is_empty() {
+            status["health"] = json!({"status": health});
+        }
+        let value = json!({"apiVersion": "argoproj.io/v1alpha1", "kind": "Application",
+                           "metadata": {"name": "a", "namespace": "argocd"}, "status": status});
+        serde_json::from_value::<DynamicObject>(value).expect("valid Application")
+    };
+    assert!(!super::fleet::application_degraded(&app(
+        "Synced", "Healthy"
+    )));
+    assert!(super::fleet::application_degraded(&app(
+        "OutOfSync",
+        "Healthy"
+    )));
+    assert!(super::fleet::application_degraded(&app(
+        "Synced", "Degraded"
+    )));
+    assert!(super::fleet::application_degraded(&app(
+        "Synced", "Missing"
+    )));
+    assert!(super::fleet::application_degraded(&app(
+        "Synced", "Unknown"
+    )));
+    // A rollout in flight is not a fault, and it flaps.
+    assert!(!super::fleet::application_degraded(&app(
+        "Synced",
+        "Progressing"
+    )));
+    // Not yet compared by Argo, also not a fault.
+    assert!(!super::fleet::application_degraded(&app("", "")));
+}
+
+/// The fleet count pages rather than pulling every Application at once, so it
+/// has to follow `continue` to the end and total across pages.
+#[tokio::test]
+async fn fleet_application_count_follows_every_page() {
+    let application = |name: &str, sync: &str| {
+        json!({"apiVersion": "argoproj.io/v1alpha1", "kind": "Application",
+               "metadata": {"name": name, "namespace": "argocd"},
+               "status": {"sync": {"status": sync}, "health": {"status": "Healthy"}}})
+    };
+    let page = |items: Vec<serde_json::Value>, next: Option<&str>| {
+        let mut meta = json!({});
+        if let Some(token) = next {
+            meta["continue"] = json!(token);
+        }
+        json!({"apiVersion": "argoproj.io/v1alpha1", "kind": "ApplicationList",
+               "metadata": meta, "items": items})
+    };
+    // Two drifted on page one, one on page two, none on the last.
+    let pages = [
+        page(
+            vec![
+                application("a", "OutOfSync"),
+                application("b", "Synced"),
+                application("c", "OutOfSync"),
+            ],
+            Some("page-2"),
+        ),
+        page(
+            vec![application("d", "OutOfSync"), application("e", "Synced")],
+            Some("page-3"),
+        ),
+        page(vec![application("f", "Synced")], None),
+    ];
+
+    let served = Arc::new(std::sync::Mutex::new(0usize));
+    let tokens = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let seen = served.clone();
+    let asked = tokens.clone();
+    let client = kube::Client::new(
+        tower::service_fn(move |request: http::Request<kube::client::Body>| {
+            let query = request.uri().query().unwrap_or_default().to_string();
+            asked.lock().unwrap().push(query);
+            let index = {
+                let mut n = seen.lock().unwrap();
+                let i = *n;
+                *n += 1;
+                i
+            };
+            let body = serde_json::to_vec(&pages[index]).unwrap();
+            async move {
+                Ok::<_, std::convert::Infallible>(
+                    http::Response::builder()
+                        .status(200)
+                        .body(kube::client::Body::from(body))
+                        .unwrap(),
+                )
+            }
+        }),
+        "default",
+    );
+
+    let (app, _rx) = test_app();
+    let kind = app
+        .cluster
+        .resolve_in_group("Application", "argoproj.io")
+        .expect("Application kind");
+    let mut warn = None;
+    let count = super::fleet::count_degraded_applications(&client, &kind.ar, &mut warn).await;
+
+    assert_eq!(count, Some(3));
+    assert!(warn.is_none(), "{warn:?}");
+    let asked = tokens.lock().unwrap();
+    assert_eq!(
+        asked.len(),
+        3,
+        "should stop when continue is empty: {asked:?}"
+    );
+    assert!(asked[0].contains("limit=500"), "{asked:?}");
+    assert!(asked[1].contains("continue=page-2"), "{asked:?}");
+    assert!(asked[2].contains("continue=page-3"), "{asked:?}");
+}
+
 fn argocd_application(destination: serde_json::Value) -> serde_json::Value {
     json!({
         "apiVersion": "argoproj.io/v1alpha1", "kind": "Application",

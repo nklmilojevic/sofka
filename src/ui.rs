@@ -4329,6 +4329,17 @@ fn draw_fleet(frame: &mut Frame, app: &mut App, area: Rect) {
                         )),
                         None => spans.push(Span::styled("   flux —".to_string(), theme::dim())),
                     }
+                    match r.argocd_degraded {
+                        Some(0) => spans.push(Span::styled(
+                            "   argo ok".to_string(),
+                            Style::default().fg(theme::green()),
+                        )),
+                        Some(n) => spans.push(Span::styled(
+                            format!("   argo {n}✗"),
+                            Style::default().fg(theme::red()),
+                        )),
+                        None => spans.push(Span::styled("   argo —".to_string(), theme::dim())),
+                    }
                     let (pol, pc) = if r.readonly {
                         ("   read-only", theme::yellow())
                     } else {

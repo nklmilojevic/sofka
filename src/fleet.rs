@@ -76,6 +76,9 @@ pub struct FleetRow {
     /// Flux resources with `Ready=False`; `None` when the cluster has no Flux
     /// toolkit CRDs.
     pub flux_failed: Option<usize>,
+    /// Argo CD Applications that are `OutOfSync` or not `Healthy`; `None` when
+    /// the cluster has no `argoproj.io` Application CRD.
+    pub argocd_degraded: Option<usize>,
     /// The read-only policy resolved for this context.
     pub readonly: bool,
 }
@@ -92,6 +95,7 @@ impl FleetRow {
             pods_unhealthy: 0,
             pods_total: 0,
             flux_failed: None,
+            argocd_degraded: None,
             readonly,
         }
     }
@@ -103,6 +107,7 @@ impl FleetRow {
             && self.nodes_ready == self.nodes_total
             && self.pods_unhealthy == 0
             && self.flux_failed.unwrap_or(0) == 0
+            && self.argocd_degraded.unwrap_or(0) == 0
     }
 }
 
@@ -120,6 +125,7 @@ mod tests {
             pods_unhealthy: 0,
             pods_total: 40,
             flux_failed: Some(0),
+            argocd_degraded: Some(0),
             readonly: true,
         }
     }
@@ -146,6 +152,10 @@ mod tests {
         let mut r = ok_row();
         r.flux_failed = Some(2);
         assert!(!r.is_healthy());
+
+        let mut r = ok_row();
+        r.argocd_degraded = Some(3);
+        assert!(!r.is_healthy());
     }
 
     #[test]
@@ -153,6 +163,14 @@ mod tests {
         let mut r = ok_row();
         r.status = FleetStatus::Error("deadline elapsed".into());
         assert!(!r.is_healthy());
+    }
+
+    /// A cluster without Argo CD installed is not an unhealthy cluster.
+    #[test]
+    fn no_argocd_crd_does_not_count_as_a_failure() {
+        let mut r = ok_row();
+        r.argocd_degraded = None;
+        assert!(r.is_healthy());
     }
 
     #[test]

@@ -516,8 +516,11 @@ concurrent drains, and full kubectl drain parity are outside this feature.
   usage in a Prometheus or VictoriaMetrics backend, with a patch preview. Never
   mutates. See [Providers](providers.md#right-sizing-metrics-provider).
 - **Fleet dashboard** (`:fleet`) - an opt-in health summary across contexts,
-  side by side. Contexts come from config or `space` in the `:ctx` switcher.
-  See [Providers](providers.md#fleet-dashboard).
+  side by side: node readiness, unhealthy pods, Flux failures, and Argo CD
+  Applications that are `OutOfSync` or not `Healthy`. A cluster without the Flux
+  or Argo CD CRDs shows `—` rather than a zero. Contexts come from config or
+  `space` in the `:ctx` switcher. See
+  [Providers](providers.md#fleet-dashboard).
 - **YAML view** (`y`), **describe** (`d`, via `kubectl`), **events**
   (`:events` / `E`, filtered by UID when available), and **diff** (`:diff`), with
   `ctrl-f` / `ctrl-b` (or `PgDn` / `PgUp`) paging through each document.
