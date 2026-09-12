@@ -360,6 +360,7 @@ const DEFAULTS: &[(&str, Action, &[&str])] = &[
     ("argocd", Action::Accept, &["enter"]),
     ("argocd", Action::Back, &["esc"]),
     ("argocd", Action::Close, &["q"]),
+    ("argocd", Action::DiscoverChildren, &["c"]),
     ("argocd", Action::Down, &["j", "down"]),
     ("argocd", Action::First, &["g", "home"]),
     ("argocd", Action::Last, &["G", "end"]),

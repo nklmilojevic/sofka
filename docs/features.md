@@ -436,7 +436,16 @@ concurrent drains, and full kubectl drain parity are outside this feature.
   Applications deploying to a **remote cluster** are handled honestly - the
   destination is resolved against your kubeconfig and shown by context name, and
   because those objects do not live in the cluster you are connected to, `⏎`
-  reports where they are instead of searching here. Opened on any **other**
+  reports where they are instead of searching here. `c` on a managed resource
+  expands what it owns, indented underneath - Deployment to ReplicaSet to Pod,
+  CronJob to Job to Pod - read from the children's own `ownerReferences`. Child
+  kinds come from the same rules the adjacent view uses, so a `[views."…"]`
+  `children` entry applies here too. Each row carries its own state: a pod's
+  phase or its waiting reason (`CrashLoopBackOff`), a ReplicaSet's ready count,
+  a Job's `Complete` or `Failed`. Superseded ReplicaSets scaled to zero that own
+  no pods are left out, otherwise `revisionHistoryLimit` buries the running one.
+  It costs one read plus one list per owned kind, so it is on request rather
+  than automatic, and only for resources in the cluster you are connected to. Opened on any **other**
   object, the view follows Argo's tracking metadata the other way: the
   `argocd.argoproj.io/tracking-id` annotation (preferred, since it is exact) or
   the `app.kubernetes.io/instance` label (truncated at 63 characters) names the

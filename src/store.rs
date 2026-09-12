@@ -158,6 +158,20 @@ pub enum Msg {
         source: Option<Box<DynamicObject>>,
         destination: crate::argocd::Destination,
         findings: Vec<crate::explain::Finding>,
+        /// Kept so an expansion can resolve a managed resource in its own API
+        /// group; a plural on its own is ambiguous across groups.
+        resources: Vec<crate::argocd::ManagedResource>,
+    },
+    /// Descendants of one managed resource in the Argo CD view, found by
+    /// walking `ownerReferences` down from it. Inserted under the row that
+    /// asked for them.
+    ArgocdChildren {
+        generation: u64,
+        request: u64,
+        claim: StatusClaim,
+        /// Stable key of the row that was expanded.
+        key: String,
+        findings: Vec<crate::explain::Finding>,
     },
     /// Captured output of an `output = "popup"` plugin run.
     PluginOutput {

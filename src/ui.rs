@@ -4446,7 +4446,9 @@ fn draw_explain(frame: &mut Frame, app: &mut App, area: Rect) {
 
 fn draw_argocd(frame: &mut Frame, app: &mut App, area: Rect) {
     let show_scrollbars = app.scrollbars_visible();
-    let title = format!(" {} ", app.argocd_title);
+    // The expansion is only discoverable from the title, the way the adjacent
+    // view advertises the same key.
+    let title = format!(" {} (c discover children) ", app.argocd_title);
     draw_findings(
         frame,
         show_scrollbars,

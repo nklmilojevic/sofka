@@ -1,6 +1,7 @@
 use super::*;
 
 use crate::argocd::{self, Destination, Evidence};
+use crate::explain::{Finding, Level, Target};
 
 /// Lowercased `(kind, group)` -> lowercased plural, resolved up front because
 /// the spawned gather has no access to the cluster registry.
@@ -87,6 +88,9 @@ impl App {
         let genr = self.generation;
         let claim = self.claim_status(format!("Argo CD: {}…", subject));
 
+        // A re-gather rebuilds every finding, so nothing stays expanded.
+        self.argocd_expanded.clear();
+        self.cancel_argocd_children();
         self.argocd_claim = Some(claim);
         self.argocd_request = self.argocd_request.wrapping_add(1);
         let request = self.argocd_request;
@@ -151,19 +155,20 @@ impl App {
                     resources,
                     app,
                 };
-                Ok((selection, argocd::describe(&ev), destination))
+                let findings = argocd::describe(&ev);
+                Ok((selection, findings, destination, ev.resources))
             }
             .await;
             // Not `report_result`: the destination travels with the findings so
             // the view can explain an absent jump target.
-            let (source, findings, destination) = match gathered {
-                Ok((source, findings, destination)) => {
-                    (Some(Box::new(source)), findings, destination)
+            let (source, findings, destination, resources) = match gathered {
+                Ok((source, findings, destination, resources)) => {
+                    (Some(Box::new(source)), findings, destination, resources)
                 }
                 Err(error) => {
                     let mut findings = Vec::new();
                     prepend_warn_finding(&mut findings, Some(error));
-                    (None, findings, Destination::Current)
+                    (None, findings, Destination::Current, Vec::new())
                 }
             };
             let _ = tx
@@ -175,6 +180,7 @@ impl App {
                     source,
                     destination,
                     findings,
+                    resources,
                 })
                 .await;
         });
@@ -183,6 +189,15 @@ impl App {
     pub(super) fn cancel_argocd_request(&mut self) {
         self.argocd_request = self.argocd_request.wrapping_add(1);
         if let Some(claim) = self.argocd_claim.take() {
+            self.clear_claimed_status(claim);
+        }
+        self.cancel_argocd_children();
+    }
+
+    fn cancel_argocd_children(&mut self) {
+        // The expanded set is cleared by the next gather, not here: leaving the
+        // view to open a managed resource must not forget what was open.
+        for claim in std::mem::take(&mut self.argocd_children_claims) {
             self.clear_claimed_status(claim);
         }
     }
@@ -201,6 +216,7 @@ impl App {
             (Some(Action::First), _) if len > 0 => self.argocd_state.select(Some(0)),
             (Some(Action::Last), _) if len > 0 => self.argocd_state.select(Some(len - 1)),
             (Some(Action::Refresh), _) => self.refresh_argocd(),
+            (Some(Action::DiscoverChildren), _) => self.toggle_argocd_children(),
             // Lines for an Application deploying elsewhere carry no target, so
             // this reports where the object lives rather than searching here.
             (Some(Action::Accept), _) => {
@@ -385,4 +401,355 @@ pub(super) fn classify_destination(
         return Destination::Current;
     }
     Destination::Unresolved(name.to_string())
+}
+
+/// Child kinds per parent plural, resolved up front because the spawned gather
+/// has no cluster registry. Comes from `adjacent`, so `[views."…"].children`
+/// applies here too.
+type ChildPlan = HashMap<String, Vec<crate::k8s::Kind>>;
+
+/// Two levels covers Deployment to ReplicaSet to Pod and CronJob to Job to Pod.
+/// Kubernetes workloads do not nest deeper.
+const MAX_DEPTH: u8 = 2;
+
+impl App {
+    /// A managed-resource row's identity, stable across re-gathers.
+    fn argocd_row_key(f: &Finding) -> String {
+        f.target
+            .as_ref()
+            .map(|t| {
+                format!(
+                    "{}/{}/{}",
+                    t.plural,
+                    t.namespace.clone().unwrap_or_default(),
+                    t.name
+                )
+            })
+            .unwrap_or_default()
+    }
+
+    /// `c` in the Argo CD view: show or hide the selected resource's
+    /// `ownerReferences` descendants.
+    pub(super) fn toggle_argocd_children(&mut self) {
+        let Some(index) = self.argocd_state.selected() else {
+            return;
+        };
+        let Some(finding) = self.argocd_items.get(index) else {
+            return;
+        };
+        // Only a row naming a resource in this cluster can be walked; remote
+        // destinations and headings carry no target.
+        if finding.target.is_none() {
+            self.flash_warn(&self.no_jump_reason());
+            return;
+        }
+        let key = Self::argocd_row_key(finding);
+        if self.argocd_expanded.remove(&key).is_some() {
+            self.collapse_argocd_children(index);
+            return;
+        }
+        self.spawn_argocd_children(index, key);
+    }
+
+    /// Drop the run of deeper-indented findings that follows `index`.
+    fn collapse_argocd_children(&mut self, index: usize) {
+        let base = self.argocd_items[index].indent;
+        let end = self.argocd_items[index + 1..]
+            .iter()
+            .position(|f| f.indent <= base)
+            .map(|n| index + 1 + n)
+            .unwrap_or(self.argocd_items.len());
+        self.argocd_items.drain(index + 1..end);
+    }
+
+    fn spawn_argocd_children(&mut self, index: usize, key: String) {
+        let Some(target) = self.argocd_items[index].target.clone() else {
+            return;
+        };
+        let namespace = target.namespace.clone().unwrap_or_default();
+        if namespace.is_empty() {
+            self.flash_warn("cluster-scoped resources have no owned workloads to show");
+            return;
+        }
+        // Resolve in the resource's own group. A plural on its own is
+        // ambiguous (`services` is core and `serving.knative.dev`), and reading
+        // the wrong object would build a tree for something else entirely.
+        let parent = self
+            .argocd_resources
+            .iter()
+            .find(|r| {
+                r.plural == target.plural && r.namespace == namespace && r.name == target.name
+            })
+            .and_then(|r| self.cluster.resolve_in_group(&r.kind, &r.group));
+        // Only a managed-resource row is in `argocd_resources`; a descendant row
+        // is already as deep as the walk goes.
+        let Some(parent) = parent else {
+            self.flash_warn("expand a managed resource, not one of its children");
+            return;
+        };
+        let parent_plural = parent.ar.plural.to_lowercase();
+        let plan = self.children_plan(&parent, &namespace);
+
+        let client = self.cluster.client.clone();
+        let tx = self.tx.clone();
+        let genr = self.generation;
+        let claim = self.claim_status(format!("Argo CD: children of {}…", target.name));
+        // Claims are per request, not per view: two rows can be gathering at
+        // once and each clears its own when it lands.
+        self.argocd_children_claims.push(claim);
+        // The counter identifies a request, it does not cancel other rows. Rows
+        // expand independently, so the guard is per key: a result is taken only
+        // if its row still expects that exact request.
+        self.argocd_children_request = self.argocd_children_request.wrapping_add(1);
+        let request = self.argocd_children_request;
+        self.argocd_expanded.insert(key.clone(), request);
+        let name = target.name.clone();
+        tokio::spawn(async move {
+            let findings =
+                gather_children(&client, parent, parent_plural, &namespace, &name, &plan).await;
+            let _ = tx
+                .send(Msg::ArgocdChildren {
+                    generation: genr,
+                    request,
+                    claim,
+                    key,
+                    findings,
+                })
+                .await;
+        });
+    }
+
+    /// Child kinds for the parent and for everything it can own, down to
+    /// [`MAX_DEPTH`]. Resolved here because the spawned gather has no registry.
+    fn children_plan(&self, parent: &crate::k8s::Kind, namespace: &str) -> ChildPlan {
+        let mut plan = ChildPlan::new();
+        let mut queue = vec![parent.clone()];
+        for _ in 0..MAX_DEPTH {
+            let mut next = Vec::new();
+            for kind in queue.drain(..) {
+                let plural = kind.ar.plural.to_lowercase();
+                if plan.contains_key(&plural) {
+                    continue;
+                }
+                let kids: Vec<crate::k8s::Kind> =
+                    crate::adjacent::children_for(&self.user_views, &kind.ar, Some(namespace))
+                        .iter()
+                        .filter_map(|p| self.cluster.resolve(p))
+                        .collect();
+                next.extend(kids.iter().cloned());
+                plan.insert(plural, kids);
+            }
+            queue = next;
+        }
+        plan
+    }
+
+    /// Insert descendants under the row that asked, if it is still expanded.
+    pub(super) fn apply_argocd_children(
+        &mut self,
+        key: &str,
+        request: u64,
+        findings: Vec<Finding>,
+    ) {
+        // Only the request this row is currently waiting on: a collapse or a
+        // second expansion of the same row supersedes an earlier result.
+        if self.argocd_expanded.get(key) != Some(&request) {
+            return;
+        }
+        let Some(index) = self
+            .argocd_items
+            .iter()
+            .position(|f| f.target.is_some() && Self::argocd_row_key(f) == key)
+        else {
+            self.argocd_expanded.remove(key);
+            return;
+        };
+        let before = self.argocd_items.len();
+        self.collapse_argocd_children(index);
+        for (offset, finding) in findings.into_iter().enumerate() {
+            self.argocd_items.insert(index + 1 + offset, finding);
+        }
+        // Rows landing above the cursor would otherwise slide the selection onto
+        // a different line, which matters because these arrive while the user is
+        // still moving around.
+        let shift = self.argocd_items.len() as isize - before as isize;
+        if let Some(selected) = self.argocd_state.selected()
+            && selected > index
+            && shift != 0
+        {
+            let moved = (selected as isize + shift).max(index as isize + 1) as usize;
+            self.argocd_state
+                .select(Some(moved.min(self.argocd_items.len().saturating_sub(1))));
+        }
+    }
+}
+
+/// Walk `ownerReferences` down from one managed resource.
+///
+/// Child kinds come from `adjacent`, which already knows Deployment to
+/// ReplicaSet to Pod and honours `[views."…"].children`. Each kind is listed
+/// once per namespace and reused at every depth.
+async fn gather_children(
+    client: &Client,
+    parent: crate::k8s::Kind,
+    parent_plural: String,
+    namespace: &str,
+    name: &str,
+    plan: &ChildPlan,
+) -> Vec<Finding> {
+    let api: Api<DynamicObject> = Api::namespaced_with(client.clone(), namespace, &parent.ar);
+    let root = match api.get(name).await {
+        Ok(o) => o,
+        Err(e) => {
+            return vec![child_finding_text(
+                2,
+                Level::Warn,
+                format!("reading {name}: {e}"),
+            )];
+        }
+    };
+    let Some(root_uid) = root.metadata.uid.clone() else {
+        return Vec::new();
+    };
+
+    let mut lists: HashMap<String, Vec<DynamicObject>> = HashMap::new();
+    let mut warn = None;
+    let mut out = Vec::new();
+    walk(
+        client,
+        namespace,
+        &parent_plural,
+        &root_uid,
+        1,
+        plan,
+        &mut lists,
+        &mut warn,
+        &mut out,
+    )
+    .await;
+
+    if let Some(w) = warn {
+        out.insert(0, child_finding_text(2, Level::Warn, w));
+    } else if out.is_empty() {
+        out.push(child_finding_text(2, Level::Info, "owns nothing"));
+    }
+    out
+}
+
+/// One level of the walk, depth first so each child is followed by its own.
+#[allow(clippy::too_many_arguments)]
+fn walk<'a>(
+    client: &'a Client,
+    namespace: &'a str,
+    parent_plural: &'a str,
+    parent_uid: &'a str,
+    depth: u8,
+    plan: &'a ChildPlan,
+    lists: &'a mut HashMap<String, Vec<DynamicObject>>,
+    warn: &'a mut Option<String>,
+    out: &'a mut Vec<Finding>,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
+    Box::pin(async move {
+        if depth > MAX_DEPTH {
+            return;
+        }
+        let Some(kinds) = plan.get(parent_plural) else {
+            return;
+        };
+        for kind in kinds {
+            let plural = kind.ar.plural.to_lowercase();
+            if !lists.contains_key(&plural) {
+                let api: Api<DynamicObject> =
+                    Api::namespaced_with(client.clone(), namespace, &kind.ar);
+                // A failed listing is reported, not swallowed: an empty tree
+                // and an unreadable one must not look the same.
+                let items = match api.list(&ListParams::default()).await {
+                    Ok(list) => list.items,
+                    Err(e) => {
+                        warn.get_or_insert(format!("listing {plural}: {e}"));
+                        Vec::new()
+                    }
+                };
+                lists.insert(plural.clone(), items);
+            }
+            let owned: Vec<DynamicObject> = lists[&plural]
+                .iter()
+                .filter(|o| crate::adjacent::owned_by(o, Some(parent_uid)))
+                .cloned()
+                .collect();
+            for obj in owned {
+                let uid = obj.metadata.uid.clone().unwrap_or_default();
+                let at = out.len();
+                out.push(child_finding(
+                    &obj,
+                    &kind.ar.kind,
+                    &plural,
+                    namespace,
+                    depth,
+                ));
+                walk(
+                    client,
+                    namespace,
+                    &plural,
+                    &uid,
+                    depth + 1,
+                    plan,
+                    lists,
+                    warn,
+                    out,
+                )
+                .await;
+                // `revisionHistoryLimit` keeps ten superseded ReplicaSets by
+                // default. One scaled to zero that owns no pod is history, and
+                // listing it buries the revision actually running. Narrow to
+                // ReplicaSets: a Job with no pods yet is still worth showing.
+                if out.len() == at + 1
+                    && kind.ar.kind == "ReplicaSet"
+                    && argocd::scaled_to_zero(&obj)
+                {
+                    out.remove(at);
+                }
+            }
+        }
+    })
+}
+
+/// One descendant row, indented under its parent and independently navigable.
+fn child_finding(
+    obj: &DynamicObject,
+    kind: &str,
+    plural: &str,
+    namespace: &str,
+    depth: u8,
+) -> Finding {
+    let name = obj.metadata.name.clone().unwrap_or_default();
+    let state = argocd::descendant_state(obj);
+    let text = if state.is_empty() {
+        format!("{kind}/{name}")
+    } else {
+        format!("{kind}/{name}: {state}")
+    };
+    let level = match state.as_ref() {
+        "Running" | "Succeeded" | "Complete" => Level::Good,
+        "Pending" => Level::Warn,
+        "" => Level::Info,
+        s if s.ends_with(" ready") => Level::Info,
+        // Failed, Unknown, and every waiting reason (CrashLoopBackOff,
+        // ImagePullBackOff, …).
+        _ => Level::Critical,
+    };
+    child_finding_text(depth + 1, level, text).with_target(Target {
+        plural: plural.to_string(),
+        namespace: Some(namespace.to_string()),
+        name,
+    })
+}
+
+fn child_finding_text(indent: u8, level: Level, text: impl Into<String>) -> Finding {
+    Finding {
+        indent,
+        level,
+        text: text.into(),
+        target: None,
+    }
 }
