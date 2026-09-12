@@ -1349,8 +1349,10 @@ impl App {
                 source,
                 destination,
                 findings,
+                resources,
             } if generation == self.generation && request == self.argocd_request => {
                 self.argocd_claim = None;
+                self.argocd_resources = resources;
                 if let Some(source) = source {
                     self.argocd_source = Some(*source);
                 }
@@ -1364,6 +1366,17 @@ impl App {
                     .unwrap_or(0);
                 self.argocd_state
                     .select((!self.argocd_items.is_empty()).then_some(first));
+                self.clear_claimed_status(claim);
+            }
+            Msg::ArgocdChildren {
+                generation,
+                request,
+                claim,
+                key,
+                findings,
+            } if generation == self.generation => {
+                self.argocd_children_claims.retain(|c| *c != claim);
+                self.apply_argocd_children(&key, request, findings);
                 self.clear_claimed_status(claim);
             }
             Msg::PluginOutput {

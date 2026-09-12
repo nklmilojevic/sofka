@@ -4329,6 +4329,17 @@ fn draw_fleet(frame: &mut Frame, app: &mut App, area: Rect) {
                         )),
                         None => spans.push(Span::styled("   flux —".to_string(), theme::dim())),
                     }
+                    match r.argocd_degraded {
+                        Some(0) => spans.push(Span::styled(
+                            "   argo ok".to_string(),
+                            Style::default().fg(theme::green()),
+                        )),
+                        Some(n) => spans.push(Span::styled(
+                            format!("   argo {n}✗"),
+                            Style::default().fg(theme::red()),
+                        )),
+                        None => spans.push(Span::styled("   argo —".to_string(), theme::dim())),
+                    }
                     let (pol, pc) = if r.readonly {
                         ("   read-only", theme::yellow())
                     } else {
@@ -4435,7 +4446,9 @@ fn draw_explain(frame: &mut Frame, app: &mut App, area: Rect) {
 
 fn draw_argocd(frame: &mut Frame, app: &mut App, area: Rect) {
     let show_scrollbars = app.scrollbars_visible();
-    let title = format!(" {} ", app.argocd_title);
+    // The expansion is only discoverable from the title, the way the adjacent
+    // view advertises the same key.
+    let title = format!(" {} (c discover children) ", app.argocd_title);
     draw_findings(
         frame,
         show_scrollbars,

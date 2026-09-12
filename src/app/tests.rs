@@ -22259,6 +22259,129 @@ async fn gitops_refresh_reads_current_owner_and_source_reference() {
     assert!(requests.contains(&format!("{source_path}/new-source")));
 }
 
+/// What the fleet dashboard counts against a cluster. A status Argo has not
+/// filled in yet is a new Application, not a fault.
+#[test]
+fn fleet_counts_drifted_and_unhealthy_applications_only() {
+    let app = |sync: &str, health: &str| {
+        let mut status = json!({});
+        if !sync.is_empty() {
+            status["sync"] = json!({"status": sync});
+        }
+        if !health.is_empty() {
+            status["health"] = json!({"status": health});
+        }
+        let value = json!({"apiVersion": "argoproj.io/v1alpha1", "kind": "Application",
+                           "metadata": {"name": "a", "namespace": "argocd"}, "status": status});
+        serde_json::from_value::<DynamicObject>(value).expect("valid Application")
+    };
+    assert!(!super::fleet::application_degraded(&app(
+        "Synced", "Healthy"
+    )));
+    assert!(super::fleet::application_degraded(&app(
+        "OutOfSync",
+        "Healthy"
+    )));
+    assert!(super::fleet::application_degraded(&app(
+        "Synced", "Degraded"
+    )));
+    assert!(super::fleet::application_degraded(&app(
+        "Synced", "Missing"
+    )));
+    assert!(super::fleet::application_degraded(&app(
+        "Synced", "Unknown"
+    )));
+    // A rollout in flight is not a fault, and it flaps.
+    assert!(!super::fleet::application_degraded(&app(
+        "Synced",
+        "Progressing"
+    )));
+    // Not yet compared by Argo, also not a fault.
+    assert!(!super::fleet::application_degraded(&app("", "")));
+}
+
+/// The fleet count pages rather than pulling every Application at once, so it
+/// has to follow `continue` to the end and total across pages.
+#[tokio::test]
+async fn fleet_application_count_follows_every_page() {
+    let application = |name: &str, sync: &str| {
+        json!({"apiVersion": "argoproj.io/v1alpha1", "kind": "Application",
+               "metadata": {"name": name, "namespace": "argocd"},
+               "status": {"sync": {"status": sync}, "health": {"status": "Healthy"}}})
+    };
+    let page = |items: Vec<serde_json::Value>, next: Option<&str>| {
+        let mut meta = json!({});
+        if let Some(token) = next {
+            meta["continue"] = json!(token);
+        }
+        json!({"apiVersion": "argoproj.io/v1alpha1", "kind": "ApplicationList",
+               "metadata": meta, "items": items})
+    };
+    // Two drifted on page one, one on page two, none on the last.
+    let pages = [
+        page(
+            vec![
+                application("a", "OutOfSync"),
+                application("b", "Synced"),
+                application("c", "OutOfSync"),
+            ],
+            Some("page-2"),
+        ),
+        page(
+            vec![application("d", "OutOfSync"), application("e", "Synced")],
+            Some("page-3"),
+        ),
+        page(vec![application("f", "Synced")], None),
+    ];
+
+    let served = Arc::new(std::sync::Mutex::new(0usize));
+    let tokens = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let seen = served.clone();
+    let asked = tokens.clone();
+    let client = kube::Client::new(
+        tower::service_fn(move |request: http::Request<kube::client::Body>| {
+            let query = request.uri().query().unwrap_or_default().to_string();
+            asked.lock().unwrap().push(query);
+            let index = {
+                let mut n = seen.lock().unwrap();
+                let i = *n;
+                *n += 1;
+                i
+            };
+            let body = serde_json::to_vec(&pages[index]).unwrap();
+            async move {
+                Ok::<_, std::convert::Infallible>(
+                    http::Response::builder()
+                        .status(200)
+                        .body(kube::client::Body::from(body))
+                        .unwrap(),
+                )
+            }
+        }),
+        "default",
+    );
+
+    let (app, _rx) = test_app();
+    let kind = app
+        .cluster
+        .resolve_in_group("Application", "argoproj.io")
+        .expect("Application kind");
+    let mut warn = None;
+    let count = super::fleet::count_degraded_applications(&client, &kind.ar, &mut warn).await;
+
+    assert_eq!(count, Some(3));
+    assert!(warn.is_none(), "{warn:?}");
+    let asked = tokens.lock().unwrap();
+    assert_eq!(
+        asked.len(),
+        3,
+        "should stop when continue is empty: {asked:?}"
+    );
+    assert!(asked[0].contains("limit=500"), "{asked:?}");
+    assert!(asked[1].contains("continue=page-2"), "{asked:?}");
+    assert!(asked[2].contains("continue=page-3"), "{asked:?}");
+}
+
 fn argocd_application(destination: serde_json::Value) -> serde_json::Value {
     json!({
         "apiVersion": "argoproj.io/v1alpha1", "kind": "Application",
@@ -22414,6 +22537,539 @@ async fn argocd_esc_cancels_a_pending_report() {
             .iter()
             .map(|f| f.text.as_str())
             .collect::<Vec<_>>()
+    );
+}
+
+async fn receive_argocd_children(app: &mut App, rx: &mut Receiver<Msg>) {
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while let Some(message) = rx.recv().await {
+            if matches!(message, Msg::ArgocdChildren { .. }) {
+                app.handle_msg(message);
+                break;
+            }
+        }
+    })
+    .await
+    .expect("argocd children did not arrive");
+}
+
+/// Children arriving above the cursor must not slide the selection onto a
+/// different line; results land while the user is still moving around.
+#[tokio::test]
+async fn argocd_expansion_keeps_the_cursor_on_its_row() {
+    let root = argocd_application(json!({"server": "https://kubernetes.default.svc",
+                                         "namespace": "default"}));
+    let (mut app, mut rx, responses, _) = health_report_app("applications", root.clone());
+    app.cluster
+        .register_kind("apps", "ReplicaSet", "replicasets", true);
+    let kind = app.kind.as_ref().unwrap();
+    let path = format!(
+        "/apis/{}/namespaces/default/applications/web",
+        kind.ar.api_version
+    );
+    {
+        let mut replies = responses.lock().unwrap();
+        replies.insert(path, (200, root));
+        replies.insert(
+            "/api/v1/namespaces/default/services/web".into(),
+            (
+                200,
+                json!({"apiVersion": "v1", "kind": "Service",
+                       "metadata": {"name": "web", "namespace": "default", "uid": "svc"}}),
+            ),
+        );
+        for p in [
+            "/apis/apps/v1/namespaces/default/replicasets",
+            "/apis/batch/v1/namespaces/default/jobs",
+            "/api/v1/namespaces/default/pods",
+        ] {
+            replies.insert(
+                p.into(),
+                (
+                    200,
+                    json!({"apiVersion": "v1", "kind": "List", "metadata": {}, "items": []}),
+                ),
+            );
+        }
+    }
+
+    open_argocd_view(&mut app);
+    receive_argocd_report(&mut app, &mut rx).await;
+
+    let row = app
+        .argocd_items
+        .iter()
+        .position(|f| f.text.starts_with("Service/web"))
+        .expect("managed resource row");
+    app.argocd_state.select(Some(row));
+    app.handle_key(press(KeyCode::Char('c'))).unwrap();
+    // Move on while the expansion is still in flight.
+    app.handle_key(press(KeyCode::Char('j'))).unwrap();
+    let parked = app.argocd_items[app.argocd_state.selected().unwrap()]
+        .text
+        .clone();
+
+    receive_argocd_children(&mut app, &mut rx).await;
+
+    assert_eq!(
+        app.argocd_items[app.argocd_state.selected().unwrap()].text,
+        parked,
+        "the cursor moved to a different row"
+    );
+}
+
+/// Rows expand independently. Starting a second expansion before the first
+/// lands must not cancel it, or the row stays marked expanded while showing
+/// nothing and needs two more presses to recover.
+#[tokio::test]
+async fn argocd_expansions_of_two_rows_both_land() {
+    let mut root = argocd_application(json!({"server": "https://kubernetes.default.svc",
+                                             "namespace": "default"}));
+    root["status"]["resources"] = json!([
+        {"group": "apps", "version": "v1", "kind": "Deployment", "namespace": "default",
+         "name": "one", "status": "Synced"},
+        {"group": "apps", "version": "v1", "kind": "Deployment", "namespace": "default",
+         "name": "two", "status": "Synced"}
+    ]);
+    let (mut app, mut rx, responses, _) = health_report_app("applications", root.clone());
+    app.cluster
+        .register_kind("apps", "ReplicaSet", "replicasets", true);
+    let kind = app.kind.as_ref().unwrap();
+    let path = format!(
+        "/apis/{}/namespaces/default/applications/web",
+        kind.ar.api_version
+    );
+    {
+        let mut replies = responses.lock().unwrap();
+        replies.insert(path, (200, root));
+        for (name, uid) in [("one", "uid-one"), ("two", "uid-two")] {
+            replies.insert(
+                format!("/apis/apps/v1/namespaces/default/deployments/{name}"),
+                (
+                    200,
+                    json!({"apiVersion": "apps/v1", "kind": "Deployment",
+                           "metadata": {"name": name, "namespace": "default", "uid": uid}}),
+                ),
+            );
+        }
+        replies.insert(
+            "/apis/apps/v1/namespaces/default/replicasets".into(),
+            (
+                200,
+                json!({"apiVersion": "apps/v1", "kind": "ReplicaSetList", "metadata": {},
+                       "items": [
+                         {"apiVersion": "apps/v1", "kind": "ReplicaSet",
+                          "metadata": {"name": "rs-one", "namespace": "default", "uid": "rs1",
+                                       "ownerReferences": [{"apiVersion": "apps/v1",
+                                                            "kind": "Deployment",
+                                                            "name": "one", "uid": "uid-one"}]},
+                          "spec": {"replicas": 1},
+                          "status": {"replicas": 1, "readyReplicas": 1}},
+                         {"apiVersion": "apps/v1", "kind": "ReplicaSet",
+                          "metadata": {"name": "rs-two", "namespace": "default", "uid": "rs2",
+                                       "ownerReferences": [{"apiVersion": "apps/v1",
+                                                            "kind": "Deployment",
+                                                            "name": "two", "uid": "uid-two"}]},
+                          "spec": {"replicas": 1},
+                          "status": {"replicas": 1, "readyReplicas": 1}}]}),
+            ),
+        );
+        replies.insert(
+            "/apis/batch/v1/namespaces/default/jobs".into(),
+            (
+                200,
+                json!({"apiVersion": "batch/v1", "kind": "JobList", "metadata": {}, "items": []}),
+            ),
+        );
+        replies.insert(
+            "/api/v1/namespaces/default/pods".into(),
+            (
+                200,
+                json!({"apiVersion": "v1", "kind": "PodList", "metadata": {}, "items": []}),
+            ),
+        );
+    }
+
+    open_argocd_view(&mut app);
+    receive_argocd_report(&mut app, &mut rx).await;
+
+    // Both presses go out before either result is handled.
+    for name in ["Deployment/one", "Deployment/two"] {
+        let row = app
+            .argocd_items
+            .iter()
+            .position(|f| f.text.starts_with(name))
+            .expect(name);
+        app.argocd_state.select(Some(row));
+        app.handle_key(press(KeyCode::Char('c'))).unwrap();
+    }
+    receive_argocd_children(&mut app, &mut rx).await;
+    receive_argocd_children(&mut app, &mut rx).await;
+
+    let texts: Vec<&str> = app.argocd_items.iter().map(|f| f.text.as_str()).collect();
+    assert!(
+        texts.iter().any(|t| t.starts_with("ReplicaSet/rs-one")),
+        "{texts:?}"
+    );
+    assert!(
+        texts.iter().any(|t| t.starts_with("ReplicaSet/rs-two")),
+        "{texts:?}"
+    );
+}
+
+/// Kind names collide across groups. Expanding a Knative `Service` must read
+/// the Knative object, not the core one that shares its plural.
+#[tokio::test]
+async fn argocd_expansion_reads_the_parent_in_its_own_api_group() {
+    let mut root = argocd_application(json!({"server": "https://kubernetes.default.svc",
+                                             "namespace": "default"}));
+    root["status"]["resources"] = json!([
+        {"group": "serving.knative.dev", "version": "v1", "kind": "Service",
+         "namespace": "default", "name": "web", "status": "Synced"}
+    ]);
+    let (mut app, mut rx, responses, requests) = health_report_app("applications", root.clone());
+    app.cluster
+        .register_kind("serving.knative.dev", "Service", "services", true);
+    // Registered last, so a bare `resolve("services")` lands here. Only a
+    // group-aware lookup still finds the Knative kind.
+    app.cluster
+        .register_kind("decoy.example.com", "Service", "services", true);
+    app.cluster
+        .register_kind("apps", "ReplicaSet", "replicasets", true);
+    let kind = app.kind.as_ref().unwrap();
+    let path = format!(
+        "/apis/{}/namespaces/default/applications/web",
+        kind.ar.api_version
+    );
+    {
+        let mut replies = responses.lock().unwrap();
+        replies.insert(path, (200, root));
+        replies.insert(
+            "/apis/serving.knative.dev/v1/namespaces/default/services/web".into(),
+            (
+                200,
+                json!({"apiVersion": "serving.knative.dev/v1", "kind": "Service",
+                       "metadata": {"name": "web", "namespace": "default", "uid": "kn-uid"}}),
+            ),
+        );
+        for p in [
+            "/apis/apps/v1/namespaces/default/replicasets",
+            "/apis/batch/v1/namespaces/default/jobs",
+            "/api/v1/namespaces/default/pods",
+        ] {
+            replies.insert(
+                p.into(),
+                (
+                    200,
+                    json!({"apiVersion": "v1", "kind": "List", "metadata": {}, "items": []}),
+                ),
+            );
+        }
+    }
+
+    open_argocd_view(&mut app);
+    receive_argocd_report(&mut app, &mut rx).await;
+    let row = app
+        .argocd_items
+        .iter()
+        .position(|f| f.text.starts_with("Service/web"))
+        .expect("managed resource row");
+    app.argocd_state.select(Some(row));
+    app.handle_key(press(KeyCode::Char('c'))).unwrap();
+    receive_argocd_children(&mut app, &mut rx).await;
+
+    let seen = requests.lock().unwrap();
+    assert!(
+        seen.iter()
+            .any(|r| r == "/apis/serving.knative.dev/v1/namespaces/default/services/web"),
+        "did not read the Knative Service: {seen:?}"
+    );
+    assert!(
+        !seen.iter().any(|r| r.contains("decoy.example.com")),
+        "resolved the plural without its group: {seen:?}"
+    );
+}
+
+/// `c` on a managed resource walks `ownerReferences` down from it, indenting
+/// Deployment → ReplicaSet → Pod under the row, and `c` again collapses.
+#[tokio::test]
+async fn argocd_view_expands_and_collapses_owned_workloads() {
+    let root = argocd_application(json!({"server": "https://kubernetes.default.svc",
+                                         "namespace": "default"}));
+    let mut root = root;
+    root["status"]["resources"] = json!([
+        {"group": "apps", "version": "v1", "kind": "Deployment", "namespace": "default",
+         "name": "web", "status": "Synced", "health": {"status": "Healthy"}}
+    ]);
+    let (mut app, mut rx, responses, _) = health_report_app("applications", root.clone());
+    app.cluster
+        .register_kind("apps", "ReplicaSet", "replicasets", true);
+    let kind = app.kind.as_ref().unwrap();
+    let path = format!(
+        "/apis/{}/namespaces/default/applications/web",
+        kind.ar.api_version
+    );
+    {
+        let mut replies = responses.lock().unwrap();
+        replies.insert(path, (200, root));
+        replies.insert(
+            "/apis/apps/v1/namespaces/default/deployments/web".into(),
+            (
+                200,
+                json!({"apiVersion": "apps/v1", "kind": "Deployment",
+                       "metadata": {"name": "web", "namespace": "default", "uid": "dep-uid"}}),
+            ),
+        );
+        replies.insert(
+            "/apis/apps/v1/namespaces/default/replicasets".into(),
+            (
+                200,
+                json!({"apiVersion": "apps/v1", "kind": "ReplicaSetList", "metadata": {},
+                       "items": [{"apiVersion": "apps/v1", "kind": "ReplicaSet",
+                                  "metadata": {"name": "web-abc", "namespace": "default",
+                                               "uid": "rs-uid",
+                                               "ownerReferences": [{"apiVersion": "apps/v1",
+                                                                    "kind": "Deployment",
+                                                                    "name": "web",
+                                                                    "uid": "dep-uid"}]},
+                                  "spec": {"replicas": 1},
+                                  "status": {"replicas": 1, "readyReplicas": 1}}]}),
+            ),
+        );
+        replies.insert(
+            "/apis/batch/v1/namespaces/default/jobs".into(),
+            (
+                200,
+                json!({"apiVersion": "batch/v1", "kind": "JobList", "metadata": {}, "items": []}),
+            ),
+        );
+        replies.insert(
+            "/api/v1/namespaces/default/pods".into(),
+            (
+                200,
+                json!({"apiVersion": "v1", "kind": "PodList", "metadata": {},
+                       "items": [{"apiVersion": "v1", "kind": "Pod",
+                                  "metadata": {"name": "web-abc-1", "namespace": "default",
+                                               "uid": "pod-uid",
+                                               "ownerReferences": [{"apiVersion": "apps/v1",
+                                                                    "kind": "ReplicaSet",
+                                                                    "name": "web-abc",
+                                                                    "uid": "rs-uid"}]},
+                                  "status": {"phase": "Running"}},
+                                 // Not owned by anything in this chain.
+                                 {"apiVersion": "v1", "kind": "Pod",
+                                  "metadata": {"name": "unrelated", "namespace": "default",
+                                               "uid": "other-uid"},
+                                  "status": {"phase": "Running"}}]}),
+            ),
+        );
+    }
+
+    open_argocd_view(&mut app);
+    receive_argocd_report(&mut app, &mut rx).await;
+
+    let row = app
+        .argocd_items
+        .iter()
+        .position(|f| f.text.starts_with("Deployment/web:"))
+        .expect("managed resource row");
+    app.argocd_state.select(Some(row));
+    let before = app.argocd_items.len();
+
+    app.handle_key(press(KeyCode::Char('c'))).unwrap();
+    receive_argocd_children(&mut app, &mut rx).await;
+
+    let texts: Vec<&str> = app.argocd_items.iter().map(|f| f.text.as_str()).collect();
+    assert!(
+        texts.contains(&"ReplicaSet/web-abc: 1/1 ready"),
+        "{texts:?}"
+    );
+    assert!(texts.contains(&"Pod/web-abc-1: Running"), "{texts:?}");
+    assert!(
+        !texts.iter().any(|t| t.contains("unrelated")),
+        "a pod owned by nothing in the chain leaked in: {texts:?}"
+    );
+    // Indented under the row, deepest last.
+    let rs = app
+        .argocd_items
+        .iter()
+        .position(|f| f.text.starts_with("ReplicaSet/"))
+        .unwrap();
+    let pod = app
+        .argocd_items
+        .iter()
+        .position(|f| f.text.starts_with("Pod/"))
+        .unwrap();
+    assert_eq!(rs, row + 1);
+    assert!(app.argocd_items[rs].indent > app.argocd_items[row].indent);
+    assert!(app.argocd_items[pod].indent > app.argocd_items[rs].indent);
+
+    // A descendant is navigable in its own right.
+    app.argocd_state.select(Some(pod));
+    app.handle_key(press(KeyCode::Enter)).unwrap();
+    assert_eq!(app.kind_plural, "pods");
+    assert_eq!(app.fields.as_deref(), Some("metadata.name=web-abc-1"));
+
+    // Back into the view, collapse again.
+    app.mode = Mode::Argocd;
+    app.argocd_state.select(Some(row));
+    app.handle_key(press(KeyCode::Char('c'))).unwrap();
+    assert_eq!(
+        app.argocd_items.len(),
+        before,
+        "collapse did not restore the list"
+    );
+}
+
+/// With the default `revisionHistoryLimit` a Deployment drags ten superseded
+/// ReplicaSets around. One scaled to zero that owns no pod is history.
+#[tokio::test]
+async fn argocd_expansion_hides_superseded_replicasets() {
+    let mut root = argocd_application(json!({"server": "https://kubernetes.default.svc",
+                                             "namespace": "default"}));
+    root["status"]["resources"] = json!([
+        {"group": "apps", "version": "v1", "kind": "Deployment", "namespace": "default",
+         "name": "web", "status": "Synced", "health": {"status": "Healthy"}}
+    ]);
+    let (mut app, mut rx, responses, _) = health_report_app("applications", root.clone());
+    app.cluster
+        .register_kind("apps", "ReplicaSet", "replicasets", true);
+    let kind = app.kind.as_ref().unwrap();
+    let path = format!(
+        "/apis/{}/namespaces/default/applications/web",
+        kind.ar.api_version
+    );
+    // No per-item apiVersion/kind: that is what a real List response looks
+    // like, and relying on them is how the filter silently stopped working.
+    let rs = |name: &str, uid: &str, replicas: i64| {
+        json!({"metadata": {"name": name, "namespace": "default", "uid": uid,
+                            "ownerReferences": [{"apiVersion": "apps/v1", "kind": "Deployment",
+                                                 "name": "web", "uid": "dep-uid"}]},
+               "spec": {"replicas": replicas},
+               "status": {"replicas": replicas, "readyReplicas": replicas}})
+    };
+    {
+        let mut replies = responses.lock().unwrap();
+        replies.insert(path, (200, root));
+        replies.insert(
+            "/apis/apps/v1/namespaces/default/deployments/web".into(),
+            (
+                200,
+                json!({"apiVersion": "apps/v1", "kind": "Deployment",
+                       "metadata": {"name": "web", "namespace": "default", "uid": "dep-uid"}}),
+            ),
+        );
+        replies.insert(
+            "/apis/apps/v1/namespaces/default/replicasets".into(),
+            (
+                200,
+                json!({"apiVersion": "apps/v1", "kind": "ReplicaSetList", "metadata": {},
+                       "items": [rs("web-live", "rs-live", 1), rs("web-dead", "rs-dead", 0)]}),
+            ),
+        );
+        replies.insert(
+            "/api/v1/namespaces/default/pods".into(),
+            (
+                200,
+                json!({"apiVersion": "v1", "kind": "PodList", "metadata": {},
+                       "items": [{"apiVersion": "v1", "kind": "Pod",
+                                  "metadata": {"name": "web-live-1", "namespace": "default",
+                                               "uid": "pod", "ownerReferences": [
+                                                 {"apiVersion": "apps/v1", "kind": "ReplicaSet",
+                                                  "name": "web-live", "uid": "rs-live"}]},
+                                  "status": {"phase": "Running"}}]}),
+            ),
+        );
+    }
+
+    open_argocd_view(&mut app);
+    receive_argocd_report(&mut app, &mut rx).await;
+    let row = app
+        .argocd_items
+        .iter()
+        .position(|f| f.text.starts_with("Deployment/web:"))
+        .expect("managed resource row");
+    app.argocd_state.select(Some(row));
+    app.handle_key(press(KeyCode::Char('c'))).unwrap();
+    receive_argocd_children(&mut app, &mut rx).await;
+
+    let texts: Vec<&str> = app.argocd_items.iter().map(|f| f.text.as_str()).collect();
+    assert!(
+        texts.iter().any(|t| t.starts_with("ReplicaSet/web-live")),
+        "{texts:?}"
+    );
+    assert!(
+        !texts.iter().any(|t| t.contains("web-dead")),
+        "a scaled-to-zero ReplicaSet owning nothing should be hidden: {texts:?}"
+    );
+}
+
+/// `c` on a heading has nothing to walk and must say so rather than do
+/// something arbitrary.
+#[tokio::test]
+async fn argocd_expansion_on_a_heading_does_nothing() {
+    let root = argocd_application(json!({"server": "https://kubernetes.default.svc",
+                                         "namespace": "default"}));
+    let (mut app, mut rx, responses, _) = health_report_app("applications", root.clone());
+    let kind = app.kind.as_ref().unwrap();
+    let path = format!(
+        "/apis/{}/namespaces/default/applications/web",
+        kind.ar.api_version
+    );
+    responses.lock().unwrap().insert(path, (200, root));
+
+    open_argocd_view(&mut app);
+    receive_argocd_report(&mut app, &mut rx).await;
+
+    let heading = app
+        .argocd_items
+        .iter()
+        .position(|f| f.text == "Source")
+        .expect("heading");
+    app.argocd_state.select(Some(heading));
+    let before = app.argocd_items.len();
+    app.handle_key(press(KeyCode::Char('c'))).unwrap();
+
+    assert_eq!(app.argocd_items.len(), before);
+    assert!(
+        app.flash.contains("no resource to jump to"),
+        "{}",
+        app.flash
+    );
+}
+
+/// A remote destination has no jump targets, so there is nothing to walk —
+/// pressing `c` must say where the resources are rather than list this
+/// cluster's workloads.
+#[tokio::test]
+async fn argocd_view_will_not_expand_a_remote_destination() {
+    let root = argocd_application(json!({"server": "https://other.example:6443",
+                                         "namespace": "default"}));
+    let (mut app, mut rx, responses, _) = health_report_app("applications", root.clone());
+    let kind = app.kind.as_ref().unwrap();
+    let path = format!(
+        "/apis/{}/namespaces/default/applications/web",
+        kind.ar.api_version
+    );
+    responses.lock().unwrap().insert(path, (200, root));
+
+    open_argocd_view(&mut app);
+    receive_argocd_report(&mut app, &mut rx).await;
+
+    let row = app
+        .argocd_items
+        .iter()
+        .position(|f| f.text.starts_with("Service/web:"))
+        .expect("managed resource row");
+    app.argocd_state.select(Some(row));
+    let before = app.argocd_items.len();
+    app.handle_key(press(KeyCode::Char('c'))).unwrap();
+
+    assert_eq!(app.argocd_items.len(), before);
+    assert!(
+        app.flash.contains("no kubeconfig context serves"),
+        "{}",
+        app.flash
     );
 }
 

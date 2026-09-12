@@ -103,6 +103,10 @@ it and mask entries out.
 Contexts are gathered concurrently with a per-context timeout, so an unreachable
 or slow cluster shows an error on its own row instead of blocking the others.
 Each row shows connectivity, Kubernetes version, node readiness, the unhealthy
-pod count, Flux `Ready=False` failures, and the resolved read-only policy. `⏎`
+pod count, Flux `Ready=False` failures, the count of Argo CD Applications that
+are `OutOfSync` or whose health is `Degraded`, `Missing` or `Unknown`, and the
+resolved read-only policy. A cluster without the Flux or Argo CD CRDs shows `—`
+for that column rather than a zero. `Progressing` Applications are not counted,
+a rollout in flight is not a fault. `⏎`
 switches to the highlighted context (through the normal context-switch path), `r`
 gathers again. Only these non-sensitive summaries are kept, in memory.

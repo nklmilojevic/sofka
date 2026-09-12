@@ -401,6 +401,7 @@ for those operations.
 | `accept`            | `enter`          |
 | `back`              | `esc`            |
 | `close`             | `q`              |
+| `discover_children` | `c`              |
 | `down`              | `j`, `down`      |
 | `first`             | `g`, `home`      |
 | `last`              | `G`, `end`       |
