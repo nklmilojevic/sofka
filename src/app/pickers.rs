@@ -176,15 +176,19 @@ impl App {
     /// Record a real namespace selection into the current context's recents
     /// (newest first, deduped, bounded). `<all>`/empty are not recorded.
     pub(super) fn note_recent_namespace(&mut self, ns: &str) {
-        if ns.is_empty() || ns == "<all>" {
+        // Callers pass what the user typed, which may spell all-namespaces
+        // (`all`, `*`, `<all>`) — that scope is not a namespace, and recording
+        // it puts a bogus entry in the switcher that selects nothing.
+        let ns = normalize_ns(ns);
+        if ns.is_empty() {
             return;
         }
         let dq = self
             .recent_namespaces
             .entry(self.cluster.context.clone())
             .or_default();
-        dq.retain(|r| r != ns);
-        dq.push_front(ns.to_string());
+        dq.retain(|r| *r != ns);
+        dq.push_front(ns);
         while dq.len() > MAX_RECENT_NAMESPACES {
             dq.pop_back();
         }

@@ -27164,6 +27164,27 @@ async fn header_lists_favorite_namespaces_with_their_keys() {
 }
 
 #[tokio::test]
+async fn the_all_namespaces_scope_is_not_a_recent_namespace() {
+    let (mut app, _rx) = test_app();
+    app.namespace = "default".into();
+    app.switch_kind("pods");
+    app.handle_key(press(KeyCode::Char('n'))).unwrap();
+    for c in "alpha".chars() {
+        app.handle_key(press(KeyCode::Char(c))).unwrap();
+    }
+    app.handle_key(press(KeyCode::Enter)).unwrap();
+    assert_eq!(app.namespace, "alpha");
+    // `:<kind> all` reaches the recents as the literal the user typed, in
+    // every spelling the palette accepts.
+    for spelling in ["all", "*", "<all>"] {
+        palette(&mut app, &format!("pods {spelling}"));
+        assert!(app.all_namespaces(), "{spelling}");
+        assert!(!app.is_recent_namespace(spelling), "{spelling}");
+    }
+    assert!(app.is_recent_namespace("alpha"));
+}
+
+#[tokio::test]
 async fn favorite_namespace_key_clears_drill_scope() {
     let (mut app, _rx) = test_app();
     app.namespace_favorites = vec!["target".into()];
