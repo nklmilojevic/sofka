@@ -1,3 +1,5 @@
+import hashlib
+import io
 import json
 import tarfile
 import tempfile
@@ -124,6 +126,127 @@ class ReleaseLicensesTests(unittest.TestCase):
                     repair_release_licenses.retire(root)
                 self.assertEqual(github.call_count, 1)
                 self.assertEqual(github.call_args.args[0], "api")
+
+    def test_correction_lifecycle_checks_hashes_before_publication_and_removal(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            destination = root / "v1.0.0"
+            original = destination / "original"
+            original.mkdir(parents=True)
+            binary = b"original binary bytes"
+            assets = []
+            for target in repair_release_licenses.TARGETS:
+                path = original / f"sofka-v1.0.0-{target}.tar.gz"
+                with tarfile.open(path, "w:gz") as archive:
+                    entry = tarfile.TarInfo("sofka")
+                    entry.size = len(binary)
+                    archive.addfile(entry, io.BytesIO(binary))
+                assets.append(
+                    {
+                        "name": path.name,
+                        "digest": "sha256:" + repair_release_licenses.digest(path),
+                    }
+                )
+            release = {"tag_name": "v1.0.0", "assets": assets}
+            source = io.BytesIO()
+            with tarfile.open(fileobj=source, mode="w"):
+                pass
+
+            def generate(_manifest, notices, _collector, _cache):
+                notices.mkdir(exist_ok=True)
+                for name in release_licenses.REQUIRED:
+                    (notices / name).write_text(name)
+
+            def git(args, **_kwargs):
+                return "0" * 40 if args[1] == "rev-parse" else source.getvalue()
+
+            with (
+                patch.object(release_licenses, "generate", side_effect=generate),
+                patch.object(
+                    repair_release_licenses.subprocess, "check_output", side_effect=git
+                ),
+            ):
+                good_digest = assets[0]["digest"]
+                assets[0]["digest"] = "sha256:wrong"
+                with self.assertRaisesRegex(
+                    ValueError, "GitHub asset checksum mismatch"
+                ):
+                    repair_release_licenses.prepare(release, root, "cargo-about")
+                assets[0]["digest"] = good_digest
+                repair_release_licenses.prepare(release, root, "cargo-about")
+
+            record = json.loads((destination / "LICENSE-CORRECTION.json").read_text())
+            for asset in record["assets"]:
+                self.assertEqual(
+                    asset["binary_sha256"], hashlib.sha256(binary).hexdigest()
+                )
+            remote = {a["name"]: dict(a) for a in assets}
+            remote["SHA256SUMS"] = {
+                "name": "SHA256SUMS",
+                "digest": "sha256:checksum-file",
+            }
+            deletions = []
+            uploads = []
+            body = "Original release notes"
+
+            def github(*args):
+                nonlocal body
+                if args[0] == "api":
+                    return json.dumps({"assets": list(remote.values()), "body": body})
+                if args[1] == "upload":
+                    uploads.append(args)
+                    for name in args[5:]:
+                        path = Path(name)
+                        remote[path.name] = {
+                            "name": path.name,
+                            "digest": "sha256:" + repair_release_licenses.digest(path),
+                        }
+                elif args[1] == "edit":
+                    body = Path(args[-1]).read_text()
+                elif args[1] == "download":
+                    return "".join(
+                        f"{a['original_sha256']}  {a['original_name']}\n"
+                        for a in record["assets"]
+                    )
+                elif args[1] == "delete-asset":
+                    deletions.append(args[3])
+                    del remote[args[3]]
+                else:
+                    self.fail(f"Unexpected GitHub operation: {args}")
+                return ""
+
+            with patch.object(repair_release_licenses, "gh", side_effect=github):
+                changed = destination / record["assets"][0]["corrected_name"]
+                saved = changed.read_bytes()
+                changed.write_bytes(b"changed archive")
+                with self.assertRaisesRegex(ValueError, "Changed correction archive"):
+                    repair_release_licenses.publish(root)
+                self.assertEqual(uploads, [])
+                changed.write_bytes(saved)
+                repair_release_licenses.publish(root)
+                repair_release_licenses.publish(root)
+                self.assertEqual(len(uploads), 1)
+                self.assertTrue(body.startswith("Original release notes"))
+                self.assertEqual(body.count("<!-- release-license-correction -->"), 1)
+                for key, error in [
+                    ("corrected_name", "Missing verified replacement"),
+                    ("original_name", "Original asset changed"),
+                ]:
+                    asset = remote[record["assets"][-1][key]]
+                    saved_digest = asset["digest"]
+                    asset["digest"] = "sha256:wrong"
+                    with self.assertRaisesRegex(ValueError, error):
+                        repair_release_licenses.retire(root)
+                    self.assertEqual(deletions, [])
+                    asset["digest"] = saved_digest
+                repair_release_licenses.retire(root)
+                repair_release_licenses.retire(root)
+            self.assertEqual(
+                set(deletions),
+                {a["original_name"] for a in record["assets"]} | {"SHA256SUMS"},
+            )
+            self.assertEqual(len(deletions), 5)
+            self.assertEqual(len(remote), 6)
 
 
 if __name__ == "__main__":
