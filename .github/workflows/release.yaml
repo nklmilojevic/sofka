@@ -37,11 +37,42 @@ jobs:
             exit 1
           fi
 
+  licenses:
+    needs: validate
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout release tag
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.release.tag_name }}
+          persist-credentials: false
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: release-licenses
+
+      - name: Install license collector
+        run: cargo install cargo-about --version 0.9.2 --locked
+
+      - name: Collect dependency licenses and source packages
+        run: python3 scripts/release_licenses.py generate --output release-notices
+
+      - name: Upload notices
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-notices
+          path: release-notices/
+          if-no-files-found: error
+
   # Cross-platform release binaries, one native build per target — every
   # target below is the runner's own host, so no cross-compilation toolchain
   # is needed.
   build:
-    needs: validate
+    needs: [validate, licenses]
     strategy:
       fail-fast: false
       matrix:
@@ -96,18 +127,25 @@ jobs:
             exit 1
           fi
 
+      - name: Download notices
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release-notices
+          path: release-notices
+
       - name: Package
         run: |
           bin="target/${{ matrix.target }}/release/sofka"
           strip "$bin"
           out="sofka-${RELEASE_TAG}-${{ matrix.target }}.tar.gz"
-          tar -czf "$out" -C "$(dirname "$bin")" sofka
+          python3 scripts/release_licenses.py package \
+            --binary "$bin" --notices release-notices --output "$out"
           echo "ASSET=$out" >> "$GITHUB_ENV"
 
       - name: Upload artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: ${{ matrix.target }}
+          name: binary-${{ matrix.target }}
           path: ${{ env.ASSET }}
 
   upload-assets:
@@ -126,6 +164,7 @@ jobs:
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           path: dist
+          pattern: binary-*
           merge-multiple: true
 
       - name: Generate checksums

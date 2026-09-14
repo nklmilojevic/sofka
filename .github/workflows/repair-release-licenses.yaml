@@ -1,0 +1,56 @@
+name: Repair release licenses
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag, or all published releases
+        required: true
+        default: all
+
+permissions:
+  contents: read
+
+concurrency:
+  group: repair-release-licenses
+  cancel-in-progress: false
+
+jobs:
+  repair:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPAIR_TAG: ${{ inputs.tag }}
+    steps:
+      - name: Checkout repair tools and release tags
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: release-licenses
+
+      - name: Install license collector
+        run: cargo install cargo-about --version 0.9.2 --locked
+
+      - name: Prepare and verify corrected archives
+        run: python3 scripts/repair_release_licenses.py prepare --directory repair --tag "$REPAIR_TAG"
+
+      - name: Attest archive correction provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: repair/v*/sofka-*-licenses.tar.gz
+
+      - name: Publish and verify corrected assets
+        run: python3 scripts/repair_release_licenses.py publish --directory repair

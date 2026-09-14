@@ -52,6 +52,9 @@ jobs:
       - name: Test
         run: cargo test --locked
 
+      - name: Test release packaging
+        run: python3 -m unittest discover -s scripts -p 'test_release_licenses.py'
+
   coverage:
     runs-on: ubuntu-latest
     steps:

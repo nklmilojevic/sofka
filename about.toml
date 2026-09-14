@@ -1,0 +1,24 @@
+# Prefer MIT when a dependency offers a choice. Other licenses need review.
+accepted = [
+    "MIT",
+    "Apache-2.0",
+    "BSD-3-Clause",
+    "BSD-2-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "Unicode-DFS-2016",
+    "Zlib",
+    "CDLA-Permissive-2.0",
+    "MPL-2.0",
+    "WTFPL",
+    "OpenSSL",
+]
+ignore-dev-dependencies = true
+ignore-build-dependencies = true
+workarounds = ["ring"]
+targets = [
+    "aarch64-apple-darwin",
+    "x86_64-apple-darwin",
+    "aarch64-unknown-linux-gnu",
+    "x86_64-unknown-linux-gnu",
+]
