@@ -48,6 +48,10 @@ def prepare(release, directory, cargo_about):
     destination = directory / tag
     destination.mkdir(parents=True, exist_ok=True)
     record_path = destination / "LICENSE-CORRECTION.json"
+    generator_sha = hashlib.sha256(
+        Path(release_licenses.__file__).read_bytes()
+        + (release_licenses.ROOT / "about.toml").read_bytes()
+    ).hexdigest()
     if record_path.exists():
         record = json.loads(record_path.read_text())
         for asset in record["assets"]:
@@ -56,8 +60,9 @@ def prepare(release, directory, cargo_about):
                 != asset["corrected_sha256"]
             ):
                 raise ValueError(f"Changed correction archive for {tag}")
-        print(f"{tag}: reuse verified correction", flush=True)
-        return
+        if record.get("generator_sha256") == generator_sha:
+            print(f"{tag}: reuse verified correction", flush=True)
+            return
     print(f"{tag}: collect notices and original binaries", flush=True)
     source = destination / "source"
     source.mkdir(exist_ok=True)
@@ -72,7 +77,12 @@ def prepare(release, directory, cargo_about):
         source / "Cargo.toml", notices, cargo_about, directory / "cache"
     )
     assets = {a["name"]: a for a in release["assets"]}
-    record = {"tag": tag, "source_commit": revision, "assets": []}
+    record = {
+        "tag": tag,
+        "source_commit": revision,
+        "generator_sha256": generator_sha,
+        "assets": [],
+    }
     original_dir = destination / "original"
     original_dir.mkdir(exist_ok=True)
     for target in TARGETS:

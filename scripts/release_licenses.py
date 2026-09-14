@@ -73,7 +73,14 @@ def license_files(package):
     files = {
         p
         for p in root.rglob("*")
-        if p.is_file() and p.name.upper().startswith(LICENSE_NAMES)
+        if p.is_file()
+        and (
+            p.name.upper().startswith(LICENSE_NAMES)
+            or any(
+                part.lstrip(".").upper() in ("LICENSES", "LICENCES")
+                for part in p.relative_to(root).parts[:-1]
+            )
+        )
     }
     if package.get("license_file"):
         files.add(root / package["license_file"])

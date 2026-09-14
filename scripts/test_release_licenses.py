@@ -62,6 +62,9 @@ class ReleaseLicensesTests(unittest.TestCase):
             (native / "NOTICE.txt").write_text("native attribution")
             (native / "COPYING").write_text("native license")
             (root / "terms.txt").write_text("declared license")
+            inherited = root / ".licenses"
+            inherited.mkdir()
+            (inherited / "Author-MIT").write_text("inherited copyright and license")
             (root / "main.rs").write_text("source")
             files = dict(
                 release_licenses.license_files(
@@ -74,6 +77,7 @@ class ReleaseLicensesTests(unittest.TestCase):
             self.assertEqual(
                 files,
                 {
+                    ".licenses/Author-MIT": "inherited copyright and license",
                     "native/NOTICE.txt": "native attribution",
                     "native/COPYING": "native license",
                     "terms.txt": "declared license",
