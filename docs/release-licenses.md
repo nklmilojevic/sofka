@@ -24,7 +24,7 @@ MPL source archives must match their checksums in `Cargo.lock`.
 To check the release notices locally:
 
 ```sh
-cargo install cargo-about --version 0.9.2 --locked
+cargo install cargo-about --version 0.9.2 --features cli --locked
 python3 scripts/release_licenses.py generate --output target/release-notices
 python3 -m unittest discover -s scripts -p 'test_release_licenses.py'
 ```

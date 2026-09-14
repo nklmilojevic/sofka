@@ -42,7 +42,9 @@ jobs:
           key: release-licenses
 
       - name: Install license collector
-        run: cargo install cargo-about --version 0.9.2 --locked
+        run: |
+          cargo install cargo-about --version 0.9.2 --features cli --locked
+          cargo-about --version
 
       - name: Prepare and verify corrected archives
         run: python3 scripts/repair_release_licenses.py prepare --directory repair --tag "$REPAIR_TAG"
