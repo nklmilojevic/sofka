@@ -24,16 +24,22 @@ class ReleaseLicensesTests(unittest.TestCase):
             sources = notices / "THIRD-PARTY-SOURCES"
             sources.mkdir()
             (sources / "matcher.crate").write_bytes(b"source archive")
+            runtime = root / "rust.html"
+            runtime.write_text("Rust library notices")
             output = root / "release.tar.gz"
-            release_licenses.package(binary, notices, output)
+            release_licenses.package(binary, notices, output, runtime)
             second = root / "second.tar.gz"
-            release_licenses.package(binary, notices, second)
+            release_licenses.package(binary, notices, second, runtime)
             self.assertEqual(output.read_bytes(), second.read_bytes())
             with tarfile.open(output) as archive:
                 self.assertEqual(
                     archive.extractfile("sofka").read(), binary.read_bytes()
                 )
                 self.assertEqual(archive.getmember("sofka").mode, 0o755)
+                self.assertEqual(
+                    archive.extractfile("RUST-LICENSES.html").read(),
+                    runtime.read_bytes(),
+                )
                 for name in release_licenses.REQUIRED:
                     self.assertEqual(archive.extractfile(name).read(), name.encode())
                 self.assertEqual(
@@ -152,7 +158,7 @@ class ReleaseLicensesTests(unittest.TestCase):
             with tarfile.open(fileobj=source, mode="w"):
                 pass
 
-            def generate(_manifest, notices, _collector, _cache):
+            def generate(_manifest, notices, _collector, _cache, _targets=None):
                 notices.mkdir(exist_ok=True)
                 for name in release_licenses.REQUIRED:
                     (notices / name).write_text(name)
@@ -165,6 +171,7 @@ class ReleaseLicensesTests(unittest.TestCase):
                 patch.object(
                     repair_release_licenses.subprocess, "check_output", side_effect=git
                 ),
+                patch.object(repair_release_licenses, "rust_notice", return_value=None),
             ):
                 good_digest = assets[0]["digest"]
                 assets[0]["digest"] = "sha256:wrong"

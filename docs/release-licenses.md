@@ -1,7 +1,8 @@
 # Release licenses
 
 Each binary archive includes `LICENSE-MIT`, `LICENSE-APACHE`, and
-`THIRD-PARTY-LICENSES.txt`. Keep these files with the installed program.
+`THIRD-PARTY-LICENSES.txt`, and `RUST-LICENSES.html`. Keep these files with the
+installed program.
 `THIRD-PARTY-SOURCES/` contains the source packages for dependencies distributed
 under MPL 2.0. The notice file also gives exact source download URLs.
 
@@ -42,6 +43,10 @@ The `Repair release licenses` workflow accepts one release tag or `all`. It
 publishes `-licenses.tar.gz` archives, `SHA256SUMS-licenses`, and a
 `LICENSE-CORRECTION.json` record for each release. Its attestation records the
 archive correction process. It does not claim to rebuild the old binary.
+It identifies the Rust compiler commit in each binary and obtains the standard
+library notices from the matching, checksum-verified Rust distribution.
+The historical v0.13.4 Linux archives keep their musl target names and include
+the musl 1.2.5 copyright file from the source selected by that tag's Nix lockfile.
 Original downloads remain available until their replacements are verified and
 package managers use the corrected URLs. The separate `retire` command checks
 the remote hashes before it removes each original binary archive.

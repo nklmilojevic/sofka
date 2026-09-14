@@ -114,34 +114,35 @@ def repository_notices(package, cache):
     return result
 
 
-def generate(manifest, output, cargo_about, cache):
+def generate(manifest, output, cargo_about, cache, targets=None):
     manifest = manifest.resolve()
     output.mkdir(parents=True, exist_ok=True)
     lock = manifest.with_name("Cargo.lock")
     before = lock.read_bytes()
+    targets = targets or tomllib.loads((ROOT / "about.toml").read_text())["targets"]
     subprocess.run(
         ["cargo", "fetch", "--locked", "--manifest-path", str(manifest)], check=True
     )
     with tempfile.TemporaryDirectory() as temporary:
         report = Path(temporary) / "licenses.json"
-        subprocess.run(
-            [
-                cargo_about,
-                "generate",
-                "--locked",
-                "--offline",
-                "--fail",
-                "--format",
-                "json",
-                "--manifest-path",
-                str(manifest),
-                "--config",
-                str(ROOT / "about.toml"),
-                "--output-file",
-                str(report),
-            ],
-            check=True,
-        )
+        command = [
+            cargo_about,
+            "generate",
+            "--locked",
+            "--offline",
+            "--fail",
+            "--format",
+            "json",
+            "--manifest-path",
+            str(manifest),
+            "--config",
+            str(ROOT / "about.toml"),
+            "--output-file",
+            str(report),
+        ]
+        for target in targets:
+            command.extend(["--target", target])
+        subprocess.run(command, check=True)
         data = json.loads(report.read_text())
     if lock.read_bytes() != before:
         raise ValueError("License collection changed Cargo.lock")
@@ -168,7 +169,8 @@ def generate(manifest, output, cargo_about, cache):
     lines = [
         "Third-party licenses for Sofka",
         "",
-        "This report covers the default release features on the four supported targets.",
+        "This report covers the default release features.",
+        "Targets: " + ", ".join(targets),
         "It includes dependency license texts and notices from bundled source trees.",
         "Some notices can apply to code that is not included in a particular binary.",
         "The source links identify the exact published dependency versions.",
@@ -247,11 +249,13 @@ def validate_notices(directory):
             raise ValueError(f"Missing or empty release notice: {name}")
 
 
-def package(binary, notices, output):
+def package(binary, notices, output, rust_notice=None):
     validate_notices(notices)
     original = binary.read_bytes()
     if not original:
         raise ValueError("The release binary is empty")
+    if rust_notice is not None and not rust_notice.read_bytes():
+        raise ValueError("The Rust library notice is empty")
     output.parent.mkdir(parents=True, exist_ok=True)
     with (
         output.open("wb") as raw,
@@ -271,12 +275,24 @@ def package(binary, notices, output):
                 entry.size = len(content)
                 entry.mode = 0o644
                 archive.addfile(entry, io.BytesIO(content))
+        if rust_notice is not None:
+            content = rust_notice.read_bytes()
+            entry = tarfile.TarInfo("RUST-LICENSES.html")
+            entry.size = len(content)
+            entry.mode = 0o644
+            archive.addfile(entry, io.BytesIO(content))
     with tarfile.open(output) as archive:
         if archive.extractfile("sofka").read() != original:
             raise ValueError("Packaging changed the release binary")
         for name in REQUIRED:
             if archive.extractfile(name).read() != (notices / name).read_bytes():
                 raise ValueError(f"Archive notice mismatch: {name}")
+        if (
+            rust_notice is not None
+            and archive.extractfile("RUST-LICENSES.html").read()
+            != rust_notice.read_bytes()
+        ):
+            raise ValueError("Archive Rust notice mismatch")
 
 
 def main():
@@ -291,11 +307,12 @@ def main():
     pack.add_argument("--binary", type=Path, required=True)
     pack.add_argument("--notices", type=Path, required=True)
     pack.add_argument("--output", type=Path, required=True)
+    pack.add_argument("--rust-notices", type=Path, required=True)
     args = parser.parse_args()
     if args.command == "generate":
         generate(args.manifest, args.output, args.cargo_about, args.cache)
     else:
-        package(args.binary, args.notices, args.output)
+        package(args.binary, args.notices, args.output, args.rust_notices)
 
 
 if __name__ == "__main__":

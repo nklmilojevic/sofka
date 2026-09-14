@@ -9,6 +9,7 @@ import re
 import subprocess
 import tarfile
 import tempfile
+import threading
 from pathlib import Path
 
 import release_licenses
@@ -20,6 +21,11 @@ TARGETS = (
     "aarch64-unknown-linux-gnu",
     "x86_64-unknown-linux-gnu",
 )
+MUSL_TARGETS = TARGETS[:2] + (
+    "aarch64-unknown-linux-musl",
+    "x86_64-unknown-linux-musl",
+)
+RUST_NOTICE_LOCK = threading.Lock()
 
 
 def gh(*args):
@@ -41,6 +47,65 @@ def binary_from_archive(path):
         return archive.extractfile(binaries[0]).read()
 
 
+def rust_notice(binary, cache):
+    commits = set(re.findall(rb"/rustc/([0-9a-f]{40})/", binary))
+    if len(commits) != 1:
+        raise ValueError("Cannot identify the original Rust compiler commit")
+    commit = commits.pop().decode()
+    with RUST_NOTICE_LOCK:
+        output = cache / f"rust-{commit}-COPYRIGHT-library.html"
+        if output.exists():
+            return output
+        version = (
+            release_licenses.download(
+                f"https://raw.githubusercontent.com/rust-lang/rust/{commit}/src/version",
+                cache,
+            )
+            .decode()
+            .strip()
+        )
+        if not re.fullmatch(r"\d+\.\d+\.\d+", version):
+            raise ValueError(f"Review the Rust compiler version for {commit}")
+        url = f"https://static.rust-lang.org/dist/rustc-{version}-x86_64-unknown-linux-gnu.tar.xz"
+        expected = release_licenses.download(url + ".sha256", cache).decode().split()[0]
+        archive = release_licenses.download(url, cache)
+        if hashlib.sha256(archive).hexdigest() != expected:
+            raise ValueError(f"Rust distribution checksum mismatch for {version}")
+        with tarfile.open(fileobj=io.BytesIO(archive)) as tree:
+            prefix = f"rustc-{version}-x86_64-unknown-linux-gnu"
+            if (
+                tree.extractfile(f"{prefix}/git-commit-hash").read().decode().strip()
+                != commit
+            ):
+                raise ValueError(f"Rust distribution commit mismatch for {version}")
+            name = f"rustc-{version}-x86_64-unknown-linux-gnu/rustc/share/doc/rust/COPYRIGHT-library.html"
+            content = tree.extractfile(name).read()
+        if not content.strip():
+            raise ValueError(f"Empty Rust library notice for {version}")
+        output.write_bytes(content)
+        return output
+
+
+def musl_notice(source, notices, cache):
+    flake = json.loads((source / "flake.lock").read_text())
+    if (
+        flake["nodes"]["nixpkgs"]["locked"]["rev"]
+        != "3b32825de172d0bc85664f495edb096b10862524"
+    ):
+        raise ValueError("Review the musl version for this historical Nix build")
+    archive = release_licenses.download(
+        "https://musl.libc.org/releases/musl-1.2.5.tar.gz", cache
+    )
+    if (
+        hashlib.sha256(archive).hexdigest()
+        != "a9a118bbe84d8764da0ea0d28b3ab3fae8477fc7e4085d90102b8596fc7c75e4"
+    ):
+        raise ValueError("musl source checksum mismatch")
+    with tarfile.open(fileobj=io.BytesIO(archive)) as tree:
+        content = tree.extractfile("musl-1.2.5/COPYRIGHT").read()
+    (notices / "MUSL-COPYRIGHT.txt").write_bytes(content)
+
+
 def prepare(release, directory, cargo_about):
     tag = release["tag_name"]
     if not re.fullmatch(r"v\d+\.\d+\.\d+", tag):
@@ -50,6 +115,7 @@ def prepare(release, directory, cargo_about):
     record_path = destination / "LICENSE-CORRECTION.json"
     generator_sha = hashlib.sha256(
         Path(release_licenses.__file__).read_bytes()
+        + Path(__file__).read_bytes()
         + (release_licenses.ROOT / "about.toml").read_bytes()
     ).hexdigest()
     if record_path.exists():
@@ -73,10 +139,27 @@ def prepare(release, directory, cargo_about):
     with tarfile.open(fileobj=io.BytesIO(archive)) as tree:
         tree.extractall(source, filter="data")
     notices = destination / "notices"
-    release_licenses.generate(
-        source / "Cargo.toml", notices, cargo_about, directory / "cache"
-    )
     assets = {a["name"]: a for a in release["assets"]}
+    targets = tuple(
+        sorted(
+            name.removeprefix(f"sofka-{tag}-").removesuffix(".tar.gz")
+            for name in assets
+            if name.startswith(f"sofka-{tag}-")
+            and name.endswith(".tar.gz")
+            and not name.endswith("-licenses.tar.gz")
+        )
+    )
+    if set(targets) not in (set(TARGETS), set(MUSL_TARGETS)):
+        raise ValueError(f"Review the release target set for {tag}: {targets}")
+    release_licenses.generate(
+        source / "Cargo.toml",
+        notices,
+        cargo_about,
+        directory / "cache",
+        targets,
+    )
+    if set(targets) == set(MUSL_TARGETS):
+        musl_notice(source, notices, directory / "cache")
     record = {
         "tag": tag,
         "source_commit": revision,
@@ -85,7 +168,7 @@ def prepare(release, directory, cargo_about):
     }
     original_dir = destination / "original"
     original_dir.mkdir(exist_ok=True)
-    for target in TARGETS:
+    for target in targets:
         original_name = f"sofka-{tag}-{target}.tar.gz"
         original = assets[original_name]
         archive = original_dir / original_name
@@ -109,7 +192,8 @@ def prepare(release, directory, cargo_about):
         binary_path.write_bytes(binary)
         corrected_name = f"sofka-{tag}-{target}-licenses.tar.gz"
         corrected = destination / corrected_name
-        release_licenses.package(binary_path, notices, corrected)
+        runtime_notice = rust_notice(binary, directory / "cache")
+        release_licenses.package(binary_path, notices, corrected, runtime_notice)
         if binary_from_archive(corrected) != binary:
             raise ValueError(f"Binary changed: {corrected_name}")
         record["assets"].append(

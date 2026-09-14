@@ -139,7 +139,8 @@ jobs:
           strip "$bin"
           out="sofka-${RELEASE_TAG}-${{ matrix.target }}.tar.gz"
           python3 scripts/release_licenses.py package \
-            --binary "$bin" --notices release-notices --output "$out"
+            --binary "$bin" --notices release-notices --output "$out" \
+            --rust-notices "$(rustc --print sysroot)/share/doc/rust/COPYRIGHT-library.html"
           echo "ASSET=$out" >> "$GITHUB_ENV"
 
       - name: Upload artifact
