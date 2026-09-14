@@ -173,17 +173,28 @@ def prepare(release, directory, cargo_about):
         original = assets[original_name]
         archive = original_dir / original_name
         if not archive.exists():
-            gh(
-                "release",
-                "download",
-                tag,
-                "--repo",
-                REPO,
-                "--pattern",
-                original_name,
-                "--dir",
-                str(original_dir),
-            )
+            with tempfile.NamedTemporaryFile(dir=original_dir) as temporary:
+                subprocess.run(
+                    [
+                        "curl",
+                        "--fail",
+                        "--silent",
+                        "--show-error",
+                        "--location",
+                        "--retry",
+                        "2",
+                        "--max-time",
+                        "120",
+                        "--output",
+                        temporary.name,
+                        original["browser_download_url"],
+                    ],
+                    check=True,
+                )
+                downloaded = Path(temporary.name)
+                if original.get("digest") != "sha256:" + digest(downloaded):
+                    raise ValueError(f"GitHub asset checksum mismatch: {original_name}")
+                archive.write_bytes(downloaded.read_bytes())
         original_sha = digest(archive)
         if original.get("digest") != "sha256:" + original_sha:
             raise ValueError(f"GitHub asset checksum mismatch: {original_name}")
@@ -253,16 +264,15 @@ def publish(directory):
                 "`LICENSE-CORRECTION.json` records the original archive hashes, "
                 "corrected archive hashes, and unchanged binary hashes.\n"
             )
-            with tempfile.NamedTemporaryFile(mode="w", suffix=".md") as notes:
-                notes.write(body)
+            with tempfile.NamedTemporaryFile(mode="w", suffix=".json") as notes:
+                json.dump({"body": body}, notes)
                 notes.flush()
                 gh(
-                    "release",
-                    "edit",
-                    record["tag"],
-                    "--repo",
-                    REPO,
-                    "--notes-file",
+                    "api",
+                    f"repos/{REPO}/releases/{verified['id']}",
+                    "--method",
+                    "PATCH",
+                    "--input",
                     notes.name,
                 )
         print(f"{record['tag']}: published and verified corrections", flush=True)

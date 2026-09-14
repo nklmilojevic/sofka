@@ -199,7 +199,11 @@ class ReleaseLicensesTests(unittest.TestCase):
             def github(*args):
                 nonlocal body
                 if args[0] == "api":
-                    return json.dumps({"assets": list(remote.values()), "body": body})
+                    if "--input" in args:
+                        body = json.loads(Path(args[-1]).read_text())["body"]
+                    return json.dumps(
+                        {"id": 123, "assets": list(remote.values()), "body": body}
+                    )
                 if args[1] == "upload":
                     uploads.append(args)
                     for name in args[5:]:
