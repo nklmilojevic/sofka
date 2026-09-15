@@ -18,6 +18,29 @@ spec.loader.exec_module(release)
 
 
 class ReleasePackagesTest(unittest.TestCase):
+    def test_linux_notice_entries_preserve_nested_paths_and_permissions(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            stage = Path(temporary)
+            notices = stage / "notices"
+            nested = notices / "THIRD-PARTY-SOURCES/example/LICENSE"
+            nested.parent.mkdir(parents=True)
+            nested.write_text("dependency license")
+            (notices / "LICENSE-MIT").write_text("project license")
+            for target in release.TARGETS:
+                if "linux" not in target:
+                    continue
+                config = release.configure(target, stage, stage / "dist")
+                contents = config["nfpms"][0]["contents"]
+                self.assertEqual(
+                    {item["dst"] for item in contents},
+                    {"/usr/share/doc/sofka/" + name for name in (
+                        "copyright", "LICENSE-MIT", "THIRD-PARTY-SOURCES/example/LICENSE"
+                    )},
+                )
+                for item in contents:
+                    self.assertNotIn("type", item)
+                    self.assertEqual(item["file_info"]["mode"], 0o644)
+
     @unittest.skipUnless(shutil.which("sh"), "requires a POSIX shell")
     def test_install_scripts_have_valid_shell_syntax(self):
         with tempfile.TemporaryDirectory() as temporary:

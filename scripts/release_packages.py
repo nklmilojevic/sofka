@@ -85,6 +85,15 @@ def configure(target, stage, dist, dependencies=None):
         config.pop("nfpms")
     else:
         package = config["nfpms"][0]
+        # nFPM 2.47.0 tree entries write invalid APK directory modes (nfpm#1112).
+        package["contents"].extend(
+            {
+                "src": "{{ .Env.SOFKA_RELEASE_NOTICES }}/" + name,
+                "dst": "/usr/share/doc/sofka/" + name,
+                "file_info": {"mode": 0o644},
+            }
+            for name in regular_files(stage / "notices")
+        )
         if target.endswith("musl"):
             package["formats"] = ["apk"]
             package["dependencies"] = ["ca-certificates"]

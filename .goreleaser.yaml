@@ -44,9 +44,6 @@ nfpms:
     priority: optional
     bindir: /usr/bin
     contents:
-      - src: "{{ .Env.SOFKA_RELEASE_NOTICES }}/"
-        dst: /usr/share/doc/sofka
-        type: tree
       - src: "{{ .Env.SOFKA_RELEASE_COPYRIGHT }}"
         dst: /usr/share/doc/sofka/copyright
         file_info:
