@@ -1,0 +1,117 @@
+name: Release packages
+
+on:
+  workflow_call:
+    inputs:
+      snapshot:
+        type: boolean
+        default: false
+  pull_request:
+    paths:
+      - .goreleaser.yaml
+      - .github/workflows/release*.yaml
+      - scripts/release*
+      - scripts/test_release_packages.py
+      - scripts/licenses/**
+      - about.toml
+      - Cargo.toml
+      - Cargo.lock
+      - pyproject.toml
+      - uv.lock
+
+permissions:
+  contents: read
+
+jobs:
+  licenses:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+        with:
+          version: "0.12.11"
+          python-version: "3.12"
+      - id: matrix
+        run: echo "matrix=$(uv run --locked python scripts/release_packages.py matrix)" >> "$GITHUB_OUTPUT"
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          toolchain: 1.97.0
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: release-licenses
+      - name: Install license collector
+        run: cargo install cargo-about --version 0.9.2 --features cli --locked
+      - name: Collect dependency licenses and source packages
+        run: cargo run --locked --example release-licenses -- generate --output release-notices
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-notices
+          path: release-notices/
+          if-no-files-found: error
+
+  build:
+    needs: licenses
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.licenses.outputs.matrix) }}
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+        with:
+          version: "0.12.11"
+          python-version: "3.12"
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          toolchain: 1.97.0
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: release-${{ matrix.target }}
+      - name: Install Linux packaging tools
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y binutils dpkg-dev musl-tools libarchive-tools rpm zstd
+      - name: Install GoReleaser OSS
+        uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94 # v7
+        with:
+          distribution: goreleaser
+          version: v2.18.1
+          install-only: true
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release-notices
+          path: release-notices
+      - name: Test package configuration and archive checks
+        run: uv run --locked python -m unittest discover -s scripts -p test_release_packages.py
+      - name: Build and verify release packages
+        env:
+          TARGET: ${{ matrix.target }}
+          SNAPSHOT: ${{ github.event_name == 'pull_request' || inputs.snapshot }}
+        run: |
+          args=()
+          if [[ "$SNAPSHOT" == 'true' ]]; then
+            args+=(--snapshot)
+          fi
+          uv run --locked python scripts/release_packages.py build --target "$TARGET" --notices release-notices "${args[@]}"
+      - name: Test Linux package installation
+        if: runner.os == 'Linux'
+        env:
+          TARGET: ${{ matrix.target }}
+        run: uv run --locked python scripts/release_packages.py install-test --target "$TARGET"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: binary-${{ matrix.target }}
+          path: target/release-assets/${{ matrix.target }}/
+          if-no-files-found: error

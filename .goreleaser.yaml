@@ -1,0 +1,60 @@
+version: 2
+project_name: sofka
+dist: target/release-dist
+
+builds:
+  - id: sofka
+    builder: rust
+    binary: sofka
+    tool: cargo
+    command: build
+    flags: [--release, --locked, --bin=sofka]
+    targets:
+      - x86_64-unknown-linux-gnu
+      - aarch64-unknown-linux-gnu
+      - x86_64-unknown-linux-musl
+      - aarch64-unknown-linux-musl
+      - x86_64-apple-darwin
+      - aarch64-apple-darwin
+      - x86_64-pc-windows-msvc
+      - aarch64-pc-windows-msvc
+
+archives:
+  - formats: [tar.gz]
+    name_template: "{{ .ProjectName }}-{{ .Tag }}-{{ .Target }}"
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+    files:
+      - src: "{{ .Env.SOFKA_RELEASE_NOTICES }}/*"
+        dst: .
+        info:
+          mode: 0644
+
+nfpms:
+  - id: linux
+    package_name: sofka
+    formats: [deb, rpm, archlinux]
+    file_name_template: "{{ .ConventionalFileName }}"
+    maintainer: Sofka contributors <nklmilojevic@users.noreply.github.com>
+    description: Kubernetes terminal interface
+    homepage: https://github.com/nklmilojevic/sofka
+    license: MIT OR Apache-2.0
+    section: utils
+    priority: optional
+    bindir: /usr/bin
+    contents:
+      - src: "{{ .Env.SOFKA_RELEASE_NOTICES }}/"
+        dst: /usr/share/doc/sofka
+        type: tree
+      - src: "{{ .Env.SOFKA_RELEASE_NOTICES }}/../copyright"
+        dst: /usr/share/doc/sofka/copyright
+        file_info:
+          mode: 0644
+
+checksum:
+  name_template: SHA256SUMS
+changelog:
+  disable: true
+release:
+  disable: true

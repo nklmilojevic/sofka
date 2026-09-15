@@ -1,6 +1,7 @@
 # Rust build artifacts
 /target
 __pycache__/
+/.venv/
 .pi*
 # Nix build output symlinks
 /result

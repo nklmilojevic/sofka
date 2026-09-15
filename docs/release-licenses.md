@@ -7,7 +7,7 @@ installed program.
 under MPL 2.0. The notice file also gives exact source download URLs.
 
 The release workflow uses cargo-about 0.9.2 and the release tag's `Cargo.lock`.
-It collects licenses for the default build on all four supported targets.
+It collects licenses for the default build on all eight release targets.
 It excludes dependencies used only for tests or build scripts. The Rust
 collector adds license and notice files from bundled native source trees.
 Cargo downloads the locked sources first. License analysis then runs offline;
@@ -30,7 +30,8 @@ cargo test --locked --example release-licenses
 ```
 
 Use an empty output directory. The release tools use Rust, cargo-about, and curl.
-Python is not required. Downloads retry connection errors, including TLS errors,
+The GoReleaser packaging step uses Python through `uv` with dependencies pinned
+in `uv.lock`. Downloads retry connection errors, including TLS errors,
 and temporary server errors up to three times. A failed download reports its URL
 and the curl error. Only successful responses and HTTP 404 results are cached.
 

@@ -57,7 +57,10 @@ The [full feature list](docs/features.md) is long. So is the
 ## Installation
 
 Every [release](https://github.com/nklmilojevic/sofka/releases) ships prebuilt
-binaries for macOS (aarch64/x86_64) and Linux (aarch64/x86_64).
+binaries for macOS, Linux, and Windows (aarch64/x86_64).
+Windows ZIP files contain `sofka.exe` and the license notices.
+Linux releases also include DEB, RPM, Arch Linux, and Alpine APK packages.
+See [release packages](docs/release-packages.md) for installation and platform limits.
 
 ```sh
 brew install nklmilojevic/sofka/sofka   # Homebrew (macOS/Linux)
