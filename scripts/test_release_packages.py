@@ -30,6 +30,8 @@ class ReleasePackagesTest(unittest.TestCase):
                 self.assertIn("--locked", config["builds"][0]["flags"])
                 if target.endswith("musl"):
                     self.assertEqual(config["nfpms"][0]["formats"], ["apk"])
+                    self.assertIn("RUSTFLAGS=-C link-self-contained=yes", config["builds"][0]["env"])
+                    self.assertFalse(any("_LINKER=" in item for item in config["builds"][0]["env"]))
                 elif "linux" in target:
                     self.assertEqual(config["nfpms"][0]["formats"], ["deb", "rpm", "archlinux"])
                     self.assertIn("mustReadFile", config["nfpms"][0]["overrides"]["deb"]["dependencies"][0])

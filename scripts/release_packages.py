@@ -78,8 +78,7 @@ def configure(target, stage, dist):
     build["targets"] = [target]
     build["hooks"] = {"post": [{"cmd": f'uv run --locked python scripts/release_packages.py check-binary --target {target} --binary "{{{{ .Path }}}}"'}]}
     if target.endswith("musl"):
-        linker = "CARGO_TARGET_" + target.upper().replace("-", "_") + "_LINKER"
-        build["env"] = [f"{linker}=musl-gcc", "CC=musl-gcc"]
+        build["env"] = ["CC=musl-gcc", "RUSTFLAGS=-C link-self-contained=yes"]
     elif target.endswith("msvc"):
         build["env"] = ["RUSTFLAGS=-C target-feature=+crt-static"]
     if "linux" not in target:
@@ -191,7 +190,7 @@ def install_test(target):
     tests = [
         (".deb", "ubuntu:22.04", "apt-get update -qq; apt-get install -y /packages/*.deb; dpkg --verify sofka", "apt-get install --reinstall -y /packages/*.deb", "apt-get remove -y sofka"),
         (".rpm", "fedora:latest", "dnf install -y /packages/*.rpm; rpm -V sofka", "dnf reinstall -y /packages/*.rpm", "dnf remove -y sofka"),
-        (".apk", "alpine:3.23", "apk add --allow-untrusted /packages/*.apk", "apk fix --allow-untrusted sofka", "apk del sofka"),
+        (".apk", "alpine:3.23", "mkdir /tmp/sofka-repo; cp /packages/*.apk /tmp/sofka-repo/; apk index -o /tmp/sofka-repo/APKINDEX.tar.gz /tmp/sofka-repo/*.apk; apk add --allow-untrusted --repository /tmp/sofka-repo sofka", "apk fix --allow-untrusted --repository /tmp/sofka-repo sofka", "apk del sofka"),
     ]
     if target.startswith("x86_64"):
         tests.append((".pkg.tar.zst", "archlinux:base", "pacman -Syu --noconfirm; pacman -U --noconfirm /packages/*.pkg.tar.zst; pacman -Qk sofka", "pacman -U --noconfirm /packages/*.pkg.tar.zst", "pacman -R --noconfirm sofka"))
@@ -226,6 +225,7 @@ def build_packages(args):
     config_file.write_text(yaml.safe_dump(config, sort_keys=False))
     environment = os.environ.copy()
     environment["SOFKA_RELEASE_NOTICES"] = notices.relative_to(ROOT).as_posix()
+    environment["SOFKA_RELEASE_COPYRIGHT"] = (stage / "copyright").relative_to(ROOT).as_posix()
     command = [args.goreleaser, "release", "--clean", "--config", str(config_file), "--skip=publish,announce"]
     if args.snapshot:
         command.append("--snapshot")

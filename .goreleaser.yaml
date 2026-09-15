@@ -47,13 +47,15 @@ nfpms:
       - src: "{{ .Env.SOFKA_RELEASE_NOTICES }}/"
         dst: /usr/share/doc/sofka
         type: tree
-      - src: "{{ .Env.SOFKA_RELEASE_NOTICES }}/../copyright"
+      - src: "{{ .Env.SOFKA_RELEASE_COPYRIGHT }}"
         dst: /usr/share/doc/sofka/copyright
         file_info:
           mode: 0644
 
 checksum:
   name_template: SHA256SUMS
+snapshot:
+  version_template: "{{ incpatch .Version }}-alpha1"
 changelog:
   disable: true
 release:

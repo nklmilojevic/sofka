@@ -36,6 +36,8 @@ These downloads do not configure a package repository for automatic updates.
 
 GNU libc archives retain their existing target names. The separate `linux-musl`
 archives and APK files contain statically linked binaries for Alpine.
+Rust uses its own musl libraries at link time. `musl-gcc` compiles C dependencies;
+it is not used as the final linker because its wrapper can break static PIE builds.
 DEB dependencies are derived from the binary. RPM and Arch packages declare
 the required GNU libc version, compiler runtime, and certificate bundle.
 The GNU builds cannot require a GLIBC symbol newer than 2.35.
@@ -101,6 +103,7 @@ Linux hosts also need `readelf`, `dpkg-shlibdeps`, `dpkg-deb`, `bsdtar`, and
 Zstandard support. Musl builds need `musl-gcc`. Windows builds need the Visual
 Studio C++ build tools and CMake. The CI runners provide these tools.
 Snapshots do not publish a release. Their packages have snapshot versions.
+They use the next patch version with an `alpha1` suffix, which Alpine accepts.
 Outputs are under `target/release-assets/<target>/`; use an empty output directory.
 
 The packaging workflow checks every target and runs package installation,
