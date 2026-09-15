@@ -34,7 +34,9 @@ class ReleasePackagesTest(unittest.TestCase):
                     self.assertFalse(any("_LINKER=" in item for item in config["builds"][0]["env"]))
                 elif "linux" in target:
                     self.assertEqual(config["nfpms"][0]["formats"], ["deb", "rpm", "archlinux"])
-                    self.assertIn("mustReadFile", config["nfpms"][0]["overrides"]["deb"]["dependencies"][0])
+                    dependencies = {"deb": {"dependencies": ["libc6 (>= 2.34)", "ca-certificates"]}}
+                    configured = release.configure(target, Path("stage"), Path("dist"), dependencies)
+                    self.assertEqual(configured["nfpms"][0]["overrides"], dependencies)
                 else:
                     self.assertNotIn("nfpms", config)
                 if "windows" in target:

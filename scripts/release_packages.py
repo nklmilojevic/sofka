@@ -67,7 +67,7 @@ def stage_notices(notices, destination, rust_notices, target):
         path.chmod(0o644)
 
 
-def configure(target, stage, dist):
+def configure(target, stage, dist, dependencies=None):
     import yaml
 
     config = yaml.safe_load((ROOT / ".goreleaser.yaml").read_text())
@@ -89,13 +89,7 @@ def configure(target, stage, dist):
             package["formats"] = ["apk"]
             package["dependencies"] = ["ca-certificates"]
         else:
-            def read(name):
-                return '{{ mustReadFile "' + (stage / name).as_posix() + '" }}'
-            package["overrides"] = {
-                "deb": {"dependencies": [read("deb-depends"), "ca-certificates"]},
-                "rpm": {"dependencies": [read("rpm-glibc"), "libgcc", "ca-certificates"]},
-                "archlinux": {"dependencies": [read("arch-glibc"), "gcc-libs", "ca-certificates"]},
-            }
+            package["overrides"] = dependencies or {}
     return config
 
 
@@ -125,8 +119,6 @@ def check_binary(target, binary):
     if set(needed) - allowed:
         raise ValueError(f"Unmapped shared libraries: {set(needed) - allowed}")
     glibc = glibc_version(output("readelf", "--version-info", binary))
-    stage = ROOT / "target/release-stage" / target
-    stage.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory() as temporary:
         control = Path(temporary) / "debian/control"
         control.parent.mkdir()
@@ -135,9 +127,11 @@ def check_binary(target, binary):
     prefix = "shlibs:Depends="
     if not depends.startswith(prefix) or not depends.removeprefix(prefix):
         raise ValueError("dpkg-shlibdeps returned no runtime dependencies")
-    (stage / "deb-depends").write_text(depends.removeprefix(prefix))
-    (stage / "rpm-glibc").write_text(f"glibc >= {glibc}")
-    (stage / "arch-glibc").write_text(f"glibc>={glibc}")
+    return {
+        "deb": {"dependencies": [depends.removeprefix(prefix), "ca-certificates"]},
+        "rpm": {"dependencies": [f"glibc >= {glibc}", "libgcc", "ca-certificates"]},
+        "archlinux": {"dependencies": [f"glibc>={glibc}", "gcc-libs", "ca-certificates"]},
+    }
 
 
 def verify_archive(path, binary, notices):
@@ -190,7 +184,7 @@ def install_test(target):
     tests = [
         (".deb", "ubuntu:22.04", "apt-get update -qq; apt-get install -y /packages/*.deb; dpkg --verify sofka", "apt-get install --reinstall -y /packages/*.deb", "apt-get remove -y sofka"),
         (".rpm", "fedora:latest", "dnf install -y /packages/*.rpm; rpm -V sofka", "dnf reinstall -y /packages/*.rpm", "dnf remove -y sofka"),
-        (".apk", "alpine:3.23", "mkdir /tmp/sofka-repo; cp /packages/*.apk /tmp/sofka-repo/; apk index -o /tmp/sofka-repo/APKINDEX.tar.gz /tmp/sofka-repo/*.apk; apk add --allow-untrusted --repository /tmp/sofka-repo sofka", "apk fix --allow-untrusted --repository /tmp/sofka-repo sofka", "apk del sofka"),
+        (".apk", "alpine:3.23", "mkdir /tmp/sofka-repo; cp /packages/*.apk /tmp/sofka-repo/; apk index --allow-untrusted -o /tmp/sofka-repo/APKINDEX.tar.gz /tmp/sofka-repo/*.apk; apk add --allow-untrusted --repository /tmp/sofka-repo sofka", "apk fix --allow-untrusted --repository /tmp/sofka-repo sofka", "apk del sofka"),
     ]
     if target.startswith("x86_64"):
         tests.append((".pkg.tar.zst", "archlinux:base", "pacman -Syu --noconfirm; pacman -U --noconfirm /packages/*.pkg.tar.zst; pacman -Qk sofka", "pacman -U --noconfirm /packages/*.pkg.tar.zst", "pacman -R --noconfirm sofka"))
@@ -221,6 +215,11 @@ def build_packages(args):
     )
     dist = ROOT / "target/release-dist" / target
     config = configure(target, stage, dist)
+    if target.endswith("linux-gnu"):
+        build = config["builds"][0]
+        run(build["tool"], build["command"], *build["flags"], "--target", target, cwd=ROOT)
+        binary = ROOT / "target" / target / "release" / build["binary"]
+        config = configure(target, stage, dist, check_binary(target, binary))
     config_file = stage / "goreleaser.yaml"
     config_file.write_text(yaml.safe_dump(config, sort_keys=False))
     environment = os.environ.copy()
@@ -276,5 +275,9 @@ def main():
 if __name__ == "__main__":
     try:
         main()
-    except (ValueError, OSError, subprocess.CalledProcessError) as error:
+    except subprocess.CalledProcessError as error:
+        if error.stderr:
+            print(error.stderr, file=sys.stderr)
+        sys.exit(str(error))
+    except (ValueError, OSError) as error:
         sys.exit(str(error))

@@ -74,6 +74,9 @@ and creates Linux packages through nFPM. The shared configuration is
 `.goreleaser.yaml`. `scripts/release_packages.py` selects one target for each
 runner, stages notices, checks the binary, and verifies package contents.
 Only verified release assets are passed to the upload job.
+A GNU Linux build runs before GoReleaser to derive runtime dependencies.
+GoReleaser then reuses Cargo's build cache. Dependency fields contain plain
+values because GoReleaser does not expand templates in those fields.
 `SHA256SUMS` and build attestations cover all archive and package formats.
 
 The release uses Rust 1.97.0. Its musl targets include musl 1.2.5; the matching
