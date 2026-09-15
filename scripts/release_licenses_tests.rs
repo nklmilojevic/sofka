@@ -1,6 +1,18 @@
 use super::*;
 use std::os::unix::{fs::symlink, process::ExitStatusExt};
 
+#[test]
+fn digest_matches_sha256_hex_vectors() {
+    assert_eq!(
+        digest(b""),
+        "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    );
+    assert_eq!(
+        digest(b"abc"),
+        "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+    );
+}
+
 fn temporary() -> Temporary {
     Temporary::new(&std::env::temp_dir()).unwrap()
 }
