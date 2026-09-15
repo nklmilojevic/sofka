@@ -1,10 +1,13 @@
 import importlib.util
 import io
 from pathlib import Path
+import shutil
+import subprocess
 import tarfile
 import tempfile
 import tomllib
 import unittest
+from unittest.mock import patch
 import zipfile
 
 import yaml
@@ -15,6 +18,24 @@ spec.loader.exec_module(release)
 
 
 class ReleasePackagesTest(unittest.TestCase):
+    @unittest.skipUnless(shutil.which("sh"), "requires a POSIX shell")
+    def test_install_scripts_have_valid_shell_syntax(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "Cargo.toml").write_text('[package]\nversion = "1.2.3"\n')
+            for target in release.TARGETS:
+                if "linux" not in target:
+                    continue
+                directory = root / "target/release-assets" / target
+                directory.mkdir(parents=True)
+                suffixes = [".apk"] if target.endswith("musl") else [".deb", ".rpm", ".pkg.tar.zst"]
+                for suffix in suffixes:
+                    (directory / ("sofka" + suffix)).touch()
+                with patch.object(release, "ROOT", root), patch.object(release, "run") as run:
+                    release.install_test(target)
+                for call in run.call_args_list:
+                    subprocess.run(["sh", "-n", "-c", call.args[-1]], check=True)
+
     def test_targets_match_license_collection_and_goreleaser(self):
         about = tomllib.loads((release.ROOT / "about.toml").read_text())
         config = yaml.safe_load((release.ROOT / ".goreleaser.yaml").read_text())

@@ -181,10 +181,21 @@ def verify_packages(directory, target, binary, notices):
 def install_test(target):
     directory = ROOT / "target/release-assets" / target
     version = tomllib.loads((ROOT / "Cargo.toml").read_text())["package"]["version"]
+    alpine_install = '''
+repo="/tmp/sofka-repo/$(apk --print-arch)"
+mkdir -p "$repo"
+for package in /packages/*.apk; do
+    version=$(tar -xzOf "$package" .PKGINFO | sed -n 's/^pkgver = //p')
+    test -n "$version"
+    cp "$package" "$repo/sofka-$version.apk"
+done
+apk index --allow-untrusted -o "$repo/APKINDEX.tar.gz" "$repo"/*.apk
+apk add --allow-untrusted --repository /tmp/sofka-repo sofka
+'''.strip()
     tests = [
         (".deb", "ubuntu:22.04", "apt-get update -qq; apt-get install -y /packages/*.deb; dpkg --verify sofka", "apt-get install --reinstall -y /packages/*.deb", "apt-get remove -y sofka"),
         (".rpm", "fedora:latest", "dnf install -y /packages/*.rpm; rpm -V sofka", "dnf reinstall -y /packages/*.rpm", "dnf remove -y sofka"),
-        (".apk", "alpine:3.23", "mkdir /tmp/sofka-repo; cp /packages/*.apk /tmp/sofka-repo/; apk index --allow-untrusted -o /tmp/sofka-repo/APKINDEX.tar.gz /tmp/sofka-repo/*.apk; apk add --allow-untrusted --repository /tmp/sofka-repo sofka", "apk fix --allow-untrusted --repository /tmp/sofka-repo sofka", "apk del sofka"),
+        (".apk", "alpine:3.23", alpine_install, "apk fix --allow-untrusted --repository /tmp/sofka-repo sofka", "apk del sofka"),
     ]
     if target.startswith("x86_64"):
         tests.append((".pkg.tar.zst", "archlinux:base", "pacman -Syu --noconfirm; pacman -U --noconfirm /packages/*.pkg.tar.zst; pacman -Qk sofka", "pacman -U --noconfirm /packages/*.pkg.tar.zst", "pacman -R --noconfirm sofka"))
