@@ -171,8 +171,16 @@ jobs:
           Description: Kubernetes terminal interface
            A fast Kubernetes TUI built with kube-rs and ratatui.
           EOF
+          mkdir "$root/debian"
+          printf 'Source: sofka\n\n' > "$root/debian/control"
+          cat "$root/DEBIAN/control" >> "$root/debian/control"
+          depends="$(cd "$root" && dpkg-shlibdeps -O -eusr/bin/sofka | sed -n 's/^shlibs:Depends=//p')"
+          test -n "$depends"
+          printf 'Depends: %s\n' "$depends" >> "$root/DEBIAN/control"
+          rm -r "$root/debian"
           dpkg-deb --build --root-owner-group "$root" "$deb"
           test "$(dpkg-deb -f "$deb" Architecture)" = "$arch"
+          test -n "$(dpkg-deb -f "$deb" Depends)"
           dpkg-deb -x "$deb" "$root/extracted"
           "$root/extracted/usr/bin/sofka" --version
           test -s "$root/extracted/usr/share/doc/sofka/THIRD-PARTY-LICENSES.txt"
