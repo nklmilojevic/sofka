@@ -1386,6 +1386,7 @@ impl App {
         warnings.extend(metrics_warnings);
         self.skin_colors = resolved.config.skin.colors;
         self.readonly = self.readonly_override.unwrap_or(resolved.config.readonly);
+        self.configure_native_describe(resolved.config.experimental.native_describe);
         self.cluster.add_aliases(&self.user_aliases);
         crate::theme::set_background(resolved.config.skin.background);
         // The skin named by the base config (if any) becomes the session skin

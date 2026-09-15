@@ -56,7 +56,7 @@ ownership scope are cleared. Startup still uses the configured default resource.
 | `shift-j`                                     | jump to owner/controller                                                                                                                                                             |
 | `o`                                           | show the node the selected row names (pods built in; other kinds via `[views."…"].node`)                                                                                             |
 | `ctrl-r`                                      | refresh the watch                                                                                                                                                                    |
-| `y` / `d` / `E`                               | view YAML / describe (`kubectl`) / live events                                                                                                                                       |
+| `y` / `d` / `E`                               | view YAML / describe (native opt-in) / live events                                                                                                                                   |
 | `x`                                           | secrets: show `data` base64-decoded (as `stringData`) · PVCs: browse the volume                                                                                                      |
 | `X` / `T`                                     | explain why the selection is unhealthy / session-local state-change timeline                                                                                                         |
 | `u` / `:adjacent`                             | adjacent view: owners, children, and the objects the selection names or is named by (`⏎` opens one)                                                                                  |
@@ -171,6 +171,13 @@ buffer is cleared or replaced, or when their position is trimmed. Marker count
 is limited to the active log buffer cap. Manual terminal selection can include
 visible markers.
 
+## Describe
+
+`d` uses kubectl by default. Enable the experimental `deskribe` backend with
+`--experimental-describe` or `[experimental] native_describe = true` in config.
+See [configuration](configuration.md#experimental-native-describe) for overrides
+and reload behavior. Helm rows continue to show release notes.
+
 ## Document views (YAML, describe, diff, events)
 
 `ctrl-f` / `ctrl-b` page forward or back, with `PgDn` / `PgUp` as aliases.
@@ -195,9 +202,11 @@ Automatic refresh is available in these resource views:
 | Explain                        | `R` turns refresh on or off | `r` refreshes immediately                         |
 
 Automatic refresh is off when a view opens. It reads immediately, then waits
-5 seconds after each result before the next read. Describe runs `kubectl describe`
-and updates the full document, including events. The other views read the
-resource through the Kubernetes API. YAML also supports custom resources.
+5 seconds after each result before the next read. Describe retains its selected
+backend: kubectl by default, or deskribe when enabled. Native describe fetches
+fresh resource, related-object, and event data through the current Kubernetes
+client. The other views also read through the API. YAML and describe support
+custom resources.
 
 Refresh keeps the original resource and context. It preserves document search,
 scroll position where possible, and the selected Explain resource when findings

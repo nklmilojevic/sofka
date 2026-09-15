@@ -213,6 +213,12 @@ pub enum Msg {
         generation: u64,
         result: Result<RefreshContent, String>,
     },
+    /// Native describe keeps the fresh object for subsequent refresh/decoded views.
+    NativeDescribeReady {
+        generation: u64,
+        claim: StatusClaim,
+        result: Result<(Box<DynamicObject>, String), String>,
+    },
     /// The initial describe result, tied to the request that opened the view.
     DescribeReady {
         generation: u64,

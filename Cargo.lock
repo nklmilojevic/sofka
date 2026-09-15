@@ -900,6 +900,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "deskribe"
+version = "0.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4dea20aeeb281d14e785268ed504dc180b5801027d7f5bd2c928b3138b228704"
+dependencies = [
+ "base64 0.23.1",
+ "futures-util",
+ "k8s-openapi",
+ "kube",
+ "serde_json",
+ "tokio",
+ "x509-parser",
+]
+
+[[package]]
 name = "dhat"
 version = "0.3.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3162,6 +3177,7 @@ dependencies = [
  "clap",
  "criterion",
  "crossterm",
+ "deskribe",
  "dhat",
  "flate2",
  "foldhash",

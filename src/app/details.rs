@@ -111,9 +111,8 @@ impl App {
         self.mode = Mode::Detail;
     }
 
-    /// Describe the selection via `kubectl describe`, off-thread so the UI loop
-    /// keeps rendering. Falls back to the object's YAML if kubectl is missing
-    /// or fails. The result arrives as `Msg::DescribeReady`.
+    /// Describe off-thread using native specialized or generic renderers.
+    /// Only the compatibility kubectl path falls back to cached YAML.
     pub(super) fn describe(&mut self) {
         self.set_return_mode();
         let Some(obj) = self.selected_ref() else {
@@ -146,8 +145,7 @@ impl App {
         self.describe_object(resource, &obj);
     }
 
-    /// Describe one object with its qualified resource name. If kubectl fails,
-    /// return the object's YAML through `Msg::DescribeReady`.
+    /// Describe one object, retaining the backend and identity for refresh.
     pub(super) fn describe_object(&mut self, resource: String, obj: &DynamicObject) {
         let name = obj.metadata.name.clone().unwrap_or_default();
         let ns = obj.metadata.namespace.clone();
@@ -177,6 +175,26 @@ impl App {
             ..Default::default()
         };
         self.mode = Mode::Detail;
+        if self.native_describe
+            && let Some(source) = self.document_source.as_mut()
+            && deskribe::supports(&source.kind.ar)
+        {
+            source.view = refresh::RefreshView::NativeDescribe;
+            let source = source.clone();
+            self.describe_task = Some(tokio::spawn(async move {
+                let result = deskribe::fetch(source.client, &source.kind.ar, &source.object)
+                    .await
+                    .map(|(object, output)| (Box::new(object), output));
+                let _ = tx
+                    .send(Msg::NativeDescribeReady {
+                        generation: genr,
+                        claim,
+                        result,
+                    })
+                    .await;
+            }));
+            return;
+        }
         self.describe_task = Some(tokio::spawn(async move {
             let msg = match tokio::process::Command::new(&argv[0])
                 .args(&argv[1..])

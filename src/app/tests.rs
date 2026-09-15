@@ -32181,3 +32181,543 @@ async fn plugin_activity_trivy_redraws_stay_on_one_line_in_a_compact_centered_pa
     }
     app.handle_key(ctrl(KeyCode::Char('c'))).unwrap();
 }
+
+fn native_describe_app(
+    plural: &str,
+    resource: Value,
+) -> (
+    App,
+    Receiver<Msg>,
+    HealthResponses,
+    Arc<std::sync::Mutex<Vec<String>>>,
+) {
+    let (mut app, rx) = test_app();
+    app.native_describe = true;
+    let version = resource["apiVersion"].as_str().unwrap();
+    let group = version.split_once('/').map_or("", |(group, _)| group);
+    app.cluster.register_kind(
+        group,
+        resource["kind"].as_str().unwrap(),
+        plural,
+        resource["metadata"]["namespace"]
+            .as_str()
+            .is_some_and(|ns| !ns.is_empty()),
+    );
+    let result = health_report_app_with(app, rx, plural, resource);
+    if plural == "nodes" {
+        result.2.lock().unwrap().insert("/apis/resource.k8s.io/v1/resourceslices".into(), (200, json!({"apiVersion":"resource.k8s.io/v1","kind":"ResourceSliceList","metadata":{},"items":[]})));
+    }
+    result
+}
+
+#[tokio::test]
+async fn native_describe_opt_in_reload_and_cli_override() {
+    let dir = std::env::temp_dir().join(format!("sofka-native-opt-in-{}", std::process::id()));
+    write_config(&dir, "");
+    let resource = json!({"apiVersion":"v1","kind":"ConfigMap","metadata":{"name":"demo","namespace":"default","uid":"demo-uid"},"data":{"key":"value"}});
+    let (mut app, mut rx, responses, _) = native_describe_app("configmaps", resource.clone());
+    app.config = crate::config::ConfigLoader::from_dir(Some(dir.clone()));
+    palette(&mut app, "reload");
+    assert!(!app.native_describe);
+    app.handle_key(press(KeyCode::Char('d'))).unwrap();
+    // Abort without yielding so the default-backend test never invokes real kubectl.
+    app.describe_task.take().unwrap().abort();
+    assert!(matches!(
+        app.document_source.as_ref().unwrap().view,
+        refresh::RefreshView::Describe(_)
+    ));
+    app.handle_key(press(KeyCode::Esc)).unwrap();
+    write_config(&dir, "[experimental]\nnative_describe = true\n");
+    palette(&mut app, "reload");
+    assert!(app.native_describe);
+    responses.lock().unwrap().insert(
+        "/api/v1/namespaces/default/configmaps/demo".into(),
+        (200, resource),
+    );
+    app.handle_key(press(KeyCode::Char('d'))).unwrap();
+    receive_native_describe(&mut app, &mut rx).await;
+    assert!(matches!(
+        app.document_source.as_ref().unwrap().view,
+        refresh::RefreshView::NativeDescribe
+    ));
+    app.handle_key(press(KeyCode::Char('r'))).unwrap();
+    write_config(&dir, "[experimental]\nnative_describe = false\n");
+    palette(&mut app, "reload");
+    assert!(!app.native_describe);
+    assert!(app.refresh_task.is_none());
+    assert!(app.document_source.is_none());
+    app.handle_key(press(KeyCode::Esc)).unwrap();
+    app.cluster.cluster_name = "test-cluster".into();
+    app.cluster.context = "test-context".into();
+    let context_dir = dir.join("clusters/test-cluster/test-context");
+    write_config(&context_dir, "[experimental]\nnative_describe = true\n");
+    palette(&mut app, "reload");
+    assert!(
+        app.native_describe,
+        "context opt-in overrides the base config"
+    );
+    app.handle_key(press(KeyCode::Char('d'))).unwrap();
+    receive_native_describe(&mut app, &mut rx).await;
+    assert!(matches!(
+        app.document_source.as_ref().unwrap().view,
+        refresh::RefreshView::NativeDescribe
+    ));
+    app.handle_key(press(KeyCode::Esc)).unwrap();
+    write_config(&context_dir, "[experimental]\nnative_describe = false\n");
+    palette(&mut app, "reload");
+    assert!(!app.native_describe);
+    app.native_describe_override = true;
+    palette(&mut app, "reload");
+    assert!(app.native_describe);
+    app.handle_key(press(KeyCode::Char('d'))).unwrap();
+    receive_native_describe(&mut app, &mut rx).await;
+    assert!(matches!(
+        app.document_source.as_ref().unwrap().view,
+        refresh::RefreshView::NativeDescribe
+    ));
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+async fn receive_native_describe(app: &mut App, rx: &mut Receiver<Msg>) {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while let Some(msg) = rx.recv().await {
+            let done = matches!(msg, Msg::NativeDescribeReady { .. });
+            app.handle_msg(msg);
+            if done {
+                return;
+            }
+        }
+        panic!("describe channel closed");
+    })
+    .await
+    .expect("native describe timed out");
+}
+
+#[tokio::test]
+async fn native_describe_key_reads_fresh_data_once_and_refresh_stays_native() {
+    for (plural, kind) in [("configmaps", "ConfigMap"), ("secrets", "Secret")] {
+        let root = json!({"apiVersion":"v1","kind":kind,"metadata":{"name":"demo","namespace":"default","uid":"demo-uid"},"data":{"cached":"Y2FjaGVk"}});
+        let (mut app, mut rx, responses, requests) = native_describe_app(plural, root.clone());
+        let path = format!("/api/v1/namespaces/default/{plural}/demo");
+        let mut fresh = root;
+        fresh["data"] = json!({"fresh":"ZnJlc2g="});
+        responses
+            .lock()
+            .unwrap()
+            .insert(path.clone(), (200, fresh.clone()));
+        app.handle_key(press(KeyCode::Char('d'))).unwrap();
+        assert_eq!(app.detail.lines[0], "loading describe...");
+        receive_native_describe(&mut app, &mut rx).await;
+        assert!(app.doc_text().contains("fresh:"));
+        assert!(!app.doc_text().contains("cached:"));
+        assert!(matches!(
+            app.document_source.as_ref().unwrap().view,
+            refresh::RefreshView::NativeDescribe
+        ));
+        assert_eq!(
+            requests
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|s| **s == path)
+                .count(),
+            1
+        );
+        assert_eq!(
+            requests
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|s| s.ends_with("/events"))
+                .count(),
+            usize::from(plural == "configmaps")
+        );
+        fresh["data"] = json!({"refreshed":"dXBkYXRl"});
+        responses.lock().unwrap().insert(path.clone(), (200, fresh));
+        app.handle_key(press(KeyCode::Char('r'))).unwrap();
+        app.handle_msg(take_resource_refresh(&mut rx).await);
+        assert!(app.doc_text().contains("refreshed:"));
+        assert_eq!(
+            requests
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|s| **s == path)
+                .count(),
+            2
+        );
+        app.handle_key(press(KeyCode::Esc)).unwrap();
+        assert!(app.refresh_task.is_none());
+    }
+}
+
+#[tokio::test]
+async fn native_describe_errors_never_fall_back_to_secret_yaml_and_retry_is_native() {
+    for (plural, kind, fail_events) in [
+        ("secrets", "Secret", false),
+        ("configmaps", "ConfigMap", true),
+    ] {
+        let root = json!({"apiVersion":"v1","kind":kind,"metadata":{"name":"demo","namespace":"default","uid":"demo-uid"},"data":{"password":"SYNTHETIC-CACHED-VALUE"}});
+        let (mut app, mut rx, responses, _) = native_describe_app(plural, root.clone());
+        let path = format!("/api/v1/namespaces/default/{plural}/demo");
+        let error = json!({"apiVersion":"v1","kind":"Status","status":"Failure","reason":"Forbidden","message":"mock denied","code":403});
+        if fail_events {
+            responses
+                .lock()
+                .unwrap()
+                .insert(path.clone(), (200, root.clone()));
+            responses
+                .lock()
+                .unwrap()
+                .insert("/api/v1/namespaces/default/events".into(), (403, error));
+        } else {
+            responses.lock().unwrap().insert(path.clone(), (403, error));
+        }
+        app.handle_key(press(KeyCode::Char('d'))).unwrap();
+        receive_native_describe(&mut app, &mut rx).await;
+        assert!(app.doc_text().contains("Describe failed:"));
+        assert!(!app.doc_text().contains("SYNTHETIC-CACHED-VALUE"));
+        assert!(app.flash_err);
+        assert!(matches!(
+            app.document_source.as_ref().unwrap().view,
+            refresh::RefreshView::NativeDescribe
+        ));
+        let mut fresh = root;
+        fresh["data"] = json!({});
+        responses
+            .lock()
+            .unwrap()
+            .insert(path.clone(), (200, fresh.clone()));
+        responses
+            .lock()
+            .unwrap()
+            .remove("/api/v1/namespaces/default/events");
+        app.handle_key(press(KeyCode::Char('r'))).unwrap();
+        app.handle_msg(take_resource_refresh(&mut rx).await);
+        assert!(app.doc_text().contains("Data"));
+        app.handle_key(press(KeyCode::Char('r'))).unwrap();
+        fresh["metadata"]["uid"] = json!("replacement");
+        responses.lock().unwrap().insert(path, (200, fresh));
+        let before = app.doc_text();
+        app.handle_key(press(KeyCode::Char('r'))).unwrap();
+        app.handle_msg(take_resource_refresh(&mut rx).await);
+        assert_eq!(app.doc_text(), before);
+        assert!(app.flash.contains("replaced"));
+        app.handle_key(press(KeyCode::Esc)).unwrap();
+    }
+}
+
+#[tokio::test]
+async fn native_describe_key_uses_upstream_version_fallbacks() {
+    for (group, kind, plural, preferred, fallback, namespace) in [
+        (
+            "autoscaling",
+            "HorizontalPodAutoscaler",
+            "horizontalpodautoscalers",
+            "v2",
+            "v1",
+            "default",
+        ),
+        (
+            "networking.k8s.io",
+            "ServiceCIDR",
+            "servicecidrs",
+            "v1",
+            "v1beta1",
+            "",
+        ),
+        (
+            "networking.k8s.io",
+            "IPAddress",
+            "ipaddresses",
+            "v1",
+            "v1beta1",
+            "",
+        ),
+    ] {
+        let mut resource = json!({"apiVersion":format!("{group}/{preferred}"), "kind":kind,"metadata":{"name":"demo","uid":"demo-uid"},"spec":{}});
+        if !namespace.is_empty() {
+            resource["metadata"]["namespace"] = json!(namespace);
+        }
+        let (mut app, mut rx, responses, requests) = native_describe_app(plural, resource.clone());
+        resource["apiVersion"] = json!(format!("{group}/{fallback}"));
+        let scope = if namespace.is_empty() {
+            String::new()
+        } else {
+            format!("/namespaces/{namespace}")
+        };
+        let preferred_path = format!("/apis/{group}/{preferred}{scope}/{plural}/demo");
+        let fallback_path = format!("/apis/{group}/{fallback}{scope}/{plural}/demo");
+        responses.lock().unwrap().insert(preferred_path.clone(), (404, json!({"apiVersion":"v1","kind":"Status","status":"Failure","reason":"NotFound","message":"the server could not find the requested resource","code":404})));
+        responses
+            .lock()
+            .unwrap()
+            .insert(fallback_path.clone(), (200, resource));
+        app.handle_key(press(KeyCode::Char('d'))).unwrap();
+        receive_native_describe(&mut app, &mut rx).await;
+        assert!(
+            app.doc_text().contains("demo"),
+            "{kind}: {}",
+            app.doc_text()
+        );
+        assert!(matches!(
+            app.document_source.as_ref().unwrap().view,
+            refresh::RefreshView::NativeDescribe
+        ));
+        let seen = requests.lock().unwrap().clone();
+        let objects: Vec<_> = seen
+            .into_iter()
+            .filter(|p| !p.ends_with("/events"))
+            .collect();
+        assert_eq!(objects, [preferred_path, fallback_path]);
+        app.handle_key(press(KeyCode::Esc)).unwrap();
+    }
+}
+
+#[tokio::test]
+async fn native_describe_key_preserves_discovered_group_aliases() {
+    for (group, kind, plural, namespace) in [
+        ("", "PriorityClass", "priorityclasses", ""),
+        ("extensions", "Ingress", "ingresses", "default"),
+    ] {
+        let mut resource = json!({"apiVersion":if group.is_empty(){"v1".into()}else{format!("{group}/v1beta1")},"kind":kind,"metadata":{"name":"demo","uid":"demo-uid"},"spec":{}});
+        if !namespace.is_empty() {
+            resource["metadata"]["namespace"] = json!(namespace);
+        }
+        let (mut app, mut rx, responses, requests) = native_describe_app(plural, resource.clone());
+        let api_version = resource["apiVersion"].as_str().unwrap();
+        let scope = if namespace.is_empty() {
+            String::new()
+        } else {
+            format!("/namespaces/{namespace}")
+        };
+        let prefix = if group.is_empty() { "api" } else { "apis" };
+        let path = format!("/{prefix}/{api_version}{scope}/{plural}/demo");
+        responses
+            .lock()
+            .unwrap()
+            .insert(path.clone(), (200, resource));
+        app.handle_key(press(KeyCode::Char('d'))).unwrap();
+        receive_native_describe(&mut app, &mut rx).await;
+        assert!(
+            app.doc_text().contains("demo"),
+            "{kind}: {}",
+            app.doc_text()
+        );
+        assert_eq!(
+            requests
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|p| !p.ends_with("/events")),
+            Some(&path)
+        );
+        assert!(matches!(
+            app.document_source.as_ref().unwrap().view,
+            refresh::RefreshView::NativeDescribe
+        ));
+        app.handle_key(press(KeyCode::Esc)).unwrap();
+    }
+}
+
+#[tokio::test]
+async fn native_node_describe_preserves_partial_permission_results() {
+    let resource =
+        json!({"apiVersion":"v1","kind":"Node","metadata":{"name":"demo","uid":"demo-uid"}});
+    let (mut app, mut rx, responses, requests) = native_describe_app("nodes", resource.clone());
+    let forbidden = json!({"apiVersion":"v1","kind":"Status","status":"Failure","reason":"Forbidden","message":"fixture forbidden","code":403});
+    responses.lock().unwrap().extend([
+        ("/api/v1/nodes/demo".into(), (200, resource)),
+        ("/api/v1/pods".into(), (403, forbidden.clone())),
+        (
+            "/apis/coordination.k8s.io/v1/namespaces/kube-node-lease/leases/demo".into(),
+            (403, forbidden),
+        ),
+    ]);
+    app.handle_key(press(KeyCode::Char('d'))).unwrap();
+    receive_native_describe(&mut app, &mut rx).await;
+    let text = app.doc_text();
+    assert!(text.contains("not authorized"), "{text}");
+    assert!(
+        text.contains("Failed to get lease: fixture forbidden"),
+        "{text}"
+    );
+    assert!(!text.contains("Allocated resources:"));
+    assert_eq!(
+        requests
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|p| p.ends_with("/events"))
+            .count(),
+        2
+    );
+    app.handle_key(press(KeyCode::Esc)).unwrap();
+}
+
+#[tokio::test]
+async fn native_describe_with_known_uid_overlaps_fresh_object_and_events() {
+    let resource = json!({"apiVersion":"v1","kind":"ConfigMap","metadata":{"name":"demo","namespace":"default","uid":"demo-uid"},"data":{"fresh":"response"}});
+    let (mut app, mut rx, _, _) = native_describe_app("configmaps", resource.clone());
+    let barrier = Arc::new(tokio::sync::Barrier::new(2));
+    app.cluster.client = Client::new(
+        tower::service_fn(move |request: http::Request<kube::client::Body>| {
+            let barrier = barrier.clone();
+            let events = request.uri().path().ends_with("/events");
+            let body = if events {
+                json!({"apiVersion":"v1","kind":"EventList","metadata":{},"items":[]})
+            } else {
+                resource.clone()
+            };
+            async move {
+                barrier.wait().await;
+                Ok::<_, std::convert::Infallible>(http::Response::new(http_body_util::Full::new(
+                    hyper::body::Bytes::from(body.to_string()),
+                )))
+            }
+        }),
+        "default",
+    );
+    app.handle_key(press(KeyCode::Char('d'))).unwrap();
+    receive_native_describe(&mut app, &mut rx).await;
+    assert!(app.doc_text().contains("response"));
+    app.handle_key(press(KeyCode::Esc)).unwrap();
+}
+
+#[tokio::test]
+async fn native_describe_paginates_events_with_fresh_uid_and_exact_selector() {
+    let root = json!({"apiVersion":"v1","kind":"ConfigMap","metadata":{"name":"demo","namespace":"default"}});
+    let (mut app, mut rx, _, _) = native_describe_app("configmaps", root.clone());
+    let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let requests = seen.clone();
+    app.cluster.client = Client::new(
+        tower::service_fn(move |request: http::Request<kube::client::Body>| {
+            let uri = request.uri().clone();
+            requests.lock().unwrap().push(uri.to_string());
+            let mut object = root.clone();
+            object["metadata"]["uid"] = json!("fresh-uid");
+            let body = if uri.path().ends_with("/events") {
+                let params: HashMap<_, _> = form_urlencoded::parse(uri.query().unwrap().as_bytes())
+                    .into_owned()
+                    .collect();
+                assert!(!params.contains_key("limit"));
+                let mut clauses: Vec<_> = params["fieldSelector"].split(',').collect();
+                clauses.sort_unstable();
+                assert_eq!(
+                    clauses,
+                    [
+                        "involvedObject.kind=ConfigMap",
+                        "involvedObject.name=demo",
+                        "involvedObject.namespace=default",
+                        "involvedObject.uid=fresh-uid"
+                    ]
+                );
+                let second = params.get("continue").is_some_and(|s| s == "page/2+token");
+                let reason = if second { "SecondPage" } else { "FirstPage" };
+                json!({"apiVersion":"v1","kind":"EventList","metadata":{"continue":if second { "" } else { "page/2+token" }},"items":[{"metadata":{"name":reason},"involvedObject":{},"reason":reason,"message":"event"}]})
+            } else {
+                object
+            };
+            async move {
+                Ok::<_, std::convert::Infallible>(http::Response::new(http_body_util::Full::new(
+                    hyper::body::Bytes::from(body.to_string()),
+                )))
+            }
+        }),
+        "default",
+    );
+    app.handle_key(press(KeyCode::Char('d'))).unwrap();
+    receive_native_describe(&mut app, &mut rx).await;
+    assert!(app.doc_text().contains("FirstPage"));
+    assert!(app.doc_text().contains("SecondPage"));
+    assert_eq!(seen.lock().unwrap().len(), 3);
+    app.handle_key(press(KeyCode::Esc)).unwrap();
+}
+
+#[tokio::test]
+async fn native_describe_cancels_inflight_request_and_rejects_late_claims() {
+    let root = json!({"apiVersion":"v1","kind":"Secret","metadata":{"name":"demo","namespace":"default","uid":"demo-uid"}});
+    let (mut app, mut rx, _, _) = native_describe_app("secrets", root);
+    let (started_tx, mut started_rx) = mpsc::unbounded_channel();
+    let cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    struct Cancelled(Arc<std::sync::atomic::AtomicBool>);
+    impl Drop for Cancelled {
+        fn drop(&mut self) {
+            self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+    let flag = cancelled.clone();
+    app.cluster.client = Client::new(
+        tower::service_fn(move |_: http::Request<kube::client::Body>| {
+            let guard = Cancelled(flag.clone());
+            let tx = started_tx.clone();
+            async move {
+                let _guard = guard;
+                tx.send(()).unwrap();
+                std::future::pending::<
+                    Result<
+                        http::Response<http_body_util::Full<hyper::body::Bytes>>,
+                        std::convert::Infallible,
+                    >,
+                >()
+                .await
+            }
+        }),
+        "default",
+    );
+    app.handle_key(press(KeyCode::Char('d'))).unwrap();
+    tokio::time::timeout(Duration::from_secs(5), started_rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    let generation = app.generation;
+    let claim = app.describe_source.as_ref().unwrap().0;
+    app.handle_key(press(KeyCode::Esc)).unwrap();
+    tokio::task::yield_now().await;
+    assert!(cancelled.load(std::sync::atomic::Ordering::SeqCst));
+    assert!(app.describe_task.is_none());
+    app.handle_key(press(KeyCode::Char('d'))).unwrap();
+    let before = app.doc_text();
+    app.handle_msg(Msg::NativeDescribeReady {
+        generation,
+        claim,
+        result: Err("late".into()),
+    });
+    assert_eq!(app.doc_text(), before);
+    let claim = app.describe_source.as_ref().unwrap().0;
+    app.handle_msg(Msg::NativeDescribeReady {
+        generation: generation.wrapping_add(1),
+        claim,
+        result: Err("wrong context".into()),
+    });
+    assert_eq!(app.doc_text(), before);
+    app.handle_key(press(KeyCode::Esc)).unwrap();
+    while let Ok(msg) = rx.try_recv() {
+        assert!(!matches!(msg, Msg::NativeDescribeReady { .. }));
+    }
+}
+
+#[tokio::test]
+async fn native_describe_key_preserves_secret_token_exception() {
+    for secret_type in ["Opaque", "kubernetes.io/service-account-token"] {
+        let encode =
+            |s: &str| base64::Engine::encode(&base64::engine::general_purpose::STANDARD, s);
+        let resource = json!({"apiVersion":"v1","kind":"Secret","metadata":{"name":"demo","namespace":"default","uid":"demo-uid"},"type":secret_type,"data":{"token":encode("SYNTHETIC-TOKEN"),"password":encode("SYNTHETIC-DO-NOT-PRINT")}});
+        let (mut app, mut rx, responses, requests) =
+            native_describe_app("secrets", resource.clone());
+        responses.lock().unwrap().insert(
+            "/api/v1/namespaces/default/secrets/demo".into(),
+            (200, resource),
+        );
+        app.handle_key(press(KeyCode::Char('d'))).unwrap();
+        receive_native_describe(&mut app, &mut rx).await;
+        let output = app.doc_text();
+        assert_eq!(
+            output.contains("SYNTHETIC-TOKEN"),
+            secret_type == "kubernetes.io/service-account-token"
+        );
+        assert!(!output.contains("SYNTHETIC-DO-NOT-PRINT"));
+        assert_eq!(requests.lock().unwrap().len(), 1);
+        app.handle_key(press(KeyCode::Esc)).unwrap();
+    }
+}

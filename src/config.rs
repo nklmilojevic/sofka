@@ -54,6 +54,8 @@ pub struct Config {
     /// and plugins. Overridden by the `--readonly`/`--write` CLI flags. Set
     /// it in a per-cluster/per-context override file to lock down just prod.
     pub readonly: bool,
+    /// Experimental features, disabled unless explicitly enabled.
+    pub experimental: Experimental,
     /// Hide the header, including the logo. Defaults to false.
     pub hide_header: bool,
     /// Start in compact mode; runtime toggles survive reloads and context switches.
@@ -118,6 +120,14 @@ pub struct Config {
     /// Structured application logging — see [`LoggingConfig`].
     pub logging: LoggingConfig,
     pub journal: JournalConfig,
+}
+
+/// Opt-in functionality that is still being evaluated.
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct Experimental {
+    /// Use deskribe instead of the kubectl describe subprocess.
+    pub native_describe: bool,
 }
 
 /// Delivery for `:notify` events, besides the status-line flash.
@@ -1713,6 +1723,17 @@ mod tests {
         assert!(cfg.journal.enabled);
         assert_eq!(cfg.journal.path(), PathBuf::from("actions.jsonl"));
         assert_eq!(cfg.journal.max_bytes(), 64 * 1024);
+    }
+
+    #[test]
+    fn native_describe_is_experimental_and_opt_in_in_both_formats() {
+        assert!(!Config::default().experimental.native_describe);
+        let toml: Config = toml::from_str("[experimental]\nnative_describe = true").unwrap();
+        let yaml: Config =
+            serde_yaml::from_str("experimental:\n  native_describe: true\n").unwrap();
+        assert!(toml.experimental.native_describe);
+        assert!(yaml.experimental.native_describe);
+        assert!(toml::from_str::<Config>("[experimental]\nnative_describe = 'yes'").is_err());
     }
 
     #[test]

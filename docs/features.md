@@ -574,9 +574,16 @@ concurrent drains, and full kubectl drain parity are outside this feature.
   used - across every namespace, not whichever one was active before the
   switch. A row with nothing degraded still lands on its default view. See
   [Providers](providers.md#fleet-dashboard).
-- **YAML view** (`y`), **describe** (`d`, via `kubectl`), **events**
+- **Experimental native describe** uses the standalone Rust `deskribe` library.
+  Enable it with `--experimental-describe` or `[experimental] native_describe = true`
+  in config. Kubectl is the default when neither enables it.
+- **YAML view** (`y`), **describe** (`d`), **events**
   (`:events` / `E`, filtered by UID when available), and **diff** (`:diff`), with
   `ctrl-f` / `ctrl-b` (or `PgDn` / `PgUp`) paging through each document.
+  Native descriptions include Service application protocols, CronJob time zones,
+  StatefulSet policies, Pod scheduling groups, and Node-local ResourceSlice
+  summaries. Node resource accounting includes Pod-level budgets and resize
+  status; older API compatibility paths remain available.
 - **Diff on GitOps clusters** - `:diff` shows a unified diff of the live object
   against its `last-applied-configuration`. When that annotation is missing - as
   it is for every Flux- or Helm-managed object, which nothing ever
@@ -593,9 +600,11 @@ Automatic refresh is available in these resource views:
 | Explain                        | `R` turns refresh on or off | `r` refreshes immediately                         |
 
 Automatic refresh is off when a view opens. It reads immediately, then waits
-5 seconds after each result before the next read. Describe runs `kubectl describe`
-and updates the full document, including events. The other views read the
-resource through the Kubernetes API. YAML also supports custom resources.
+5 seconds after each result before the next read. Describe retains its selected
+backend: kubectl by default, or deskribe when enabled. Native describe fetches
+fresh resource, related-object, and event data through the current Kubernetes
+client. The other views also read through the API. YAML and describe support
+custom resources.
 
 Refresh keeps the original resource and context. It preserves document search,
 scroll position where possible, and the selected Explain resource when findings

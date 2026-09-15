@@ -21,6 +21,36 @@ converted settings in memory. See [palette migration](keybindings.md#legacy-pale
 
 Everything below is optional. An empty config behaves like no config.
 
+## Experimental native describe
+
+Describe uses kubectl by default. Opt into the experimental Rust `deskribe`
+backend in `config.toml`:
+
+```toml
+[experimental]
+native_describe = true
+```
+
+Or in `config.yaml`:
+
+```yaml
+experimental:
+  native_describe: true
+```
+
+Alternatively, `sofka --experimental-describe` enables it for that process,
+regardless of config overrides. This changes the `d` action's backend, not other
+kubectl-backed actions. The setting participates in normal cluster/context
+overrides and `:reload`. Disabling it on reload cancels
+an open native description's pending fetch/automatic refresh; reopen with `d` to
+use kubectl. A CLI opt-in remains enabled across reloads and context switches.
+
+Native descriptions reuse the current Kubernetes client and fetch fresh resource,
+related-object, and event data. Custom resources use a generic description. Native
+errors are shown directly rather than falling back to YAML. As with kubectl,
+service-account Secret descriptions can include tokens; treat copied output as
+sensitive. Helm release notes are unchanged.
+
 ## Drop-in files
 
 To split the configuration, put extra files in `conf.d/` next to the base

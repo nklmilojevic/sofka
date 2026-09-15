@@ -46,6 +46,10 @@ struct Args {
     #[arg(short, long)]
     namespace: Option<String>,
 
+    /// Opt into experimental native descriptions using deskribe (also configurable).
+    #[arg(long)]
+    experimental_describe: bool,
+
     /// Start across all namespaces.
     #[arg(short = 'A', long)]
     all_namespaces: bool,
@@ -365,6 +369,7 @@ async fn run_main(args: Args) -> Result<()> {
     let (tx, mut rx) = mpsc::channel(EVENT_CHANNEL_CAP);
     let panic_tx = tx.clone();
     let mut app = App::new(cluster, tx);
+    app.native_describe_override = args.experimental_describe;
     app.config = loader;
     if let Err(error) = app.journal.configure(&cfg.journal) {
         eprintln!("warning: {error}");
@@ -476,6 +481,7 @@ async fn run_main(args: Args) -> Result<()> {
         _ => None,
     };
     app.readonly = app.readonly_override.unwrap_or(cfg.readonly);
+    app.configure_native_describe(cfg.experimental.native_describe);
     // CLI flags win; then the namespace remembered for this context from the
     // last session; then the config default; then the kubeconfig's.
     let launch_namespace = args.launch_namespace();
@@ -1171,6 +1177,21 @@ async fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn experimental_describe_is_opt_in() {
+        assert!(
+            !Args::try_parse_from(["sofka"])
+                .unwrap()
+                .experimental_describe
+        );
+        for argv in [
+            vec!["sofka", "--experimental-describe", "pods"],
+            vec!["sofka", "pods", "--experimental-describe"],
+        ] {
+            assert!(Args::try_parse_from(argv).unwrap().experimental_describe);
+        }
+    }
 
     #[test]
     fn context_picker_launch_validates_explicit_context() {

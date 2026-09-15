@@ -15,6 +15,7 @@ pub(super) enum RefreshView {
     Yaml,
     DecodedSecret,
     Describe(Vec<String>),
+    NativeDescribe,
     Diff {
         baseline: String,
     },
@@ -55,6 +56,14 @@ impl RefreshSource {
                 findings,
             });
         }
+        if matches!(self.view, RefreshView::NativeDescribe) {
+            let (source, output) =
+                deskribe::fetch(self.client.clone(), &self.kind.ar, &self.object).await?;
+            return Ok(RefreshContent::Document {
+                source: Box::new(source),
+                lines: output.lines().map(String::from).collect(),
+            });
+        }
         let mut source = self.read().await?;
         source.managed_fields_mut().clear();
         let lines = match &self.view {
@@ -90,7 +99,7 @@ impl RefreshSource {
                     .map(String::from)
                     .collect()
             }
-            RefreshView::Explain { .. } => unreachable!(),
+            RefreshView::Explain { .. } | RefreshView::NativeDescribe => unreachable!(),
         };
         Ok(RefreshContent::Document {
             source: Box::new(source),
@@ -162,6 +171,20 @@ impl App {
         self.refresh_generation = self.refresh_generation.wrapping_add(1);
         if let Some(task) = self.refresh_task.take() {
             task.abort();
+        }
+    }
+
+    /// Apply the config opt-in while retaining an explicit CLI opt-in.
+    pub fn configure_native_describe(&mut self, configured: bool) {
+        self.native_describe = self.native_describe_override || configured;
+        if !self.native_describe
+            && self
+                .document_source
+                .as_ref()
+                .is_some_and(|source| matches!(source.view, RefreshView::NativeDescribe))
+        {
+            self.stop_resource_refresh();
+            self.clear_document_source();
         }
     }
 

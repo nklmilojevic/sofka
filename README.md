@@ -96,6 +96,7 @@ sofka [RESOURCE] [-n NAMESPACE] [-A] [--context NAME] [--kubeconfig PATH] [--rea
   --allow-v1-client-cert  allow X.509 v1 client certificates for this run
   --readonly        disable every mutating action for the session
   --write           force write mode, overriding any config `readonly`
+  --experimental-describe  use deskribe for native resource descriptions
 ```
 
 Use `sofka ctx` or `sofka contexts` to open the context picker before connecting.
@@ -123,6 +124,11 @@ sofka plugin install ID      # install the latest compatible package
 sofka plugin update          # explicitly update all managed packages
 sofka plugin list            # offline installed-package inventory
 ```
+
+Native describe is experimental and uses the standalone `deskribe` Rust library.
+Enable it with `--experimental-describe` or `[experimental] native_describe = true`
+in config to use it for `d`. Kubectl remains the default. See
+[configuration](docs/configuration.md#experimental-native-describe).
 
 ### Keys
 

@@ -1550,6 +1550,37 @@ impl App {
                     self.set_claimed_status(claim, format!("snapshot save failed: {e}"), true)
                 }
             },
+            Msg::NativeDescribeReady {
+                generation,
+                claim,
+                result,
+            } if generation == self.generation
+                && self
+                    .describe_source
+                    .as_ref()
+                    .is_some_and(|(id, _)| *id == claim) =>
+            {
+                self.describe_task = None;
+                match result {
+                    Ok((fresh, output)) => {
+                        self.detail.title = format!(
+                            "{} — describe",
+                            fresh.metadata.name.as_deref().unwrap_or_default()
+                        );
+                        if let Some(source) = self.document_source.as_mut() {
+                            source.object = *fresh;
+                        }
+                        self.detail
+                            .replace_lines(output.lines().map(String::from).collect());
+                        self.clear_claimed_status(claim);
+                    }
+                    Err(error) => {
+                        self.detail
+                            .replace_lines(vec![format!("Describe failed: {error}")].into());
+                        self.set_claimed_status(claim, error, true);
+                    }
+                }
+            }
             Msg::DescribeReady {
                 generation,
                 claim,

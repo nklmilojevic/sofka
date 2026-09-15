@@ -919,6 +919,7 @@ impl App {
         self.timeline.clear();
         self.skin_colors = resolved.config.skin.colors;
         self.readonly = self.readonly_override.unwrap_or(resolved.config.readonly);
+        self.configure_native_describe(resolved.config.experimental.native_describe);
         cluster.add_aliases(&self.user_aliases);
         self.bump_generation();
         // The launch scope applies once. Later switches use namespace memory,
