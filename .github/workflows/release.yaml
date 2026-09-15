@@ -145,11 +145,45 @@ jobs:
             --rust-notices "$(rustc --print sysroot)/share/doc/rust/COPYRIGHT-library.html"
           echo "ASSET=$out" >> "$GITHUB_ENV"
 
+      - name: Package Debian binary
+        if: runner.os == 'Linux'
+        run: |
+          version="${RELEASE_TAG#v}"
+          arch="$(dpkg --print-architecture)"
+          deb="sofka_${version}_${arch}.deb"
+          root="$(mktemp -d)"
+          mkdir -p "$root/DEBIAN" "$root/usr/bin" "$root/usr/share/doc/sofka"
+          tar -xzf "$ASSET" -C "$root/usr/share/doc/sofka"
+          mv "$root/usr/share/doc/sofka/sofka" "$root/usr/bin/sofka"
+          {
+            printf 'Upstream: https://github.com/nklmilojevic/sofka\nLicense: MIT or Apache-2.0\n\n'
+            cat "$root/usr/share/doc/sofka/LICENSE-MIT"
+            cat "$root/usr/share/doc/sofka/LICENSE-APACHE"
+          } > "$root/usr/share/doc/sofka/copyright"
+          cat > "$root/DEBIAN/control" <<EOF
+          Package: sofka
+          Version: $version
+          Section: utils
+          Priority: optional
+          Architecture: $arch
+          Maintainer: Sofka contributors <nklmilojevic@users.noreply.github.com>
+          Homepage: https://github.com/nklmilojevic/sofka
+          Description: Kubernetes terminal interface
+           A fast Kubernetes TUI built with kube-rs and ratatui.
+          EOF
+          dpkg-deb --build --root-owner-group "$root" "$deb"
+          test "$(dpkg-deb -f "$deb" Architecture)" = "$arch"
+          dpkg-deb -x "$deb" "$root/extracted"
+          "$root/extracted/usr/bin/sofka" --version
+          test -s "$root/extracted/usr/share/doc/sofka/THIRD-PARTY-LICENSES.txt"
+
       - name: Upload artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: binary-${{ matrix.target }}
-          path: ${{ env.ASSET }}
+          path: |
+            *.tar.gz
+            *.deb
 
   upload-assets:
     needs: build
@@ -172,15 +206,17 @@ jobs:
 
       - name: Generate checksums
         working-directory: dist
-        run: shasum -a 256 -- *.tar.gz > SHA256SUMS
+        run: shasum -a 256 -- *.tar.gz *.deb > SHA256SUMS
 
       - name: Attest build provenance
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
-          subject-path: dist/*.tar.gz
+          subject-path: |
+            dist/*.tar.gz
+            dist/*.deb
 
       - name: Upload release assets
-        run: gh release upload "$RELEASE_TAG" dist/*.tar.gz dist/SHA256SUMS --clobber
+        run: gh release upload "$RELEASE_TAG" dist/*.tar.gz dist/*.deb dist/SHA256SUMS --clobber
 
   # Kick the tap's bump workflow so `brew install nklmilojevic/sofka/sofka`
   # picks up the new version immediately instead of waiting for the tap's

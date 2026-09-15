@@ -58,6 +58,8 @@ The [full feature list](docs/features.md) is long. So is the
 
 Every [release](https://github.com/nklmilojevic/sofka/releases) ships prebuilt
 binaries for macOS (aarch64/x86_64) and Linux (aarch64/x86_64).
+Debian and Ubuntu users can download the matching `.deb` release asset and install
+it with `sudo apt install ./sofka_*.deb`.
 
 ```sh
 brew install nklmilojevic/sofka/sofka   # Homebrew (macOS/Linux)
