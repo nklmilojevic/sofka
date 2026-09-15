@@ -2,6 +2,7 @@
 
 sofka reads one config file under `$XDG_CONFIG_HOME/sofka` (or
 `~/.config/sofka`). Use `config.toml`, `config.yaml`, or `config.yml`.
+On Windows, Sofka uses `USERPROFILE` for the home directory when `HOME` is unset.
 TOML remains the default. Both formats support the same settings, defaults,
 validation, keybindings, and overrides. `:reload` reads the files again;
 `:config` shows the sources and warnings. Settings that require a restart

@@ -1595,10 +1595,19 @@ fn sanitize(name: &str) -> String {
 }
 
 fn config_dir() -> Option<PathBuf> {
-    config_dir_from(
-        std::env::var_os("XDG_CONFIG_HOME"),
-        std::env::var_os("HOME"),
-    )
+    config_dir_from(std::env::var_os("XDG_CONFIG_HOME"), home_dir())
+}
+
+pub(crate) fn home_dir() -> Option<std::ffi::OsString> {
+    std::env::var_os("HOME")
+        .filter(|path| !path.is_empty())
+        .or_else(|| {
+            if cfg!(windows) {
+                std::env::var_os("USERPROFILE").filter(|path| !path.is_empty())
+            } else {
+                None
+            }
+        })
 }
 
 /// Empty is not a setting. An exported `XDG_CONFIG_HOME=""` otherwise resolves

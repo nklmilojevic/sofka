@@ -18321,6 +18321,43 @@ confirm = true
 }
 
 #[tokio::test]
+async fn plugin_reload_resolves_the_native_executable_suffix() {
+    let dir = std::env::temp_dir().join(format!("sofka-native-plugin-{}", std::process::id()));
+    let package = dir.join("plugins/native-example");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&package).unwrap();
+    let adapter = package.join(format!("adapter{}", std::env::consts::EXE_SUFFIX));
+    std::fs::write(&adapter, b"test adapter").unwrap();
+    std::fs::write(
+        package.join("plugin.toml"),
+        r#"
+schema_version = 2
+[[commands]]
+name = "Native example"
+palette = "native-example"
+command = "./adapter"
+output = "report"
+target = "context"
+mutating = false
+"#,
+    )
+    .unwrap();
+    let (mut app, _rx) = test_app();
+    app.config = crate::config::ConfigLoader::from_dir(Some(dir.clone()));
+    plugin_command(&mut app, "reload");
+    let plugin = app
+        .plugins
+        .iter()
+        .find(|plugin| plugin.palette.as_deref() == Some("native-example"))
+        .unwrap();
+    assert_eq!(
+        std::path::PathBuf::from(&plugin.command),
+        adapter.canonicalize().unwrap()
+    );
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[tokio::test]
 async fn plugin_package_reload_loads_valid_packages_and_isolates_invalid_ones() {
     let dir = std::env::temp_dir().join(format!("sofka-plugin-reload-{}", std::process::id()));
     let package = dir.join("plugins/example");

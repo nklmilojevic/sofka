@@ -128,19 +128,30 @@ pub fn executable(name: &str) -> Option<PathBuf> {
             .map(|p| p.join(name))
             .collect()
     };
-    candidates.into_iter().find(|p| {
-        p.metadata().is_ok_and(|m| {
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                m.is_file() && m.permissions().mode() & 0o111 != 0
-            }
-            #[cfg(not(unix))]
-            {
-                m.is_file()
-            }
+    candidates
+        .into_iter()
+        .map(|path| executable_path(path, std::env::consts::EXE_SUFFIX))
+        .find(|p| {
+            p.metadata().is_ok_and(|m| {
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    m.is_file() && m.permissions().mode() & 0o111 != 0
+                }
+                #[cfg(not(unix))]
+                {
+                    m.is_file()
+                }
+            })
         })
-    })
+}
+
+fn executable_path(path: PathBuf, suffix: &str) -> PathBuf {
+    if !suffix.is_empty() && path.extension().is_none() && !path.is_file() {
+        path.with_extension(suffix.trim_start_matches('.'))
+    } else {
+        path
+    }
 }
 
 #[derive(Deserialize)]
@@ -342,8 +353,7 @@ pub fn read_package(dir: &Path) -> Result<Vec<Plugin>, String> {
     let mut commands = read_package_manifest(&dir)?.0;
     for plugin in &mut commands {
         if plugin.command.starts_with("./") {
-            let command = dir
-                .join(&plugin.command)
+            let command = executable_path(dir.join(&plugin.command), std::env::consts::EXE_SUFFIX)
                 .canonicalize()
                 .map_err(|e| e.to_string())?;
             if !command.starts_with(&dir) {
@@ -916,6 +926,22 @@ pub async fn execute_with_activity(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn windows_executable_lookup_adds_a_suffix_only_when_needed() {
+        let dir = std::env::temp_dir().join(format!("sofka-exe-lookup-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("adapter");
+        let exe = dir.join("adapter.exe");
+        std::fs::write(&exe, b"binary").unwrap();
+        assert_eq!(executable_path(path.clone(), ".exe"), exe);
+        assert_eq!(executable_path(exe.clone(), ".exe"), exe);
+        assert_eq!(executable_path(path.clone(), ""), path);
+        std::fs::write(&path, b"native binary").unwrap();
+        assert_eq!(executable_path(path.clone(), ".exe"), path);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 
     fn job(command: &str, args: &[&str]) -> Job {
         Job {

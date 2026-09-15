@@ -62,8 +62,10 @@ The release does not add a new Nix User Repository.
 ## Plugins
 
 The official plugin catalog currently publishes GNU Linux and macOS adapters.
-Windows and Alpine plugin support needs a matching change in Sofka's platform
-selection and in the [plugin repository](https://github.com/nklmilojevic/sofka-plugins).
+Sofka recognizes Windows catalog entries and resolves packaged `adapter.exe`
+files. Windows adapters must also be published by the
+[plugin repository](https://github.com/nklmilojevic/sofka-plugins).
+Alpine adapters still need separate musl builds.
 The new application archives do not imply that those adapters are available.
 Plugin packages keep their existing `.tar.zst` format.
 

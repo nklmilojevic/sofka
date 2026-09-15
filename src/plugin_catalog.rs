@@ -582,6 +582,8 @@ pub const SUPPORTED_PLATFORMS: &[&str] = &[
     "aarch64-unknown-linux-gnu",
     "x86_64-apple-darwin",
     "aarch64-apple-darwin",
+    "x86_64-pc-windows-msvc",
+    "aarch64-pc-windows-msvc",
 ];
 
 fn validate_artifact(artifact: &Artifact) -> Result<(), String> {
@@ -614,11 +616,17 @@ pub fn parse_request(request: &str) -> Result<(&str, Option<&str>), String> {
 }
 
 pub fn platform() -> Result<&'static str, String> {
-    match (std::env::consts::ARCH, std::env::consts::OS) {
+    platform_for(std::env::consts::ARCH, std::env::consts::OS)
+}
+
+fn platform_for(arch: &str, os: &str) -> Result<&'static str, String> {
+    match (arch, os) {
         ("x86_64", "linux") => Ok("x86_64-unknown-linux-gnu"),
         ("aarch64", "linux") => Ok("aarch64-unknown-linux-gnu"),
         ("x86_64", "macos") => Ok("x86_64-apple-darwin"),
         ("aarch64", "macos") => Ok("aarch64-apple-darwin"),
+        ("x86_64", "windows") => Ok("x86_64-pc-windows-msvc"),
+        ("aarch64", "windows") => Ok("aarch64-pc-windows-msvc"),
         (arch, os) => Err(format!("unsupported plugin platform {arch}-{os}")),
     }
 }
@@ -627,7 +635,7 @@ pub fn cache_dir() -> PathBuf {
     if let Some(path) = std::env::var_os("XDG_CACHE_HOME").filter(|p| !p.is_empty()) {
         return PathBuf::from(path).join("sofka").join("plugins");
     }
-    if let Some(home) = std::env::var_os("HOME").filter(|p| !p.is_empty()) {
+    if let Some(home) = crate::config::home_dir() {
         return PathBuf::from(home)
             .join(".cache")
             .join("sofka")
@@ -640,11 +648,7 @@ pub fn config_dir() -> Result<PathBuf, String> {
     let base = std::env::var_os("XDG_CONFIG_HOME")
         .filter(|p| !p.is_empty())
         .map(PathBuf::from)
-        .or_else(|| {
-            std::env::var_os("HOME")
-                .filter(|p| !p.is_empty())
-                .map(|home| PathBuf::from(home).join(".config"))
-        })
+        .or_else(|| crate::config::home_dir().map(|home| PathBuf::from(home).join(".config")))
         .ok_or_else(|| {
             "cannot determine config directory: set XDG_CONFIG_HOME or HOME".to_string()
         })?;
@@ -1122,6 +1126,20 @@ fn validate_http_uri(uri: &http::Uri, allow_test_http: bool) -> Result<(), Strin
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn windows_targets_are_valid_catalog_platforms() {
+        for (arch, target) in [
+            ("x86_64", "x86_64-pc-windows-msvc"),
+            ("aarch64", "aarch64-pc-windows-msvc"),
+        ] {
+            assert_eq!(platform_for(arch, "windows").unwrap(), target);
+            let mut value = catalog();
+            value.plugins[0].versions[0].artifacts[0].platform = target.into();
+            value.validate().unwrap();
+        }
+        assert!(platform_for("riscv64", "windows").is_err());
+    }
 
     fn server(response: Vec<u8>, delay: Duration) -> String {
         use std::io::{Read as _, Write as _};
