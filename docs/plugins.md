@@ -168,6 +168,7 @@ dangerous = true          # confirm (showing the exact command) first
   (plural), `$GROUP`, `$VERSION`, `$KIND`, `$FILTER`.
 - **`output`** selects `terminal`, `popup`, `background`, or `report`.
   `terminal` is the default. It suspends the TUI for an interactive command.
+  On Unix, Ctrl-C interrupts the command. Sofka resumes when the command exits.
   `popup` shows captured text. `background` shows a completion message.
   `report` shows a [JSON report](plugin-authoring.md#report-format).
   Captured modes use `timeout` (`"30s"` by default) and enforce output limits.

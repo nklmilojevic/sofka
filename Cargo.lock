@@ -3248,6 +3248,7 @@ dependencies = [
  "ipnet",
  "k8s-openapi",
  "kube",
+ "libc",
  "memchr",
  "nucleo-matcher",
  "ratatui",

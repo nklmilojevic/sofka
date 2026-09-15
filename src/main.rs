@@ -15,7 +15,7 @@ use sofka::app::App;
 use sofka::k8s::Cluster;
 use sofka::{
     altscroll, app, applog, config, diagnostics, fleet, k8s, nsmem, providers, sortmem, store,
-    theme, thresholds, ui, views,
+    terminal, theme, thresholds, ui, views,
 };
 
 mod terminal_title;
@@ -708,41 +708,6 @@ fn ring_notification(text: &str, cfg: &config::NotifyConfig) {
     }
 }
 
-/// Leave the alt-screen/raw-mode TUI, run an interactive command with inherited
-/// stdio (kubectl exec/edit/port-forward), then restore the TUI. Toggles the
-/// terminal modes directly rather than `ratatui::restore()`/`init()`: `init()`
-/// stacks another panic hook on every call, and the hook installed at startup
-/// must stay the outermost one. `captured` is whether mouse capture is on
-/// right now (not just the config flag), so the pre-suspend state is restored
-/// exactly.
-fn suspend_and_run(terminal: &mut ratatui::DefaultTerminal, argv: &[String], captured: bool) {
-    use crossterm::event::{DisableMouseCapture, EnableMouseCapture};
-    use crossterm::terminal::{
-        EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
-    };
-    if argv.is_empty() {
-        return;
-    }
-    if captured {
-        let _ = crossterm::execute!(std::io::stdout(), DisableMouseCapture);
-    }
-    let _ = disable_raw_mode();
-    let _ = crossterm::execute!(
-        std::io::stdout(),
-        LeaveAlternateScreen,
-        crossterm::cursor::Show
-    );
-    let _ = std::process::Command::new(&argv[0])
-        .args(&argv[1..])
-        .status();
-    let _ = enable_raw_mode();
-    let _ = crossterm::execute!(std::io::stdout(), EnterAlternateScreen);
-    if captured {
-        let _ = crossterm::execute!(std::io::stdout(), EnableMouseCapture);
-    }
-    let _ = terminal.clear();
-}
-
 /// Which diagnostics report the CLI asked for, if any. The `--info` flag is
 /// the deprecated spelling and keeps its documented contract: no connection.
 fn info_request(args: &Args) -> Option<InfoArgs> {
@@ -1045,9 +1010,16 @@ fn dispatch(
 /// for it).
 fn take_suspend(terminal: &mut ratatui::DefaultTerminal, app: &mut App, captured: bool) {
     if let Some(app::Suspend::Shell(argv)) = app.pending.take() {
-        suspend_and_run(terminal, &argv, captured);
-        app.flash = format!("ran: {}", argv.join(" "));
-        app.flash_err = false;
+        match terminal::suspend_and_run(terminal, &argv, captured) {
+            Ok(()) => {
+                app.flash = format!("ran: {}", argv.join(" "));
+                app.flash_err = false;
+            }
+            Err(error) => {
+                app.flash = format!("cannot run command: {error}");
+                app.flash_err = true;
+            }
+        }
         app.after_suspend();
         terminal_title::set(app.terminal_title().as_deref());
     }
