@@ -32697,6 +32697,82 @@ async fn native_describe_cancels_inflight_request_and_rejects_late_claims() {
     }
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn native_describe_key_labels_unsupported_kubectl_fallback_without_yaml() {
+    use std::os::unix::process::ExitStatusExt;
+
+    for (plural, kind) in [("secrets", "Secret"), ("configmaps", "ConfigMap")] {
+        for outcome in ["success", "failure", "missing"] {
+            let resource = json!({"apiVersion":"v2","kind":kind,"metadata":{"name":"demo","namespace":"default","uid":"demo-uid"},"data":{"password":"SYNTHETIC-CACHED-SECRET"}});
+            let (mut app, _rx, _, requests) = native_describe_app(plural, resource);
+            app.handle_key(press(KeyCode::Char('d'))).unwrap();
+            // Stop before yielding: no test may launch the real kubectl.
+            app.describe_task.take().unwrap().abort();
+            assert!(app.detail.title.contains("kubectl fallback"));
+            assert!(app.doc_text().contains("native description unavailable"));
+            assert!(matches!(
+                app.document_source.as_ref().unwrap().view,
+                refresh::RefreshView::Describe(_)
+            ));
+            let output = match outcome {
+                "missing" => Err(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    "mock missing",
+                )),
+                _ => Ok(std::process::Output {
+                    status: std::process::ExitStatus::from_raw(if outcome == "success" {
+                        0
+                    } else {
+                        256
+                    }),
+                    stdout: b"kubectl description".to_vec(),
+                    stderr: b"mock denied".to_vec(),
+                }),
+            };
+            let claim = app.describe_source.as_ref().unwrap().0;
+            app.handle_msg(details::kubectl_describe_message(
+                app.generation,
+                claim,
+                "demo",
+                None,
+                output,
+            ));
+            assert!(app.detail.title.contains("kubectl fallback"));
+            assert!(!app.doc_text().contains("SYNTHETIC-CACHED-SECRET"));
+            assert!(!app.flash.contains("showing YAML"));
+            if outcome == "success" {
+                assert!(app.doc_text().contains("kubectl description"));
+            } else {
+                assert!(app.doc_text().contains("Describe failed:"));
+                assert!(app.flash_err);
+            }
+            assert!(requests.lock().unwrap().is_empty());
+            app.handle_key(press(KeyCode::Esc)).unwrap();
+        }
+    }
+}
+
+#[tokio::test]
+async fn native_describe_key_uses_generic_renderer_for_custom_resources() {
+    let resource = json!({"apiVersion":"example.test/v1","kind":"Widget","metadata":{"name":"demo","namespace":"default","uid":"demo-uid"},"spec":{"message":"generic native output"}});
+    let (mut app, mut rx, responses, requests) = native_describe_app("widgets", resource.clone());
+    responses.lock().unwrap().insert(
+        "/apis/example.test/v1/namespaces/default/widgets/demo".into(),
+        (200, resource),
+    );
+    app.handle_key(press(KeyCode::Char('d'))).unwrap();
+    receive_native_describe(&mut app, &mut rx).await;
+    assert!(app.doc_text().contains("generic native output"));
+    assert!(!app.detail.title.contains("kubectl fallback"));
+    assert!(matches!(
+        app.document_source.as_ref().unwrap().view,
+        refresh::RefreshView::NativeDescribe
+    ));
+    assert_eq!(requests.lock().unwrap().len(), 2);
+    app.handle_key(press(KeyCode::Esc)).unwrap();
+}
+
 #[tokio::test]
 async fn native_describe_key_preserves_secret_token_exception() {
     for secret_type in ["Opaque", "kubernetes.io/service-account-token"] {

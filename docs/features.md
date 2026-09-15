@@ -576,7 +576,9 @@ concurrent drains, and full kubectl drain parity are outside this feature.
   [Providers](providers.md#fleet-dashboard).
 - **Experimental native describe** uses the standalone Rust `deskribe` library.
   Enable it with `--experimental-describe` or `[experimental] native_describe = true`
-  in config. Kubectl is the default when neither enables it.
+  in config. Kubectl is the default when neither enables it. Unsupported native
+  resources use a labeled kubectl fallback; fallback failures show errors, not
+  cached YAML. Custom resources use the generic native renderer.
 - **YAML view** (`y`), **describe** (`d`), **events**
   (`:events` / `E`, filtered by UID when available), and **diff** (`:diff`), with
   `ctrl-f` / `ctrl-b` (or `PgDn` / `PgUp`) paging through each document.
@@ -601,7 +603,8 @@ Automatic refresh is available in these resource views:
 
 Automatic refresh is off when a view opens. It reads immediately, then waits
 5 seconds after each result before the next read. Describe retains its selected
-backend: kubectl by default, or deskribe when enabled. Native describe fetches
+backend: kubectl by default, or native-first with a labeled kubectl fallback when
+opted in. Native describe fetches
 fresh resource, related-object, and event data through the current Kubernetes
 client. The other views also read through the API. YAML and describe support
 custom resources.

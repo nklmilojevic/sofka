@@ -175,7 +175,9 @@ visible markers.
 
 `d` uses kubectl by default. Enable the experimental `deskribe` backend with
 `--experimental-describe` or `[experimental] native_describe = true` in config.
-See [configuration](configuration.md#experimental-native-describe) for overrides
+Unsupported native resources use a labeled kubectl fallback; errors from that
+fallback never show cached YAML. See
+[configuration](configuration.md#experimental-native-describe) for overrides
 and reload behavior. Helm rows continue to show release notes.
 
 ## Document views (YAML, describe, diff, events)
@@ -203,7 +205,8 @@ Automatic refresh is available in these resource views:
 
 Automatic refresh is off when a view opens. It reads immediately, then waits
 5 seconds after each result before the next read. Describe retains its selected
-backend: kubectl by default, or deskribe when enabled. Native describe fetches
+backend: kubectl by default, or native-first with a labeled kubectl fallback when
+opted in. Native describe fetches
 fresh resource, related-object, and event data through the current Kubernetes
 client. The other views also read through the API. YAML and describe support
 custom resources.

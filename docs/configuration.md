@@ -46,8 +46,12 @@ an open native description's pending fetch/automatic refresh; reopen with `d` to
 use kubectl. A CLI opt-in remains enabled across reloads and context switches.
 
 Native descriptions reuse the current Kubernetes client and fetch fresh resource,
-related-object, and event data. Custom resources use a generic description. Native
-errors are shown directly rather than falling back to YAML. As with kubectl,
+related-object, and event data. Custom resources use a generic native description.
+If a native description is unsupported or the resource cannot be resolved, `d`
+uses kubectl and labels the document **kubectl fallback**. Refresh retains that
+backend. If this fallback fails, the error is shown, never cached YAML.
+Native fetch and permission errors are shown directly without retrying kubectl.
+As with kubectl,
 service-account Secret descriptions can include tokens; treat copied output as
 sensitive. Helm release notes are unchanged.
 

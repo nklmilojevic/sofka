@@ -150,10 +150,8 @@ impl App {
         let name = obj.metadata.name.clone().unwrap_or_default();
         let ns = obj.metadata.namespace.clone();
 
-        // Compute the YAML fallback up front while we hold the object; the
-        // selection may change before the describe completes.
-        let yaml = self.object_yaml(obj);
-        let yaml_title = format!("{name} — YAML");
+        // Cached YAML remains a compatibility fallback only in kubectl-default mode.
+        let yaml = (!self.native_describe).then(|| self.object_yaml(obj));
 
         let tx = self.tx.clone();
         let genr = self.generation;
@@ -195,44 +193,19 @@ impl App {
             }));
             return;
         }
+        if self.native_describe {
+            self.detail.title = format!("{name} — describe (kubectl fallback)");
+            self.detail.replace_lines(
+                vec!["native description unavailable; loading kubectl fallback...".into()].into(),
+            );
+        }
         self.describe_task = Some(tokio::spawn(async move {
-            let msg = match tokio::process::Command::new(&argv[0])
+            let output = tokio::process::Command::new(&argv[0])
                 .args(&argv[1..])
                 .kill_on_drop(true)
                 .output()
-                .await
-            {
-                Ok(out) if out.status.success() => Msg::DescribeReady {
-                    generation: genr,
-                    claim,
-                    title: format!("{name} — describe"),
-                    lines: String::from_utf8_lossy(&out.stdout)
-                        .lines()
-                        .map(String::from)
-                        .collect(),
-                    warn: None,
-                },
-                Ok(out) => {
-                    let err = String::from_utf8_lossy(&out.stderr);
-                    Msg::DescribeReady {
-                        generation: genr,
-                        claim,
-                        title: yaml_title,
-                        lines: yaml,
-                        warn: Some(format!(
-                            "kubectl describe failed ({}); showing YAML",
-                            err.lines().next().unwrap_or("error")
-                        )),
-                    }
-                }
-                Err(_) => Msg::DescribeReady {
-                    generation: genr,
-                    claim,
-                    title: yaml_title,
-                    lines: yaml,
-                    warn: Some("kubectl not found; showing YAML".into()),
-                },
-            };
+                .await;
+            let msg = kubectl_describe_message(genr, claim, &name, yaml, output);
             let _ = tx.send(msg).await;
         }));
     }
@@ -480,6 +453,58 @@ fn decoded_secret_entry(key: &str, value: &Value) -> Vec<String> {
         lines
     } else {
         vec![format!("{key}: {text}")]
+    }
+}
+
+pub(super) fn kubectl_describe_message(
+    generation: u64,
+    claim: crate::store::StatusClaim,
+    name: &str,
+    yaml: Option<Vec<String>>,
+    output: std::io::Result<std::process::Output>,
+) -> Msg {
+    let title = if yaml.is_none() {
+        format!("{name} — describe (kubectl fallback)")
+    } else {
+        format!("{name} — describe")
+    };
+    let error = match output {
+        Ok(out) if out.status.success() => {
+            return Msg::DescribeReady {
+                generation,
+                claim,
+                title,
+                lines: String::from_utf8_lossy(&out.stdout)
+                    .lines()
+                    .map(String::from)
+                    .collect(),
+                warn: None,
+            };
+        }
+        Ok(out) => format!(
+            "kubectl describe failed ({})",
+            String::from_utf8_lossy(&out.stderr)
+                .lines()
+                .next()
+                .unwrap_or("error")
+        ),
+        Err(error) => format!("kubectl describe could not start: {error}"),
+    };
+    match yaml {
+        Some(lines) => Msg::DescribeReady {
+            generation,
+            claim,
+            title: format!("{name} — YAML"),
+            lines,
+            warn: Some(format!("{error}; showing YAML")),
+        },
+        None => Msg::DescribeReady {
+            generation,
+            claim,
+            title,
+            lines: vec![format!("Describe failed: {error}")],
+            warn: Some(error),
+        },
     }
 }
 
