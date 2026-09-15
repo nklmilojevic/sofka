@@ -12,6 +12,7 @@ use crate::k8s::Cluster;
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 
 const CHILD_TEST: &str = "terminal::tests::terminal_plugin_child";
+const COMMAND_TEST: &str = "terminal::tests::terminal_plugin_command";
 const CASE_ENV: &str = "SOFKA_TERMINAL_TEST_CASE";
 
 struct Session {
@@ -190,6 +191,27 @@ fn read_key() -> KeyEvent {
     }
 }
 
+#[test]
+fn terminal_plugin_command() {
+    let Ok(case) = std::env::var(CASE_ENV) else {
+        return;
+    };
+    // Check the dispositions after exec, before the parent can send a signal.
+    for signal in [libc::SIGINT, libc::SIGQUIT] {
+        assert_eq!(signal_action(signal).sa_sigaction, libc::SIG_DFL);
+    }
+    println!("PLUGIN_READY");
+    io::stdout().flush().unwrap();
+    if case == "exit" {
+        let mut answer = String::new();
+        io::stdin().read_line(&mut answer).unwrap();
+        assert_eq!(answer.trim_end(), "done");
+    } else {
+        std::thread::sleep(Duration::from_secs(30));
+        panic!("terminal interrupt did not stop the command");
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn terminal_plugin_child() {
     let Ok(case) = std::env::var(CASE_ENV) else {
@@ -201,20 +223,11 @@ async fn terminal_plugin_child() {
         key: "alt-g".into(),
         name: "terminal-test".into(),
         command: if case == "missing" {
-            "/sofka-test-command-does-not-exist"
+            "/sofka-test-command-does-not-exist".into()
         } else {
-            "/bin/sh"
-        }
-        .into(),
-        args: vec![
-            "-c".into(),
-            if case == "exit" {
-                "printf 'PLUGIN_READY\n'; read answer; test \"$answer\" = done"
-            } else {
-                "printf 'PLUGIN_READY\n'; exec sleep 30"
-            }
-            .into(),
-        ],
+            std::env::current_exe().unwrap().to_str().unwrap().into()
+        },
+        args: vec!["--exact".into(), COMMAND_TEST.into(), "--nocapture".into()],
         target: Some("context".into()),
         mutating: Some(false),
         output: Some("terminal".into()),
