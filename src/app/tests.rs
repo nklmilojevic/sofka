@@ -7,6 +7,7 @@ use tokio::sync::mpsc::{self, Receiver};
 
 mod flux;
 mod label_filter;
+mod oidc;
 mod popup_wrapping;
 mod proxy;
 mod scale;
@@ -26394,10 +26395,34 @@ fn oidc_test_token(expiry: i64) -> String {
 }
 
 async fn read_pods_through_a_configured_ca_server_certificate(oidc: bool) {
+    let token = oidc_test_token(4_070_908_800);
+    let provider = oidc.then(|| {
+        serde_json::from_value(json!({
+            "name": "oidc",
+            "config": {"id-token": token}
+        }))
+        .unwrap()
+    });
+    read_pods_with_tls_and_auth(true, provider, oidc.then_some(token.as_str())).await;
+}
+
+async fn read_pods_with_tls_and_auth(
+    configured_ca: bool,
+    provider: Option<kube::config::AuthProviderConfig>,
+    expected_token: Option<&str>,
+) {
     use rustls::pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-    let pem = include_bytes!("../../tests/fixtures/tls/proxy-ca.pem");
+    let (pem, root): (&[u8], &[u8]) = if configured_ca {
+        let pem = include_bytes!("../../tests/fixtures/tls/proxy-ca.pem");
+        (pem, pem)
+    } else {
+        (
+            include_bytes!("../../tests/fixtures/tls/server.pem"),
+            include_bytes!("../../tests/fixtures/tls/ca.pem"),
+        )
+    };
     let der = CertificateDer::from_pem_slice(pem).unwrap();
     let tls = rustls::ServerConfig::builder()
         .with_no_client_auth()
@@ -26413,19 +26438,10 @@ async fn read_pods_through_a_configured_ca_server_certificate(oidc: bool) {
             .parse()
             .unwrap(),
     );
-    config.root_cert = Some(vec![der.to_vec()]);
+    config.root_cert = Some(vec![CertificateDer::from_pem_slice(root).unwrap().to_vec()]);
     config.tls_server_name = Some("localhost".into());
     config.default_retry = false;
-    let token = oidc_test_token(4_070_908_800);
-    if oidc {
-        config.auth_info.auth_provider = Some(
-            serde_json::from_value(json!({
-                "name": "oidc",
-                "config": {"id-token": token}
-            }))
-            .unwrap(),
-        );
-    }
+    config.auth_info.auth_provider = provider;
     let (request_tx, mut requests) = mpsc::unbounded_channel();
     let server = tokio::spawn(async move {
         let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(tls));
@@ -26466,7 +26482,7 @@ async fn read_pods_through_a_configured_ca_server_certificate(oidc: bool) {
     sync_selector_view(&mut app, &mut rx).await;
     assert_eq!(row_names(&app), ["proxy-pod"]);
     let request = requests.recv().await.unwrap();
-    if oidc {
+    if let Some(token) = expected_token {
         assert!(request.lines().any(|line| {
             line.split_once(':').is_some_and(|(name, value)| {
                 name.eq_ignore_ascii_case("authorization")
