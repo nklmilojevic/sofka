@@ -16,8 +16,8 @@
 //!
 //! Override files are partial configs merged over the base (cluster level
 //! first, then context level): tables like `[aliases]` and `[skin.colors]`
-//! merge key-by-key, everything else — strings, booleans, arrays like
-//! `[[plugins]]` — replaces the base value. Directory names are the
+//! merge key by key. Other values replace the base value unless a file sets
+//! `plugins_merge = "name"` for inline plugins. Directory names are the
 //! kubeconfig names sanitized for the filesystem: any character other than
 //! ASCII letters, digits, `.`, `_` and `-` becomes `-`, so an EKS context
 //! `arn:aws:eks:eu-west-1:123:cluster/prod` lives in
@@ -40,6 +40,21 @@ use serde::Deserialize;
 
 mod document;
 mod key_migration;
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct PluginMergeControls {
+    plugins_merge: PluginMergeMode,
+    plugins_remove: Vec<String>,
+}
+
+#[derive(Debug, Default, Deserialize, PartialEq)]
+#[serde(rename_all = "lowercase")]
+enum PluginMergeMode {
+    #[default]
+    Replace,
+    Name,
+}
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
@@ -67,6 +82,8 @@ pub struct Config {
     pub favorite_namespaces: Vec<String>,
     /// User-defined shell-out plugins bound to keys.
     pub plugins: Vec<Plugin>,
+    #[serde(flatten)]
+    pub plugin_merge: PluginMergeControls,
     /// Saved navigation commands bound to keys and the palette — see
     /// [`Bookmark`]. Validated by [`bookmark_warnings`].
     pub bookmarks: Vec<Bookmark>,
@@ -1410,7 +1427,11 @@ impl ConfigLoader {
         {
             migrations.push(migration);
         }
-        let base = merged.clone();
+        let mut base = toml::Value::Table(toml::Table::new());
+        if let Err(e) = merge_config(&mut base, merged) {
+            warnings.push(format!("ignoring invalid base config: {e}"));
+        }
+        let mut merged = base.clone();
 
         for path in self.dropin_paths() {
             match read_dropin(&path) {
@@ -1418,7 +1439,9 @@ impl ConfigLoader {
                     if let Some(migration) = key_migration::prepare(&mut v, &path, &mut warnings) {
                         migrations.push(migration);
                     }
-                    merge(&mut merged, v);
+                    if let Err(e) = merge_config(&mut merged, v) {
+                        warnings.push(format!("ignoring invalid {}: {e}", path.display()));
+                    }
                 }
                 Ok(None) => {}
                 Err(e) => warnings.push(format!("ignoring invalid {}: {e}", path.display())),
@@ -1431,8 +1454,12 @@ impl ConfigLoader {
                     if let Some(migration) = key_migration::prepare(&mut v, &path, &mut warnings) {
                         migrations.push(migration);
                     }
-                    merge(&mut merged, v.clone());
-                    merge(&mut overlay, v);
+                    match merge_config(&mut merged, v.clone()) {
+                        Ok(()) => merge(&mut overlay, v),
+                        Err(e) => {
+                            warnings.push(format!("ignoring invalid {}: {e}", path.display()))
+                        }
+                    }
                 }
                 Ok(None) => {}
                 Err(e) => warnings.push(format!("ignoring invalid {}: {e}", path.display())),
@@ -1482,6 +1509,56 @@ impl ConfigLoader {
             warnings,
         }
     }
+}
+
+/// Apply plugin controls once at the document root, then merge other settings.
+fn merge_config(base: &mut toml::Value, mut overlay: toml::Value) -> Result<(), toml::de::Error> {
+    let controls: PluginMergeControls = overlay.clone().try_into()?;
+    let Some(table) = overlay.as_table_mut() else {
+        return Ok(());
+    };
+    table.remove("plugins_merge");
+    table.remove("plugins_remove");
+    if let Some(entries) = base.get_mut("plugins").and_then(toml::Value::as_array_mut) {
+        entries.retain(|entry| {
+            !entry
+                .get("name")
+                .and_then(toml::Value::as_str)
+                .is_some_and(|name| {
+                    controls
+                        .plugins_remove
+                        .iter()
+                        .any(|removed| removed == name)
+                })
+        });
+    }
+    if controls.plugins_merge == PluginMergeMode::Name
+        && let Some(toml::Value::Array(entries)) = table.get("plugins")
+    {
+        let mut combined = base
+            .get("plugins")
+            .and_then(toml::Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        // Process both lists to remove repeated names while keeping their first position.
+        let incoming = combined
+            .drain(..)
+            .chain(entries.iter().cloned())
+            .collect::<Vec<_>>();
+        for entry in incoming {
+            let name = entry.get("name").and_then(toml::Value::as_str);
+            if let Some(index) = combined.iter().position(|old| {
+                name.is_some() && old.get("name").and_then(toml::Value::as_str) == name
+            }) {
+                combined[index] = entry;
+            } else {
+                combined.push(entry);
+            }
+        }
+        table.insert("plugins".into(), toml::Value::Array(combined));
+    }
+    merge(base, overlay);
+    Ok(())
 }
 
 /// Recursively merge `overlay` into `base`: tables merge key-by-key, any
@@ -1549,7 +1626,14 @@ fn read_dropin(path: &Path) -> Result<Option<toml::Value>, String> {
 
 fn read_file(path: &Path) -> Result<Option<toml::Value>, String> {
     match std::fs::read_to_string(path) {
-        Ok(text) => document::parse(path, &text).map(Some),
+        Ok(text) => {
+            let value = document::parse(path, &text)?;
+            let _: PluginMergeControls = value
+                .clone()
+                .try_into()
+                .map_err(|e: toml::de::Error| e.to_string())?;
+            Ok(Some(value))
+        }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(e) => Err(e.to_string()),
     }
@@ -2051,6 +2135,161 @@ mod tests {
 
     fn val(s: &str) -> toml::Value {
         parse_doc(s).unwrap()
+    }
+
+    #[test]
+    fn plugin_name_merge_replaces_whole_entries_and_preserves_order() {
+        let mut base = val(r#"
+plugins = [
+    { name = "a", command = "old", args = ["old"], mutating = false },
+    { name = "b", command = "keep" },
+    { name = "a", command = "duplicate" },
+]
+bookmarks = [{ name = "old", resource = "pods" }]
+"#);
+        merge_config(
+            &mut base,
+            val(r#"
+plugins_merge = "name"
+plugins = [
+    { name = "a", command = "first" },
+    { name = "c", command = "new" },
+    { name = "a", command = "last" },
+    { name = "A", command = "case-sensitive" },
+]
+bookmarks = []
+"#),
+        )
+        .unwrap();
+        let config: Config = base.clone().try_into().unwrap();
+        assert_eq!(
+            config
+                .plugins
+                .iter()
+                .map(|p| p.name.as_str())
+                .collect::<Vec<_>>(),
+            ["a", "b", "c", "A"]
+        );
+        assert_eq!(config.plugins[0].command, "last");
+        assert!(config.plugins[0].args.is_empty());
+        assert_eq!(config.plugins[0].mutating, None);
+        assert!(config.bookmarks.is_empty());
+        assert!(base.get("plugins_merge").is_none());
+
+        merge_config(&mut base, val("plugins_merge = 'name'\nplugins = []")).unwrap();
+        assert_eq!(base["plugins"].as_array().unwrap().len(), 4);
+        merge_config(&mut base, val("plugins = []")).unwrap();
+        assert!(base["plugins"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn plugin_removal_runs_before_addition_and_does_not_carry_forward() {
+        let mut base =
+            val("plugins = [{ name = 'a', command = 'old' }, { name = 'b', command = 'keep' }]");
+        merge_config(&mut base, val("plugins_remove = ['a', 'absent']")).unwrap();
+        assert_eq!(base["plugins"].as_array().unwrap().len(), 1);
+        merge_config(
+            &mut base,
+            val("plugins_merge = 'name'\nplugins = [{ name = 'a', command = 'new' }]"),
+        )
+        .unwrap();
+        merge_config(&mut base, val("plugins_remove = ['b']\nplugins_merge = 'name'\nplugins = [{ name = 'b', command = 'redefined' }]")).unwrap();
+        let config: Config = base.try_into().unwrap();
+        assert_eq!(
+            config
+                .plugins
+                .iter()
+                .map(|p| p.name.as_str())
+                .collect::<Vec<_>>(),
+            ["a", "b"]
+        );
+        assert_eq!(config.plugins[1].command, "redefined");
+    }
+
+    #[test]
+    fn invalid_plugin_controls_do_not_change_the_base() {
+        for text in [
+            "plugins_merge = 'invalid'",
+            "plugins_merge = true",
+            "plugins_remove = 'a'",
+            "plugins_remove = [1]",
+        ] {
+            assert!(validate(text).is_err(), "{text}");
+            let mut base = val("plugins = [{ name = 'a', command = 'keep' }]");
+            let before = base.clone();
+            assert!(merge_config(&mut base, val(text)).is_err());
+            assert_eq!(base, before);
+        }
+    }
+
+    #[test]
+    fn plugin_controls_follow_file_order_in_toml_and_yaml() {
+        let dir = std::env::temp_dir().join(format!("sofka-plugin-merge-{}", std::process::id()));
+        let context = dir.join("clusters/c1/ctx");
+        std::fs::create_dir_all(&context).unwrap();
+        std::fs::create_dir_all(dir.join("conf.d")).unwrap();
+        std::fs::write(
+            dir.join("config.toml"),
+            "plugins_merge = 'name'\nplugins = [{ name = 'personal', command = 'base' }]",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("conf.d/10-team.yaml"),
+            "plugins_merge: name\nplugins:\n  - name: team\n    command: team\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("conf.d/20-personal.toml"),
+            "plugins_merge = 'name'\nplugins = [{ name = 'personal', command = 'dropin' }]",
+        )
+        .unwrap();
+        std::fs::write(dir.join("clusters/c1/config.yaml"), "plugins_merge: name\nplugins_remove: [team]\nplugins:\n  - name: personal\n    command: cluster\n").unwrap();
+        std::fs::write(
+            context.join("config.toml"),
+            "plugins_merge = 'name'\nplugins = [{ name = 'personal', command = 'context' }]",
+        )
+        .unwrap();
+        let loader = ConfigLoader::from_dir(Some(dir.clone()));
+        for (ctx, cluster, command, team) in [
+            ("", "", "dropin", true),
+            ("", "c1", "cluster", false),
+            ("ctx", "c1", "context", false),
+        ] {
+            let resolved = loader.resolve(ctx, cluster);
+            assert!(resolved.warnings.is_empty(), "{:?}", resolved.warnings);
+            assert_eq!(
+                resolved
+                    .config
+                    .plugins
+                    .iter()
+                    .find(|p| p.name == "personal")
+                    .unwrap()
+                    .command,
+                command
+            );
+            assert_eq!(
+                resolved.config.plugins.iter().any(|p| p.name == "team"),
+                team
+            );
+        }
+        std::fs::write(context.join("config.toml"), "plugins = []").unwrap();
+        let resolved = loader.resolve("ctx", "c1");
+        assert!(
+            !resolved
+                .config
+                .plugins
+                .iter()
+                .any(|p| p.name == "personal" || p.name == "team")
+        );
+        std::fs::write(
+            context.join("config.toml"),
+            "plugins_merge = 'invalid'\nplugins = []",
+        )
+        .unwrap();
+        let resolved = loader.resolve("ctx", "c1");
+        assert_eq!(resolved.warnings.len(), 1);
+        assert!(resolved.config.plugins.iter().any(|p| p.name == "personal"));
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

@@ -16457,6 +16457,41 @@ columns = [
 }
 
 #[tokio::test]
+async fn reload_merges_and_removes_inline_plugins_through_the_palette() {
+    let dir =
+        std::env::temp_dir().join(format!("sofka-reload-plugin-merge-{}", std::process::id()));
+    write_config(
+        &dir,
+        "plugins = [{ name = 'personal', palette = 'personal', command = 'old', args = ['old'] }]",
+    );
+    std::fs::create_dir_all(dir.join("conf.d")).unwrap();
+    let path = dir.join("conf.d/team.yaml");
+    std::fs::write(&path, "plugins_merge: name\nplugins:\n  - name: team\n    palette: team\n    command: team\n  - name: personal\n    palette: personal\n    command: new\n").unwrap();
+    let (mut app, _rx) = test_app();
+    app.config = crate::config::ConfigLoader::from_dir(Some(dir.clone()));
+    palette(&mut app, "reload");
+    assert!(!app.flash_err, "{}", app.flash);
+    assert!(app.config_warnings.is_empty(), "{:?}", app.config_warnings);
+    let personal = app.plugins.iter().find(|p| p.name == "personal").unwrap();
+    assert_eq!(personal.command, "new");
+    assert!(personal.args.is_empty());
+    assert!(app.plugins.iter().any(|p| p.name == "team"));
+    std::fs::write(&path, "plugins_remove: [personal]\nplugins_merge: name\nplugins:\n  - name: team\n    palette: team\n    command: team\n").unwrap();
+    palette(&mut app, "reload");
+    assert!(!app.flash_err, "{}", app.flash);
+    assert!(!app.plugins.iter().any(|p| p.name == "personal"));
+    assert!(app.plugins.iter().any(|p| p.name == "team"));
+    std::fs::write(&path, "plugins: []\n").unwrap();
+    palette(&mut app, "reload");
+    assert!(
+        !app.plugins
+            .iter()
+            .any(|p| p.name == "personal" || p.name == "team")
+    );
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[tokio::test]
 async fn reload_applies_config_changes_live() {
     let dir = std::env::temp_dir().join(format!("sofka-app-reload-ok-{}", std::process::id()));
     write_config(&dir, "[aliases]\ndep = \"deployments\"\n");

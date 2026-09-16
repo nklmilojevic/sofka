@@ -74,12 +74,76 @@ keep personal settings in another:
 TOML and YAML files can be mixed in `conf.d/`. Drop-in files merge before the
 cluster and context overrides, so those keep the last word. The merge rules are
 the same as for [overrides](#per-cluster-and-per-context-overrides): tables
-merge key by key, and arrays like `[[plugins]]` replace the base value. An
+merge key by key, and arrays like `[[plugins]]` replace the base value by default.
+Use [inline plugin merging](#inline-plugin-merging) to combine plugins by name. An
 invalid drop-in file is skipped with a warning. `:config` lists the drop-in
 files and `:reload` reads them again.
 
 The [Home Manager module](home-manager.md) can manage generated TOML settings
 or existing TOML and YAML files, including cluster and context overrides.
+
+## Inline plugin merging
+
+By default, each file that contains `plugins` replaces the complete inherited
+inline plugin list. To keep shared and personal plugins, set
+`plugins_merge = "name"` at the top level of each file that must combine lists.
+
+For example, keep personal plugins in `config.toml` and put this shared file in
+`conf.d/10-team.toml`:
+
+```toml
+plugins_merge = "name"
+
+[[plugins]]
+name = "Team logs"
+key = "ctrl-l"
+command = "kubectl"
+args = ["logs", "-f", "-n", "$NAMESPACE", "$NAME"]
+scopes = ["pods"]
+output = "terminal"
+mutating = false
+```
+
+Names match exactly and are case-sensitive. A new name is added at the end of
+the list. An existing name keeps its position, but the later entry replaces its
+complete definition. Fields are not combined: include all required fields,
+including `command`, in each replacement. This prevents old arguments or
+permissions from carrying into a new command. If a name occurs more than once,
+the last definition wins and the first position is kept.
+
+Use `plugins_remove` to remove inherited inline entries by name. Removal runs
+before the entries in the same file are applied. Unknown names have no effect.
+A file can remove a name and then add a new definition with that name.
+
+```toml
+# conf.d/20-personal.toml
+plugins_merge = "name"
+plugins_remove = ["Team logs"]
+
+[[plugins]]
+name = "Personal logs"
+palette = "personal-logs"
+command = "kubectl"
+args = ["logs", "--tail=100", "-n", "$NAMESPACE", "$NAME"]
+scopes = ["pods"]
+output = "popup"
+mutating = false
+```
+
+Both controls apply only to the file that contains them. A later file uses
+`plugins_merge = "replace"` unless it explicitly selects `"name"`. A file with
+no `plugins` field keeps the inherited list, apart from requested removals.
+In replace mode, `plugins = []` clears the inherited inline list. In name mode,
+an empty list adds nothing. Other arrays still use replacement.
+
+The controls work in TOML and YAML, in the base file, `conf.d/`, cluster files,
+and context files. The order stays the same: base, drop-in files in file name
+order, cluster, then context. `:reload` applies the same rules.
+
+Package and bundled plugins load after inline configuration. These controls do
+not disable those plugins. Removing an inline entry can expose a package or
+bundled plugin that the entry previously replaced. Package terminal support is
+unchanged.
 
 ## YAML format
 
@@ -356,7 +420,9 @@ in the same directory.
 
 Overrides merge over the base config, cluster level first, then context level.
 Tables like `[aliases]` and `[skin.colors]` merge key by key. Everything else -
-strings, booleans, and arrays like `[[plugins]]` - replaces the base value.
+strings, booleans, and arrays like `[[plugins]]` - replaces the base value by
+default. [Inline plugin merging](#inline-plugin-merging) can change this rule
+for plugins in an individual file.
 
 Directory names are the kubeconfig names, with any character that isn't a
 letter, digit, `.`, `_`, or `-` replaced by `-`. So the EKS context
