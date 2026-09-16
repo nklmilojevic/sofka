@@ -26377,6 +26377,23 @@ async fn bundled_plugin_receives_tls_resumption_option_only_when_enabled() {
 
 #[tokio::test]
 async fn refresh_key_reads_pods_through_a_configured_ca_server_certificate() {
+    read_pods_through_a_configured_ca_server_certificate(false).await;
+}
+
+#[tokio::test]
+async fn refresh_key_reads_pods_with_oidc_and_a_configured_ca_server_certificate() {
+    read_pods_through_a_configured_ca_server_certificate(true).await;
+}
+
+fn oidc_test_token(expiry: i64) -> String {
+    use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+
+    let header = URL_SAFE_NO_PAD.encode(r#"{"alg":"RS256","typ":"JWT"}"#);
+    let payload = URL_SAFE_NO_PAD.encode(json!({"exp": expiry}).to_string());
+    format!("{header}.{payload}.test-signature")
+}
+
+async fn read_pods_through_a_configured_ca_server_certificate(oidc: bool) {
     use rustls::pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -26399,6 +26416,16 @@ async fn refresh_key_reads_pods_through_a_configured_ca_server_certificate() {
     config.root_cert = Some(vec![der.to_vec()]);
     config.tls_server_name = Some("localhost".into());
     config.default_retry = false;
+    let token = oidc_test_token(4_070_908_800);
+    if oidc {
+        config.auth_info.auth_provider = Some(
+            serde_json::from_value(json!({
+                "name": "oidc",
+                "config": {"id-token": token}
+            }))
+            .unwrap(),
+        );
+    }
     let (request_tx, mut requests) = mpsc::unbounded_channel();
     let server = tokio::spawn(async move {
         let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(tls));
@@ -26438,11 +26465,74 @@ async fn refresh_key_reads_pods_through_a_configured_ca_server_certificate() {
     app.handle_key(press(KeyCode::Char('r'))).unwrap();
     sync_selector_view(&mut app, &mut rx).await;
     assert_eq!(row_names(&app), ["proxy-pod"]);
-    let request = requests.recv().await.unwrap().to_ascii_lowercase();
+    let request = requests.recv().await.unwrap();
+    if oidc {
+        assert!(request.lines().any(|line| {
+            line.split_once(':').is_some_and(|(name, value)| {
+                name.eq_ignore_ascii_case("authorization")
+                    && value.trim() == format!("Bearer {token}")
+            })
+        }));
+    }
+    let request = request.to_ascii_lowercase();
     assert!(request.contains("watch=true"), "{request}");
     assert!(request.contains("accept-encoding: identity"), "{request}");
     app.handle_key(press(KeyCode::Char('q'))).unwrap();
     server.abort();
+}
+
+#[tokio::test]
+async fn refresh_key_reports_oidc_refresh_failure_for_an_expired_token() {
+    use rustls::pki_types::{CertificateDer, pem::PemObject};
+
+    for configured_ca in [false, true] {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let mut config = kube::Config::new(
+            format!("https://{}", listener.local_addr().unwrap())
+                .parse()
+                .unwrap(),
+        );
+        if configured_ca {
+            config.root_cert = Some(vec![
+                CertificateDer::from_pem_slice(include_bytes!(
+                    "../../tests/fixtures/tls/proxy-ca.pem"
+                ))
+                .unwrap()
+                .to_vec(),
+            ]);
+        }
+        config.default_retry = false;
+        config.auth_info.auth_provider = Some(
+            serde_json::from_value(json!({
+                "name": "oidc",
+                "config": {
+                    "id-token": oidc_test_token(1),
+                    "idp-issuer-url": "https://issuer.invalid",
+                    "client-id": "test-client",
+                    "refresh-token": "test-refresh-token"
+                }
+            }))
+            .unwrap(),
+        );
+        let (mut app, mut rx) = test_app();
+        app.cluster.client = crate::k8s::build_client(config, false, false).unwrap();
+        app.kind = app.cluster.resolve("pods");
+        app.kind_plural = "pods".into();
+        app.handle_key(press(KeyCode::Char('r'))).unwrap();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while app.last_error.is_none() {
+                app.handle_msg(rx.recv().await.expect("watch channel closed"));
+            }
+        })
+        .await
+        .expect("OIDC refresh error timeout");
+        let error = app.last_error.as_deref().unwrap();
+        assert!(error.contains("failed OIDC"), "{error}");
+        assert!(error.contains("ID token expired"), "{error}");
+        assert!(error.contains("missing field client-secret"), "{error}");
+        assert!(!error.contains("test-refresh-token"), "{error}");
+        app.handle_key(press(KeyCode::Char('q'))).unwrap();
+    }
 }
 
 #[tokio::test]

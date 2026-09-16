@@ -24,7 +24,11 @@ pub(crate) fn configured_roots(config: &Config) -> Option<&[Vec<u8>]> {
     if config.accept_invalid_certs
         || config.root_cert_file.is_some()
         || config.auth_info.exec.is_some()
-        || config.auth_info.auth_provider.is_some()
+        || config
+            .auth_info
+            .auth_provider
+            .as_ref()
+            .is_some_and(|provider| provider.name != "oidc")
     {
         return None;
     }
@@ -293,6 +297,30 @@ mod tests {
             CertificateDer::from_pem_slice(PROXY).unwrap().to_vec(),
         ]);
         assert!(configured_roots(&config).is_some());
+        config.accept_invalid_certs = true;
+        assert!(configured_roots(&config).is_none());
+        config.accept_invalid_certs = false;
+        config.root_cert_file = Some("/test/ca.pem".into());
+        assert!(configured_roots(&config).is_none());
+    }
+
+    #[test]
+    fn only_oidc_providers_allow_the_configured_ca_exception() {
+        let mut config = Config::new("https://localhost".parse().unwrap());
+        config.root_cert = Some(vec![
+            CertificateDer::from_pem_slice(PROXY).unwrap().to_vec(),
+        ]);
+        for name in ["oidc", "gcp", "azure", "unknown"] {
+            config.auth_info.auth_provider = Some(kube::config::AuthProviderConfig {
+                name: name.into(),
+                ..Default::default()
+            });
+            assert_eq!(configured_roots(&config).is_some(), name == "oidc");
+        }
+        config.auth_info.auth_provider.as_mut().unwrap().name = "oidc".into();
+        config.auth_info.exec = Some(kube::config::ExecConfig::default());
+        assert!(configured_roots(&config).is_none());
+        config.auth_info.exec = None;
         config.accept_invalid_certs = true;
         assert!(configured_roots(&config).is_none());
         config.accept_invalid_certs = false;

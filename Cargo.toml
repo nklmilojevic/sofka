@@ -41,6 +41,7 @@ kube = { version = "4.2.0", default-features = false, features = [
   "http-proxy",
   "socks5",
   "gzip",
+  "oidc",
   "rustls-tls",
   "aws-lc-rs",
 ] }
