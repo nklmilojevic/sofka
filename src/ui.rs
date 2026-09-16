@@ -2713,6 +2713,8 @@ fn build_help(app: &App, width: usize) -> (Vec<Line<'static>>, String) {
             }
         } else if scope == "table" && action == Action::Describe {
             "describe; experimental native backend: --experimental-describe or experimental.native_describe in config"
+        } else if scope == "table" && action == Action::RestartOrRefresh {
+            "restart workloads (marked rows, or current); force-sync external secrets; rollback Helm history; refresh elsewhere"
         } else if scope == "table" && action == Action::Logs {
             "logs (marked pods, or current row)"
         } else if scope == "table" && action == Action::ActionMenu {

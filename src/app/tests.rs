@@ -11,6 +11,7 @@ mod node_roles;
 mod oidc;
 mod popup_wrapping;
 mod proxy;
+mod restart;
 mod scale;
 mod server_table;
 mod synchronized_output;
@@ -5642,8 +5643,8 @@ async fn restart_key_opens_confirm() {
     assert!(!app.confirm_allows_force_toggle());
     assert!(matches!(
         app.confirm_action,
-        Some(ConfirmAction::Restart { ref name, ref ns, .. })
-            if name == "web" && ns == "default"
+        Some(ConfirmAction::Restart { ref targets, .. })
+            if targets == &vec![("web".into(), "default".into())]
     ));
 
     // Cancelling leaves the workload untouched.

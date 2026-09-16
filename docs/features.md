@@ -519,6 +519,10 @@ concurrent drains, and full kubectl drain parity are outside this feature.
   all the inspection is native. UPDATED advances with the clock in both the
   release list and revision history. The table keeps the deployment timestamp
   in its row cache, so clock updates do not decode the release again.
+- **Restart workloads** (`r`) - restart marked Deployments, StatefulSets, or
+  DaemonSets after confirmation. With no marked rows, restart the current row.
+  Guardrails apply to the full target set. A failed request does not stop requests
+  for the other targets.
 - **Scale discovered resources** (`s`) - scale built-in or custom resources when
   API discovery lists a `scale` subresource with PATCH support. Changes use
   `/scale`, including when a CRD stores replicas at a custom path. Marked rows

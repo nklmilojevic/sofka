@@ -331,13 +331,10 @@ enum ConfirmAction {
         targets: Vec<String>,
         options: drain::DrainOptions,
     },
-    /// Rollout-restart a workload by stamping the pod template's
-    /// `restartedAt` annotation (k9s `r`). Single-target — acts on the
-    /// selected row, never bulk.
+    /// Restart the marked workloads, or the current workload if none are marked.
     Restart {
         kind: Kind,
-        name: String,
-        ns: String,
+        targets: Vec<(String, String)>,
     },
     /// Roll a Helm release back to an earlier revision (`helm rollback`) —
     /// always a single revision, never bulk (mirrors k9s: rollback acts on

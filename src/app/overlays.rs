@@ -128,8 +128,9 @@ impl App {
                 self.do_drain_nodes(targets, options);
                 self.marked.clear();
             }
-            ConfirmAction::Restart { kind, name, ns } => {
-                self.do_restart(kind, name, ns);
+            ConfirmAction::Restart { kind, targets } => {
+                self.do_restart(kind, targets);
+                self.marked.clear();
             }
             ConfirmAction::HelmRollback { ns, name, revision } => {
                 self.do_helm_rollback(ns, name, revision);
