@@ -104,7 +104,7 @@ impl App {
         let tx = self.tx.clone();
         let genr = self.generation;
         tokio::spawn(async move {
-            let mut failed = false;
+            let mut errors = Vec::new();
             for (name, ns) in targets {
                 let api: Api<DynamicObject> = if kind.namespaced && !ns.is_empty() {
                     Api::namespaced_with(client.clone(), &ns, &kind.ar)
@@ -122,27 +122,19 @@ impl App {
                         .map(|_| ()),
                 };
                 if let Err(e) = result {
-                    failed = true;
-                    let _ = tx
-                        .send(Msg::Flash {
-                            generation: genr,
-                            claim,
-                            message: error_message(&name, &ns, e),
-                            err: true,
-                        })
-                        .await;
+                    errors.push(error_message(&name, &ns, e));
                 }
             }
-            if !failed {
-                let _ = tx
-                    .send(Msg::Flash {
-                        generation: genr,
-                        claim,
-                        message: ok_message,
-                        err: false,
-                    })
-                    .await;
-            }
+            let err = !errors.is_empty();
+            let message = if err { errors.join("; ") } else { ok_message };
+            let _ = tx
+                .send(Msg::Flash {
+                    generation: genr,
+                    claim,
+                    message,
+                    err,
+                })
+                .await;
         });
     }
 

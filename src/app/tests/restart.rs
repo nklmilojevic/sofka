@@ -32,7 +32,8 @@ async fn restart_patches_only_confirmed_targets_and_continues_after_failure() {
         ("daemonsets", "DaemonSet"),
     ] {
         for bulk in [false, true] {
-            for fail in [false, true] {
+            for failures in 0..=if bulk { 2 } else { 1 } {
+                let fail = failures > 0;
                 let (mut app, mut rx) = marked_workloads(plural, kind);
                 if !bulk {
                     app.handle_key(press(KeyCode::Esc)).unwrap();
@@ -52,7 +53,8 @@ async fn restart_patches_only_confirmed_targets_and_continues_after_failure() {
                             let patch: Value = serde_json::from_slice(&bytes).unwrap();
                             let path = parts.uri.path().to_string();
                             requests.send((path.clone(), patch)).unwrap();
-                            let denied = fail && (!bulk || path.contains("/namespaces/a/"));
+                            let denied =
+                                fail && (failures == 2 || !bulk || path.contains("/namespaces/a/"));
                             let (status, body) = if denied {
                                 (
                                     403,
@@ -137,7 +139,10 @@ async fn restart_patches_only_confirmed_targets_and_continues_after_failure() {
                 assert!(patches.iter().all(|patch| patch == &patches[0]));
                 tokio::time::timeout(Duration::from_secs(2), async {
                     while let Some(msg) = rx.recv().await {
-                        if let Msg::Flash { message, err, .. } = msg {
+                        if let Msg::Flash {
+                            ref message, err, ..
+                        } = msg
+                        {
                             assert_eq!(err, fail);
                             assert!(
                                 message.contains(if fail {
@@ -151,6 +156,19 @@ async fn restart_patches_only_confirmed_targets_and_continues_after_failure() {
                                 }),
                                 "{message}"
                             );
+                            if failures == 2 {
+                                assert!(message.contains("restart web in b failed:"), "{message}");
+                            }
+                            let expected = message.clone();
+                            app.handle_msg(msg);
+                            assert_eq!(app.flash, expected);
+                            assert_eq!(app.flash_err, fail);
+                            if fail {
+                                assert_eq!(
+                                    app.last_action_error.as_deref(),
+                                    Some(expected.as_str())
+                                );
+                            }
                             break;
                         }
                     }
@@ -165,7 +183,7 @@ async fn restart_patches_only_confirmed_targets_and_continues_after_failure() {
                         .is_none()
                 );
                 while let Ok(msg) = rx.try_recv() {
-                    assert!(!matches!(msg, Msg::Flash { err: false, .. }) || !fail);
+                    assert!(!matches!(msg, Msg::Flash { .. }));
                 }
             }
         }

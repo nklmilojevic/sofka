@@ -522,7 +522,7 @@ concurrent drains, and full kubectl drain parity are outside this feature.
 - **Restart workloads** (`r`) - restart marked Deployments, StatefulSets, or
   DaemonSets after confirmation. With no marked rows, restart the current row.
   Guardrails apply to the full target set. A failed request does not stop requests
-  for the other targets.
+  for the other targets. The final error report retains all failed targets.
 - **Scale discovered resources** (`s`) - scale built-in or custom resources when
   API discovery lists a `scale` subresource with PATCH support. Changes use
   `/scale`, including when a CRD stores replicas at a custom path. Marked rows
