@@ -51,6 +51,7 @@ struct CellContext<'a> {
     age: OnceCell<String>,
     pod: OnceCell<(String, String, String)>,
     helm: OnceCell<Option<crate::helm::Summary>>,
+    node_roles: Option<std::sync::Arc<crate::config::NodeRoles>>,
 }
 
 impl<'a> CellContext<'a> {
@@ -63,6 +64,7 @@ impl<'a> CellContext<'a> {
             age: OnceCell::new(),
             pod: OnceCell::new(),
             helm: OnceCell::new(),
+            node_roles: None,
         }
     }
 
@@ -419,6 +421,7 @@ pub struct ViewSpec {
     plural: String,
     columns: Vec<SpecColumn>,
     status_idx: Option<usize>,
+    node_roles: Option<std::sync::Arc<crate::config::NodeRoles>>,
 }
 
 struct SpecColumn {
@@ -600,6 +603,7 @@ pub fn build_spec(
         plural: plural.to_string(),
         columns: cols,
         status_idx,
+        node_roles: None,
     }
 }
 
@@ -643,10 +647,23 @@ pub fn build_table_spec(
         plural: plural.into(),
         columns: resolved,
         status_idx: None,
+        node_roles: None,
     }
 }
 
 impl ViewSpec {
+    pub(crate) fn set_node_roles(&mut self, sources: std::sync::Arc<crate::config::NodeRoles>) {
+        if self.group.is_empty() && self.plural == "nodes" {
+            self.node_roles = Some(sources);
+        }
+    }
+
+    fn cell_context<'a>(&self, obj: &'a DynamicObject, now: i64) -> CellContext<'a> {
+        let mut ctx = CellContext::new(obj, now);
+        ctx.node_roles = self.node_roles.clone();
+        ctx
+    }
+
     pub fn metric_at(&self, idx: usize) -> Option<MetricColumn> {
         match &self.columns.get(idx)?.source {
             SpecSource::User(uc) => match uc.kind {
@@ -718,7 +735,7 @@ impl ViewSpec {
         now: i64,
         server: Option<&[serde_json::Value]>,
     ) -> (Vec<String>, Option<usize>, Option<i64>) {
-        let ctx = CellContext::new(obj, now);
+        let ctx = self.cell_context(obj, now);
         let values = self
             .columns
             .iter()
@@ -799,7 +816,7 @@ impl ViewSpec {
             SpecSource::User(uc) => Cow::Owned(crate::views::render_cell(obj, uc, now)),
             SpecSource::Server { .. } => Cow::Borrowed("<none>"),
             SpecSource::Curated(extract) => {
-                let ctx = CellContext::new(obj, now);
+                let ctx = self.cell_context(obj, now);
                 extract(&ctx)
             }
         })
@@ -839,7 +856,7 @@ impl ViewSpec {
                 column.sort_value(server.and_then(|cells| cells.get(*index)))
             }
             SpecSource::Curated(extract) => {
-                let ctx = CellContext::new(obj, now);
+                let ctx = self.cell_context(obj, now);
                 let v = extract(&ctx);
                 if is_numeric_header(&self.group, &self.plural, &col.original_header) {
                     crate::views::SortValue::Num(parse_leading_num(&v))
@@ -1196,7 +1213,7 @@ fn col_node_status<'a>(ctx: &CellContext<'a>) -> Cow<'a, str> {
 }
 
 fn col_node_roles<'a>(ctx: &CellContext<'a>) -> Cow<'a, str> {
-    Cow::Owned(node_roles(ctx.obj))
+    Cow::Owned(node_roles(ctx.obj, ctx.node_roles.as_deref()))
 }
 
 fn col_node_taints<'a>(ctx: &CellContext<'a>) -> Cow<'a, str> {
@@ -2095,29 +2112,34 @@ fn node_status(d: &Value) -> &'static str {
     }
 }
 
-fn node_roles(obj: &DynamicObject) -> String {
-    let mut roles: Vec<String> = obj
-        .metadata
-        .labels
-        .as_ref()
-        .map(|l| {
-            l.keys()
-                .filter_map(|k| k.strip_prefix("node-role.kubernetes.io/"))
-                .filter(|r| !r.is_empty())
-                .map(String::from)
-                .collect()
-        })
-        .unwrap_or_default();
-    if let Some(role) = obj
-        .metadata
-        .labels
-        .as_ref()
-        .and_then(|labels| labels.get("kubernetes.io/role"))
-        .filter(|role| !role.is_empty())
-    {
-        roles.push(role.clone());
+fn node_roles(obj: &DynamicObject, sources: Option<&crate::config::NodeRoles>) -> String {
+    let mut roles = Vec::new();
+    if let Some(labels) = &obj.metadata.labels {
+        let prefixes = std::iter::once("node-role.kubernetes.io/").chain(
+            sources
+                .into_iter()
+                .flat_map(|s| s.label_prefixes.iter().map(String::as_str)),
+        );
+        for prefix in prefixes.filter(|prefix| !prefix.is_empty()) {
+            roles.extend(
+                labels
+                    .keys()
+                    .filter_map(|key| key.strip_prefix(prefix))
+                    .filter(|role| !role.is_empty()),
+            );
+        }
+        let keys = std::iter::once("kubernetes.io/role").chain(
+            sources
+                .into_iter()
+                .flat_map(|s| s.label_keys.iter().map(String::as_str)),
+        );
+        roles.extend(
+            keys.filter_map(|key| labels.get(key))
+                .filter(|role| !role.is_empty())
+                .map(String::as_str),
+        );
     }
-    roles.sort();
+    roles.sort_unstable();
     roles.dedup();
     if roles.is_empty() {
         "<none>".into()

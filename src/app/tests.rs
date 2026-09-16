@@ -7,6 +7,7 @@ use tokio::sync::mpsc::{self, Receiver};
 
 mod flux;
 mod label_filter;
+mod node_roles;
 mod oidc;
 mod popup_wrapping;
 mod proxy;
@@ -26061,6 +26062,8 @@ async fn service_endpoint_columns_include_names_addresses_and_node_ports() {
 #[tokio::test]
 async fn node_roles_include_legacy_labels_without_duplicates() {
     for (labels, expected) in [
+        (json!({}), "<none>"),
+        (json!({"example.com/role":"worker"}), "<none>"),
         (json!({"kubernetes.io/role":"worker"}), "worker"),
         (
             json!({"kubernetes.io/role":"worker", "node-role.kubernetes.io/worker":"", "node-role.kubernetes.io/control-plane":""}),

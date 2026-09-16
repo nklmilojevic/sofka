@@ -79,6 +79,8 @@ pub struct Config {
     /// Custom table views keyed by resource — see [`ViewConfig`]. Compiled
     /// and validated by [`crate::views::compile`].
     pub views: HashMap<String, ViewConfig>,
+    /// Additional label sources for node roles.
+    pub node_roles: NodeRoles,
     /// Color skin: a built-in palette name plus optional per-swatch overrides.
     pub skin: Skin,
     /// Optional external observability backends — see [`Providers`]. Compiled
@@ -120,6 +122,34 @@ pub struct Config {
     /// Structured application logging — see [`LoggingConfig`].
     pub logging: LoggingConfig,
     pub journal: JournalConfig,
+}
+
+/// Additional label sources for the node ROLES column.
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct NodeRoles {
+    pub label_prefixes: Vec<String>,
+    pub label_keys: Vec<String>,
+}
+
+impl NodeRoles {
+    pub fn compile(&self) -> (Self, Vec<String>) {
+        let mut sources = self.clone();
+        let mut warnings = Vec::new();
+        sources.label_prefixes.retain(|prefix| {
+            if prefix.is_empty() {
+                warnings.push("node_roles.label_prefixes: empty prefix ignored".into());
+                false
+            } else {
+                true
+            }
+        });
+        sources.label_prefixes.sort();
+        sources.label_prefixes.dedup();
+        sources.label_keys.sort();
+        sources.label_keys.dedup();
+        (sources, warnings)
+    }
 }
 
 /// Opt-in functionality that is still being evaluated.

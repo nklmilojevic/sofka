@@ -334,6 +334,35 @@ redaction as the application log. Resource names and contexts remain visible.
 Application logging at `info` or above also records actions, independently of
 `[journal]`.
 
+## Node role labels
+
+The node `ROLES` column always reads role names from the suffix of
+`node-role.kubernetes.io/<role>` and the value of `kubernetes.io/role`.
+Add custom sources with:
+
+```toml
+[node_roles]
+label_prefixes = ["node-role.example.com/"]
+label_keys = ["example.com/role"]
+```
+
+Each prefix selects matching label keys and uses the non-empty suffix as a role.
+Each exact key uses its non-empty label value as a role. Empty prefixes are
+ignored with a config warning. Roles from all sources are sorted and duplicates
+are removed. If no role is found, the column shows `<none>`.
+
+With no configuration, the output stays unchanged. Built-in sources always stay
+active, including when configured arrays are empty. Listing a built-in source
+again has no effect.
+
+These settings support `:reload` and cluster/context overrides. Override arrays
+replace the configured arrays from the previous level; built-in sources are then
+added. Display, filtering, and sorting use the same role text. These settings do
+not change Kubernetes objects or API requests.
+
+A custom view column with `name = "ROLES"` replaces the built-in column and
+uses its own source. A column with `builtin = "ROLES"` uses these settings.
+
 ## Per-cluster and per-context overrides
 
 Any option can be overridden for a specific cluster or kubeconfig context, like

@@ -2280,6 +2280,7 @@ pub struct App {
     /// Compiled warning/critical coloring thresholds from config, re-resolved
     /// on context switch and `:reload`.
     pub thresholds: crate::thresholds::Compiled,
+    pub node_roles: Arc<crate::config::NodeRoles>,
     /// CRD printer-column fallbacks fetched per API resource for this cluster
     /// (`None` = fetched, nothing usable). Cleared on context switch.
     crd_views: HashMap<GroupVersionResource, Option<crate::views::View>>,
@@ -2564,6 +2565,7 @@ impl App {
             metrics_provider: None,
             user_views: HashMap::new(),
             thresholds: crate::thresholds::Compiled::default(),
+            node_roles: Arc::new(crate::config::NodeRoles::default()),
             crd_views: HashMap::new(),
             server_table: crate::server_table::State::default(),
             server_table_started: false,

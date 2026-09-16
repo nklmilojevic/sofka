@@ -906,6 +906,9 @@ impl App {
         let (thresholds, threshold_warnings) =
             crate::thresholds::compile(&resolved.config.thresholds);
         self.thresholds = thresholds;
+        let (node_roles, role_warnings) = resolved.config.node_roles.compile();
+        self.node_roles = Arc::new(node_roles);
+        plugin_warnings.extend(role_warnings);
         let (log_provider, provider_warnings) =
             crate::providers::compile(resolved.config.providers.logs.as_ref());
         self.log_provider = log_provider;

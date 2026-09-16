@@ -903,6 +903,7 @@ impl App {
         } else {
             spec
         };
+        self.spec.set_node_roles(Arc::clone(&self.node_roles));
         self.spec_rev = self.spec_rev.wrapping_add(1);
         if let Some((h, desc)) = sort {
             self.sort_column = self.display_headers().iter().position(|x| *x == h);

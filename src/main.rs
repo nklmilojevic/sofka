@@ -455,6 +455,12 @@ async fn run_main(args: Args) -> Result<()> {
         eprintln!("warning: {w}");
     }
     app.thresholds = thresholds;
+    let (node_roles, role_warnings) = cfg.node_roles.compile();
+    app.node_roles = std::sync::Arc::new(node_roles);
+    for warning in &role_warnings {
+        eprintln!("warning: {warning}");
+    }
+    config_warnings.extend(role_warnings);
     let (log_provider, provider_warnings) = providers::compile(cfg.providers.logs.as_ref());
     for w in &provider_warnings {
         eprintln!("warning: {w}");
