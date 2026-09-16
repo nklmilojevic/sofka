@@ -22951,6 +22951,57 @@ async fn gitops_flux_resources_follow_owner_labels() {
 }
 
 #[tokio::test]
+async fn gitops_inventory_uses_selected_resource_on_open_and_refresh() {
+    let root = json!({"apiVersion":"kustomize.toolkit.fluxcd.io/v1","kind":"Kustomization",
+        "metadata":{"name":"web","namespace":"default","uid":"child-uid",
+            "labels":{"kustomize.toolkit.fluxcd.io/name":"parent",
+                "kustomize.toolkit.fluxcd.io/namespace":"default"}},
+        "status":{"inventory":{"entries":[{"id":"default_child_apps_Deployment","v":"v1"}]}}});
+    let (mut app, mut rx, responses, _) = health_report_app("kustomizations", root.clone());
+    let version = app.kind.as_ref().unwrap().ar.api_version.clone();
+    let path = format!("/apis/{version}/namespaces/default/kustomizations/web");
+    {
+        let mut replies = responses.lock().unwrap();
+        replies.insert(path.clone(), (200, root.clone()));
+        replies.insert(
+            format!("/apis/{version}/namespaces/default/kustomizations/parent"),
+            (200, json!({"apiVersion":version,"kind":"Kustomization",
+                "metadata":{"name":"parent","namespace":"default"},
+                "spec":{"kubeConfig":{"secretRef":{"name":"remote"}}},
+                "status":{"inventory":{"entries":[{"id":"default_sibling_apps_Deployment","v":"v1"}]}}})),
+        );
+    }
+
+    open_health_report_key(&mut app, true);
+    receive_health_report(&mut app, &mut rx, true).await;
+    let child = app
+        .gitops_items
+        .iter()
+        .find(|f| f.text == "Deployment.apps/child (default, v1)")
+        .unwrap();
+    let target = child.target.as_ref().unwrap();
+    assert_eq!(target.name, "child");
+    assert_eq!(target.namespace.as_deref(), Some("default"));
+    assert!(!app.gitops_items.iter().any(|f| f.text.contains("sibling")));
+
+    let mut fresh = root;
+    fresh["status"] = json!({});
+    responses.lock().unwrap().insert(path, (200, fresh));
+    app.handle_key(press(KeyCode::Char('r'))).unwrap();
+    receive_health_report(&mut app, &mut rx, true).await;
+    assert!(
+        app.gitops_items
+            .iter()
+            .any(|f| f.text == "no inventory reported")
+    );
+    assert!(
+        !app.gitops_items
+            .iter()
+            .any(|f| f.text.contains("Deployment.apps/"))
+    );
+}
+
+#[tokio::test]
 async fn gitops_flux_resources_without_parent_use_the_selection() {
     for (plural, kind, label) in [
         ("helmreleases", "HelmRelease", "helm"),

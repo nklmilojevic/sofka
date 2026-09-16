@@ -142,9 +142,7 @@ impl App {
                     deps,
                 };
                 let mut findings = gitops::describe(&ev);
-                if let Some(owner) = ev.owner.as_ref().and_then(|n| n.obj.as_ref()) {
-                    findings.extend(gitops::inventory_findings(owner, &inventory_kinds));
-                }
+                findings.extend(gitops::inventory_findings(&obj, &inventory_kinds));
                 prepend_warn_finding(&mut findings, warn);
                 Ok((obj, findings))
             }
