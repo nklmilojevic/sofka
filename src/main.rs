@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use anyhow::{Context as _, Result};
-use clap::Parser;
+use clap::{CommandFactory, Parser};
 use crossterm::event::{Event, KeyEventKind};
 use futures_util::StreamExt;
 use tokio::sync::mpsc;
@@ -34,7 +34,7 @@ struct Args {
     /// Defaults to config `default_resource`, then "pods".
     resource: Option<String>,
 
-    /// Explicit resource name. Use this to open a resource named `plugin`.
+    /// Explicit resource name, including names such as `plugin` or `completion`.
     #[arg(
         long = "resource",
         value_name = "RESOURCE",
@@ -113,6 +113,11 @@ struct Args {
 
 #[derive(clap::Subcommand, Debug, Clone)]
 enum Command {
+    /// Print a shell completion script without connecting to a cluster.
+    Completion {
+        #[arg(value_enum)]
+        shell: clap_complete::Shell,
+    },
     /// Print runtime diagnostics and exit: version and build, config sources,
     /// context/cluster/API server, discovery and Metrics API status, request
     /// latency, logging, and the directories sofka uses.
@@ -146,6 +151,16 @@ fn main() -> Result<()> {
     let _profiler = dhat::Profiler::new_heap();
 
     let args = Args::parse();
+    if let Some(Command::Completion { shell }) = &args.command {
+        use std::io::Write;
+
+        let mut script = Vec::new();
+        clap_complete::generate(*shell, &mut Args::command(), "sofka", &mut script);
+        return std::io::stdout()
+            .lock()
+            .write_all(&script)
+            .context("writing shell completion script");
+    }
     // `--kubeconfig`: export for the whole process so every kubeconfig read
     // (kube-rs config inference, context listing/switching, `--info`) and
     // every kubectl shell-out sees the same file.
@@ -719,7 +734,7 @@ fn ring_notification(text: &str, cfg: &config::NotifyConfig) {
 fn info_request(args: &Args) -> Option<InfoArgs> {
     match &args.command {
         Some(Command::Info(info)) => Some(info.clone()),
-        Some(Command::Plugin(_)) => None,
+        Some(Command::Plugin(_) | Command::Completion { .. }) => None,
         None if args.info => Some(InfoArgs { offline: true }),
         None => None,
     }
@@ -1220,6 +1235,13 @@ mod tests {
                     .unwrap()
             );
         }
+    }
+
+    #[test]
+    fn completion_resource_can_be_selected_explicitly() {
+        let args = Args::try_parse_from(["sofka", "--resource", "completion"]).unwrap();
+        assert!(args.command.is_none());
+        assert_eq!(args.resource(), Some("completion"));
     }
 
     #[test]

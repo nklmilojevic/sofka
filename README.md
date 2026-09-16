@@ -88,6 +88,10 @@ xattr -d com.apple.quarantine sofka
 
 ## Usage
 
+Shell completion is available for Bash, Zsh, Fish, Elvish, and PowerShell.
+Run `sofka completion <shell>` and follow the
+[setup instructions](docs/shell-completion.md).
+
 ```
 sofka [RESOURCE] [-n NAMESPACE] [-A] [--context NAME] [--kubeconfig PATH] [--readonly | --write]
 
