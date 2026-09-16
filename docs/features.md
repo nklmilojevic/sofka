@@ -430,7 +430,15 @@ concurrent drains, and full kubectl drain parity are outside this feature.
   Only the latest requested report can update the findings. Closing the view
   with `esc` or `q` cancels pending results and clears the report progress
   message. Navigation to a target resource or a palette destination also
-  cancels pending results.
+  cancels pending results. The **Managed resources** section shows up to 500
+  entries from the owner’s `.status.inventory.entries`, including custom and
+  cluster-scoped resources. Press `⏎` on an entry to open it. Building this list
+  does not read the managed resources. Navigation uses the API version available
+  through cluster discovery. Unknown kinds and invalid entries show a warning.
+  If the owner has `spec.kubeConfig`, the list is shown without navigation because
+  its resources can be in another cluster. An absent inventory is reported as
+  unavailable. Helm hooks and controller-created children are not added to this
+  list. Navigation uses the normal resource view and its access error handling.
 - **Argo CD view** (`:argocd` / `:argo`) - the state of the selected Application:
   sync and health, the project and destination, every source it deploys from with
   the revision actually deployed from that source, every object in

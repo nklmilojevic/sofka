@@ -413,3 +413,186 @@ async fn flux_menu_cancel_and_readonly_do_not_start_an_action() {
         }
     }
 }
+
+#[tokio::test]
+async fn gitops_inventory_navigation_uses_group_and_scope_without_resource_reads() {
+    for (plural, owner_kind) in [
+        ("kustomizations", "Kustomization"),
+        ("helmreleases", "HelmRelease"),
+    ] {
+        for (id, target_plural, group, namespace) in [
+            ("default_web__Service", "services", "", "default"),
+            (
+                "default_web_serving.knative.dev_Service",
+                "services.serving.knative.dev",
+                "serving.knative.dev",
+                "default",
+            ),
+            ("_web__Namespace", "namespaces", "", ""),
+        ] {
+            let root = json!({"apiVersion":"test/v1", "kind":owner_kind,
+                "metadata":{"name":"web", "namespace":"default"},
+                "status":{"inventory":{"entries":[{"id":id,"v":"v1"}]}}});
+            let (mut app, mut rx, responses, requests) = health_report_app(plural, root.clone());
+            app.cluster
+                .register_kind("serving.knative.dev", "Service", "services", true);
+            app.cluster.register_kind("", "Service", "services", true);
+            let path = format!(
+                "/apis/{}/namespaces/default/{plural}/web",
+                app.kind.as_ref().unwrap().ar.api_version
+            );
+            responses.lock().unwrap().insert(path.clone(), (200, root));
+            open_health_report_key(&mut app, true);
+            receive_health_report(&mut app, &mut rx, true).await;
+            let index = app
+                .gitops_items
+                .iter()
+                .position(|f| f.target.as_ref().is_some_and(|t| t.plural == target_plural))
+                .unwrap();
+            assert_eq!(
+                requests
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .filter(|p| p.as_str() != "/api/v1/namespaces")
+                    .cloned()
+                    .collect::<Vec<_>>(),
+                vec![path]
+            );
+            app.gitops_state.select(Some(index));
+            app.handle_key(press(KeyCode::Enter)).unwrap();
+            assert_eq!(app.mode, Mode::Table);
+            assert_eq!(app.kind.as_ref().unwrap().ar.group, group);
+            assert_eq!(app.namespace, namespace);
+            assert_eq!(app.fields.as_deref(), Some("metadata.name=web"));
+        }
+    }
+}
+
+#[tokio::test]
+async fn gitops_inventory_reports_unavailable_entries_and_blocks_navigation() {
+    for (inventory, kube_config, expected) in [
+        (Value::Null, Value::Null, "no inventory reported"),
+        (
+            json!({"entries":{}}),
+            Value::Null,
+            "invalid inventory entries",
+        ),
+        (
+            json!({"entries":[]}),
+            Value::Null,
+            "no managed resources reported",
+        ),
+        (
+            json!({"entries":[{"id":"bad","v":"v1"}]}),
+            Value::Null,
+            "invalid inventory entry",
+        ),
+        (
+            json!({"entries":[{"id":"default_web__Service"}]}),
+            Value::Null,
+            "invalid inventory entry",
+        ),
+        (
+            json!({"entries":[{"id":"default_web_unknown.io_Unknown","v":"v1"}]}),
+            Value::Null,
+            "resource kind unavailable",
+        ),
+        (
+            json!({"entries":[{"id":"_web__Service","v":"v1"}]}),
+            Value::Null,
+            "invalid namespace scope",
+        ),
+        (
+            json!({"entries":[{"id":"default_web__Service","v":"v1"}]}),
+            json!({"secretRef":{"name":"remote"}}),
+            "remote cluster configured",
+        ),
+        (
+            json!({"entries":[{"id":"default_web__Service","v":"v1"}]}),
+            json!({"configMapRef":{"name":"remote"}}),
+            "remote cluster configured",
+        ),
+    ] {
+        let root = json!({"apiVersion":"helm.toolkit.fluxcd.io/v2", "kind":"HelmRelease",
+            "metadata":{"name":"web", "namespace":"default"},
+            "spec":{"kubeConfig":kube_config}, "status":{"inventory":inventory}});
+        let (mut app, mut rx, responses, _) = health_report_app("helmreleases", root.clone());
+        let path = format!(
+            "/apis/{}/namespaces/default/helmreleases/web",
+            app.kind.as_ref().unwrap().ar.api_version
+        );
+        responses
+            .lock()
+            .unwrap()
+            .insert(path.clone(), (200, root.clone()));
+        open_health_report_key(&mut app, true);
+        receive_health_report(&mut app, &mut rx, true).await;
+        assert!(
+            app.gitops_items.iter().any(|f| f.text.contains(expected)),
+            "{expected}"
+        );
+        let heading = app
+            .gitops_items
+            .iter()
+            .position(|f| f.text == "Managed resources")
+            .unwrap();
+        for index in heading + 1..app.gitops_items.len() {
+            assert!(app.gitops_items[index].target.is_none());
+            app.gitops_state.select(Some(index));
+            app.handle_key(press(KeyCode::Enter)).unwrap();
+            assert_eq!(app.mode, Mode::Gitops);
+        }
+        let mut updated = root;
+        updated["spec"] = json!({});
+        updated["status"]["inventory"] =
+            json!({"entries":[{"id":"default_web__Service","v":"v1"}]});
+        responses.lock().unwrap().insert(path, (200, updated));
+        app.handle_key(press(KeyCode::Char('r'))).unwrap();
+        receive_health_report(&mut app, &mut rx, true).await;
+        assert!(
+            app.gitops_items
+                .iter()
+                .any(|f| f.target.as_ref().is_some_and(|t| t.plural == "services"))
+        );
+    }
+}
+
+#[tokio::test]
+async fn gitops_inventory_limits_large_lists() {
+    let entries: Vec<_> = (0..502)
+        .map(|i| json!({"id":format!("default_web-{i}__Service"),"v":"v1"}))
+        .collect();
+    let root = json!({"apiVersion":"helm.toolkit.fluxcd.io/v2", "kind":"HelmRelease",
+        "metadata":{"name":"web", "namespace":"default"}, "status":{"inventory":{"entries":entries}}});
+    let (mut app, mut rx, responses, requests) = health_report_app("helmreleases", root.clone());
+    let path = format!(
+        "/apis/{}/namespaces/default/helmreleases/web",
+        app.kind.as_ref().unwrap().ar.api_version
+    );
+    responses.lock().unwrap().insert(path.clone(), (200, root));
+    open_health_report_key(&mut app, true);
+    receive_health_report(&mut app, &mut rx, true).await;
+    assert_eq!(
+        app.gitops_items
+            .iter()
+            .filter(|f| f.target.is_some())
+            .count(),
+        500
+    );
+    assert!(
+        app.gitops_items
+            .iter()
+            .any(|f| f.text == "2 more inventory entries omitted")
+    );
+    assert_eq!(
+        requests
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|p| p.as_str() != "/api/v1/namespaces")
+            .cloned()
+            .collect::<Vec<_>>(),
+        vec![path]
+    );
+}

@@ -135,6 +135,97 @@ pub fn depends_on(owner: &DynamicObject) -> Vec<FluxRef> {
         .unwrap_or_default()
 }
 
+/// Show the inventory without reading each managed resource.
+pub fn inventory_findings(
+    owner: &DynamicObject,
+    kinds: &std::collections::HashMap<(String, String), (String, bool)>,
+) -> Vec<Finding> {
+    let mut out = vec![finding(0, Level::Heading, "Managed resources")];
+    let Some(entries) = owner.data.pointer("/status/inventory/entries") else {
+        out.push(finding(1, Level::Info, "no inventory reported"));
+        return out;
+    };
+    let Some(entries) = entries.as_array() else {
+        out.push(finding(1, Level::Warn, "invalid inventory entries"));
+        return out;
+    };
+    let remote = owner
+        .data
+        .pointer("/spec/kubeConfig")
+        .is_some_and(|v| !v.is_null());
+    if remote {
+        out.push(finding(
+            1,
+            Level::Warn,
+            "remote cluster configured: inventory navigation is unavailable",
+        ));
+    }
+    if entries.is_empty() {
+        out.push(finding(1, Level::Info, "no managed resources reported"));
+    }
+    const MAX_LISTED: usize = 500;
+    for entry in entries.iter().take(MAX_LISTED) {
+        let parts: Vec<_> = entry
+            .get("id")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .split('_')
+            .collect();
+        let version = entry.get("v").and_then(Value::as_str).unwrap_or_default();
+        if parts.len() != 4 || parts[1].is_empty() || parts[3].is_empty() || version.is_empty() {
+            out.push(finding(1, Level::Warn, "invalid inventory entry"));
+            continue;
+        }
+        let (namespace, name, group, kind) = (parts[0], parts[1], parts[2], parts[3]);
+        let qualified = if group.is_empty() {
+            kind.to_string()
+        } else {
+            format!("{kind}.{group}")
+        };
+        let scope = if namespace.is_empty() {
+            "cluster"
+        } else {
+            namespace
+        };
+        let mut row = finding(
+            1,
+            Level::Info,
+            format!("{qualified}/{name} ({scope}, {version})"),
+        );
+        if !remote {
+            match kinds.get(&(kind.to_lowercase(), group.to_lowercase())) {
+                Some((plural, namespaced)) if *namespaced == !namespace.is_empty() => {
+                    row = row.with_target(Target {
+                        plural: plural.clone(),
+                        namespace: namespaced.then(|| namespace.to_string()),
+                        name: name.to_string(),
+                    });
+                }
+                Some(_) => {
+                    row.level = Level::Warn;
+                    row.text.push_str(": invalid namespace scope");
+                }
+                None => {
+                    row.level = Level::Warn;
+                    row.text.push_str(": resource kind unavailable");
+                }
+            }
+        }
+        out.push(row);
+    }
+    if entries.len() > MAX_LISTED {
+        out.push(finding(
+            1,
+            Level::Info,
+            format!(
+                "{} more inventory entries omitted",
+                entries.len() - MAX_LISTED
+            ),
+        ));
+    }
+    out
+}
+
 // ----- object state accessors ----------------------------------------------
 
 /// `(status, reason, message)` of the object's `Ready` condition.

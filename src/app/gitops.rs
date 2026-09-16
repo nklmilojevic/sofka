@@ -56,6 +56,22 @@ impl App {
         let title = self.gitops_title.clone();
 
         let flux = self.flux_kind_map();
+        let inventory_kinds: HashMap<_, _> = self
+            .cluster
+            .kind_plurals()
+            .into_iter()
+            .filter_map(|((kind, group), plural)| {
+                let key = if group.is_empty() {
+                    plural
+                } else {
+                    format!("{plural}.{group}")
+                };
+                let target = self.cluster.resolve(&key)?;
+                (target.ar.group.eq_ignore_ascii_case(&group)
+                    && target.ar.kind.eq_ignore_ascii_case(&kind))
+                .then_some(((kind, group), (key, target.namespaced)))
+            })
+            .collect();
         let client = self.cluster.client.clone();
         let tx = self.tx.clone();
         let genr = self.generation;
@@ -126,6 +142,9 @@ impl App {
                     deps,
                 };
                 let mut findings = gitops::describe(&ev);
+                if let Some(owner) = ev.owner.as_ref().and_then(|n| n.obj.as_ref()) {
+                    findings.extend(gitops::inventory_findings(owner, &inventory_kinds));
+                }
                 prepend_warn_finding(&mut findings, warn);
                 Ok((obj, findings))
             }
