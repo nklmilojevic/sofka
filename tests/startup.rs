@@ -21,6 +21,8 @@ fn headless_start_without_current_context_reports_selection_instructions() {
                 .env("XDG_CONFIG_HOME", &dir)
                 .env("XDG_CACHE_HOME", &dir)
                 .env_remove("SOFKA_COMPLETE")
+                .env_remove("KUBERNETES_SERVICE_HOST")
+                .env_remove("KUBERNETES_SERVICE_PORT")
                 .output()
                 .unwrap();
             assert_eq!(output.status.code(), Some(1));

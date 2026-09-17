@@ -411,21 +411,30 @@ fn require_current_context(config: &Kubeconfig) -> Result<()> {
     Ok(())
 }
 
+fn startup_config(kubeconfig: Option<&Kubeconfig>, inferred: Result<Config>) -> Result<Config> {
+    inferred.or_else(|error| {
+        if let Some(kubeconfig) = kubeconfig {
+            require_current_context(kubeconfig)?;
+        }
+        Err(error).context("loading kubeconfig (is KUBECONFIG / ~/.kube/config present?)")
+    })
+}
+
 impl Cluster {
     pub async fn connect(allow_v1_client_cert: bool, no_tls_resumption: bool) -> Result<Self> {
         let kubeconfig = Kubeconfig::read().ok();
-        if let Some(kubeconfig) = &kubeconfig {
-            require_current_context(kubeconfig)?;
-        }
-        let mut config = kubeconfig::infer()
-            .await
-            .context("loading kubeconfig (is KUBECONFIG / ~/.kube/config present?)")?;
+        let mut config = startup_config(
+            kubeconfig.as_ref(),
+            kubeconfig::infer().await.map_err(Into::into),
+        )?;
         // The real kubeconfig current-context (if any) is what kubectl uses by
         // default; pass it explicitly so shell-outs can't drift from us.
         if let Some(kubeconfig) = &kubeconfig {
             proxy::configure(&mut config, kubeconfig, None);
         }
-        let cli_context = kubeconfig.and_then(|config| config.current_context);
+        let cli_context = kubeconfig
+            .and_then(|config| config.current_context)
+            .filter(|context| !context.is_empty());
         let context = cli_context.clone().unwrap_or_else(|| "default".into());
         Self::from_config(
             config,
@@ -1319,18 +1328,52 @@ pub(crate) mod tests {
                 current_context,
                 ..Default::default()
             };
-            let error = super::require_current_context(&config).unwrap_err();
+            let error = super::startup_config(
+                Some(&config),
+                Err(anyhow::anyhow!("in-cluster credentials unavailable")),
+            )
+            .unwrap_err();
             assert!(error.is::<super::MissingCurrentContext>());
             let message = error.to_string();
             assert!(message.starts_with("no current-context in "));
             assert!(message.contains("--context <name>"));
             assert!(message.contains("sofka ctx"));
         }
-        let config = kube::config::Kubeconfig {
+    }
+
+    #[test]
+    fn missing_current_context_keeps_successful_incluster_config() {
+        for current_context in [None, Some(String::new())] {
+            let kubeconfig = kube::config::Kubeconfig {
+                current_context,
+                ..Default::default()
+            };
+            let mut inferred = kube::Config::new("https://127.0.0.1:6443".parse().unwrap());
+            inferred.default_namespace = "service-account-namespace".into();
+            inferred.auth_info.token_file = Some("/service-account/token".into());
+            let config = super::startup_config(Some(&kubeconfig), Ok(inferred)).unwrap();
+            assert_eq!(config.default_namespace, "service-account-namespace");
+            assert_eq!(
+                config.auth_info.token_file.as_deref(),
+                Some("/service-account/token")
+            );
+        }
+    }
+
+    #[test]
+    fn startup_preserves_other_inference_errors() {
+        let configured = kube::config::Kubeconfig {
             current_context: Some("prod".into()),
             ..Default::default()
         };
-        assert!(super::require_current_context(&config).is_ok());
+        for kubeconfig in [None, Some(&configured)] {
+            let error =
+                super::startup_config(kubeconfig, Err(anyhow::anyhow!("invalid certificate data")))
+                    .unwrap_err();
+            assert!(!error.is::<super::MissingCurrentContext>());
+            assert!(error.to_string().starts_with("loading kubeconfig"));
+            assert_eq!(error.root_cause().to_string(), "invalid certificate data");
+        }
     }
 
     #[cfg(unix)]
