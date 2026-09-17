@@ -33583,3 +33583,62 @@ async fn unrelated_missing_shell_uses_its_own_target() {
     assert!(argv.iter().any(|a| a == "--target=worker"));
     assert_eq!(failure.target.as_ref().unwrap().pod, "new-pod");
 }
+
+#[tokio::test]
+async fn detail_wrap_default_and_session_toggles_survive_new_documents() {
+    let dir = std::env::temp_dir().join(format!("sofka-detail-wrap-{}", std::process::id()));
+    write_config(&dir, "detail_wrap = false\n");
+    write_config(
+        &dir.join("clusters/test-cluster/dev"),
+        "detail_wrap = true\n",
+    );
+    for _ in 0..2 {
+        let (mut app, _rx) = test_app();
+        app.config = crate::config::ConfigLoader::from_dir(Some(dir.clone()));
+        assert!(
+            !app.config
+                .resolve("prod", "test-cluster")
+                .config
+                .detail_wrap
+        );
+        app.detail.wrap = app.config.resolve("dev", "test-cluster").config.detail_wrap;
+        palette(&mut app, "pods");
+        apply(
+            &mut app,
+            json!({
+                "apiVersion": "v1", "kind": "Pod",
+                "metadata": {"name": "wrap-test", "namespace": "default"}
+            }),
+        );
+        app.table_state.select(Some(0));
+        for expected in [true, false, true] {
+            app.handle_key(press(KeyCode::Char('y'))).unwrap();
+            assert_eq!(app.mode, Mode::Detail);
+            assert_eq!(app.detail.wrap, expected);
+            app.handle_key(press(KeyCode::Esc)).unwrap();
+            app.handle_key(press(KeyCode::Char('d'))).unwrap();
+            assert_eq!(app.mode, Mode::Detail);
+            assert_eq!(app.detail.wrap, expected);
+            app.describe_task.take().unwrap().abort();
+            app.handle_key(press(KeyCode::Char('w'))).unwrap();
+            let claim = app.describe_source.as_ref().unwrap().0;
+            app.handle_msg(Msg::DescribeReady {
+                generation: app.generation,
+                claim,
+                title: "wrap-test".into(),
+                lines: vec!["describe output".into()],
+                warn: None,
+            });
+            assert_eq!(app.detail.wrap, !expected);
+            app.handle_key(press(KeyCode::Esc)).unwrap();
+            palette(&mut app, "config");
+            assert_eq!(app.mode, Mode::Detail);
+            assert_eq!(app.detail.wrap, !expected);
+            app.handle_key(press(KeyCode::Esc)).unwrap();
+        }
+        land_context(&mut app, "prod");
+        palette(&mut app, "reload");
+        assert!(!app.detail.wrap);
+    }
+    std::fs::remove_dir_all(dir).unwrap();
+}

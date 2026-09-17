@@ -75,6 +75,8 @@ pub struct Config {
     pub hide_header: bool,
     /// Start in compact mode; runtime toggles survive reloads and context switches.
     pub compact_mode: bool,
+    /// Start with document line wrapping enabled.
+    pub detail_wrap: bool,
     /// Custom alias -> canonical resource (plural/kind) mappings.
     pub aliases: HashMap<String, String>,
     /// Namespaces pinned to the top of the switcher (a curated team list, in
@@ -1753,6 +1755,18 @@ fn config_dir_from(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn detail_wrap_defaults_and_formats() {
+        assert!(!Config::default().detail_wrap);
+        assert!(!toml::from_str::<Config>("").unwrap().detail_wrap);
+        for enabled in [false, true] {
+            let toml: Config = toml::from_str(&format!("detail_wrap = {enabled}")).unwrap();
+            let yaml: Config = serde_yaml::from_str(&format!("detail_wrap: {enabled}\n")).unwrap();
+            assert_eq!(toml.detail_wrap, enabled);
+            assert_eq!(yaml.detail_wrap, enabled);
+        }
+    }
 
     #[test]
     fn every_config_format_combination_uses_the_same_merge_rules() {

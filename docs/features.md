@@ -97,6 +97,10 @@ concurrent drains, and full kubectl drain parity are outside this feature.
   copying, and refresh still work. The document setting is kept for the current
   session, including new documents, and is separate from the Logs setting.
 
+- **Document wrapping** - set `detail_wrap = true` to enable line wrapping at
+  startup. The `w` key changes wrapping for the session. New documents, reloads,
+  and context switches keep the selected setting.
+
 - **Terminal title** shows `sofka: <context>/<namespace>` and follows navigation.
   The namespace is `all` when all namespaces are selected. Set
   `terminal_title = false` to disable title changes. Sofka clears the title on exit.

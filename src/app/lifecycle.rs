@@ -1428,7 +1428,10 @@ impl App {
                 if visible {
                     self.stop_resource_refresh();
                     self.clear_document_source();
-                    self.detail = Scrollable::doc(title, lines);
+                    self.detail = Scrollable {
+                        wrap: self.detail.wrap,
+                        ..Scrollable::doc(title, lines)
+                    };
                     self.mode = Mode::Detail;
                 }
                 let suffix = if visible {
@@ -1512,6 +1515,7 @@ impl App {
                 filename,
             } if generation == self.generation => {
                 self.detail = Scrollable {
+                    wrap: self.detail.wrap,
                     title: format!("{title} (:bundle-save to write)"),
                     lines: text.lines().map(String::from).collect(),
                     ..Default::default()
@@ -1616,6 +1620,7 @@ impl App {
                 self.stop_resource_refresh();
                 self.clear_document_source();
                 self.detail = Scrollable {
+                    wrap: self.detail.wrap,
                     title,
                     lines: lines.into(),
                     ..Default::default()

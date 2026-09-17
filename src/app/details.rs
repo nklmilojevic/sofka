@@ -43,6 +43,7 @@ impl App {
             match crate::helm::decode(obj) {
                 Some(rel) => {
                     self.detail = Scrollable {
+                        wrap: self.detail.wrap,
                         title: format!("{} v{} — manifest", rel.name, rel.revision),
                         lines: rel.manifest.lines().map(String::from).collect(),
                         ..Default::default()
@@ -65,6 +66,7 @@ impl App {
         self.document_source = self.resource_source(obj, refresh::RefreshView::Yaml);
         let title = obj.metadata.name.clone().unwrap_or_else(|| "object".into());
         self.detail = Scrollable {
+            wrap: self.detail.wrap,
             title: format!("{title} — YAML"),
             lines: self.object_yaml(obj).into(),
             ..Default::default()
@@ -104,6 +106,7 @@ impl App {
         self.document_source = self.resource_source(&obj, refresh::RefreshView::DecodedSecret);
         let title = obj.metadata.name.as_deref().unwrap_or("secret");
         self.detail = Scrollable {
+            wrap: self.detail.wrap,
             title: format!("{title} - decoded"),
             lines: decoded_secret_lines(&obj).into(),
             ..Default::default()
@@ -130,6 +133,7 @@ impl App {
                         rel.notes.lines().map(String::from).collect()
                     };
                     self.detail = Scrollable {
+                        wrap: self.detail.wrap,
                         title: format!("{} v{} — notes", rel.name, rel.revision),
                         lines: lines.into(),
                         ..Default::default()
@@ -168,6 +172,7 @@ impl App {
             self.resource_source(obj, refresh::RefreshView::Describe(argv.clone()));
         self.describe_source = Some((claim, argv.clone()));
         self.detail = Scrollable {
+            wrap: self.detail.wrap,
             title: format!("{name} - describe"),
             lines: vec!["loading describe...".into()].into(),
             ..Default::default()
@@ -280,6 +285,7 @@ impl App {
             self.flash_err = false;
         }
         self.detail = Scrollable {
+            wrap: self.detail.wrap,
             title: format!("{name} — diff ({baseline_label} → live)"),
             lines: lines.into(),
             ..Default::default()
@@ -334,6 +340,7 @@ impl App {
         self.stop_event_stream();
         let genr = self.event_gen;
         self.detail = Scrollable {
+            wrap: self.detail.wrap,
             title: title.clone(),
             lines: vec!["loading events…".into()].into(),
             ..Default::default()

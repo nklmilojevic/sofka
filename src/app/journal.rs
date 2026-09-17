@@ -36,6 +36,7 @@ impl App {
             format!("action journal ({} entries)", self.journal.len())
         };
         self.detail = Scrollable {
+            wrap: self.detail.wrap,
             title,
             lines: self.journal.lines().into(),
             ..Default::default()

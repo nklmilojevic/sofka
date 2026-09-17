@@ -208,6 +208,7 @@ readonly          = false  # true disables every mutating action (delete, edit,
                            # scale, shell, plugins, …); --readonly/--write win
 hide_header = false # true hides the header and logo
 compact_mode = false # true starts with a one-line header and no footer
+detail_wrap = false # true starts with document line wrapping enabled
 mouse             = true   # false keeps the terminal's native mouse behavior
                            # (text selection) instead of scroll/click/sort
 mouse_scroll_lines = 3     # steps per wheel event in captured views; 1 for one step
@@ -242,6 +243,13 @@ namespace, context, and live status, with the footer hidden. The default is
 overrides are resolved at startup; `:reload` and subsequent context switches do
 not reset the current compact mode. With `hide_header = true`, the compact
 header is hidden too. Command and filter input still appears when needed.
+
+Set `detail_wrap = true` to enable line wrapping at startup for document views,
+including describe, YAML, diff, events, and plugin output. The default is `false`.
+The `w` key changes wrapping for the current session. New documents, `:reload`,
+and context switches keep this setting. The configuration is read at startup,
+including cluster and context overrides. Changes made with `w` are not written
+to the configuration file. Log wrapping is separate.
 
 `mouse_scroll_lines` sets how many navigation steps one received mouse wheel
 event triggers in views with mouse capture enabled (tables and pickers). The

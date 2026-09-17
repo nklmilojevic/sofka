@@ -416,6 +416,7 @@ async fn run_main(args: Args) -> Result<()> {
         config::mouse_scroll_lines(cfg.mouse_scroll_lines, &mut config_warnings);
     app.hide_header = cfg.hide_header;
     app.compact = cfg.compact_mode;
+    app.detail.wrap = cfg.detail_wrap;
     app.terminal_title = cfg.terminal_title.unwrap_or(true);
     // The last namespace picked per context persists too, so a relaunch (or
     // a `:ctx` switch back) lands where you left off.

@@ -134,6 +134,7 @@ impl App {
         }
 
         self.detail = Scrollable {
+            wrap: self.detail.wrap,
             title: "diagnostics (:info)".into(),
             redact_header: true,
             lines: lines

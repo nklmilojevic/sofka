@@ -173,6 +173,7 @@ impl App {
                 ];
                 lines.extend(body.lines().map(String::from));
                 self.detail = Scrollable {
+                    wrap: self.detail.wrap,
                     title: name,
                     lines: lines.into(),
                     ..Default::default()

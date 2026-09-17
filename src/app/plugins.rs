@@ -463,7 +463,10 @@ impl App {
                 activity.visible = false;
                 self.stop_resource_refresh();
                 self.clear_document_source();
-                self.detail = result;
+                self.detail = Scrollable {
+                    wrap: self.detail.wrap,
+                    ..result
+                };
                 self.mode = Mode::Detail;
                 // Opening the retained document is not navigation cancellation.
                 self.plugin_run = self.plugin_run.wrapping_add(1);

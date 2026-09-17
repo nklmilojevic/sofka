@@ -1559,6 +1559,7 @@ impl App {
             }
         }
         self.detail = Scrollable {
+            wrap: self.detail.wrap,
             title: "config — :reload to re-read".into(),
             lines: lines.into(),
             ..Default::default()
