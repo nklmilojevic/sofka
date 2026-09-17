@@ -8,9 +8,11 @@
 
 use anyhow::{Context, Result};
 use k8s_openapi::api::core::v1::Pod;
+use kube::Client;
+#[cfg(test)]
+use kube::Config;
 use kube::api::{Api, ApiResource, DeleteParams, ListParams, Preconditions};
 use kube::core::DynamicObject;
-use kube::{Client, Config};
 use serde_json::{Value, json};
 
 /// Statuses that mean the pod is finished and will not come back on its own.
@@ -144,7 +146,7 @@ fn guardrails_for(request: &Value) -> Vec<crate::config::Guardrail> {
 
 fn guardrail_context(request: &Value) -> &str {
     // Cluster::connect uses this name for guardrails without a named context.
-    // Keep the request context null so client_for still uses Config::infer.
+    // Keep the request context null so client_for still uses config inference.
     request
         .get("context")
         .and_then(Value::as_str)
@@ -410,11 +412,13 @@ async fn client_for(
                 user: None,
             };
             let kubeconfig = kube::config::Kubeconfig::read().context("reading kubeconfig")?;
-            Config::from_custom_kubeconfig(kubeconfig, &options)
+            crate::k8s::kubeconfig::from_custom(kubeconfig, &options)
                 .await
                 .with_context(|| format!("building config for context '{name}'"))?
         }
-        None => Config::infer().await.context("loading kubeconfig")?,
+        None => crate::k8s::kubeconfig::infer()
+            .await
+            .context("loading kubeconfig")?,
     };
     crate::k8s::build_client(config, allow_v1_client_cert, no_tls_resumption)
         .context("building a Kubernetes client")

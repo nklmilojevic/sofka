@@ -6,6 +6,7 @@ use std::time::Instant;
 use tokio::sync::mpsc::{self, Receiver};
 
 mod flux;
+mod kubeconfig;
 mod label_filter;
 mod node_roles;
 mod oidc;

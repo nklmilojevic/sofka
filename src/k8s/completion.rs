@@ -12,7 +12,7 @@ pub async fn values(
         context: context.map(str::to_owned),
         ..Default::default()
     };
-    let mut config = Config::from_custom_kubeconfig(kubeconfig.clone(), &options).await?;
+    let mut config = kubeconfig::from_custom(kubeconfig.clone(), &options).await?;
     proxy::configure(&mut config, &kubeconfig, context);
     let client = build_client(config, allow_v1_client_cert, no_tls_resumption)?;
     if namespaces {

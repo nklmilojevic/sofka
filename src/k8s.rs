@@ -26,6 +26,7 @@ use crate::store::{Msg, row_key};
 
 pub mod completion;
 mod discovery;
+pub(crate) mod kubeconfig;
 mod proxy;
 mod table;
 
@@ -387,7 +388,7 @@ pub(crate) fn normalize_server(server: &str) -> String {
 
 impl Cluster {
     pub async fn connect(allow_v1_client_cert: bool, no_tls_resumption: bool) -> Result<Self> {
-        let mut config = Config::infer()
+        let mut config = kubeconfig::infer()
             .await
             .context("loading kubeconfig (is KUBECONFIG / ~/.kube/config present?)")?;
         // The real kubeconfig current-context (if any) is what kubectl uses by
@@ -420,7 +421,7 @@ impl Cluster {
             cluster: None,
             user: None,
         };
-        let mut config = Config::from_custom_kubeconfig(kubeconfig.clone(), &opts)
+        let mut config = kubeconfig::from_custom(kubeconfig.clone(), &opts)
             .await
             .with_context(|| format!("building config for context '{name}'"))?;
         proxy::configure(&mut config, &kubeconfig, Some(name));
