@@ -498,6 +498,44 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn empty_inline_token_preserves_certificate_auth() {
+        for client_pem in [CLIENT_V3, CLIENT] {
+            for disabled in [false, true] {
+                for token in [None, Some(""), Some("test-token")] {
+                    let (url, task) = server(SERVER, &rustls::version::TLS13).await;
+                    let mut config = config();
+                    config.cluster_url = url;
+                    config.auth_info.client_certificate_data = Some(STANDARD.encode(client_pem));
+                    config.auth_info.token = token.map(Into::into);
+                    let client =
+                        crate::k8s::build_client(config, client_pem == CLIENT, disabled).unwrap();
+                    tokio::time::timeout(
+                        std::time::Duration::from_secs(5),
+                        client.apiserver_version(),
+                    )
+                    .await
+                    .unwrap()
+                    .unwrap();
+                    let request = task.await.unwrap().unwrap();
+                    let authorization = request.lines().find_map(|line| {
+                        let (name, value) = line.split_once(':')?;
+                        name.eq_ignore_ascii_case("authorization")
+                            .then(|| value.trim())
+                    });
+                    assert_eq!(
+                        authorization,
+                        token
+                            .filter(|token| !token.is_empty())
+                            .map(|_| "Bearer test-token"),
+                        "token: {token:?}, legacy certificate: {}, resumption disabled: {disabled}",
+                        client_pem == CLIENT,
+                    );
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn disabling_resumption_keeps_client_auth_on_new_connections() {
         for version in [&rustls::version::TLS12, &rustls::version::TLS13] {
             for (server_pem, ca, client_pem) in [

@@ -17,6 +17,7 @@ use kube::core::{DynamicObject, GroupVersionResource};
 use kube::discovery::ApiResource;
 use kube::runtime::{WatchStreamExt, utils::Backoff, watcher};
 use kube::{Client, Config, ResourceExt};
+use secrecy::ExposeSecret;
 use tokio::sync::mpsc::Sender;
 use tokio::task::JoinHandle;
 
@@ -33,6 +34,10 @@ pub(crate) fn build_client(
     allow_v1_client_cert: bool,
     no_tls_resumption: bool,
 ) -> Result<Client> {
+    config.auth_info.token = config
+        .auth_info
+        .token
+        .filter(|token| !token.expose_secret().is_empty());
     if let Some(exec) = &mut config.auth_info.exec {
         // Authentication commands must not read from or write to the TUI terminal.
         exec.interactive_mode = Some(kube::config::ExecInteractiveMode::Never);
