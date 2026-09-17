@@ -385,14 +385,42 @@ pub(crate) fn normalize_server(server: &str) -> String {
     server.trim().trim_end_matches('/').to_lowercase()
 }
 
+#[derive(Debug)]
+pub struct MissingCurrentContext;
+
+impl std::fmt::Display for MissingCurrentContext {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let source = std::env::var_os("KUBECONFIG")
+            .filter(|value| !value.is_empty())
+            .map(|value| value.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "~/.kube/config".into());
+        write!(
+            f,
+            "no current-context in {source}; use --context <name> or run sofka ctx to select a context"
+        )
+    }
+}
+
+impl std::error::Error for MissingCurrentContext {}
+
+fn require_current_context(config: &Kubeconfig) -> Result<()> {
+    if config.current_context.as_deref().is_none_or(str::is_empty) {
+        return Err(MissingCurrentContext.into());
+    }
+    Ok(())
+}
+
 impl Cluster {
     pub async fn connect(allow_v1_client_cert: bool, no_tls_resumption: bool) -> Result<Self> {
+        let kubeconfig = Kubeconfig::read().ok();
+        if let Some(kubeconfig) = &kubeconfig {
+            require_current_context(kubeconfig)?;
+        }
         let mut config = Config::infer()
             .await
             .context("loading kubeconfig (is KUBECONFIG / ~/.kube/config present?)")?;
         // The real kubeconfig current-context (if any) is what kubectl uses by
         // default; pass it explicitly so shell-outs can't drift from us.
-        let kubeconfig = Kubeconfig::read().ok();
         if let Some(kubeconfig) = &kubeconfig {
             proxy::configure(&mut config, kubeconfig, None);
         }
@@ -1283,6 +1311,27 @@ impl Cluster {
 
 #[cfg(test)]
 pub(crate) mod tests {
+    #[test]
+    fn missing_current_context_has_selection_instructions() {
+        for current_context in [None, Some(String::new())] {
+            let config = kube::config::Kubeconfig {
+                current_context,
+                ..Default::default()
+            };
+            let error = super::require_current_context(&config).unwrap_err();
+            assert!(error.is::<super::MissingCurrentContext>());
+            let message = error.to_string();
+            assert!(message.starts_with("no current-context in "));
+            assert!(message.contains("--context <name>"));
+            assert!(message.contains("sofka ctx"));
+        }
+        let config = kube::config::Kubeconfig {
+            current_context: Some("prod".into()),
+            ..Default::default()
+        };
+        assert!(super::require_current_context(&config).is_ok());
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn exec_auth_failure_is_captured_for_all_interactive_modes() {

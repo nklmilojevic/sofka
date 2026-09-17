@@ -13108,9 +13108,13 @@ async fn context_switch_keeps_fallback_message_with_config_warning() {
 
 #[tokio::test]
 async fn context_picker_launch_connects_on_enter_and_opens_default_resource() {
-    for default in [None, Some("deployments")] {
+    for (default, current_context) in [None, Some("deployments")]
+        .into_iter()
+        .flat_map(|default| ["test", ""].map(|context| (default, context)))
+    {
         let (mut app, _rx) = test_app();
         app.cluster.connected = false;
+        app.cluster.context = current_context.into();
         let dir = std::env::temp_dir().join(format!(
             "sofka-context-launch-{}-{}",
             std::process::id(),

@@ -271,7 +271,7 @@ async fn run_main(args: Args) -> Result<()> {
         return result;
     }
 
-    let context_picker = args.context_picker()?;
+    let mut context_picker = args.context_picker()?;
 
     // Connect before taking over the terminal so errors are readable. An
     // unreachable current context isn't fatal for the interactive TUI: start
@@ -297,6 +297,10 @@ async fn run_main(args: Args) -> Result<()> {
                 eprintln!("\x1b[31merror:\x1b[0m {e:#}");
                 applog::shutdown();
                 std::process::exit(1);
+            }
+            Err(e) if e.is::<k8s::MissingCurrentContext>() => {
+                context_picker = true;
+                (Cluster::disconnected(None), None)
             }
             Err(e) => {
                 eprintln!("\x1b[33mwarning:\x1b[0m {e:#}");
