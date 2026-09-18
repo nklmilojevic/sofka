@@ -1250,7 +1250,7 @@ mod tests {
         assert!(matches!(
             args.command,
             Some(Command::Plugin(sofka::plugin_cli::PluginArgs {
-                command: sofka::plugin_cli::PluginCommand::Update { ref plugins, .. }
+                command: sofka::plugin_cli::PluginCommand::Update { ref plugins, .. }, ..
             })) if plugins == &["resource-summary"]
         ));
 

@@ -515,3 +515,24 @@ An empty inline plugin list does not disable installed packages.
 
 The [manifest reference](plugin-authoring.md#manifest) describes the package fields.
 The [authoring guide](plugin-authoring.md) includes an adapter and tests without a cluster.
+
+## Plugin catalog sources
+
+Plugin commands read `catalogs.toml` from the Sofka configuration directory.
+This file is separate from `config.toml` and `config.yaml`; cluster overrides
+and `conf.d` do not apply to it.
+
+```toml
+official = false
+
+[[catalogs]]
+name = "team"
+url = "/srv/sofka-plugins/index.json"
+trusted = true
+```
+
+`official` defaults to `true`. Each entry in `catalogs` needs a unique `name`,
+a local path or HTTP/HTTPS `url`, and explicit `trusted = true`. Relative paths
+start at the Sofka configuration directory. An invalid configuration stops
+catalog commands. See [Custom catalogs and offline installation](plugins.md#custom-catalogs-and-offline-installation)
+for source selection, trust, update rules, and mirror preparation.

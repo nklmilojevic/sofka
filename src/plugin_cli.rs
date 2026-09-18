@@ -13,13 +13,16 @@ use crate::plugin_install::{Activation, InstallLock, InstalledPackage};
 
 #[derive(clap::Args, Debug, Clone)]
 pub struct PluginArgs {
+    /// Select a configured plugin catalog.
+    #[arg(long, global = true)]
+    pub catalog: Option<String>,
     #[command(subcommand)]
     pub command: PluginCommand,
 }
 
 #[derive(clap::Subcommand, Debug, Clone)]
 pub enum PluginCommand {
-    /// Search the official reviewed catalog.
+    /// Search the configured plugin catalogs.
     Search {
         /// Match plugin IDs, names, descriptions, and tags.
         #[arg(default_value = "")]
@@ -75,6 +78,7 @@ pub enum PluginCommand {
 
 #[derive(Serialize)]
 struct SearchRow<'a> {
+    catalog: &'a str,
     id: &'a str,
     display_name: &'a str,
     description: &'a str,
@@ -88,6 +92,7 @@ struct SearchRow<'a> {
 
 #[derive(Serialize)]
 struct ListRow<'a> {
+    catalog_source: &'a str,
     id: &'a str,
     version: Option<&'a str>,
     path: &'a Path,
@@ -98,6 +103,7 @@ struct ListRow<'a> {
 
 #[derive(Serialize)]
 struct Description<'a> {
+    catalog: &'a str,
     id: &'a str,
     display_name: &'a str,
     description: &'a str,
@@ -132,26 +138,40 @@ fn confirms(release: &CatalogVersion) -> bool {
 }
 
 pub async fn run(args: &PluginArgs) -> Result<(), String> {
+    let catalog = args.catalog.as_deref();
+    if catalog.is_some()
+        && matches!(
+            args.command,
+            PluginCommand::List { .. } | PluginCommand::Remove { .. }
+        )
+    {
+        return Err("--catalog applies to search, describe, install, and update".into());
+    }
     match &args.command {
         PluginCommand::Search {
             query,
             offline,
             json,
-        } => search(query, *offline, *json).await,
+        } => search(query, *offline, *json, catalog).await,
         PluginCommand::Describe {
             plugin,
             offline,
             json,
-        } => describe(plugin, *offline, *json).await,
-        PluginCommand::Install { plugins, offline } => install(plugins, *offline).await,
-        PluginCommand::Update { plugins, offline } => update(plugins, *offline).await,
+        } => describe(plugin, *offline, *json, catalog).await,
+        PluginCommand::Install { plugins, offline } => install(plugins, *offline, catalog).await,
+        PluginCommand::Update { plugins, offline } => update(plugins, *offline, catalog).await,
         PluginCommand::List { json } => list(*json),
         PluginCommand::Remove { plugins } => remove(plugins),
     }
 }
 
-async fn search(query: &str, offline: bool, json: bool) -> Result<(), String> {
-    let snapshot = crate::plugin_catalog::load(offline).await?;
+async fn search(
+    query: &str,
+    offline: bool,
+    json: bool,
+    catalog: Option<&str>,
+) -> Result<(), String> {
+    let snapshot = crate::plugin_catalog::load_selected(offline, catalog).await?;
     offline_notice(&snapshot);
     let installed = crate::plugin_install::installed_versions()?;
     let rows = search_rows(&snapshot.catalog, &installed, query);
@@ -170,7 +190,8 @@ async fn search(query: &str, offline: bool, json: bool) -> Result<(), String> {
                 .withdrawal_reason
                 .map_or(String::new(), |reason| format!(" withdrawn: {reason}"));
             println!(
-                "{}\t{}\t{}{}{}\t{}",
+                "{}\t{}\t{}\t{}{}{}\t{}",
+                row.catalog,
                 row.id,
                 row.latest_version.unwrap_or("-"),
                 compatibility,
@@ -185,7 +206,7 @@ async fn search(query: &str, offline: bool, json: bool) -> Result<(), String> {
 
 fn search_rows<'a>(
     catalog: &'a Catalog,
-    installed: &'a BTreeMap<String, String>,
+    installed: &'a BTreeMap<(String, String), String>,
     query: &str,
 ) -> Vec<SearchRow<'a>> {
     catalog
@@ -193,8 +214,11 @@ fn search_rows<'a>(
         .into_iter()
         .map(|plugin| {
             let latest = plugin.latest_compatible();
-            let installed_version = installed.get(plugin.id.as_str()).map(String::as_str);
+            let installed_version = installed
+                .get(&(plugin.id.clone(), plugin.source.identity().into()))
+                .map(String::as_str);
             SearchRow {
+                catalog: &plugin.source.name,
                 id: &plugin.id,
                 display_name: &plugin.display_name,
                 description: &plugin.description,
@@ -269,6 +293,7 @@ fn description<'a>(
         .filter(|version| *version != release.version)
         .and_then(|version| installed_withdrawal(plugin, version));
     Description {
+        catalog: &plugin.source.name,
         id: &plugin.id,
         display_name: &plugin.display_name,
         description: &plugin.description,
@@ -298,15 +323,22 @@ fn description<'a>(
     }
 }
 
-async fn describe(request: &str, offline: bool, json: bool) -> Result<(), String> {
-    let snapshot = crate::plugin_catalog::load(offline).await?;
+async fn describe(
+    request: &str,
+    offline: bool,
+    json: bool,
+    catalog: Option<&str>,
+) -> Result<(), String> {
+    let snapshot = crate::plugin_catalog::load_selected(offline, catalog).await?;
     offline_notice(&snapshot);
     let (plugin, release) = described_release(&snapshot, request)?;
     let installed = crate::plugin_install::installed_versions()?;
     let description = description(
         plugin,
         release,
-        installed.get(plugin.id.as_str()).map(String::as_str),
+        installed
+            .get(&(plugin.id.clone(), plugin.source.identity().into()))
+            .map(String::as_str),
     );
     if json {
         println!(
@@ -315,6 +347,7 @@ async fn describe(request: &str, offline: bool, json: bool) -> Result<(), String
         );
     } else {
         println!("{} ({})", description.display_name, description.id);
+        println!("catalog: {}", description.catalog);
         println!("version: {} ({})", description.version, description.status);
         if let Some(reason) = description.withdrawal_reason {
             println!("withdrawal: {reason}");
@@ -371,8 +404,8 @@ fn print_execution(command: &crate::plugin_catalog::Execution) {
     println!("network load: {}", command.network_load);
 }
 
-async fn install(requests: &[String], offline: bool) -> Result<(), String> {
-    let snapshot = crate::plugin_catalog::load(offline).await?;
+async fn install(requests: &[String], offline: bool, catalog: Option<&str>) -> Result<(), String> {
+    let snapshot = crate::plugin_catalog::load_selected(offline, catalog).await?;
     offline_notice(&snapshot);
     report_missing_requirements(&snapshot, requests)?;
     let config = crate::plugin_catalog::config_dir()?;
@@ -381,7 +414,7 @@ async fn install(requests: &[String], offline: bool) -> Result<(), String> {
     activate(prepared).report()
 }
 
-async fn update(requested: &[String], offline: bool) -> Result<(), String> {
+async fn update(requested: &[String], offline: bool, catalog: Option<&str>) -> Result<(), String> {
     // The lock finishes any interrupted operation, so hold it before reading
     // installations: a half-applied update has no state worth deciding from.
     let config = crate::plugin_catalog::config_dir()?;
@@ -414,7 +447,17 @@ async fn update(requested: &[String], offline: bool) -> Result<(), String> {
     if ready.is_empty() {
         return Err(format!("could not update: {}", unresolved.join(", ")));
     }
-    let snapshot = crate::plugin_catalog::load(offline).await?;
+    let mut snapshot = crate::plugin_catalog::load_selected(offline, catalog).await?;
+    let origins: HashMap<_, _> = installed
+        .iter()
+        .filter(|package| package.managed)
+        .map(|package| (package.id.as_str(), package.catalog_source.as_str()))
+        .collect();
+    snapshot.catalog.plugins.retain(|plugin| {
+        origins
+            .get(plugin.id.as_str())
+            .is_some_and(|source| *source == plugin.source.identity())
+    });
     offline_notice(&snapshot);
     let mut updates = Vec::new();
     for id in ready {
@@ -637,8 +680,9 @@ fn list(json: bool) -> Result<(), String> {
                 .withdrawal_reason
                 .map_or(String::new(), |reason| format!(" withdrawn: {reason}"));
             println!(
-                "{}\t{}\t{kind}{modified}{withdrawn}\t{}",
+                "{}\t{}\t{}\t{kind}{modified}{withdrawn}\t{}",
                 row.id,
+                row.catalog_source,
                 row.version.unwrap_or("-"),
                 row.path.display()
             );
@@ -654,6 +698,7 @@ fn list_rows<'a>(
     packages
         .iter()
         .map(|package| ListRow {
+            catalog_source: &package.catalog_source,
             id: &package.id,
             version: package.version.as_deref(),
             path: &package.path,
@@ -663,7 +708,13 @@ fn list_rows<'a>(
                 .filter(|_| package.managed)
                 .zip(package.version.as_deref())
                 .and_then(|(catalog, version)| {
-                    installed_withdrawal(catalog.find(&package.id).ok()?, version)
+                    installed_withdrawal(
+                        catalog.plugins.iter().find(|plugin| {
+                            plugin.id == package.id
+                                && plugin.source.identity() == package.catalog_source
+                        })?,
+                        version,
+                    )
                 }),
         })
         .collect()
@@ -837,6 +888,7 @@ mod tests {
 
     fn package(version: &str) -> Vec<InstalledPackage> {
         vec![InstalledPackage {
+            catalog_source: "official".into(),
             id: "resource-summary".into(),
             version: Some(version.into()),
             path: std::path::PathBuf::from("/config/plugins/resource-summary"),
@@ -1007,6 +1059,7 @@ mod tests {
         assert_eq!(
             keys(&value),
             [
+                "catalog",
                 "command",
                 "confirm",
                 "confirmation",
@@ -1073,6 +1126,7 @@ mod tests {
         assert_eq!(
             keys(&rows[0]),
             [
+                "catalog",
                 "compatible",
                 "description",
                 "display_name",
@@ -1094,6 +1148,7 @@ mod tests {
         assert_eq!(
             keys(&rows[0]),
             [
+                "catalog_source",
                 "id",
                 "managed",
                 "modified",
@@ -1272,10 +1327,15 @@ mod tests {
     }
 
     /// What search and describe actually consume: installed versions by ID.
-    fn installed_rows(packages: &[InstalledPackage]) -> BTreeMap<String, String> {
+    fn installed_rows(packages: &[InstalledPackage]) -> BTreeMap<(String, String), String> {
         packages
             .iter()
-            .filter_map(|package| Some((package.id.clone(), package.version.clone()?)))
+            .filter_map(|package| {
+                Some((
+                    (package.id.clone(), package.catalog_source.clone()),
+                    package.version.clone()?,
+                ))
+            })
             .collect()
     }
 
@@ -1396,6 +1456,7 @@ mod tests {
     fn a_modified_package_is_refused_without_holding_back_the_others() {
         let installed = [
             InstalledPackage {
+                catalog_source: "official".into(),
                 id: "clean".into(),
                 version: Some("1.0.0".into()),
                 path: "/config/plugins/clean".into(),
@@ -1403,6 +1464,7 @@ mod tests {
                 modified: false,
             },
             InstalledPackage {
+                catalog_source: "official".into(),
                 id: "edited".into(),
                 version: Some("1.0.0".into()),
                 path: "/config/plugins/edited".into(),

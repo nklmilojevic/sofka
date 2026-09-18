@@ -100,9 +100,9 @@ installation, update, or removal changed anything, enter `:reload` in an
 existing session.
 
 Add `--json` to search, describe, and list for stable machine-readable output.
-Search returns an array with `id`, `display_name`, `description`, `tags`,
+Search returns an array with `catalog`, `id`, `display_name`, `description`, `tags`,
 `latest_version`, `compatible`, `installed`, `installed_version`, and
-`withdrawal_reason`. Describe returns `id`, `display_name`, `description`,
+`withdrawal_reason`. Describe returns `catalog`, `id`, `display_name`, `description`,
 `tags`, `publisher`, `repository`, `version`, `status`, `withdrawal_reason`,
 `license`, `readme`, `sofka`, `platforms`, `requirements`, `confirmation`,
 `installed`, `installed_version`, and `installed_withdrawal_reason`.
@@ -268,3 +268,82 @@ contexts = ["home"]           # optional: only these contexts
 ```
 
 sofka stops every forward on quit instead of orphaning it.
+
+### Custom catalogs and offline installation
+
+Create `$XDG_CONFIG_HOME/sofka/catalogs.toml`, or
+`~/.config/sofka/catalogs.toml`. This file applies to plugin commands only. It
+is separate from cluster configuration and does not load cluster credentials.
+
+```toml
+# Set false to prevent access to the official catalog.
+official = false
+
+[[catalogs]]
+name = "team"
+url = "/srv/sofka-plugins/index.json"
+trusted = true
+```
+
+The official catalog remains enabled when this file is absent or `official`
+is omitted. Catalog names must be unique. The name `official` is reserved.
+Each custom source requires `trusted = true`. Set this only after you review
+the source. Its plugins run with your permissions. There is no startup prompt,
+so the same configuration works in automated deployments. An invalid file or
+an untrusted source stops the command; Sofka does not fall back to defaults.
+
+Use an absolute path, a path relative to the Sofka configuration directory,
+a `file://` path, or an HTTP/HTTPS URL for `url`. Local paths use literal file
+names, without URL percent encoding. For an internal server, use, for example,
+`url = "https://plugins.internal/sofka/index.json"`. HTTPS uses the system trust
+store. HTTP is supported for internal mirrors but does not protect traffic
+against changes during transport. URLs with embedded credentials are rejected.
+
+Catalogs use the existing schema 1 or schema 2 JSON format. For custom catalogs,
+artifact URLs can be relative to the index. HTTP artifacts and redirects must
+stay on the catalog origin, including its scheme and port. Local artifacts
+must stay inside the directory that contains the index. Paths with `..` and
+symbolic links that leave that directory are rejected. The official catalog
+keeps its existing GitHub download restrictions.
+
+```sh
+sofka plugin search --catalog team
+sofka plugin describe resource-summary --catalog team
+sofka plugin install resource-summary --catalog team --offline
+sofka plugin update --offline
+```
+
+Without `--catalog`, search includes all enabled sources. If a plugin ID exists
+in more than one source, describe and install require `--catalog NAME`.
+One install command can use multiple sources when their plugin IDs are unique.
+Search and describe include the catalog name in text and JSON output. List
+includes `catalog_source`, which is the stored source location or `official`.
+
+Installation records store the source location, catalog revision, package
+version, and BLAKE3 checksum. Custom catalog revisions are BLAKE3 hashes of the
+index. Existing records without a source belong to the official catalog.
+Updates use the installed source. A source at a different location cannot
+replace an installed package, even if its name, version, and checksum match.
+To change the source, remove the managed plugin and then install it from the
+new source. Renaming a catalog without changing its location keeps ownership.
+
+To prepare an offline mirror:
+
+1. Copy the catalog index and the package archives for the required versions
+   and platforms to one directory tree.
+2. Change the artifact URLs in the index to relative paths in that tree.
+   Keep the package sizes and checksums unchanged.
+3. Copy the tree to the offline environment. Configure its local index and set
+   `official = false`.
+4. Provide the runtime tools listed in each plugin's `requirements`. Sofka
+   reports missing tools but does not install them.
+5. Run install with `--offline`. A local index and local archives work with an
+   empty cache.
+
+HTTP catalogs need cached metadata and archives for `--offline`. An internal
+HTTP server is used without that flag. Catalog caches are separate for each
+source location. Artifact caches use content hashes and check both the size
+and checksum before reuse. A failed network request does not select a different
+source or silently use an old catalog. Catalog files are limited to 10 MiB;
+compressed packages are limited to 50 MiB. Existing archive and manifest checks
+also apply to custom packages.

@@ -60,8 +60,9 @@ choices in there.
 `plugins.rs` loads package manifests and validates input values.
 It also controls adapter processes and reads JSON reports.
 `app/plugins.rs` connects this code to commands, guardrails, and document views.
-`plugin_catalog.rs` validates and caches the official single-file index and
-selects compatible platform artifacts. `plugin_install.rs` verifies, stages,
+`plugin_catalog.rs` validates catalogs and selects compatible platform artifacts.
+`plugin_catalog/sources.rs` loads trusted custom catalogs and limits downloads
+to each source. `plugin_install.rs` verifies, stages,
 records, updates, and removes managed packages. `plugin_cli.rs` keeps those
 operations independent of the TUI and Kubernetes initialization.
 

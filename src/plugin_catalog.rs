@@ -1,4 +1,7 @@
-//! Official plugin catalog metadata, selection, caching, and downloads.
+//! Plugin catalog metadata, selection, caching, and downloads.
+
+mod sources;
+pub use sources::{Source, load_selected};
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -50,6 +53,10 @@ pub struct Catalog {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct CatalogPlugin {
+    #[serde(skip)]
+    pub source: Source,
+    #[serde(skip)]
+    pub revision: String,
     pub id: String,
     pub display_name: String,
     pub description: String,
@@ -231,6 +238,10 @@ pub struct Selection<'a> {
 
 impl Catalog {
     pub fn parse(bytes: &[u8]) -> Result<Self, String> {
+        Self::parse_from(bytes, &Source::default())
+    }
+
+    fn parse_from(bytes: &[u8], source: &Source) -> Result<Self, String> {
         if bytes.len() > CATALOG_MAX_BYTES {
             return Err("catalog exceeds 10 MiB".into());
         }
@@ -246,8 +257,11 @@ impl Catalog {
                 schema.schema_version
             ));
         }
-        let catalog: Self =
+        let mut catalog: Self =
             serde_json::from_slice(bytes).map_err(|e| format!("invalid catalog JSON: {e}"))?;
+        for plugin in &mut catalog.plugins {
+            plugin.source = source.clone();
+        }
         catalog.validate()?;
         Ok(catalog)
     }
@@ -269,7 +283,7 @@ impl Catalog {
             if plugin.display_name.trim().is_empty() || plugin.description.trim().is_empty() {
                 return Err(format!("plugin {} has empty display metadata", plugin.id));
             }
-            if !plugin.repository.starts_with("https://") {
+            if !metadata_url(&plugin.repository, &plugin.source) {
                 return Err(format!("plugin {} repository must use HTTPS", plugin.id));
             }
             let mut versions = HashSet::new();
@@ -296,7 +310,9 @@ impl Catalog {
                         plugin.id, release.version
                     ));
                 }
-                if release.license.trim().is_empty() || !release.readme.starts_with("https://") {
+                if release.license.trim().is_empty()
+                    || !metadata_url(&release.readme, &plugin.source)
+                {
                     return Err(format!(
                         "plugin {} version {} has invalid license or README metadata",
                         plugin.id, release.version
@@ -394,7 +410,7 @@ impl Catalog {
                             plugin.id, release.version, artifact.platform
                         ));
                     }
-                    validate_artifact(artifact).map_err(|e| {
+                    validate_artifact_from(artifact, &plugin.source).map_err(|e| {
                         format!("plugin {} version {}: {e}", plugin.id, release.version)
                     })?;
                 }
@@ -404,10 +420,16 @@ impl Catalog {
     }
 
     pub fn find(&self, id: &str) -> Result<&CatalogPlugin, String> {
-        self.plugins
-            .iter()
-            .find(|plugin| plugin.id == id)
-            .ok_or_else(|| format!("unknown plugin {id:?}"))
+        let mut matches = self.plugins.iter().filter(|plugin| plugin.id == id);
+        let plugin = matches
+            .next()
+            .ok_or_else(|| format!("unknown plugin {id:?}"))?;
+        if matches.next().is_some() {
+            return Err(format!(
+                "plugin {id:?} exists in multiple catalogs; use --catalog NAME"
+            ));
+        }
+        Ok(plugin)
     }
 
     pub fn matching(&self, query: &str) -> Vec<&CatalogPlugin> {
@@ -586,14 +608,22 @@ pub const SUPPORTED_PLATFORMS: &[&str] = &[
     "aarch64-pc-windows-msvc",
 ];
 
-fn validate_artifact(artifact: &Artifact) -> Result<(), String> {
+fn metadata_url(url: &str, source: &Source) -> bool {
+    url.starts_with("https://")
+        || (!source.is_official() && (url.starts_with("http://") || url.starts_with("file://")))
+}
+
+fn validate_artifact_from(artifact: &Artifact, source: &Source) -> Result<(), String> {
     if artifact.platform != "any" && !SUPPORTED_PLATFORMS.contains(&artifact.platform.as_str()) {
         return Err(format!("unsupported platform {:?}", artifact.platform));
     }
-    if !artifact.url.starts_with(RELEASE_ROOT) {
+    if source.is_official() && !artifact.url.starts_with(RELEASE_ROOT) {
         return Err(format!(
             "artifact URL must be a release asset of {REPOSITORY}"
         ));
+    }
+    if !source.is_official() {
+        source.artifact_location(&artifact.url)?;
     }
     if artifact.blake3.len() != 64 || !artifact.blake3.bytes().all(|b| b.is_ascii_hexdigit()) {
         return Err("artifact BLAKE3 must contain 64 hexadecimal characters".into());
@@ -655,7 +685,7 @@ pub fn config_dir() -> Result<PathBuf, String> {
     Ok(base.join("sofka"))
 }
 
-pub async fn load(offline: bool) -> Result<CatalogSnapshot, String> {
+async fn load(offline: bool) -> Result<CatalogSnapshot, String> {
     let cache_path = cache_dir().join("catalog-cache.json");
     if offline {
         return load_cached(&cache_path);
@@ -718,7 +748,7 @@ fn finish_load(
 /// The cached catalog when one is readable, for commands that must work
 /// without the network and without failing when nothing has been fetched yet.
 pub fn cached() -> Option<CatalogSnapshot> {
-    load_cached(&cache_dir().join("catalog-cache.json")).ok()
+    sources::cached_sources()
 }
 
 fn load_cached(path: &Path) -> Result<CatalogSnapshot, String> {
@@ -790,13 +820,22 @@ pub async fn artifact_in(
     artifact: &Artifact,
     offline: bool,
 ) -> Result<ArtifactArchive, String> {
-    validate_artifact(artifact)?;
+    artifact_from(cache, artifact, offline, &Source::default()).await
+}
+
+pub async fn artifact_from(
+    cache: &Path,
+    artifact: &Artifact,
+    offline: bool,
+    source: &Source,
+) -> Result<ArtifactArchive, String> {
+    validate_artifact_from(artifact, source)?;
     let path = cache
         .join("artifacts")
         .join(format!("{}.tar.zst", artifact.blake3.to_ascii_lowercase()));
     if path.is_file() {
         let bytes = std::fs::read(&path).map_err(|e| e.to_string())?;
-        if digest(&bytes) == artifact.blake3.to_ascii_lowercase() {
+        if verify_artifact(artifact, &bytes).is_ok() {
             return Ok(ArtifactArchive {
                 path,
                 temporary: false,
@@ -804,6 +843,14 @@ pub async fn artifact_in(
         }
         std::fs::remove_file(&path)
             .map_err(|e| format!("removing corrupt cached artifact {}: {e}", path.display()))?;
+    }
+    if !source.is_official() {
+        let location = source.artifact_location(&artifact.url)?;
+        let bytes = source
+            .read(&location, ARTIFACT_MAX_BYTES, ARTIFACT_BUDGET, offline)
+            .await?;
+        verify_artifact(artifact, &bytes)?;
+        return store_artifact(&path, &bytes);
     }
     if offline {
         return Err(format!(
@@ -936,7 +983,7 @@ type HttpClient = hyper_util::client::legacy::Client<
 /// least two requests — the commit, then the index, then any artifacts.
 fn client(allow_http: bool) -> Result<HttpClient, String> {
     if allow_http {
-        // Only the loopback test server takes this path.
+        // Custom HTTP catalogs and the loopback test server use this client.
         return build_client(true);
     }
     static CLIENT: std::sync::OnceLock<Result<HttpClient, String>> = std::sync::OnceLock::new();
@@ -968,14 +1015,17 @@ async fn get_with(
     budget: Budget,
     allow_test_http: bool,
 ) -> Result<Vec<u8>, String> {
-    tokio::time::timeout(budget.total, get_inner(url, limit, budget, allow_test_http))
-        .await
-        .map_err(|_| {
-            format!(
-                "request timed out after {}ms: {url}",
-                budget.total.as_millis()
-            )
-        })?
+    tokio::time::timeout(
+        budget.total,
+        get_inner(url, limit, budget, allow_test_http, None),
+    )
+    .await
+    .map_err(|_| {
+        format!(
+            "request timed out after {}ms: {url}",
+            budget.total.as_millis()
+        )
+    })?
 }
 
 async fn get_inner(
@@ -983,14 +1033,20 @@ async fn get_inner(
     limit: usize,
     budget: Budget,
     allow_test_http: bool,
+    source: Option<&Source>,
 ) -> Result<Vec<u8>, String> {
-    let client = client(allow_test_http)?;
+    let client =
+        client(allow_test_http || source.is_some_and(|source| source.url.starts_with("http://")))?;
     let mut current = url.to_string();
     for redirects in 0..=REDIRECT_LIMIT {
         let uri: http::Uri = current
             .parse()
             .map_err(|e| format!("invalid catalog URL: {e}"))?;
-        validate_http_uri(&uri, allow_test_http)?;
+        if let Some(source) = source {
+            source.validate_url(&current)?;
+        } else {
+            validate_http_uri(&uri, allow_test_http)?;
+        }
         let base = uri.clone();
         let request = http::Request::get(uri)
             .header(
@@ -1181,11 +1237,13 @@ mod tests {
         format!("http://{address}/fixture")
     }
 
-    fn catalog() -> Catalog {
+    pub(super) fn catalog() -> Catalog {
         Catalog {
             schema_version: 1,
             generated_at: "2026-09-11T00:00:00Z".into(),
             plugins: vec![CatalogPlugin {
+                source: Source::default(),
+                revision: String::new(),
                 id: "resource-summary".into(),
                 display_name: "Resource summary".into(),
                 description: "Summarize a resource".into(),

@@ -9,6 +9,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::plugin_catalog::{self, CatalogSnapshot};
 
+fn official_source() -> String {
+    "official".into()
+}
+
 const RECORD: &str = ".sofka-install.json";
 const STAGE_MARKER: &str = ".sofka-install-stage";
 const RECORD_SCHEMA: u32 = 1;
@@ -30,6 +34,8 @@ pub struct InstallationRecord {
     pub id: String,
     pub package_version: String,
     pub catalog_commit: String,
+    #[serde(default = "official_source")]
+    pub catalog_source: String,
     pub source_commit: String,
     pub artifact_digest: String,
     pub files: BTreeMap<String, String>,
@@ -37,6 +43,7 @@ pub struct InstallationRecord {
 
 #[derive(Clone, Debug, Serialize)]
 pub struct InstalledPackage {
+    pub catalog_source: String,
     pub id: String,
     pub version: Option<String>,
     pub path: PathBuf,
@@ -272,7 +279,7 @@ async fn prepare_below(
         }
         if selections
             .iter()
-            .any(|(id, _, _): &(String, _, _)| id == &selection.plugin.id)
+            .any(|(id, _, _, _, _): &(String, _, _, _, _)| id == &selection.plugin.id)
         {
             continue;
         }
@@ -280,16 +287,25 @@ async fn prepare_below(
             selection.plugin.id.clone(),
             selection.version,
             selection.artifact,
+            &selection.plugin.source,
+            &selection.plugin.revision,
         ));
     }
 
     let mut prepared = Vec::new();
     // Manifests prepared so far in this batch, by package ID.
     let mut batch: Vec<(String, Vec<crate::config::Plugin>)> = Vec::new();
-    for (id, release, artifact) in selections {
+    for (id, release, artifact, source, revision) in selections {
         let version = release.version.clone();
         let destination = plugins.join(&id);
         let previous = inspect_destination(&destination, &id)?;
+        if let Some(record) = previous.as_ref()
+            && record.catalog_source != source.identity()
+        {
+            return Err(format!(
+                "plugin {id} belongs to a different catalog; remove it before changing its source"
+            ));
+        }
         if let Some(record) = previous.as_ref()
             && record.package_version == version
         {
@@ -311,7 +327,7 @@ async fn prepare_below(
             });
             continue;
         }
-        let archive = plugin_catalog::artifact_in(cache, artifact, offline).await?;
+        let archive = plugin_catalog::artifact_from(cache, artifact, offline, source).await?;
         let stage = unique_path(config, &format!(".plugin-stage-{id}"));
         std::fs::create_dir(&stage).map_err(|e| format!("creating {}: {e}", stage.display()))?;
         std::fs::write(
@@ -349,7 +365,12 @@ async fn prepare_below(
             schema_version: RECORD_SCHEMA,
             id: id.clone(),
             package_version: version.clone(),
-            catalog_commit: snapshot.commit.clone(),
+            catalog_commit: if revision.is_empty() {
+                snapshot.commit.clone()
+            } else {
+                revision.clone()
+            },
+            catalog_source: source.identity().into(),
             source_commit: release.source_commit.clone(),
             artifact_digest: artifact.blake3.to_ascii_lowercase(),
             files,
@@ -497,11 +518,11 @@ pub fn installed() -> Result<Vec<InstalledPackage>, String> {
 /// Installed versions by ID, without hashing a single file. Search and describe
 /// report what is installed, never whether it was edited, and verifying every
 /// file of every package to answer that costs more than the rest of the command.
-pub fn installed_versions() -> Result<BTreeMap<String, String>, String> {
+pub fn installed_versions() -> Result<BTreeMap<(String, String), String>, String> {
     Ok(scan(&plugin_catalog::config_dir()?.join("plugins"), false)?
         .into_iter()
         .filter(|package| package.managed)
-        .filter_map(|package| Some((package.id, package.version?)))
+        .filter_map(|package| Some(((package.id, package.catalog_source), package.version?)))
         .collect())
 }
 
@@ -535,6 +556,7 @@ fn scan(plugins: &Path, verify: bool) -> Result<Vec<InstalledPackage>, String> {
             // Reported, never owned: install, update, and removal all refuse a
             // symlinked path, so it can only ever be somebody else's package.
             packages.push(InstalledPackage {
+                catalog_source: String::new(),
                 id,
                 version: None,
                 path,
@@ -545,6 +567,7 @@ fn scan(plugins: &Path, verify: bool) -> Result<Vec<InstalledPackage>, String> {
         }
         match read_record(&path) {
             Ok(record) => packages.push(InstalledPackage {
+                catalog_source: record.catalog_source.clone(),
                 modified: record.id != id || (verify && verify_record(&path, &record).is_err()),
                 id,
                 version: Some(record.package_version.clone()),
@@ -554,6 +577,7 @@ fn scan(plugins: &Path, verify: bool) -> Result<Vec<InstalledPackage>, String> {
             Err(_) => {
                 let has_record = path.join(RECORD).exists();
                 packages.push(InstalledPackage {
+                    catalog_source: String::new(),
                     id,
                     version: None,
                     path,
@@ -1249,6 +1273,71 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn local_install_and_update_keep_the_source_and_reject_source_changes() {
+        let config = scratch("local-source");
+        let mirror = config.join("mirror");
+        let cache = config.join("empty-cache");
+        std::fs::create_dir_all(&mirror).unwrap();
+        let mut snapshot = published(&mirror, "resource-summary", "1.0.0", MANIFEST);
+        let plugin = &mut snapshot.catalog.plugins[0];
+        plugin.source = plugin_catalog::Source {
+            name: "team".into(),
+            url: format!("file://{}/index.json", mirror.display()),
+            trusted: true,
+        };
+        plugin.revision = "a".repeat(64);
+        plugin.versions[0].artifacts[0].url = "resource-summary-1.0.0.tar.zst".into();
+        let requests = ["resource-summary".into()];
+        let prepared = prepare_below(&config, &cache, &snapshot, &requests, true)
+            .await
+            .unwrap();
+        prepared.into_iter().next().unwrap().activate().unwrap();
+        let destination = config.join("plugins/resource-summary");
+        let record = read_record(&destination).unwrap();
+        assert_eq!(
+            record.catalog_source,
+            snapshot.catalog.plugins[0].source.identity()
+        );
+        assert_eq!(record.catalog_commit, "a".repeat(64));
+        let mut changed = snapshot.clone();
+        changed.catalog.plugins[0].source.url = format!("file://{}/other.json", mirror.display());
+        let error = prepare_below(&config, &cache, &changed, &requests, true)
+            .await
+            .unwrap_err();
+        assert!(error.contains("different catalog"));
+        assert_eq!(read_record(&destination).unwrap().package_version, "1.0.0");
+
+        let mut newer = published(
+            &mirror,
+            "resource-summary",
+            "2.0.0",
+            &MANIFEST.replace("1.0.0", "2.0.0"),
+        );
+        newer.catalog.plugins[0].source = snapshot.catalog.plugins[0].source.clone();
+        newer.catalog.plugins[0].versions[0].artifacts[0].url =
+            "resource-summary-2.0.0.tar.zst".into();
+        let prepared = prepare_below(&config, &cache, &newer, &requests, true)
+            .await
+            .unwrap();
+        prepared.into_iter().next().unwrap().activate().unwrap();
+        assert_eq!(read_record(&destination).unwrap().package_version, "2.0.0");
+        assert_eq!(
+            read_record(&destination).unwrap().catalog_source,
+            record.catalog_source
+        );
+        std::fs::remove_dir_all(config).unwrap();
+    }
+
+    #[test]
+    fn legacy_installation_records_belong_to_the_official_catalog() {
+        let record = record_for("resource-summary", "1.0.0");
+        let mut json = serde_json::to_value(&record).unwrap();
+        json.as_object_mut().unwrap().remove("catalog_source");
+        let record: InstallationRecord = serde_json::from_value(json).unwrap();
+        assert_eq!(record.catalog_source, "official");
+    }
+
     fn multi_manifest() -> String {
         format!(
             "{}{}",
@@ -1399,6 +1488,7 @@ confirm = true
             id: id.into(),
             package_version: version.into(),
             catalog_commit: "0".repeat(40),
+            catalog_source: official_source(),
             source_commit: "1".repeat(40),
             artifact_digest: "2".repeat(64),
             files: BTreeMap::new(),
@@ -2318,6 +2408,7 @@ confirm = true
             id: "sample".into(),
             package_version: "1.0.0".into(),
             catalog_commit: "0".repeat(40),
+            catalog_source: official_source(),
             source_commit: "1".repeat(40),
             artifact_digest: "2".repeat(64),
             files: hash_files(&dir).unwrap(),
@@ -2552,6 +2643,7 @@ confirm = true
             id: "sample".into(),
             package_version: "2.0.0".into(),
             catalog_commit: "0".repeat(40),
+            catalog_source: official_source(),
             source_commit: "1".repeat(40),
             artifact_digest: "2".repeat(64),
             files: BTreeMap::new(),
@@ -2620,6 +2712,7 @@ confirm = true
             id: "sample".into(),
             package_version: "1.0.0".into(),
             catalog_commit: "0".repeat(40),
+            catalog_source: official_source(),
             source_commit: "1".repeat(40),
             artifact_digest: "2".repeat(64),
             files: BTreeMap::new(),
@@ -2682,6 +2775,7 @@ confirm = true
             id: "resource-summary".into(),
             package_version: "1.0.0".into(),
             catalog_commit: "0".repeat(40),
+            catalog_source: official_source(),
             source_commit: "1".repeat(40),
             artifact_digest: "2".repeat(64),
             files: BTreeMap::new(),
