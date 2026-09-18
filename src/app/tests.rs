@@ -33701,6 +33701,28 @@ async fn context_namespace_policy_uses_target_config_and_preserves_explicit_scop
 }
 
 #[tokio::test]
+async fn context_namespace_policy_keeps_incluster_namespace_without_selected_context() {
+    let dir =
+        std::env::temp_dir().join(format!("sofka-incluster-namespace-{}", std::process::id()));
+    write_config(&dir, "prefer_context_namespace = true\n");
+    let (mut app, _rx) = test_app();
+    app.config = crate::config::ConfigLoader::from_dir(Some(dir.clone()));
+    app.all_contexts = vec!["default".into()];
+    type_resource_query(&mut app, "pods @default");
+    let mut cluster = Cluster::fake();
+    cluster.context = "default".into();
+    cluster.context_namespace = None;
+    cluster.default_namespace = "service-account-namespace".into();
+    app.handle_msg(Msg::ContextSwitched {
+        generation: app.generation,
+        name: "default".into(),
+        result: Ok(Box::new(cluster)),
+    });
+    assert_eq!(app.namespace, "service-account-namespace");
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[tokio::test]
 async fn reload_namespace_policy_keeps_view_and_changes_next_context_resolution() {
     let dir = std::env::temp_dir().join(format!("sofka-namespace-reload-{}", std::process::id()));
     write_config(&dir, "prefer_context_namespace = false\n");

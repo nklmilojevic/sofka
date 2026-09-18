@@ -434,6 +434,9 @@ impl Cluster {
         if let Some(kubeconfig) = &kubeconfig {
             proxy::configure(&mut config, kubeconfig, None);
         }
+        let context_namespace = kubeconfig
+            .as_ref()
+            .and_then(|config| context_namespace_from(config, config.current_context.as_deref()));
         let cli_context = kubeconfig
             .and_then(|config| config.current_context)
             .filter(|context| !context.is_empty());
@@ -442,6 +445,7 @@ impl Cluster {
             config,
             context,
             cli_context,
+            context_namespace,
             allow_v1_client_cert,
             no_tls_resumption,
         )
@@ -468,6 +472,7 @@ impl Cluster {
             config,
             name.to_string(),
             Some(name.to_string()),
+            context_namespace_from(&kubeconfig, Some(name)),
             allow_v1_client_cert,
             no_tls_resumption,
         )
@@ -478,6 +483,7 @@ impl Cluster {
         config: Config,
         context: String,
         cli_context: Option<String>,
+        context_namespace: Option<String>,
         allow_v1_client_cert: bool,
         no_tls_resumption: bool,
     ) -> Result<Self> {
@@ -490,7 +496,7 @@ impl Cluster {
         let cluster_name = cluster_name_for(&context).unwrap_or_default();
         let mut cluster = Self {
             client,
-            context_namespace: context_namespace(&context),
+            context_namespace,
             context,
             cluster_name,
             cluster_url,
@@ -1116,6 +1122,11 @@ fn context_info_from(
 /// diagnostics report, which has no live client to ask.
 pub fn context_namespace(context: &str) -> Option<String> {
     let kubeconfig = kube::config::Kubeconfig::read().ok()?;
+    context_namespace_from(&kubeconfig, Some(context))
+}
+
+fn context_namespace_from(kubeconfig: &Kubeconfig, context: Option<&str>) -> Option<String> {
+    let context = context.filter(|name| !name.is_empty())?;
     kubeconfig
         .contexts
         .iter()
@@ -1351,8 +1362,21 @@ pub(crate) mod tests {
         for current_context in [None, Some(String::new())] {
             let kubeconfig = kube::config::Kubeconfig {
                 current_context,
+                contexts: serde_json::from_value(serde_json::json!([{
+                    "name": "default",
+                    "context": {"cluster": "unrelated", "namespace": "unrelated-namespace"}
+                }]))
+                .unwrap(),
                 ..Default::default()
             };
+            assert_eq!(
+                super::context_namespace_from(&kubeconfig, kubeconfig.current_context.as_deref()),
+                None
+            );
+            assert_eq!(
+                super::context_namespace_from(&kubeconfig, Some("default")).as_deref(),
+                Some("unrelated-namespace")
+            );
             let mut inferred = kube::Config::new("https://127.0.0.1:6443".parse().unwrap());
             inferred.default_namespace = "service-account-namespace".into();
             inferred.auth_info.token_file = Some("/service-account/token".into());
@@ -2112,7 +2136,7 @@ clusters:
         // backoff) turns the mock's deliberate 503 into a ~4-minute stall;
         // retrying is not what these tests exercise.
         config.default_retry = false;
-        Cluster::from_config(config, "test".into(), None, false, false).await
+        Cluster::from_config(config, "test".into(), None, None, false, false).await
     }
 
     #[tokio::test]
