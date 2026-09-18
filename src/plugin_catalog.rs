@@ -2,6 +2,7 @@
 
 mod sources;
 pub use sources::{Source, load_selected};
+pub(crate) use sources::{configured_sources, load_sources};
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -748,7 +749,11 @@ fn finish_load(
 /// The cached catalog when one is readable, for commands that must work
 /// without the network and without failing when nothing has been fetched yet.
 pub fn cached() -> Option<CatalogSnapshot> {
-    sources::cached_sources()
+    cached_selected(None)
+}
+
+pub fn cached_selected(selected: Option<&str>) -> Option<CatalogSnapshot> {
+    sources::cached_sources(selected)
 }
 
 fn load_cached(path: &Path) -> Result<CatalogSnapshot, String> {

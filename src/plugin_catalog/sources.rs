@@ -269,6 +269,19 @@ fn configured(directory: &Path) -> Result<Vec<Source>, String> {
     settings.sources(directory)
 }
 
+pub(crate) fn configured_sources(selected: Option<&str>) -> Result<Vec<Source>, String> {
+    let sources = configured(&config_dir()?)?;
+    if let Some(name) = selected
+        && !sources.iter().any(|source| source.name == name)
+    {
+        return Err(format!("unknown or disabled catalog {name:?}"));
+    }
+    Ok(sources
+        .into_iter()
+        .filter(|source| selected.is_none_or(|name| name == source.name))
+        .collect())
+}
+
 pub async fn load_selected(
     offline: bool,
     selected: Option<&str>,
@@ -277,7 +290,7 @@ pub async fn load_selected(
     load_sources(sources, &cache_dir(), offline, selected).await
 }
 
-async fn load_sources(
+pub(crate) async fn load_sources(
     sources: Vec<Source>,
     cache: &Path,
     offline: bool,
@@ -312,8 +325,8 @@ async fn load_sources(
     combined.ok_or_else(|| "no plugin catalogs are enabled".into())
 }
 
-pub(super) fn cached_sources() -> Option<CatalogSnapshot> {
-    let sources = configured(&config_dir().ok()?).ok()?;
+pub(super) fn cached_sources(selected: Option<&str>) -> Option<CatalogSnapshot> {
+    let sources = configured_sources(selected).ok()?;
     let cache = cache_dir();
     let mut combined: Option<CatalogSnapshot> = None;
     for source in sources {

@@ -26,6 +26,10 @@ impl Fixture {
     }
 
     fn publish(&self, directory: &str, version: &str) {
+        self.publish_named(directory, version, "local-test");
+    }
+
+    fn publish_named(&self, directory: &str, version: &str, id: &str) {
         let path = self.0.join("config/sofka").join(directory);
         std::fs::create_dir_all(&path).unwrap();
         let manifest = format!(
@@ -36,8 +40,8 @@ description = "Local test plugin"
 license = "MIT"
 sofka = ">=0.0.1"
 [plugin]
-name = "Local test"
-palette = "local-test"
+name = "{id}"
+palette = "{id}"
 command = "echo"
 output = "report"
 mutating = false
@@ -56,7 +60,7 @@ mutating = false
         let index = serde_json::json!({
             "schema_version": 1, "generated_at": "2026-09-18T00:00:00Z",
             "plugins": [{
-                "id": "local-test", "display_name": "Local test", "description": "Local test plugin",
+                "id": id, "display_name": id, "description": "Local test plugin",
                 "publisher": "team", "repository": "https://example.invalid/team",
                 "versions": [{
                     "version": version, "sofka": ">=0.0.1", "source_commit": "a".repeat(40),
@@ -79,6 +83,36 @@ mutating = false
             .env("KUBECONFIG", self.0.join("absent-kubeconfig"))
             .output()
             .unwrap()
+    }
+
+    fn complete(&self, shell: &str, words: &[&str]) -> Vec<String> {
+        let output = Command::new(env!("CARGO_BIN_EXE_sofka"))
+            .arg("--")
+            .args(words)
+            .env("SOFKA_COMPLETE", shell)
+            .env_remove("SOFKA_COMPLETE_WORKER")
+            .env("_CLAP_COMPLETE_INDEX", (words.len() - 1).to_string())
+            .env_remove("_CLAP_IFS")
+            .env("XDG_CONFIG_HOME", self.0.join("config"))
+            .env("XDG_CACHE_HOME", self.0.join("cache"))
+            .env("KUBECONFIG", self.0.join("absent-kubeconfig"))
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{shell} {words:?}: {:?}",
+            output.stderr
+        );
+        assert!(
+            output.stderr.is_empty(),
+            "{shell} {words:?}: {:?}",
+            output.stderr
+        );
+        String::from_utf8(output.stdout)
+            .unwrap()
+            .lines()
+            .map(|line| line.split('\t').next().unwrap().to_owned())
+            .collect()
     }
 
     fn ok(&self, args: &[&str]) -> Output {
@@ -164,4 +198,135 @@ fn plugin_catalog_cli_rejects_untrusted_sources_ambiguous_ids_and_bad_checksums(
             .success()
     );
     assert!(!fixture.0.join("config/sofka/plugins/local-test").exists());
+}
+
+#[test]
+fn targeted_update_does_not_load_unrelated_catalogs() {
+    let fixture = Fixture::new();
+    fixture.config(true, false);
+    fixture.publish("mirror", "1.0.0");
+    let config = fixture.0.join("config/sofka/catalogs.toml");
+    let team = std::fs::read_to_string(&config).unwrap();
+    std::fs::write(&config, team.replace("official=false", "official=true")).unwrap();
+    fixture.ok(&["install", "local-test", "--catalog", "team", "--offline"]);
+    fixture.publish("mirror", "2.0.0");
+    fixture.ok(&["update", "local-test", "--offline"]);
+
+    std::fs::write(&config, format!("{team}\n[[catalogs]]\nname='unavailable'\nurl='http://127.0.0.1:1/index.json'\ntrusted=true\n")).unwrap();
+    fixture.publish("mirror", "3.0.0");
+    fixture.ok(&["update", "local-test"]);
+    let output = fixture.ok(&["list", "--json"]);
+    let rows: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(rows[0]["version"], "3.0.0");
+}
+
+#[test]
+fn catalog_scoped_update_limits_installations_before_triage() {
+    let fixture = Fixture::new();
+    fixture.config(true, true);
+    fixture.publish("mirror", "1.0.0");
+    fixture.publish_named("other", "1.0.0", "other-test");
+    fixture.ok(&["install", "local-test", "--catalog", "team", "--offline"]);
+    fixture.ok(&["install", "other-test", "--catalog", "other", "--offline"]);
+    fixture.publish("mirror", "2.0.0");
+    fixture.publish_named("other", "2.0.0", "other-test");
+    fixture.ok(&["update", "--catalog", "team", "--offline"]);
+    let output = fixture.ok(&["list", "--json"]);
+    let rows: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let version = |id| {
+        rows.as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["id"] == id)
+            .unwrap()["version"]
+            .as_str()
+            .unwrap()
+    };
+    assert_eq!(version("local-test"), "2.0.0");
+    assert_eq!(version("other-test"), "1.0.0");
+    std::fs::write(
+        fixture
+            .0
+            .join("config/sofka/plugins/other-test/plugin.toml"),
+        "modified",
+    )
+    .unwrap();
+    fixture.ok(&["update", "--catalog", "team", "--offline"]);
+    assert!(
+        !fixture
+            .run(&["update", "other-test", "--catalog", "team", "--offline"])
+            .status
+            .success()
+    );
+    assert!(
+        !fixture
+            .run(&["update", "--catalog", "missing", "--offline"])
+            .status
+            .success()
+    );
+}
+
+#[test]
+fn selected_catalog_completion_includes_duplicate_ids_and_its_own_versions() {
+    let fixture = Fixture::new();
+    fixture.config(true, true);
+    fixture.publish("mirror", "1.0.0");
+    fixture.publish("other", "9.0.0");
+    fixture.ok(&["search", "--offline"]);
+    for shell in ["bash", "zsh", "fish", "elvish", "powershell"] {
+        assert_eq!(
+            fixture.complete(
+                shell,
+                &["sofka", "plugin", "--catalog", "team", "install", "local"]
+            ),
+            ["local-test"]
+        );
+        assert_eq!(
+            fixture.complete(
+                shell,
+                &[
+                    "sofka",
+                    "plugin",
+                    "install",
+                    "--catalog",
+                    "team",
+                    "local-test@"
+                ]
+            ),
+            ["local-test@1.0.0"]
+        );
+        assert_eq!(
+            fixture.complete(
+                shell,
+                &[
+                    "sofka",
+                    "plugin",
+                    "install",
+                    "--catalog=other",
+                    "local-test@"
+                ]
+            ),
+            ["local-test@9.0.0"]
+        );
+        assert!(
+            fixture
+                .complete(
+                    shell,
+                    &[
+                        "sofka",
+                        "plugin",
+                        "install",
+                        "--catalog",
+                        "missing",
+                        "local"
+                    ]
+                )
+                .is_empty()
+        );
+        assert!(
+            fixture
+                .complete(shell, &["sofka", "plugin", "install", "local"])
+                .is_empty()
+        );
+    }
 }

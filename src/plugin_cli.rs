@@ -420,13 +420,23 @@ async fn update(requested: &[String], offline: bool, catalog: Option<&str>) -> R
     let config = crate::plugin_catalog::config_dir()?;
     let _lock = InstallLock::acquire(&config)?;
     let installed = crate::plugin_install::installed()?;
+    let mut sources = crate::plugin_catalog::configured_sources(catalog)?;
     let managed: HashMap<_, _> = installed
         .iter()
         .filter(|package| package.managed)
         .map(|package| (package.id.as_str(), package))
         .collect();
     let ids: Vec<String> = if requested.is_empty() {
-        let mut ids: Vec<_> = managed.keys().map(|id| (*id).to_string()).collect();
+        let mut ids: Vec<_> = managed
+            .values()
+            .filter(|package| {
+                catalog.is_none()
+                    || sources
+                        .iter()
+                        .any(|source| source.identity() == package.catalog_source)
+            })
+            .map(|package| package.id.clone())
+            .collect();
         ids.sort();
         ids
     } else {
@@ -438,25 +448,46 @@ async fn update(requested: &[String], offline: bool, catalog: Option<&str>) -> R
     }
     // Triaged before the catalog is fetched: when nothing is updatable there is
     // no reason to reach the network at all.
-    let (ready, refused) = triage(&managed, ids);
+    let (mut ready, refused) = triage(&managed, ids);
     let mut unresolved = Vec::new();
     for (id, reason) in refused {
         eprintln!("warning: {reason}");
         unresolved.push(id);
     }
+    ready.retain(|id| {
+        let package = managed[id.as_str()];
+        if sources
+            .iter()
+            .any(|source| source.identity() == package.catalog_source)
+        {
+            true
+        } else {
+            eprintln!(
+                "warning: {id}: its installed catalog is not enabled or does not match --catalog"
+            );
+            unresolved.push(id.clone());
+            false
+        }
+    });
     if ready.is_empty() {
         return Err(format!("could not update: {}", unresolved.join(", ")));
     }
-    let mut snapshot = crate::plugin_catalog::load_selected(offline, catalog).await?;
-    let origins: HashMap<_, _> = installed
-        .iter()
-        .filter(|package| package.managed)
-        .map(|package| (package.id.as_str(), package.catalog_source.as_str()))
-        .collect();
+    sources.retain(|source| {
+        ready
+            .iter()
+            .any(|id| managed[id.as_str()].catalog_source == source.identity())
+    });
+    let mut snapshot = crate::plugin_catalog::load_sources(
+        sources,
+        &crate::plugin_catalog::cache_dir(),
+        offline,
+        None,
+    )
+    .await?;
     snapshot.catalog.plugins.retain(|plugin| {
-        origins
+        managed
             .get(plugin.id.as_str())
-            .is_some_and(|source| *source == plugin.source.identity())
+            .is_some_and(|package| package.catalog_source == plugin.source.identity())
     });
     offline_notice(&snapshot);
     let mut updates = Vec::new();

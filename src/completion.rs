@@ -133,6 +133,7 @@ fn normalize_bash_words(words: &mut Vec<OsString>, index: &mut usize) {
 struct Selection {
     kubeconfig: Option<PathBuf>,
     context: Option<String>,
+    catalog: Option<String>,
     allow_v1_client_cert: bool,
     no_tls_resumption: bool,
 }
@@ -165,6 +166,7 @@ impl Selection {
                     "context" => selection.context = value.and_then(|v| v.into_string().ok()),
                     "allow-v1-client-cert" => selection.allow_v1_client_cert = true,
                     "no-tls-resumption" => selection.no_tls_resumption = true,
+                    "catalog" => selection.catalog = value.and_then(|v| v.into_string().ok()),
                     _ => (),
                 }
             } else if let Some(shorts) = text.strip_prefix('-') {
@@ -179,8 +181,14 @@ impl Selection {
                         break;
                     }
                 }
-            } else if command.get_subcommands().any(|c| c.get_name() == text) {
-                break;
+            } else {
+                let subcommand = command
+                    .get_subcommands()
+                    .find(|c| c.get_name() == text)
+                    .cloned();
+                if let Some(subcommand) = subcommand {
+                    command = subcommand;
+                }
             }
         }
         selection
@@ -235,6 +243,7 @@ fn candidates(values: Vec<String>, current: &OsStr) -> Vec<CompletionCandidate> 
 }
 
 fn command(selection: Selection) -> clap::Command {
+    let catalog = selection.catalog.clone();
     let contexts = selection.clone();
     let namespaces = selection.clone();
     let resources = move |current: &OsStr| {
@@ -298,6 +307,7 @@ fn command(selection: Selection) -> clap::Command {
                 sub.mut_arg("query", |arg| arg.value_hint(clap::ValueHint::Other))
             });
             for name in ["describe", "install", "update", "remove"] {
+                let catalog = catalog.clone();
                 cmd = cmd.mut_subcommand(name, |sub| {
                     sub.mut_arg(
                         if name == "describe" {
@@ -307,7 +317,10 @@ fn command(selection: Selection) -> clap::Command {
                         },
                         |arg| {
                             arg.add(ArgValueCompleter::new(move |current: &OsStr| {
-                                candidates(plugin_values(name, current), current)
+                                candidates(
+                                    plugin_values(name, current, catalog.as_deref()),
+                                    current,
+                                )
                             }))
                         },
                     )
@@ -317,12 +330,12 @@ fn command(selection: Selection) -> clap::Command {
         })
 }
 
-fn plugin_values(command: &str, current: &OsStr) -> Vec<String> {
+fn plugin_values(command: &str, current: &OsStr, catalog: Option<&str>) -> Vec<String> {
     if matches!(command, "update" | "remove") {
         return plugin_install::managed_ids().unwrap_or_default();
     }
     let mut values = Vec::new();
-    if let Some(snapshot) = plugin_catalog::cached() {
+    if let Some(snapshot) = plugin_catalog::cached_selected(catalog) {
         for plugin in &snapshot.catalog.plugins {
             if current.to_string_lossy().contains('@') {
                 values.extend(

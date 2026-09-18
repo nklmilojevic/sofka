@@ -322,7 +322,11 @@ includes `catalog_source`, which is the stored source location or `official`.
 Installation records store the source location, catalog revision, package
 version, and BLAKE3 checksum. Custom catalog revisions are BLAKE3 hashes of the
 index. Existing records without a source belong to the official catalog.
-Updates use the installed source. A source at a different location cannot
+Updates fetch only the sources needed by the requested installations.
+`update --catalog NAME` without plugin IDs updates only installations from that
+source. An explicitly requested ID from another source is rejected. Shell
+completion also uses `--catalog` for plugin IDs and versions.
+A source at a different location cannot
 replace an installed package, even if its name, version, and checksum match.
 To change the source, remove the managed plugin and then install it from the
 new source. Renaming a catalog without changing its location keeps ownership.
