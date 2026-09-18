@@ -57,6 +57,7 @@ impl LogLineMeta {
                 let end = rest.find("] ")?;
                 let label = &rest[..end];
                 (!label.is_empty()
+                    && !rest[end + 2..].trim().is_empty()
                     && label
                         .bytes()
                         .all(|b| b.is_ascii_alphanumeric() || b"/._-:".contains(&b)))

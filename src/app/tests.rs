@@ -33711,6 +33711,34 @@ async fn log_json_shortcut_formats_records_and_keeps_raw_save() {
 }
 
 #[tokio::test]
+async fn log_json_shortcut_formats_primitive_arrays_with_trailing_whitespace() {
+    let (mut app, _rx) = test_app();
+    app.mode = Mode::Logs;
+    let records = [
+        ("[123] ", "[\n  123\n]"),
+        ("[true] \t", "[\n  true\n]"),
+        ("[false]  ", "[\n  false\n]"),
+        ("[null] ", "[\n  null\n]"),
+        ("[-1.25e-3] ", "[\n  -0.00125\n]"),
+        ("[app] [123] ", "[app] [\n  123\n]"),
+    ];
+    shortcut_log_lines(
+        &mut app,
+        records.iter().map(|(raw, _)| (*raw).into()).collect(),
+    );
+    let raw_lines = app.logs.view.lines.clone();
+    app.handle_key(press(KeyCode::Char('J'))).unwrap();
+    for (i, (_, pretty)) in records.iter().enumerate() {
+        assert_eq!(app.logs.display_line(i), *pretty);
+    }
+    assert_eq!(app.logs.view.lines, raw_lines);
+    app.handle_key(press(KeyCode::Char('J'))).unwrap();
+    for (i, raw) in raw_lines.iter().enumerate() {
+        assert_eq!(app.logs.display_line(i), *raw);
+    }
+}
+
+#[tokio::test]
 async fn log_json_shortcut_keeps_scroll_follow_wrap_and_record_limits() {
     use ratatui::{Terminal, backend::TestBackend};
     let (mut app, _rx) = test_app();
