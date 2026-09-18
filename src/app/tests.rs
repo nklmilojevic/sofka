@@ -792,6 +792,44 @@ fn helm_release_secret_deployed_at(
 }
 
 #[tokio::test]
+async fn partial_aggregated_discovery_keeps_resources_in_the_palette() {
+    for groups_ignore_negotiation in [true, false] {
+        let url = crate::k8s::tests::mock_apiserver_opts(crate::k8s::tests::MockOptions {
+            supports_aggregated: true,
+            serve_version: true,
+            groups_ignore_negotiation,
+            core_ignores_negotiation: !groups_ignore_negotiation,
+            ..Default::default()
+        })
+        .await;
+        let cluster = crate::k8s::tests::connect_mock(url).await.unwrap();
+        assert!(cluster.discovery_warnings.is_empty());
+        assert!(cluster.discovery_fallback.is_none());
+        let (tx, _rx) = mpsc::channel(1024);
+        let mut app = App::new(cluster, tx);
+        for (alias, plural) in [
+            ("gd", "gadgets"),
+            ("deployments", "deployments"),
+            ("po", "pods"),
+        ] {
+            for ch in format!(":{alias}").chars() {
+                app.handle_key(press(KeyCode::Char(ch))).unwrap();
+            }
+            assert_eq!(
+                app.cluster
+                    .resolve(&app.cmd_suggestions[0].label)
+                    .unwrap()
+                    .ar
+                    .plural,
+                plural
+            );
+            app.handle_key(press(KeyCode::Enter)).unwrap();
+            assert_eq!(app.kind_plural, plural);
+        }
+    }
+}
+
+#[tokio::test]
 async fn discovered_short_names_select_resources_in_the_palette() {
     for aggregated in [true, false] {
         let url = crate::k8s::tests::mock_apiserver(aggregated, aggregated, true).await;

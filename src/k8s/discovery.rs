@@ -4,7 +4,7 @@ use anyhow::{Context, Result, ensure};
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::APIResourceList;
 use kube::Client;
 use kube::core::Version;
-use kube::core::discovery::v2::APIGroupDiscoveryList;
+use kube::core::discovery::v2::{ACCEPT_AGGREGATED_DISCOVERY_V2, APIGroupDiscoveryList};
 
 use super::{ApiResource, Kind};
 
@@ -56,16 +56,40 @@ pub(super) async fn discover(client: &Client) -> Result<Discovered> {
 }
 
 async fn aggregated(client: &Client) -> Result<Option<Vec<Resource>>> {
-    let groups = client.list_api_groups_aggregated().await?;
-    let core = client.list_core_api_versions_aggregated().await?;
-    // Legacy responses deserialize as empty lists when negotiation is unsupported.
-    if groups.items.is_empty() && core.items.is_empty() {
+    let groups = aggregated_endpoint(client, "/apis", "APIGroupList").await?;
+    let core = aggregated_endpoint(client, "/api", "APIVersions").await?;
+    let (Some(groups), Some(core)) = (groups, core) else {
         return Ok(None);
-    }
+    };
     let mut resources = Vec::new();
     append_aggregated(&mut resources, groups)?;
     append_aggregated(&mut resources, core)?;
     Ok(Some(resources))
+}
+
+async fn aggregated_endpoint(
+    client: &Client,
+    path: &str,
+    legacy_kind: &str,
+) -> Result<Option<APIGroupDiscoveryList>> {
+    let document: serde_json::Value = client
+        .request(
+            http::Request::get(path)
+                .header(http::header::ACCEPT, ACCEPT_AGGREGATED_DISCOVERY_V2)
+                .body(Vec::new())?,
+        )
+        .await?;
+    // The typed list discards the response kind and defaults missing items to [].
+    // Check the format first so a valid empty list does not trigger legacy discovery.
+    if document["kind"].as_str() == Some(legacy_kind) {
+        return Ok(None);
+    }
+    ensure!(
+        document["kind"].as_str() == Some("APIGroupDiscoveryList"),
+        "unexpected discovery response kind at {path}: {}",
+        document["kind"]
+    );
+    Ok(Some(serde_json::from_value(document)?))
 }
 
 fn append_aggregated(out: &mut Vec<Resource>, list: APIGroupDiscoveryList) -> Result<()> {

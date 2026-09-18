@@ -1969,6 +1969,10 @@ clusters:
         pub serve_version: bool,
         pub core_unreadable: bool,
         pub aggregated_unreadable: bool,
+        pub groups_ignore_negotiation: bool,
+        pub core_ignores_negotiation: bool,
+        pub empty_aggregated_groups: bool,
+        pub empty_aggregated_core: bool,
     }
 
     pub(crate) async fn mock_apiserver_opts(opts: MockOptions) -> String {
@@ -2005,6 +2009,16 @@ clusters:
             let capi_legacy = r#",{"name":"cluster.x-k8s.io","versions":[{"groupVersion":"cluster.x-k8s.io/v1beta1","version":"v1beta1"}],"preferredVersion":{"groupVersion":"cluster.x-k8s.io/v1beta1","version":"v1beta1"}}"#;
             let capi_v2 = r#",{"metadata":{"name":"cluster.x-k8s.io"},"versions":[{"version":"v1beta1","freshness":"Current","resources":[{"resource":"machinedeployments","responseKind":{"kind":"MachineDeployment"},"scope":"Namespaced","shortNames":["md","cross"],"verbs":["get","list","watch"]},{"resource":"machinedrainrules","responseKind":{"kind":"MachineDrainRule"},"scope":"Namespaced","verbs":["get","list","watch"]}]}]}"#;
             match (path, aggregated) {
+                ("/apis", true) if opts.groups_ignore_negotiation => route(path, false, opts),
+                ("/api", true) if opts.core_ignores_negotiation => route(path, false, opts),
+                ("/apis", true) if opts.empty_aggregated_groups => (
+                    "200 OK",
+                    r#"{"kind":"APIGroupDiscoveryList","apiVersion":"apidiscovery.k8s.io/v2","items":[]}"#.into(),
+                ),
+                ("/api", true) if opts.empty_aggregated_core => (
+                    "200 OK",
+                    r#"{"kind":"APIGroupDiscoveryList","apiVersion":"apidiscovery.k8s.io/v2","items":[]}"#.into(),
+                ),
                 ("/apis", true) if opts.aggregated_unreadable => (
                     "200 OK",
                     r#"{"kind":"APIGroupDiscoveryList","apiVersion":"apidiscovery.k8s.io/v2","metadata":{},"items":[{"metadata":{"name":"apps"},"versions":"not-a-list"}]}"#.into(),
@@ -2137,6 +2151,31 @@ clusters:
         // retrying is not what these tests exercise.
         config.default_retry = false;
         Cluster::from_config(config, "test".into(), None, None, false, false).await
+    }
+
+    #[tokio::test]
+    async fn empty_aggregated_lists_do_not_trigger_legacy_discovery() {
+        for (empty_groups, empty_core) in [(true, false), (false, true), (true, true)] {
+            let (url, requests) = mock_apiserver_with_requests(MockOptions {
+                supports_aggregated: true,
+                serve_version: true,
+                empty_aggregated_groups: empty_groups,
+                empty_aggregated_core: empty_core,
+                ..MockOptions::default()
+            })
+            .await;
+            let cluster = connect_mock(url).await.unwrap();
+            assert_eq!(cluster.resolve("deployments").is_none(), empty_groups);
+            assert_eq!(
+                cluster.catalog.iter().any(|name| name == "pods"),
+                !empty_core
+            );
+            assert!(cluster.discovery_warnings.is_empty());
+            assert!(cluster.discovery_fallback.is_none());
+            let mut requests = requests.lock().unwrap().clone();
+            requests.sort();
+            assert_eq!(requests, ["/api", "/apis", "/version"]);
+        }
     }
 
     #[tokio::test]
