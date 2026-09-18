@@ -198,11 +198,31 @@ YAML rules:
   `"*"`.
 - Integers must fit in a signed 64-bit value, as in TOML.
 
+## Namespace selection
+
+The default order at startup and on context changes is: explicit destination,
+saved namespace for the context, `default_namespace`, then the Kubernetes
+namespace fallback.
+
+Set `prefer_context_namespace = true` to use this order: explicit destination,
+namespace explicitly set in the target kubeconfig context, saved namespace,
+`default_namespace`, then the Kubernetes namespace fallback. An absent kubeconfig
+namespace does not count as an explicit `default` namespace. Saved all-namespaces
+selections remain valid history values.
+
+Explicit CLI flags, resource commands, bookmarks, and workspaces keep their
+priority. Namespace choices are still saved. The target context's effective
+configuration controls the policy, including cluster and context overrides.
+The setting also accepts YAML (`prefer_context_namespace: true`). `:reload`
+updates the policy for later context changes and does not change the active
+namespace.
+
 ## Base options
 
 ```toml
 default_namespace = "kube-system"  # fallback only: the last namespace picked in a
                                    # context is remembered across restarts
+prefer_context_namespace = false # true gives the kubeconfig namespace priority over history
 default_resource  = "deployments"
 readonly          = false  # true disables every mutating action (delete, edit,
                            # scale, shell, plugins, …); --readonly/--write win

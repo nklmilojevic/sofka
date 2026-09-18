@@ -496,6 +496,7 @@ impl App {
     pub(super) fn launch_logs(&mut self, source: LogSource, title: String) {
         self.set_return_mode();
         self.logs.source = Some(source);
+        self.logs.since_anchor = None;
         // Note: we deliberately do NOT touch the view generation here — the
         // underlying table/xray watch keeps running so returning is instant and
         // the selection is preserved. Log streams have their own lifecycle.
@@ -707,8 +708,8 @@ impl App {
     }
 
     /// The configured initial `tail` line count and optional `since` lookback
-    /// (epoch seconds), parsed from `[logs]`. An unparseable `since` is
-    /// ignored. A `0`–`5` time anchor overrides the config for the session.
+    /// in seconds, parsed from `[logs]`. An unparseable `since` is ignored.
+    /// A custom lookback or time anchor overrides the config for this view.
     pub(super) fn log_tail_and_since(&self) -> (i64, Option<i64>) {
         let tail = self.logs_cfg.tail.max(1);
         let since = match self.logs.since_anchor {
@@ -721,6 +722,26 @@ impl App {
                 .and_then(|s| crate::providers::parse_lookback(s).ok()),
         };
         (tail, since)
+    }
+
+    pub(super) fn apply_log_lookback(&mut self, input: &str) {
+        if self.provider_logs_active() {
+            self.apply_provider_lookback(input);
+            return;
+        }
+        let input = input.trim();
+        let secs = if input == "tail" {
+            0
+        } else {
+            match crate::providers::parse_lookback(input) {
+                Ok(secs) => secs,
+                Err(error) => {
+                    self.flash_warn(&format!("lookback: {error}; use s/m/h/d or tail"));
+                    return;
+                }
+            }
+        };
+        self.set_log_lookback(secs, input);
     }
 
     /// Apply a `0`–`5` time anchor (k9s): `0` re-tails, `1`–`5` re-stream the
@@ -745,6 +766,10 @@ impl App {
             self.apply_provider_lookback(label);
             return;
         }
+        self.set_log_lookback(secs, label);
+    }
+
+    fn set_log_lookback(&mut self, secs: i64, label: &str) {
         self.logs.since_anchor = Some(secs);
         self.flash = if secs == 0 {
             format!("showing tail ({} lines)", self.logs_cfg.tail.max(1))

@@ -115,7 +115,15 @@ since = "1h"       # optional: only logs newer than this, within the tail limit
 fullscreen = false # open log views fullscreen (F toggles per session)
 ```
 
-The `since` window and the `1`–`5` time anchors keep the initial line limit.
+Press `T` to enter a positive duration such as `90s`, `30m`, `24h`, or `2d`.
+Enter `tail` to clear the time window and use the configured tail limit.
+Press `Esc` or submit an empty prompt to cancel. Invalid input keeps the active
+stream. The value applies to the current view only and does not change the
+configuration. The replacement stream keeps the selected sources, filter,
+wrapping, timestamps, and follow preference. The `0`–`5` shortcuts still work.
+Previous-container logs keep their full history, regardless of this value.
+
+The `since` window, custom durations, and `1`–`5` time anchors keep the initial line limit.
 A pod stream requests at most `tail` initial lines per container. Workload and
 Service streams request at most `min(tail, 100)` initial lines per container.
 The time window can reduce this number. Live following continues after these

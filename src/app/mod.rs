@@ -487,9 +487,9 @@ enum PromptKind {
         upload: bool,
         src: Option<String>,
     },
-    /// New lookback period for the provider logs view (`T`) — the only
+    /// New lookback period for the logs view (`T`), the only
     /// prompt opened from (and returning to) [`Mode::Logs`].
-    ProviderLookback,
+    LogLookback,
     /// A guardrail typed-confirmation: the action runs only if the input
     /// matches `expected` (a resource or context name).
     GuardConfirm {
@@ -1170,7 +1170,7 @@ pub struct LogsView {
     /// borders, or status line, so terminal text selection copies clean lines.
     /// Session-sticky like `wrap`/`timestamps`; seeded from `[logs] fullscreen`.
     pub fullscreen: bool,
-    /// Time anchor for the kubelet streams, set by the `0`–`5` keys (k9s):
+    /// Lookback for the kubelet streams, set by `T` or the `0`–`5` keys:
     /// `Some(secs)` streams only logs newer than `secs`, `Some(0)` forces the
     /// plain tail, `None` follows the config (`[logs] since`/`tail`).
     pub since_anchor: Option<i64>,
@@ -1377,17 +1377,18 @@ impl LogsView {
         index
     }
 
-    /// Title label for the active `0`–`5` time anchor, if any.
-    pub fn anchor_label(&self) -> Option<&'static str> {
-        match self.since_anchor? {
-            0 => Some("tail"),
-            60 => Some("1m"),
-            300 => Some("5m"),
-            900 => Some("15m"),
-            1800 => Some("30m"),
-            3600 => Some("1h"),
-            _ => None,
+    /// Title label for the active lookback, if any.
+    pub fn anchor_label(&self) -> Option<String> {
+        let secs = self.since_anchor?;
+        if secs == 0 {
+            return Some("tail".into());
         }
+        for (unit, scale) in [("d", 86_400), ("h", 3600), ("m", 60), ("s", 1)] {
+            if secs % scale == 0 {
+                return Some(format!("{}{unit}", secs / scale));
+            }
+        }
+        None
     }
 }
 
@@ -2580,7 +2581,7 @@ impl App {
     /// Whether the active prompt was opened from the logs view, so the
     /// renderer keeps the logs (not the table) underneath it.
     pub fn prompt_over_logs(&self) -> bool {
-        matches!(self.prompt_kind, Some(PromptKind::ProviderLookback))
+        matches!(self.prompt_kind, Some(PromptKind::LogLookback))
     }
 
     /// Whether the active prompt was opened from the context switcher, so the

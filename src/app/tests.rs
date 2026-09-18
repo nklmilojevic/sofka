@@ -10005,6 +10005,17 @@ async fn marked_pod_logs_keep_the_snapshot_and_existing_controls() {
         assert!(!app.logs.follow);
     }
     assert_eq!(app.logs.since_anchor, Some(300));
+    app.handle_key(press(KeyCode::Char('T'))).unwrap();
+    for c in "24h".chars() {
+        app.handle_key(press(KeyCode::Char(c))).unwrap();
+    }
+    app.handle_key(press(KeyCode::Enter)).unwrap();
+    assert_eq!(app.logs.since_anchor, Some(86_400));
+    assert_eq!(app.logs.anchor_label().as_deref(), Some("1d"));
+    assert_eq!(format!("{:?}", app.logs.source), snapshot);
+    assert_eq!(app.log_tasks.len(), 5);
+    assert_eq!(app.logs.filter, "ready");
+    assert!(!app.logs.follow);
     let generation = app.log_gen;
     app.handle_key(press(KeyCode::Char('x'))).unwrap();
     assert!(app.logs.stopped);
@@ -17241,7 +17252,32 @@ async fn provider_lookback_prompt_changes_period_and_requeries() {
 }
 
 #[tokio::test]
-async fn lookback_key_only_applies_to_provider_logs() {
+async fn kubelet_lookback_prompt_shows_validated_config() {
+    for (configured, current, since) in [
+        (None, "tail", None),
+        (Some("bogus"), "tail", None),
+        (Some("0s"), "tail", None),
+        (Some("9223372036854775807d"), "tail", None),
+        (Some("4h"), "4h", Some(14_400)),
+    ] {
+        let (mut app, _rx) = test_app();
+        app.mode = Mode::Logs;
+        app.return_mode = Mode::Table;
+        app.logs_cfg.since = configured.map(str::to_owned);
+
+        app.handle_key(press(KeyCode::Char('T'))).unwrap();
+
+        assert_eq!(app.mode, Mode::Prompt);
+        assert_eq!(
+            app.prompt_label,
+            format!("lookback: s/m/h/d or tail (current: {current})")
+        );
+        assert_eq!(app.log_tail_and_since().1, since);
+    }
+}
+
+#[tokio::test]
+async fn kubelet_lookback_prompt_cancel_and_invalid_input_keep_stream() {
     let (mut app, _rx) = test_app();
     app.switch_kind("pods");
     apply(
@@ -17254,12 +17290,28 @@ async fn lookback_key_only_applies_to_provider_logs() {
     );
     app.table_state.select(Some(0));
 
-    // Kubelet logs: `T` explains itself instead of prompting.
     app.handle_key(press(KeyCode::Char('l'))).unwrap();
-    assert_eq!(app.mode, Mode::Logs);
+    let generation = app.log_gen;
     app.handle_key(press(KeyCode::Char('T'))).unwrap();
+    assert_eq!(app.mode, Mode::Prompt);
+    assert!(app.prompt_over_logs());
+    app.handle_key(press(KeyCode::Esc)).unwrap();
     assert_eq!(app.mode, Mode::Logs);
-    assert!(app.flash.contains("provider logs"), "{}", app.flash);
+    assert_eq!(app.log_gen, generation);
+    for input in ["", "soon", "0s", "-2h", "9223372036854775807d"] {
+        app.handle_key(press(KeyCode::Char('T'))).unwrap();
+        for c in input.chars() {
+            app.handle_key(press(KeyCode::Char(c))).unwrap();
+        }
+        app.handle_key(press(KeyCode::Enter)).unwrap();
+        assert_eq!(app.mode, Mode::Logs);
+        assert_eq!(app.log_gen, generation);
+        assert_eq!(app.logs.since_anchor, None);
+        if !input.is_empty() {
+            assert!(app.flash_err);
+            assert!(app.flash.contains("lookback"));
+        }
+    }
 }
 
 #[tokio::test]
@@ -17296,7 +17348,7 @@ async fn logs_time_anchors_restream_kubelet_logs() {
     let gen_before = app.log_gen;
     app.handle_key(press(KeyCode::Char('2'))).unwrap();
     assert_eq!(app.logs.since_anchor, Some(300));
-    assert_eq!(app.logs.anchor_label(), Some("5m"));
+    assert_eq!(app.logs.anchor_label().as_deref(), Some("5m"));
     assert_eq!(app.log_tail_and_since().1, Some(300));
     assert!(app.log_gen > gen_before, "anchor must restart the stream");
     assert!(app.flash.contains("5m"), "{}", app.flash);
@@ -17306,7 +17358,7 @@ async fn logs_time_anchors_restream_kubelet_logs() {
     app.handle_key(press(KeyCode::Char('0'))).unwrap();
     assert_eq!(app.logs.since_anchor, Some(0));
     assert_eq!(app.log_tail_and_since(), (app.logs_cfg.tail, None));
-    assert_eq!(app.logs.anchor_label(), Some("tail"));
+    assert_eq!(app.logs.anchor_label().as_deref(), Some("tail"));
 
     // Without an anchor the configured `since` applies again.
     app.logs.since_anchor = None;
@@ -25723,6 +25775,42 @@ async fn next_log_query(rx: &mut Receiver<String>) -> HashMap<String, String> {
 }
 
 #[tokio::test]
+async fn marked_pod_custom_lookback_keeps_each_stream_tail_limit() {
+    let (mut app, _rx) = marked_logs_app();
+    app.logs_cfg.tail = 250;
+    let (tx, mut queries) = mpsc::channel(32);
+    app.cluster.client = kube::Client::new(
+        tower::service_fn(move |request: http::Request<kube::client::Body>| {
+            assert!(request.uri().path().ends_with("/log"));
+            tx.try_send(request.uri().query().unwrap_or_default().to_owned())
+                .unwrap();
+            async move {
+                Ok::<_, std::convert::Infallible>(http::Response::new(http_body_util::Full::new(
+                    hyper::body::Bytes::from("line\n"),
+                )))
+            }
+        }),
+        "default",
+    );
+    app.handle_key(press(KeyCode::Char('l'))).unwrap();
+    for _ in 0..5 {
+        next_log_query(&mut queries).await;
+    }
+    for (input, since) in [("2d", Some("172800")), ("tail", None)] {
+        app.handle_key(press(KeyCode::Char('T'))).unwrap();
+        for c in input.chars() {
+            app.handle_key(press(KeyCode::Char(c))).unwrap();
+        }
+        app.handle_key(press(KeyCode::Enter)).unwrap();
+        for _ in 0..5 {
+            let query = next_log_query(&mut queries).await;
+            assert_eq!(query.get("tailLines").map(String::as_str), Some("250"));
+            assert_eq!(query.get("sinceSeconds").map(String::as_str), since);
+        }
+    }
+}
+
+#[tokio::test]
 async fn log_lookback_keys_keep_tail_limits_in_api_requests() {
     for aggregate in [false, true] {
         for tail in [40, 300] {
@@ -25767,6 +25855,39 @@ async fn log_lookback_keys_keep_tail_limits_in_api_requests() {
             assert_eq!(query.get("tailLines"), Some(&expected_tail));
             assert_eq!(query.get("sinceSeconds").map(String::as_str), Some("14400"));
             assert_eq!(query.get("follow").map(String::as_str), Some("true"));
+            app.logs.follow = false;
+            app.logs.wrap = true;
+            app.logs.set_filter("line".into());
+            let timestamps = app.logs.timestamps;
+            for (input, expected) in [("24h", Some("86400")), ("tail", None)] {
+                let old_generation = app.log_gen;
+                app.handle_key(press(KeyCode::Char('T'))).unwrap();
+                for c in input.chars() {
+                    app.handle_key(press(KeyCode::Char(c))).unwrap();
+                }
+                app.handle_key(press(KeyCode::Enter)).unwrap();
+                assert_eq!(app.mode, Mode::Logs);
+                assert!(app.log_gen > old_generation);
+                let query = next_log_query(&mut queries).await;
+                assert_eq!(query.get("tailLines"), Some(&expected_tail));
+                assert_eq!(query.get("sinceSeconds").map(String::as_str), expected);
+                assert!(!app.logs.follow);
+                assert!(app.logs.wrap);
+                assert_eq!(app.logs.filter, "line");
+                assert_eq!(app.logs.timestamps, timestamps);
+                app.handle_msg(Msg::LogLines {
+                    generation: old_generation,
+                    lines: vec!["stale record".into()],
+                });
+                assert!(
+                    !app.logs
+                        .view
+                        .lines
+                        .iter()
+                        .any(|line| line.contains("stale record"))
+                );
+                assert_eq!(app.logs_cfg.since.as_deref(), Some("4h"));
+            }
             app.handle_key(press(KeyCode::Char('2'))).unwrap();
             let query = next_log_query(&mut queries).await;
             assert_eq!(query.get("tailLines"), Some(&expected_tail));
@@ -25783,7 +25904,20 @@ async fn log_lookback_keys_keep_tail_limits_in_api_requests() {
                 assert!(!query.contains_key("tailLines"));
                 assert!(!query.contains_key("sinceSeconds"));
                 assert!(!query.contains_key("follow"));
+                app.handle_key(press(KeyCode::Char('T'))).unwrap();
+                for c in "2d".chars() {
+                    app.handle_key(press(KeyCode::Char(c))).unwrap();
+                }
+                app.handle_key(press(KeyCode::Enter)).unwrap();
+                let query = next_log_query(&mut queries).await;
+                assert_eq!(query.get("previous").map(String::as_str), Some("true"));
+                assert!(!query.contains_key("tailLines"));
+                assert!(!query.contains_key("sinceSeconds"));
                 app.handle_key(press(KeyCode::Esc)).unwrap();
+                app.handle_key(press(KeyCode::Char('l'))).unwrap();
+                let query = next_log_query(&mut queries).await;
+                assert_eq!(query.get("sinceSeconds").map(String::as_str), Some("14400"));
+                assert_eq!(app.logs.since_anchor, None);
             }
         }
     }
@@ -33816,4 +33950,151 @@ async fn log_json_full_buffer_performance_and_cache_limits() {
         start.elapsed()
     );
     assert_eq!(app.logs.json_budget, before);
+}
+
+#[tokio::test]
+async fn context_namespace_policy_uses_target_config_and_preserves_explicit_scope() {
+    let dir = std::env::temp_dir().join(format!("sofka-namespace-policy-{}", std::process::id()));
+    write_config(&dir, "default_namespace = 'configured'\n");
+    let cluster_dir = dir.join("clusters/test-cluster");
+    std::fs::create_dir_all(&cluster_dir).unwrap();
+    std::fs::write(
+        cluster_dir.join("config.yaml"),
+        "prefer_context_namespace: true\n",
+    )
+    .unwrap();
+    let context_dir = cluster_dir.join("legacy");
+    std::fs::create_dir_all(&context_dir).unwrap();
+    std::fs::write(
+        context_dir.join("config.toml"),
+        "prefer_context_namespace = false\n",
+    )
+    .unwrap();
+    for (context, pinned, saved, explicit, expected) in [
+        ("west", Some("X"), Some("X"), "", "X"),
+        ("west", Some("Y"), Some("X"), "", "Y"),
+        ("legacy", Some("Y"), Some("X"), "", "X"),
+        ("west", None, Some("X"), "", "X"),
+        ("west", None, Some(""), "", ""),
+        ("west", Some("Y"), Some(""), "", "Y"),
+        ("west", None, None, "", "configured"),
+        ("west", Some("Y"), Some("X"), " prod", "prod"),
+        ("west", Some("Y"), Some("X"), " all", ""),
+    ] {
+        let (mut app, _rx) = test_app();
+        app.config = crate::config::ConfigLoader::from_dir(Some(dir.clone()));
+        app.all_contexts = vec![context.into()];
+        if let Some(saved) = saved {
+            app.namespace_memory.set(context, saved);
+        }
+        type_resource_query(&mut app, &format!("pods @{context}{explicit}"));
+        let mut cluster = Cluster::fake();
+        cluster.context = context.into();
+        cluster.context_namespace = pinned.map(str::to_owned);
+        app.handle_msg(Msg::ContextSwitched {
+            generation: app.generation,
+            name: context.into(),
+            result: Ok(Box::new(cluster)),
+        });
+        assert_eq!(
+            app.namespace, expected,
+            "{context} {pinned:?} {saved:?} {explicit}"
+        );
+    }
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[tokio::test]
+async fn context_namespace_policy_keeps_incluster_namespace_without_selected_context() {
+    let dir =
+        std::env::temp_dir().join(format!("sofka-incluster-namespace-{}", std::process::id()));
+    write_config(&dir, "prefer_context_namespace = true\n");
+    let (mut app, _rx) = test_app();
+    app.config = crate::config::ConfigLoader::from_dir(Some(dir.clone()));
+    app.all_contexts = vec!["default".into()];
+    type_resource_query(&mut app, "pods @default");
+    let mut cluster = Cluster::fake();
+    cluster.context = "default".into();
+    cluster.context_namespace = None;
+    cluster.default_namespace = "service-account-namespace".into();
+    app.handle_msg(Msg::ContextSwitched {
+        generation: app.generation,
+        name: "default".into(),
+        result: Ok(Box::new(cluster)),
+    });
+    assert_eq!(app.namespace, "service-account-namespace");
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[tokio::test]
+async fn reload_namespace_policy_keeps_view_and_changes_next_context_resolution() {
+    let dir = std::env::temp_dir().join(format!("sofka-namespace-reload-{}", std::process::id()));
+    write_config(&dir, "prefer_context_namespace = false\n");
+    let (mut app, _rx) = test_app();
+    app.config = crate::config::ConfigLoader::from_dir(Some(dir.clone()));
+    app.namespace = "active".into();
+    write_config(&dir, "prefer_context_namespace = true\n");
+    plugin_command(&mut app, "reload");
+    assert_eq!(app.namespace, "active");
+    app.all_contexts = vec!["west".into()];
+    app.namespace_memory.set("west", "X");
+    type_resource_query(&mut app, "pods @west");
+    let mut cluster = Cluster::fake();
+    cluster.context = "west".into();
+    cluster.context_namespace = Some("Y".into());
+    app.handle_msg(Msg::ContextSwitched {
+        generation: app.generation,
+        name: "west".into(),
+        result: Ok(Box::new(cluster)),
+    });
+    assert_eq!(app.namespace, "Y");
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[tokio::test]
+async fn context_namespace_policy_preserves_bookmarks_workspaces_and_launch_scope() {
+    let dir = std::env::temp_dir().join(format!("sofka-namespace-explicit-{}", std::process::id()));
+    write_config(&dir, "prefer_context_namespace = true\n");
+    for source in ["bookmark", "workspace", "launch"] {
+        for namespace in ["chosen", ""] {
+            let (mut app, _rx) = test_app();
+            app.config = crate::config::ConfigLoader::from_dir(Some(dir.clone()));
+            app.all_contexts = vec!["west".into()];
+            match source {
+                "bookmark" => {
+                    bind_bookmark(&mut app, "pods", "west");
+                    app.bookmarks[0].namespace = Some(namespace.into());
+                    app.handle_key(ctrl(KeyCode::Char('y'))).unwrap();
+                }
+                "workspace" => {
+                    app.workspaces = vec![crate::config::Workspace {
+                        key: Some("ctrl-w".into()),
+                        name: "ops".into(),
+                        context: Some("west".into()),
+                        views: vec![crate::config::WorkspaceView {
+                            name: "pods".into(),
+                            resource: "pods".into(),
+                            namespace: Some(namespace.into()),
+                            ..Default::default()
+                        }],
+                    }];
+                    app.handle_key(ctrl(KeyCode::Char('w'))).unwrap();
+                }
+                _ => {
+                    app.launch_namespace = Some(namespace.into());
+                    type_resource_query(&mut app, "pods @west");
+                }
+            }
+            let mut cluster = Cluster::fake();
+            cluster.context = "west".into();
+            cluster.context_namespace = Some("pinned".into());
+            app.handle_msg(Msg::ContextSwitched {
+                generation: app.generation,
+                name: "west".into(),
+                result: Ok(Box::new(cluster)),
+            });
+            assert_eq!(app.namespace, namespace, "{source}");
+        }
+    }
+    std::fs::remove_dir_all(dir).unwrap();
 }

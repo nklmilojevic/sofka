@@ -404,10 +404,10 @@ impl App {
                         }
                     }
                     // Empty input = cancel, keep the current period.
-                    Some(PromptKind::ProviderLookback) if !input.is_empty() => {
-                        self.apply_provider_lookback(&input)
+                    Some(PromptKind::LogLookback) if !input.is_empty() => {
+                        self.apply_log_lookback(&input)
                     }
-                    Some(PromptKind::ProviderLookback) => {}
+                    Some(PromptKind::LogLookback) => {}
                     Some(PromptKind::GuardConfirm { expected, action }) => {
                         if input == expected {
                             self.run_confirm_action(*action);

@@ -2724,6 +2724,8 @@ fn build_help(app: &App, width: usize) -> (Vec<Line<'static>>, String) {
             "action menu: Flux suspend/resume/reconcile (includes HelmChart; HelmRelease: + force reconcile); Argo CD suspend/resume (Application: + sync); CronJobs trigger/suspend/resume; pods file transfer"
         } else if scope == "port_forward_picker" && action == Action::Edit {
             "edit local port of the selected mapping"
+        } else if scope == "logs" && action == Action::Lookback {
+            "set lookback (s/m/h/d); kubelet logs also accept tail"
         } else if action == Action::LogMarker {
             "add visual marker at the log tail (excluded from copy/save)"
         } else if action == Action::Fullscreen {

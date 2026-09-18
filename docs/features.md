@@ -566,7 +566,8 @@ concurrent drains, and full kubectl drain parity are outside this feature.
   [Debug containers and pods](debugging.md#debug-containers-and-pods).
 - **Logs** (`l`) - combined logs for marked pods, per-container on a pod, or aggregated across all matching
   pods on a workload/service, with filtering, previous-container logs, and
-  configurable tail/buffer/lookback. Lines with timestamps are sorted by time.
+  configurable tail/buffer/lookback. Press `T` to enter a duration or `tail`
+  for the current kubelet log view. Lines with timestamps are sorted by time.
   Press `t` to show or hide timestamps without changing log order or restarting
   streams. If a container is waiting to start, sofka
   retries until its logs are available. sofka parses ANSI color from the source app

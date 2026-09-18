@@ -1313,19 +1313,25 @@ impl App {
                 self.flash_err = false;
                 return;
             }
-            // Provider logs: `T` changes the lookback period (re-queries).
             (Some(Action::Lookback), _) => {
-                if self.provider_logs_active() {
-                    self.prompt_label = format!(
-                        "lookback period — e.g. 30m, 4h, 2d (current: {})",
+                self.prompt_label = if self.provider_logs_active() {
+                    format!(
+                        "lookback period: e.g. 30m, 4h, 2d (current: {})",
                         self.provider_lookback_label()
-                    );
-                    self.prompt_input.clear();
-                    self.prompt_kind = Some(PromptKind::ProviderLookback);
-                    self.mode = Mode::Prompt;
+                    )
                 } else {
-                    self.flash_warn("lookback period applies to provider logs (L)");
-                }
+                    let current = self.logs.anchor_label().unwrap_or_else(|| {
+                        self.logs_cfg
+                            .since
+                            .clone()
+                            .filter(|_| self.log_tail_and_since().1.is_some())
+                            .unwrap_or_else(|| "tail".into())
+                    });
+                    format!("lookback: s/m/h/d or tail (current: {current})")
+                };
+                self.prompt_input.clear();
+                self.prompt_kind = Some(PromptKind::LogLookback);
+                self.mode = Mode::Prompt;
                 return;
             }
             (Some(Action::Json), _) => {

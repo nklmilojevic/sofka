@@ -926,14 +926,14 @@ impl App {
         self.configure_native_describe(resolved.config.experimental.native_describe);
         cluster.add_aliases(&self.user_aliases);
         self.bump_generation();
-        // The launch scope applies once. Later switches use namespace memory,
-        // then the context default.
-        self.namespace = self
-            .launch_namespace
-            .take()
-            .or_else(|| self.namespace_memory.get(&cluster.context))
-            .or(resolved.config.default_namespace)
-            .unwrap_or_else(|| cluster.default_namespace.clone());
+        self.namespace = crate::nsmem::resolve_namespace(
+            self.launch_namespace.take(),
+            resolved.config.prefer_context_namespace,
+            cluster.context_namespace.as_deref(),
+            self.namespace_memory.get(&cluster.context),
+            resolved.config.default_namespace.as_deref(),
+            &cluster.default_namespace,
+        );
         self.cluster = *cluster;
         plugin_warnings.extend(self.configure_keys(&resolved.config.keys));
         self.stack.clear();

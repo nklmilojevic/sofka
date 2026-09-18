@@ -512,16 +512,15 @@ async fn run_main(args: Args) -> Result<()> {
     };
     app.readonly = app.readonly_override.unwrap_or(cfg.readonly);
     app.configure_native_describe(cfg.experimental.native_describe);
-    // CLI flags win; then the namespace remembered for this context from the
-    // last session; then the config default; then the kubeconfig's.
     let launch_namespace = args.launch_namespace();
-    if let Some(ns) = &launch_namespace {
-        app.namespace = ns.clone();
-    } else if let Some(ns) = app.namespace_memory.get(&app.cluster.context) {
-        app.namespace = ns;
-    } else if let Some(ns) = cfg.default_namespace.clone() {
-        app.namespace = ns;
-    }
+    app.namespace = nsmem::resolve_namespace(
+        launch_namespace.clone(),
+        cfg.prefer_context_namespace,
+        app.cluster.context_namespace.as_deref(),
+        app.namespace_memory.get(&app.cluster.context),
+        cfg.default_namespace.as_deref(),
+        &app.cluster.default_namespace,
+    );
     let resource = args.launch_resource(cfg.default_resource.as_deref());
     match &connect_error {
         // No cluster to watch — open the context picker over the empty table;
@@ -985,33 +984,25 @@ async fn run_info(
 }
 
 /// The namespace a launch with these flags would start in, resolved the same
-/// way the TUI resolves it (flags, then remembered, then config, then
-/// kubeconfig) — a report that disagreed with the app would be worse than
-/// none. Empty means all namespaces.
+/// way the TUI resolves it, with the configured namespace policy.
+/// Empty means all namespaces.
 fn starting_namespace(
     args: &Args,
     cfg: &config::Config,
     context: &str,
     kubeconfig_default: Option<String>,
 ) -> String {
-    if args.all_namespaces {
-        return String::new();
-    }
-    if let Some(ns) = &args.namespace {
-        return ns.clone();
-    }
-    if let Some(ns) =
-        nsmem::NamespaceMemory::load(&nsmem::NamespaceMemory::default_path()).get(context)
-    {
-        return ns;
-    }
-    if let Some(ns) = &cfg.default_namespace {
-        return ns.clone();
-    }
-    // Kubernetes' own fallback when nothing pins one.
-    kubeconfig_default
-        .filter(|ns| !ns.is_empty())
-        .unwrap_or_else(|| "default".into())
+    nsmem::resolve_namespace(
+        args.launch_namespace(),
+        cfg.prefer_context_namespace,
+        k8s::context_namespace(context).as_deref(),
+        nsmem::NamespaceMemory::load(&nsmem::NamespaceMemory::default_path()).get(context),
+        cfg.default_namespace.as_deref(),
+        kubeconfig_default
+            .as_deref()
+            .filter(|ns| !ns.is_empty())
+            .unwrap_or("default"),
+    )
 }
 
 /// Feed keys to the app and redraw. Returns whether anything was dispatched,
