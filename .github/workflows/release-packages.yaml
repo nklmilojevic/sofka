@@ -11,7 +11,7 @@ on:
       - .goreleaser.yaml
       - .github/workflows/release*.yaml
       - scripts/release*
-      - scripts/test_release_packages.py
+      - scripts/test_release*.py
       - scripts/licenses/**
       - about.toml
       - Cargo.toml
@@ -94,8 +94,8 @@ jobs:
         with:
           name: release-notices
           path: release-notices
-      - name: Test package configuration and archive checks
-        run: uv run --locked python -m unittest discover -s scripts -p test_release_packages.py
+      - name: Test package and SBOM checks
+        run: uv run --locked python -m unittest discover -s scripts -p 'test_release*.py'
       - name: Build and verify release packages
         env:
           TARGET: ${{ matrix.target }}

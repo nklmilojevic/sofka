@@ -2,6 +2,7 @@
 
 import argparse
 import json
+import hashlib
 import os
 from pathlib import Path
 import re
@@ -100,6 +101,77 @@ def configure(target, stage, dist, dependencies=None):
         else:
             package["overrides"] = dependencies or {}
     return config
+
+
+def capture_build(config, target, stage, environment):
+    """Capture the Cargo inputs with the same flags and environment as GoReleaser."""
+    build = config["builds"][0]
+    environment = environment.copy()
+    for entry in build.get("env", []):
+        name, value = entry.split("=", 1)
+        environment[name] = value
+    messages = stage / "cargo-messages.jsonl"
+    with messages.open("w") as stream:
+        run(build["tool"], build["command"], "--target=" + target,
+            *build["flags"], "--message-format=json-render-diagnostics",
+            cwd=ROOT, env=environment, stdout=stream)
+    metadata = json.loads(run(
+        build["tool"], "metadata", "--locked", "--format-version=1",
+        "--filter-platform", target, cwd=ROOT, env=environment,
+        capture_output=True, text=True, encoding="utf-8",
+    ).stdout)
+    binary = ROOT / "target" / target / "release" / (
+        build["binary"] + (".exe" if target.endswith("msvc") else "")
+    )
+    return messages, metadata, binary
+
+
+def publish_assets(artifacts, destination, sbom, name):
+    """Stage assets only after all package and SBOM checks pass."""
+    import release_sbom
+
+    release_sbom.validate_document(sbom)
+    encoded = json.dumps(sbom, indent=2) + "\n"
+    destination.mkdir(parents=True, exist_ok=True)
+    if any(destination.iterdir()):
+        raise ValueError(f"The asset output directory must be empty: {destination}")
+    for artifact in artifacts:
+        if artifact["type"] in ("Archive", "Linux Package"):
+            path = Path(artifact["path"])
+            shutil.copyfile(path, destination / path.name)
+    (destination / (name + ".spdx.json")).write_text(encoded)
+
+
+def verify_sboms(directory, version):
+    """Require one SBOM per target, with the archive binary's checksum."""
+    import release_sbom
+
+    expected = {f"sofka-v{version}-{target}.spdx.json" for target in TARGETS}
+    actual = {path.name for path in directory.glob("*.spdx.json")}
+    if actual != expected:
+        raise ValueError(f"Release SBOM set differs: missing={expected - actual}, extra={actual - expected}")
+    for target in TARGETS:
+        name = f"sofka-v{version}-{target}"
+        document = json.loads((directory / (name + ".spdx.json")).read_text())
+        release_sbom.validate_document(document)
+        binary = "sofka.exe" if target.endswith("msvc") else "sofka"
+        if target.endswith("msvc"):
+            with zipfile.ZipFile(directory / (name + ".zip")) as archive:
+                payload = archive.read(binary)
+        else:
+            with tarfile.open(directory / (name + ".tar.gz")) as archive:
+                payload = archive.extractfile(binary).read()
+        checksum = hashlib.sha256(payload).hexdigest()
+        files = document.get("files", [])
+        roots = [package for package in document.get("packages", [])
+                 if package.get("SPDXID") in document.get("documentDescribes", [])]
+        if (document.get("spdxVersion") != "SPDX-2.3"
+                or document.get("name") != name
+                or len(roots) != 1 or roots[0].get("name") != "sofka"
+                or roots[0].get("versionInfo") != version
+                or len(files) != 1 or files[0].get("fileName") != "./" + binary
+                or {"algorithm": "SHA256", "checksumValue": checksum} not in files[0].get("checksums", [])):
+            raise ValueError(f"SBOM does not match its release archive: {name}")
 
 
 def glibc_version(text):
@@ -235,16 +307,20 @@ def build_packages(args):
     )
     dist = ROOT / "target/release-dist" / target
     config = configure(target, stage, dist)
-    if target.endswith("linux-gnu"):
-        build = config["builds"][0]
-        run(build["tool"], build["command"], *build["flags"], "--target", target, cwd=ROOT)
-        binary = ROOT / "target" / target / "release" / build["binary"]
-        config = configure(target, stage, dist, check_binary(target, binary))
-    config_file = stage / "goreleaser.yaml"
-    config_file.write_text(yaml.safe_dump(config, sort_keys=False))
     environment = os.environ.copy()
     environment["SOFKA_RELEASE_NOTICES"] = notices.relative_to(ROOT).as_posix()
     environment["SOFKA_RELEASE_COPYRIGHT"] = (stage / "copyright").relative_to(ROOT).as_posix()
+    messages, metadata, binary = capture_build(config, target, stage, environment)
+    import release_sbom
+
+    version = tomllib.loads((ROOT / "Cargo.toml").read_text())["package"]["version"]
+    revision = output("git", "-C", ROOT, "rev-parse", "HEAD")
+    sbom = release_sbom.generate(messages, metadata, binary, target, version, revision)
+    captured_hash = sbom["files"][0]["checksums"][0]["checksumValue"]
+    if target.endswith("linux-gnu"):
+        config = configure(target, stage, dist, check_binary(target, binary))
+    config_file = stage / "goreleaser.yaml"
+    config_file.write_text(yaml.safe_dump(config, sort_keys=False))
     command = [args.goreleaser, "release", "--clean", "--config", str(config_file), "--skip=publish,announce"]
     if args.snapshot:
         command.append("--snapshot")
@@ -256,14 +332,10 @@ def build_packages(args):
         raise ValueError("Expected one binary and one archive for the target")
     verify_archive(archives[0], binaries[0], notices)
     verify_packages(dist, target, binaries[0], notices)
+    if hashlib.sha256(binaries[0].read_bytes()).hexdigest() != captured_hash:
+        raise ValueError("The packaged binary differs from the captured Cargo build")
     destination = ROOT / "target/release-assets" / target
-    destination.mkdir(parents=True, exist_ok=True)
-    if any(destination.iterdir()):
-        raise ValueError(f"The asset output directory must be empty: {destination}")
-    for artifact in artifacts:
-        if artifact["type"] in ("Archive", "Linux Package"):
-            path = Path(artifact["path"])
-            shutil.copyfile(path, destination / path.name)
+    publish_assets(artifacts, destination, sbom, f"sofka-v{version}-{target}")
     print(f"Verified release assets: {destination}")
 
 
@@ -281,11 +353,16 @@ def main():
     check.add_argument("--binary", type=Path, required=True)
     install = commands.add_parser("install-test")
     install.add_argument("--target", choices=TARGETS, required=True)
+    verify = commands.add_parser("verify-sboms")
+    verify.add_argument("--directory", type=Path, required=True)
+    verify.add_argument("--version", required=True)
     args = parser.parse_args()
     if args.command == "matrix":
         print(json.dumps({"include": [{"target": target, "os": runner} for target, runner in TARGETS.items()]}))
     elif args.command == "check-binary":
         check_binary(args.target, args.binary)
+    elif args.command == "verify-sboms":
+        verify_sboms(args.directory, args.version)
     elif args.command == "install-test":
         install_test(args.target)
     else:

@@ -69,19 +69,43 @@ Alpine adapters still need separate musl builds.
 The new application archives do not imply that those adapters are available.
 Plugin packages keep their existing `.tar.zst` format.
 
+## Software bill of materials
+
+Each release target has an SPDX 2.3 JSON file named
+`sofka-v<version>-<target>.spdx.json`. The file records the release version,
+source revision, target, Rust package names and versions, declared licenses,
+and the SHA-256 checksum of the executable in the matching archive.
+Package checks also confirm that Linux packages contain the same executable.
+
+The SBOM lists Rust build inputs. Cargo compiler messages select the packages
+for that target and build, including cached artifacts, build dependencies, and
+procedural macros. Cargo metadata supplies package descriptions; it does not
+select the package list. The document does not infer a dependency graph.
+
+This is not an exact list of code linked into the executable. It does not list
+Rust standard library components or native libraries. Build dependencies can
+appear even when their code is not in the final executable. License values
+come from package metadata and do not replace the supplied license notices.
+
+The release stops if Cargo capture or SBOM generation fails, or if the packaged
+executable differs from the captured build. Before upload, the workflow checks
+that all eight target SBOMs exist and match their archive executable checksums.
+The SBOM files are separate assets; archive contents remain unchanged.
+
 ## Release development
 
-GoReleaser OSS 2.18.1 runs Cargo on each platform runner, creates archives,
+GoReleaser OSS 2.18.2 runs Cargo on each platform runner, creates archives,
 and creates Linux packages through nFPM. The shared configuration is
 `.goreleaser.yaml`. `scripts/release_packages.py` selects one target for each
 runner, stages notices, checks the binary, and verifies package contents.
 Only verified release assets are passed to the upload job.
-A GNU Linux build runs before GoReleaser to derive runtime dependencies.
+Each target build runs before GoReleaser to capture Cargo build inputs.
+GNU Linux builds also derive runtime dependencies.
 GoReleaser then reuses Cargo's build cache. Dependency fields contain plain
 values because GoReleaser does not expand templates in those fields.
-`SHA256SUMS` and build attestations cover all archive and package formats.
+`SHA256SUMS` and build attestations cover all archive, package, and SBOM files.
 
-The release uses Rust 1.97.0. Its musl targets include musl 1.2.5; the matching
+The release uses Rust 1.98.1. Its musl targets include musl 1.2.5; the matching
 copyright notice is in `scripts/licenses/musl-COPYRIGHT`.
 When updating the release toolchain, check the musl version in Rust's
 `src/ci/docker/scripts/musl.sh` and update the notice if required.
@@ -90,11 +114,11 @@ When updating the release toolchain, check the musl version in Rust's
 To run the local configuration tests:
 
 ```sh
-uv run --locked python -m unittest discover -s scripts -p test_release_packages.py
+uv run --locked python -m unittest discover -s scripts -p 'test_release*.py'
 ```
 
 To build a local snapshot on a matching native host, install GoReleaser OSS,
-Rust 1.97.0, and `uv`. Python dependencies are pinned in `uv.lock`.
+Rust 1.98.1, and `uv`. Python dependencies are pinned in `uv.lock`.
 Collect real notices as described
 in [release licenses](release-licenses.md), then run:
 
