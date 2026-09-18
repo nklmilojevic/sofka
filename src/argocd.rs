@@ -47,7 +47,7 @@ const CONDITION_PRIORITY: &[&str] = &[
 ];
 
 /// How many managed resources to list before summarising the rest.
-const MAX_LISTED: usize = 50;
+pub(crate) const MAX_LISTED: usize = 50;
 
 /// Whether an Application syncs by itself, and if not, why not.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

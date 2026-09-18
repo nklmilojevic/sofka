@@ -12,6 +12,23 @@ type KindPlurals = HashMap<(String, String), String>;
 const LABEL_VALUE_MAX: usize = 63;
 
 /// Page size and page cap for the truncated-label fallback scan.
+/// A remote managed resource on its way to being opened in the cluster that
+/// holds it, with what `esc` should come back to.
+pub(super) struct RemoteJump {
+    pub resource: argocd::ManagedResource,
+    pub back: ArgocdReturn,
+}
+
+/// The Argo CD view a remote jump left: the context it was on and the object
+/// it was opened for (an Application, or something Argo manages), so the same
+/// view can be reopened after switching back.
+#[derive(Clone)]
+pub(super) struct ArgocdReturn {
+    pub context: String,
+    pub source: DynamicObject,
+    pub kind: crate::k8s::Kind,
+}
+
 const PREFIX_SCAN_PAGE: u32 = 500;
 const PREFIX_SCAN_PAGES: usize = 20;
 
@@ -41,6 +58,11 @@ impl App {
             self.flash_warn("no selection for the Argo CD view");
             return;
         };
+        self.show_argocd(obj);
+    }
+
+    /// Open the Argo CD view for `obj`, a row of the current kind.
+    fn show_argocd(&mut self, obj: DynamicObject) {
         self.set_return_mode();
         let name = obj.metadata.name.clone().unwrap_or_default();
         self.argocd_title = format!("{name} — Argo CD");
@@ -251,8 +273,9 @@ impl App {
             (Some(Action::Last), _) if len > 0 => self.argocd_state.select(Some(len - 1)),
             (Some(Action::Refresh), _) => self.refresh_argocd(),
             (Some(Action::DiscoverChildren), _) => self.toggle_argocd_children(),
-            // Lines for an Application deploying elsewhere carry no target, so
-            // this reports where the object lives rather than searching here.
+            // Lines for an Application deploying elsewhere carry no target;
+            // when a kubeconfig context serves that cluster the jump goes
+            // through it, otherwise this reports where the object lives.
             (Some(Action::Accept), _) => {
                 let selected = self
                     .argocd_state
@@ -260,7 +283,7 @@ impl App {
                     .and_then(|i| self.argocd_items.get(i));
                 match selected.and_then(|f| f.target.clone()) {
                     Some(t) => self.navigate_to_target(&t),
-                    None => self.flash_warn(&self.no_jump_reason()),
+                    None => self.jump_to_remote_managed_resource(),
                 }
             }
             _ => {}
@@ -270,12 +293,137 @@ impl App {
         }
     }
 
+    /// `⏎` on a managed resource of an Application deploying to a cluster some
+    /// kubeconfig context serves: switch to it and open the object once the
+    /// connection lands. The kind is resolved then, against the cluster that
+    /// holds it — this one may not know the CRD. Any other target-less line
+    /// reports why there is nothing to jump to.
+    fn jump_to_remote_managed_resource(&mut self) {
+        let Destination::Context(context) = self.argocd_destination.clone() else {
+            self.flash_warn(&self.no_jump_reason());
+            return;
+        };
+        // Same name as the connected context, yet not classified local: the
+        // kubeconfig now points that name at another server. A switch would
+        // be a no-op, so say what happened instead of dropping the jump.
+        if context == self.cluster.context && self.cluster.connected {
+            self.flash_warn(&format!(
+                "kubeconfig context {context} no longer points at the connected cluster; reconnect with :ctx {context}"
+            ));
+            return;
+        }
+        let resource = self
+            .argocd_state
+            .selected()
+            .and_then(|i| self.managed_row_ordinal(i))
+            .and_then(|o| self.argocd_resources.get(o).cloned());
+        let Some(resource) = resource else {
+            self.flash_warn(&self.no_jump_reason());
+            return;
+        };
+        let back = match (self.argocd_source.clone(), self.kind.clone()) {
+            (Some(source), Some(kind)) => ArgocdReturn {
+                context: self.cluster.context.clone(),
+                source,
+                kind,
+            },
+            _ => {
+                self.flash_warn(&self.no_jump_reason());
+                return;
+            }
+        };
+        // Leave the view first: it describes the cluster being left, and the
+        // tail of `key_argocd` cancels its request on the mode change.
+        self.mode = self.return_mode;
+        self.switch_context(context);
+        self.pending_resource_query = None;
+        self.pending_bookmark = None;
+        self.pending_workspace = None;
+        self.pending_argocd_return = None;
+        self.pending_argocd_target = Some(RemoteJump { resource, back });
+    }
+
+    /// `esc` at the root of the view a remote jump opened: switch back to the
+    /// context the Argo CD view was on and reopen it there once the switch
+    /// lands.
+    pub(super) fn return_to_argocd(&mut self, back: ArgocdReturn) {
+        self.switch_context(back.context.clone());
+        self.pending_resource_query = None;
+        self.pending_bookmark = None;
+        self.pending_workspace = None;
+        self.pending_argocd_target = None;
+        self.pending_argocd_return = Some(back);
+    }
+
+    /// The landing half of [`Self::return_to_argocd`]: the table underneath
+    /// is the kind the view was opened from, so `esc` out of the view lands
+    /// somewhere sensible, and the view itself re-reads its object.
+    pub(super) fn reopen_argocd(&mut self, back: ArgocdReturn) {
+        let ArgocdReturn { source, kind, .. } = back;
+        self.set_root_view(kind);
+        if let Some(ns) = source.metadata.namespace.clone() {
+            self.namespace = ns;
+        }
+        self.record_history();
+        self.start_watch();
+        self.show_argocd(source);
+    }
+
+    /// The landing half of [`Self::jump_to_remote_managed_resource`]: the
+    /// switch to `context` is in, so open the object as a root view scoped to
+    /// its name. A kind this cluster does not know falls back to pods, and
+    /// says so.
+    pub(super) fn open_remote_managed_resource(&mut self, jump: RemoteJump, context: &str) {
+        let RemoteJump { resource, back } = jump;
+        let Some(kind) = self
+            .cluster
+            .resolve_in_group(&resource.kind, &resource.group)
+        else {
+            if let Some(pods) = self.cluster.resolve("pods") {
+                self.set_root_view(pods);
+                self.record_history();
+                self.start_watch();
+            }
+            // Still the jumped view: `esc` must find its way back from here
+            // too, and `set_root_view` above just dropped it.
+            self.argocd_return = Some(back);
+            self.flash_warn(&format!("{context} has no {}; viewing pods", resource.kind));
+            return;
+        };
+        let title = kind.title();
+        self.set_root_view(kind);
+        if !resource.namespace.is_empty() {
+            self.namespace = resource.namespace.clone();
+        }
+        self.fields = Some(format!("metadata.name={}", resource.name));
+        self.scope_label = Some(resource.name.clone());
+        self.record_history();
+        self.start_watch();
+        // After `set_root_view`, which drops it: this root is the jumped view.
+        self.argocd_return = Some(back);
+        self.set_flash(format!(
+            "Viewing {title}/{} in {context} · esc returns to the Application",
+            resource.name
+        ));
+    }
+
+    /// Whether `⏎` on row `index` goes somewhere: the row's own target, or a
+    /// managed resource of an Application deploying to a cluster some
+    /// kubeconfig context serves, which jumps through that context.
+    pub fn argocd_row_jumps(&self, index: usize) -> bool {
+        self.argocd_items
+            .get(index)
+            .is_some_and(|f| f.target.is_some())
+            || (matches!(self.argocd_destination, Destination::Context(_))
+                && self.managed_row_ordinal(index).is_some())
+    }
+
     /// Why `⏎` did nothing. A remote destination is a different answer from a
     /// line that never named a resource.
     fn no_jump_reason(&self) -> String {
         match &self.argocd_destination {
             Destination::Context(ctx) => {
-                format!("these resources live in {ctx}; switch with :ctx {ctx}")
+                format!("these resources live in {ctx}; ⏎ on a managed resource opens it there")
             }
             Destination::Unresolved(server) if !server.is_empty() => {
                 format!("these resources live in {server}, which no kubeconfig context serves")
@@ -391,6 +539,7 @@ fn resolve_destination(
         server,
         name,
         current_server,
+        |c| contexts.server_by_context.get(c).cloned(),
         |s| {
             contexts
                 .by_server
@@ -407,9 +556,21 @@ pub(super) fn classify_destination(
     server: &str,
     name: &str,
     current_server: &str,
+    server_for_context: impl Fn(&str) -> Option<String>,
     context_for_server: impl Fn(&str) -> Option<String>,
     context_for_name: impl Fn(&str) -> Option<String>,
 ) -> Destination {
+    // A resolved context is local when it serves the cluster we are connected
+    // to — by server, never by name: a context of the same name can point
+    // elsewhere once the kubeconfig has changed under a running session.
+    let here = crate::k8s::normalize_server(current_server);
+    let resolved = |ctx: String| {
+        if server_for_context(&ctx).is_some_and(|s| crate::k8s::normalize_server(&s) == here) {
+            Destination::Current
+        } else {
+            Destination::Context(ctx)
+        }
+    };
     if !server.is_empty() {
         let normalized = crate::k8s::normalize_server(server);
         // Argo writes the in-cluster destination as the Kubernetes service
@@ -422,7 +583,7 @@ pub(super) fn classify_destination(
             return Destination::Current;
         }
         return match context_for_server(server) {
-            Some(ctx) => Destination::Context(ctx),
+            Some(ctx) => resolved(ctx),
             None => Destination::Unresolved(server.to_string()),
         };
     }
@@ -434,7 +595,7 @@ pub(super) fn classify_destination(
     // it over the `in-cluster` convention stops a cluster registered under that
     // name from passing as the local one.
     if let Some(ctx) = context_for_name(name) {
-        return Destination::Context(ctx);
+        return resolved(ctx);
     }
     if name == "in-cluster" {
         return Destination::Current;
@@ -480,12 +641,13 @@ impl App {
         if self.argocd_items[index].indent != 1 {
             return None;
         }
-        Some(
-            self.argocd_items[heading + 1..index]
-                .iter()
-                .filter(|f| f.indent == 1)
-                .count(),
-        )
+        let ordinal = self.argocd_items[heading + 1..index]
+            .iter()
+            .filter(|f| f.indent == 1)
+            .count();
+        // Past the cap sits the "… and N more" summary, another indent-1 row
+        // that names no resource — it must not map to the first hidden one.
+        (ordinal < argocd::MAX_LISTED).then_some(ordinal)
     }
 
     /// The row showing the `ordinal`th managed resource, if it is still there.

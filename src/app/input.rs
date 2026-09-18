@@ -400,8 +400,12 @@ impl App {
                     // selectors, so the watch must widen back out.
                     self.sync_filter_selectors();
                     self.save_history_filter();
-                } else if !self.pop_frame() {
-                    // at root, nothing to pop
+                } else if !self.pop_frame()
+                    && let Some(back) = self.argocd_return.take()
+                {
+                    // At the root of a view a remote Argo CD jump opened:
+                    // back means back to the Application it came from.
+                    self.return_to_argocd(back);
                 }
             }
             (Some(Action::RangeDown), _) => self.extend_selection(1),

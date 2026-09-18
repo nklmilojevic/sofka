@@ -345,6 +345,10 @@ fn sanitize_server_version(version: &str) -> String {
 pub struct ContextIndex {
     pub by_server: HashMap<String, String>,
     pub clusters: Vec<(String, String)>,
+    /// Every admitted context's normalized server — the inverse of
+    /// `by_server` without the alias collapse, so a context that lost that
+    /// collision can still be told local from remote.
+    pub server_by_context: HashMap<String, String>,
 }
 
 impl ContextIndex {
@@ -374,6 +378,9 @@ impl ContextIndex {
                 continue;
             };
             index.by_server.insert(server.clone(), c.name.clone());
+            index
+                .server_by_context
+                .insert(c.name.clone(), server.clone());
             index.clusters.push((c.name.clone(), cluster));
         }
         index
@@ -1622,6 +1629,18 @@ clusters:
             "last alias on the server wins the server map"
         );
         assert_eq!(index.by_server.len(), 1);
+        assert_eq!(
+            index.server_by_context.get("prod").map(String::as_str),
+            Some("https://prod.example")
+        );
+        assert_eq!(
+            index
+                .server_by_context
+                .get("prod-alias")
+                .map(String::as_str),
+            Some("https://prod.example")
+        );
+        assert_eq!(index.server_by_context.len(), 2);
     }
 
     #[test]

@@ -54,6 +54,8 @@ impl App {
             self.switch_context(ctx);
             self.pending_resource_query = None;
             self.pending_bookmark = None;
+            self.pending_argocd_target = None;
+            self.pending_argocd_return = None;
             self.pending_workspace = Some(ws);
             return;
         }
@@ -113,7 +115,12 @@ impl App {
             };
             let resource = DEFAULT_RESOURCES[index];
             if self.cluster.resolve(resource).is_some() {
+                // Cycling kinds is still browsing the cluster a remote Argo CD
+                // jump landed in: keep its way back, which `switch_kind`'s
+                // fresh root would otherwise drop. A `:resource` query drops it.
+                let back = self.argocd_return.take();
                 self.switch_kind(resource);
+                self.argocd_return = back;
                 return true;
             }
         }

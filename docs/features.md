@@ -478,7 +478,11 @@ concurrent drains, and full kubectl drain parity are outside this feature.
   Applications deploying to a **remote cluster** are handled honestly - the
   destination is resolved against your kubeconfig and shown by context name, and
   because those objects do not live in the cluster you are connected to, `⏎`
-  reports where they are instead of searching here. A `destination.server` URL
+  on a managed resource switches to the context that serves that cluster and
+  opens the object there once the connection lands (the kind is resolved
+  against that cluster, so a CRD this one lacks is fine). `esc` at the root of
+  that view switches back and reopens the Argo CD view it came from. Where no
+  context serves the destination, `⏎` reports where the objects are instead. A `destination.server` URL
   matches the context whose cluster has that server. A `destination.name`
   matches a context named the same, then a context whose cluster entry is named
   the same, then one whose cluster entry ends in `/<name>` - so an EKS entry

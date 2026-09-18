@@ -4558,13 +4558,17 @@ fn draw_fleet(frame: &mut Frame, app: &mut App, area: Rect) {
 /// selected object. Lines carrying a navigation target are marked with a `→`.
 /// Render a list of [`crate::explain::Finding`]s (shared by the explain and
 /// GitOps views): coloured by level, indented, with a `→` on lines that carry
-/// a jump target. Shows `empty_msg` while the findings are still gathering.
+/// a jump target — `jumps` says which rows have one, since a view may know of
+/// jumps its findings do not carry. Shows `empty_msg` while the findings are
+/// still gathering.
+#[allow(clippy::too_many_arguments)]
 fn draw_findings(
     frame: &mut Frame,
     show_scrollbars: bool,
     area: Rect,
     title: String,
     findings: &[crate::explain::Finding],
+    jumps: &dyn Fn(usize, &crate::explain::Finding) -> bool,
     empty_msg: &str,
     state: &mut ListState,
 ) {
@@ -4586,7 +4590,8 @@ fn draw_findings(
     } else {
         findings
             .iter()
-            .map(|f| {
+            .enumerate()
+            .map(|(i, f)| {
                 let indent = "  ".repeat(f.indent as usize);
                 let mut spans = vec![Span::raw(indent)];
                 let style = match f.level {
@@ -4596,7 +4601,7 @@ fn draw_findings(
                     _ => Style::default().fg(color(f.level)),
                 };
                 spans.push(Span::styled(f.text.clone(), style));
-                if f.target.is_some() {
+                if jumps(i, f) {
                     spans.push(Span::styled("  →", theme::dim()));
                 }
                 ListItem::new(Line::from(spans))
@@ -4631,6 +4636,7 @@ fn draw_explain(frame: &mut Frame, app: &mut App, area: Rect) {
         area,
         title,
         &app.explain_items,
+        &|_, f| f.target.is_some(),
         "gathering evidence…",
         &mut app.explain_state,
     );
@@ -4641,12 +4647,16 @@ fn draw_argocd(frame: &mut Frame, app: &mut App, area: Rect) {
     // The expansion is only discoverable from the title, the way the adjacent
     // view advertises the same key.
     let title = format!(" {} (c discover children) ", app.argocd_title);
+    let jumps: Vec<bool> = (0..app.argocd_items.len())
+        .map(|i| app.argocd_row_jumps(i))
+        .collect();
     draw_findings(
         frame,
         show_scrollbars,
         area,
         title,
         &app.argocd_items,
+        &|i, _| jumps[i],
         "reading the Application…",
         &mut app.argocd_state,
     );
@@ -4661,6 +4671,7 @@ fn draw_gitops(frame: &mut Frame, app: &mut App, area: Rect) {
         area,
         title,
         &app.gitops_items,
+        &|_, f| f.target.is_some(),
         "following the reconciliation chain…",
         &mut app.gitops_state,
     );
