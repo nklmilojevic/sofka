@@ -1089,8 +1089,7 @@ pub struct LogIndex {
     shown: Vec<Option<u32>>,
     consumed_markers: usize,
     /// Cumulative display rows *through* `shown[i]`, so the first row of
-    /// `shown[i]` is `ends[i-1]` (0 for i == 0). Only maintained when
-    /// wrapping; without wrap every line is exactly one row.
+    /// `shown[i]` is `ends[i-1]` (0 for i == 0).
     ends: Vec<u32>,
     total_rows: usize,
 }
@@ -1115,9 +1114,6 @@ impl LogIndex {
 
     /// Display row where the `i`th shown line starts.
     pub fn start_row(&self, i: usize) -> usize {
-        if self.wrap_width == 0 {
-            return i;
-        }
         match i.checked_sub(1) {
             None => 0,
             Some(prev) => self.ends.get(prev).copied().unwrap_or(0) as usize,
@@ -1126,9 +1122,6 @@ impl LogIndex {
 
     /// Display rows occupied by the `i`th shown line.
     pub fn height_at(&self, i: usize) -> usize {
-        if self.wrap_width == 0 {
-            return 1;
-        }
         self.ends.get(i).copied().unwrap_or(0) as usize - self.start_row(i)
     }
 
@@ -1136,9 +1129,6 @@ impl LogIndex {
     /// binary search over the cumulative row ends, replacing a linear walk
     /// from the top of the buffer.
     pub fn first_at_row(&self, row: usize) -> usize {
-        if self.wrap_width == 0 {
-            return row.min(self.shown.len());
-        }
         self.ends.partition_point(|&end| (end as usize) <= row)
     }
 
@@ -1173,6 +1163,8 @@ pub struct LogsView {
     pub warnings_only: bool,
     pub wrap: bool,
     pub timestamps: bool,
+    pub json: bool,
+    json_budget: usize,
     pub stopped: bool,
     /// Fullscreen (`F`, k9s): the pane takes the whole frame with no header,
     /// borders, or status line, so terminal text selection copies clean lines.
@@ -1211,6 +1203,8 @@ impl Default for LogsView {
             warnings_only: false,
             wrap: false,
             timestamps: false,
+            json: false,
+            json_budget: logs::JSON_CACHE_LIMIT,
             stopped: false,
             fullscreen: false,
             since_anchor: None,
@@ -1260,6 +1254,7 @@ impl LogsView {
     fn clear_lines(&mut self) {
         self.view.clear_lines();
         self.line_meta.clear();
+        self.json_budget = logs::JSON_CACHE_LIMIT;
         self.markers.clear();
         self.line_offset = 0;
         self.reset_index();
@@ -1277,16 +1272,16 @@ impl LogsView {
                 .lines
                 .iter()
                 .take(count)
-                .filter(|line| self.matches(line))
-                .map(|line| match self.last_wrap_width {
-                    0 => 1,
-                    width => crate::ui::wrapped_height(line, width),
-                })
+                .enumerate()
+                .filter(|(_, line)| self.matches(line))
+                .map(|(i, _)| logs::display_height(self.display_line(i), self.last_wrap_width))
                 .sum();
             self.view.scroll = self.view.scroll.saturating_sub(rows + removed_markers);
         }
         self.markers.drain(..removed_markers);
-        self.line_meta.drain(..count.min(self.line_meta.len()));
+        for meta in self.line_meta.drain(..count.min(self.line_meta.len())) {
+            self.json_budget = (self.json_budget + meta.json_charge).min(logs::JSON_CACHE_LIMIT);
+        }
         self.view.drain_front(count);
         self.reset_index();
     }
@@ -1333,6 +1328,8 @@ impl LogsView {
             index,
             markers,
             line_offset,
+            json,
+            line_meta,
             ..
         } = self;
 
@@ -1353,9 +1350,7 @@ impl LogsView {
             {
                 index.shown.push(None);
                 index.total_rows += 1;
-                if wrap_width > 0 {
-                    index.ends.push(index.total_rows as u32);
-                }
+                index.ends.push(index.total_rows as u32);
                 index.consumed_markers += 1;
             }
             let Some(line) = view.lines.get(i) else {
@@ -1367,12 +1362,16 @@ impl LogsView {
                 continue;
             }
             index.shown.push(Some(i as u32));
-            if wrap_width > 0 {
-                index.total_rows += crate::ui::wrapped_height(line, wrap_width);
-                index.ends.push(index.total_rows as u32);
+            let display = if *json {
+                line_meta
+                    .get(i)
+                    .and_then(|m| m.pretty.as_deref())
+                    .unwrap_or(line)
             } else {
-                index.total_rows += 1;
-            }
+                line
+            };
+            index.total_rows += logs::display_height(display, wrap_width);
+            index.ends.push(index.total_rows as u32);
         }
         index.consumed = len;
         index

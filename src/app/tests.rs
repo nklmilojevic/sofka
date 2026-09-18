@@ -33647,3 +33647,145 @@ async fn detail_wrap_default_and_session_toggles_survive_new_documents() {
     }
     std::fs::remove_dir_all(dir).unwrap();
 }
+
+#[tokio::test]
+async fn log_json_shortcut_formats_records_and_keeps_raw_save() {
+    let (mut app, mut rx) = test_app();
+    app.mode = Mode::Logs;
+    app.logs.view.title = "json-display-test".into();
+    let lines = vec![
+        r#"[ns/pod:app] 2026-09-10T10:00:00Z {"level":"error","nested":{"items":[1,2]}}"#.into(),
+        r#"["a] b:c",{"nested":[true,null]}]"#.into(),
+        "plain text".into(),
+        "{bad json}".into(),
+        "42".into(),
+        "null".into(),
+    ];
+    shortcut_log_lines(&mut app, lines);
+    let raw = app.filtered_log_text();
+    let generation = app.log_gen;
+    app.handle_key(press(KeyCode::Char('J'))).unwrap();
+    assert!(app.logs.json);
+    assert!(app.logs.display_line(0).starts_with("[ns/pod:app] {\n"));
+    assert!(app.logs.display_line(0).contains("    \"items\": [\n"));
+    assert!(app.logs.display_line(1).starts_with("[\n"));
+    for i in 2..6 {
+        assert_eq!(app.logs.display_line(i), app.logs.view.lines[i]);
+    }
+    assert_eq!(app.filtered_log_text(), raw);
+    app.handle_key(press(KeyCode::Char('t'))).unwrap();
+    assert!(
+        app.logs
+            .display_line(0)
+            .starts_with("[ns/pod:app] 2026-09-10T10:00:00Z {\n")
+    );
+    app.handle_key(press(KeyCode::Char('t'))).unwrap();
+    app.logs.set_filter(r#""items":[1,2]"#.into());
+    assert_eq!(app.logs.refresh_index(0).matched_lines(), 1);
+    assert!(app.logs.refresh_index(0).total_rows() > 5);
+    app.logs.set_filter(String::new());
+    app.handle_key(KeyEvent::new(KeyCode::Char('z'), KeyModifiers::CONTROL))
+        .unwrap();
+    assert_eq!(app.logs.refresh_index(0).matched_lines(), 1);
+    app.handle_key(KeyEvent::new(KeyCode::Char('z'), KeyModifiers::CONTROL))
+        .unwrap();
+    app.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL))
+        .unwrap();
+    let saved = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            if let Msg::LogsSaved { result, .. } = rx.recv().await.unwrap() {
+                break result.unwrap();
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(std::fs::read_to_string(&saved).unwrap(), raw);
+    std::fs::remove_file(saved).unwrap();
+    shortcut_log_lines(&mut app, vec![r#"[app] {"new":[3]}"#.into()]);
+    assert!(app.logs.display_line(6).starts_with("[app] {\n"));
+    app.handle_key(press(KeyCode::Char('J'))).unwrap();
+    assert!(!app.logs.json);
+    assert_eq!(app.logs.display_line(0), app.logs.view.lines[0]);
+    assert_eq!(app.log_gen, generation);
+}
+
+#[tokio::test]
+async fn log_json_shortcut_keeps_scroll_follow_wrap_and_record_limits() {
+    use ratatui::{Terminal, backend::TestBackend};
+    let (mut app, _rx) = test_app();
+    app.mode = Mode::Logs;
+    app.compact = true;
+    app.logs_cfg.buffer = 30;
+    shortcut_log_lines(
+        &mut app,
+        (0..30)
+            .map(|i| format!(r#"{{"record":{i},"message":"long message for wrapping"}}"#))
+            .collect(),
+    );
+    app.handle_key(press(KeyCode::Char('J'))).unwrap();
+    let mut terminal = Terminal::new(TestBackend::new(24, 12)).unwrap();
+    for width in [24, 8] {
+        terminal.backend_mut().resize(width, 12);
+        crate::ui::resize(&mut terminal, &mut app).unwrap();
+        for _ in 0..2 {
+            app.handle_key(press(KeyCode::Char('w'))).unwrap();
+            terminal.draw(|f| crate::ui::draw(f, &mut app)).unwrap();
+            assert_eq!(
+                app.logs.view.scroll,
+                app.logs.viewport_rows.saturating_sub(app.logs.viewport_h)
+            );
+            assert!(app.logs.viewport_rows >= 120);
+        }
+    }
+    app.handle_key(press(KeyCode::Home)).unwrap();
+    terminal.draw(|f| crate::ui::draw(f, &mut app)).unwrap();
+    assert!(!app.logs.follow);
+    assert_eq!(app.logs.view.scroll, 0);
+    app.handle_key(press(KeyCode::PageDown)).unwrap();
+    assert!(app.logs.view.scroll > 0);
+    let shown = app.logs.index.first_at_row(app.logs.view.scroll);
+    app.handle_key(press(KeyCode::Char('J'))).unwrap();
+    assert_eq!(app.logs.index.first_at_row(app.logs.view.scroll), shown);
+    app.handle_key(press(KeyCode::Char('J'))).unwrap();
+    app.handle_key(press(KeyCode::Char('f'))).unwrap();
+    shortcut_log_lines(&mut app, vec![r#"{"last":1}"#.into()]);
+    assert_eq!(app.logs.view.lines.len(), 30);
+    let large = format!(r#"{{"large":"{}"}}"#, "x".repeat(4096));
+    shortcut_log_lines(&mut app, vec![large.clone()]);
+    assert_eq!(app.logs.display_line(29), large);
+    app.logs.clear_lines();
+    assert!(app.logs.json);
+    assert_eq!(app.logs.json_budget, logs::JSON_CACHE_LIMIT);
+}
+
+#[tokio::test]
+async fn log_json_full_buffer_performance_and_cache_limits() {
+    let (mut app, _rx) = test_app();
+    app.mode = Mode::Logs;
+    app.logs_cfg.buffer = 100_000;
+    shortcut_log_lines(
+        &mut app,
+        (0..100_000)
+            .map(|i| format!(r#"{{"record":{i},"nested":{{"items":[1,2,3]}}}}"#))
+            .collect(),
+    );
+    let start = std::time::Instant::now();
+    app.handle_key(press(KeyCode::Char('J'))).unwrap();
+    let toggle = start.elapsed();
+    assert_eq!(app.logs.view.lines.len(), 100_000);
+    assert!(app.logs.display_line(0).contains('\n'));
+    assert!(!app.logs.display_line(99_999).contains('\n'));
+    let used: usize = app.logs.line_meta.iter().map(|meta| meta.json_charge).sum();
+    assert!(used <= logs::JSON_CACHE_LIMIT);
+    let before = app.logs.json_budget;
+    let start = std::time::Instant::now();
+    for _ in 0..1000 {
+        std::hint::black_box(app.logs.refresh_index(0).total_rows());
+    }
+    eprintln!(
+        "JSON performance: 100000 records, toggle {toggle:?}, 1000 cached index refreshes {:?}, charged bytes {used}",
+        start.elapsed()
+    );
+    assert_eq!(app.logs.json_budget, before);
+}

@@ -1968,29 +1968,32 @@ fn draw_logs(frame: &mut Frame, app: &mut App, area: Rect) {
                 rows.push(Line::styled("-".repeat(inner_w), theme::dim()));
                 continue;
             };
-            let Some(l) = app.logs.view.lines.get(buf_idx) else {
-                break;
-            };
-            let line = render_log_line(l, highlight);
-            if wrap {
-                for (j, sub) in wrap_line(line, inner_w).into_iter().enumerate() {
-                    let r = row + j;
-                    if r < scroll {
-                        continue;
-                    }
-                    if r >= scroll + inner_h {
-                        break;
-                    }
-                    rows.push(sub);
+            let l = app.logs.display_line(buf_idx);
+            let mut offset = 0;
+            for part in l.split('\n') {
+                if row + offset >= scroll + inner_h {
+                    break;
                 }
-            } else {
-                rows.push(line);
+                let line = render_log_line(part, highlight);
+                let parts = if wrap {
+                    wrap_line(line, inner_w)
+                } else {
+                    vec![line]
+                };
+                for sub in parts {
+                    let r = row + offset;
+                    offset += 1;
+                    if r >= scroll && r < scroll + inner_h {
+                        rows.push(sub);
+                    }
+                }
             }
         }
     }
 
     let flags = format!(
-        "{}{}{}{}{}",
+        "{}{}{}{}{}{}",
+        if app.logs.json { " JSON" } else { "" },
         if app.logs.warnings_only {
             " [warn/error]"
         } else {
@@ -5095,6 +5098,7 @@ fn navigation_hint(app: &App, width: u16) -> String {
             Action::Follow,
             Action::LogMarker,
             Action::LogWarnings,
+            Action::Json,
             Action::Wrap,
             Action::Stream,
             Action::Copy,

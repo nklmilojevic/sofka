@@ -579,6 +579,9 @@ concurrent drains, and full kubectl drain parity are outside this feature.
   recognized severity, including stack trace continuation lines, can be hidden.
   Press `Ctrl+Z` again to show all retained lines. The filter resets when a new
   log view opens. Copy and save use the filtered lines.
+- **JSON log display** (`J` in logs) indents JSON objects and arrays. The setting
+  stays active for the session. Filters and application copy/save use raw records.
+  See [Log controls](debugging.md#log-controls) for limits.
 - **Log markers** (`m` in logs) add visual separators at the buffer tail.
   Markers stay visible through filters, do not move a paused viewport, and are
   excluded from sofka copy/save. Clearing or replacing the buffer removes them.

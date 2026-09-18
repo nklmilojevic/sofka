@@ -3,6 +3,9 @@ use super::*;
 #[derive(Default)]
 pub(super) struct LogLineMeta {
     sort_time: Option<i128>,
+    pub(super) pretty: Option<String>,
+    checked_json: bool,
+    pub(super) json_charge: usize,
     timestamp: Option<(usize, String)>,
 }
 
@@ -22,25 +25,142 @@ impl LogLineMeta {
                     fallback.unwrap_or_else(|| k8s_openapi::jiff::Timestamp::now().as_nanosecond()),
                 ),
                 timestamp: None,
+                ..Self::default()
             };
         };
         let end = (end + 1).min(line.len());
         Self {
             sort_time: Some(time.as_nanosecond()),
             timestamp: Some((start, line[start..end].to_owned())),
+            ..Self::default()
         }
     }
 }
 
+pub(super) const JSON_CACHE_LIMIT: usize = 8 * 1024 * 1024;
+const JSON_RECORD_LIMIT: usize = 4096;
+
+impl LogLineMeta {
+    fn format_json(&mut self, line: &str, budget: &mut usize) {
+        if self.checked_json {
+            return;
+        }
+        self.checked_json = true;
+        if line.len() > JSON_RECORD_LIMIT || line.len() > *budget {
+            return;
+        }
+        *budget -= line.len();
+        self.json_charge = line.len();
+        let source_end = line
+            .strip_prefix('[')
+            .and_then(|rest| {
+                let end = rest.find("] ")?;
+                let label = &rest[..end];
+                (!label.is_empty()
+                    && label
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || b"/._-:".contains(&b)))
+                .then_some(end + 3)
+            })
+            .unwrap_or(0);
+        let time_end = self
+            .timestamp
+            .as_ref()
+            .map_or(source_end, |(start, timestamp)| {
+                if line.get(*start..).is_some_and(|s| s.starts_with(timestamp)) {
+                    start + timestamp.len()
+                } else {
+                    source_end
+                }
+            });
+        let payload = line[time_end..].trim();
+        if !payload.starts_with(['{', '[']) {
+            return;
+        }
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(payload) else {
+            return;
+        };
+        // The input and parser depth limits also bound the temporary output.
+        let Ok(pretty) = serde_json::to_string_pretty(&value) else {
+            return;
+        };
+        let timestamp_reserve = self
+            .timestamp
+            .as_ref()
+            .map_or(0, |(_, timestamp)| timestamp.len());
+        let charge = pretty.len() + time_end + timestamp_reserve;
+        if charge > *budget {
+            return;
+        }
+        *budget -= charge;
+        self.json_charge += charge;
+        self.pretty = Some(format!("{}{}", &line[..time_end], pretty));
+    }
+}
+
+pub(super) fn display_height(line: &str, width: usize) -> usize {
+    line.split('\n')
+        .map(|part| {
+            if width == 0 {
+                1
+            } else {
+                crate::ui::wrapped_height(part, width)
+            }
+        })
+        .sum()
+}
+
 impl LogsView {
+    pub fn display_line(&self, i: usize) -> &str {
+        if self.json
+            && let Some(pretty) = self.line_meta.get(i).and_then(|m| m.pretty.as_deref())
+        {
+            pretty
+        } else {
+            &self.view.lines[i]
+        }
+    }
+
+    pub(super) fn toggle_json(&mut self) {
+        let scroll = self.view.scroll;
+        let shown = self
+            .refresh_index(self.last_wrap_width)
+            .first_at_row(scroll);
+        self.json = !self.json;
+        self.prepare_json();
+        self.view.revision = self.view.revision.wrapping_add(1);
+        let width = self.last_wrap_width;
+        self.viewport_rows = self.refresh_index(width).total_rows();
+        if !self.follow {
+            self.view.scroll = self
+                .index
+                .start_row(shown)
+                .min(self.viewport_rows.saturating_sub(self.viewport_h));
+        }
+    }
+
+    pub(super) fn prepare_json(&mut self) {
+        if !self.json {
+            return;
+        }
+        self.line_meta
+            .resize_with(self.view.lines.len(), LogLineMeta::default);
+        for (line, meta) in self.view.lines.iter().zip(self.line_meta.iter_mut()) {
+            meta.format_json(line, &mut self.json_budget);
+        }
+    }
+
     fn push_line(&mut self, mut line: String) {
         self.line_meta
             .resize_with(self.view.lines.len(), LogLineMeta::default);
-        let meta = LogLineMeta::parse(&line, self.line_meta.back().and_then(|m| m.sort_time));
+        let mut meta = LogLineMeta::parse(&line, self.line_meta.back().and_then(|m| m.sort_time));
         if !self.timestamps
             && let Some((start, timestamp)) = &meta.timestamp
         {
             line.replace_range(*start..start + timestamp.len(), "");
+        }
+        if self.json {
+            meta.format_json(&line, &mut self.json_budget);
         }
         // Equal timestamps keep their arrival order. Missing timestamps use
         // the newest known time, or the arrival time if no time is known.
@@ -67,10 +187,10 @@ impl LogsView {
                     }
                 }) && self.index.start_row(shown) <= self.view.scroll
                 {
-                    self.view.scroll += match self.last_wrap_width {
-                        0 => 1,
-                        width => crate::ui::wrapped_height(&line, width),
-                    };
+                    self.view.scroll += display_height(
+                        meta.pretty.as_deref().unwrap_or(&line),
+                        self.last_wrap_width,
+                    );
                 }
             }
             for marker in &mut self.markers {
@@ -98,8 +218,15 @@ impl LogsView {
             })
         };
         self.timestamps = !self.timestamps;
-        for (line, meta) in self.view.lines.iter_mut().zip(&self.line_meta) {
+        for (line, meta) in self.view.lines.iter_mut().zip(&mut self.line_meta) {
             if let Some((start, timestamp)) = &meta.timestamp {
+                if let Some(pretty) = &mut meta.pretty {
+                    if self.timestamps {
+                        pretty.insert_str(*start, timestamp);
+                    } else {
+                        pretty.replace_range(*start..start + timestamp.len(), "");
+                    }
+                }
                 if self.timestamps {
                     line.insert_str(*start, timestamp);
                 } else {

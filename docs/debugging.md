@@ -75,6 +75,19 @@ herdr's own `ui.toast` delivery (in-app, outer terminal, or system).
 
 ## Log controls
 
+Press `J` to switch between raw and indented JSON. Raw display is the default.
+The setting applies to buffered and new records and stays active for the session.
+Only individual JSON objects and arrays are formatted. Other text stays unchanged.
+Source labels and timestamps stay with their record. Filters and severity selection
+use the original record and show all its formatted rows when it matches.
+Application copy/save keeps its existing raw output. Terminal selection copies the
+displayed text. Configure the key with `json` in `[keys.logs]`.
+
+Formatting accepts records of at most 4 KiB and the JSON parser depth limit.
+The buffer has an 8 MiB budget for inspected input and cached output. Records that
+exceed these limits stay raw. Results are cached, so redraws do not parse the buffer.
+Extra display rows do not change the record count or buffer limit.
+
 In the pod table, use `Space` to mark pods, then press `l` to open their combined
 logs. This includes pods from different namespaces. Each line has a
 `[namespace/pod:container]` prefix. Only marked pods still present in the filtered

@@ -154,7 +154,7 @@ point instead. See [PVC explore](features.md#pvc-explore).
 ## Logs view
 
 `/` filter (substring · `/regex/` · `!invert`) · `s`/`f` autoscroll · `w` wrap ·
-`Ctrl+Z` warning/error filter · `m` visual marker · `t` timestamps · `x` stop/resume stream · `z` clear buffer · `c` copy buffer ·
+`J` JSON formatting · `Ctrl+Z` warning/error filter · `m` visual marker · `t` timestamps · `x` stop/resume stream · `z` clear buffer · `c` copy buffer ·
 `ctrl-s` save to file · `F` fullscreen (no chrome, clean text selection) ·
 `0`–`5` time anchors (tail · 1m · 5m · 15m · 30m · 1h) · `T` provider lookback
 (VictoriaLogs views) · `esc` back. The newest line anchors to the bottom of the

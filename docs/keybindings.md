@@ -471,6 +471,7 @@ for those operations.
 | `page_up`    | `pageup`            |
 | `save`       | `ctrl-s`            |
 | `stream`     | `x`                 |
+| `json`       | `J`                 |
 | `timestamps` | `t`                 |
 | `up`         | `k`, `up`           |
 | `wrap`       | `w`                 |

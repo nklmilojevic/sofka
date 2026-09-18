@@ -1328,6 +1328,15 @@ impl App {
                 }
                 return;
             }
+            (Some(Action::Json), _) => {
+                self.logs.toggle_json();
+                self.flash = format!(
+                    "JSON formatting: {}",
+                    if self.logs.json { "on" } else { "off" }
+                );
+                self.flash_err = false;
+                return;
+            }
             // Show or hide timestamps in the current buffer.
             (Some(Action::Timestamps), _) => {
                 self.logs.toggle_timestamps();
