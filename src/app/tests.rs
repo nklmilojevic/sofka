@@ -33647,3 +33647,128 @@ async fn detail_wrap_default_and_session_toggles_survive_new_documents() {
     }
     std::fs::remove_dir_all(dir).unwrap();
 }
+
+#[tokio::test]
+async fn context_namespace_policy_uses_target_config_and_preserves_explicit_scope() {
+    let dir = std::env::temp_dir().join(format!("sofka-namespace-policy-{}", std::process::id()));
+    write_config(&dir, "default_namespace = 'configured'\n");
+    let cluster_dir = dir.join("clusters/test-cluster");
+    std::fs::create_dir_all(&cluster_dir).unwrap();
+    std::fs::write(
+        cluster_dir.join("config.yaml"),
+        "prefer_context_namespace: true\n",
+    )
+    .unwrap();
+    let context_dir = cluster_dir.join("legacy");
+    std::fs::create_dir_all(&context_dir).unwrap();
+    std::fs::write(
+        context_dir.join("config.toml"),
+        "prefer_context_namespace = false\n",
+    )
+    .unwrap();
+    for (context, pinned, saved, explicit, expected) in [
+        ("west", Some("X"), Some("X"), "", "X"),
+        ("west", Some("Y"), Some("X"), "", "Y"),
+        ("legacy", Some("Y"), Some("X"), "", "X"),
+        ("west", None, Some("X"), "", "X"),
+        ("west", None, Some(""), "", ""),
+        ("west", Some("Y"), Some(""), "", "Y"),
+        ("west", None, None, "", "configured"),
+        ("west", Some("Y"), Some("X"), " prod", "prod"),
+        ("west", Some("Y"), Some("X"), " all", ""),
+    ] {
+        let (mut app, _rx) = test_app();
+        app.config = crate::config::ConfigLoader::from_dir(Some(dir.clone()));
+        app.all_contexts = vec![context.into()];
+        if let Some(saved) = saved {
+            app.namespace_memory.set(context, saved);
+        }
+        type_resource_query(&mut app, &format!("pods @{context}{explicit}"));
+        let mut cluster = Cluster::fake();
+        cluster.context = context.into();
+        cluster.context_namespace = pinned.map(str::to_owned);
+        app.handle_msg(Msg::ContextSwitched {
+            generation: app.generation,
+            name: context.into(),
+            result: Ok(Box::new(cluster)),
+        });
+        assert_eq!(
+            app.namespace, expected,
+            "{context} {pinned:?} {saved:?} {explicit}"
+        );
+    }
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[tokio::test]
+async fn reload_namespace_policy_keeps_view_and_changes_next_context_resolution() {
+    let dir = std::env::temp_dir().join(format!("sofka-namespace-reload-{}", std::process::id()));
+    write_config(&dir, "prefer_context_namespace = false\n");
+    let (mut app, _rx) = test_app();
+    app.config = crate::config::ConfigLoader::from_dir(Some(dir.clone()));
+    app.namespace = "active".into();
+    write_config(&dir, "prefer_context_namespace = true\n");
+    plugin_command(&mut app, "reload");
+    assert_eq!(app.namespace, "active");
+    app.all_contexts = vec!["west".into()];
+    app.namespace_memory.set("west", "X");
+    type_resource_query(&mut app, "pods @west");
+    let mut cluster = Cluster::fake();
+    cluster.context = "west".into();
+    cluster.context_namespace = Some("Y".into());
+    app.handle_msg(Msg::ContextSwitched {
+        generation: app.generation,
+        name: "west".into(),
+        result: Ok(Box::new(cluster)),
+    });
+    assert_eq!(app.namespace, "Y");
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[tokio::test]
+async fn context_namespace_policy_preserves_bookmarks_workspaces_and_launch_scope() {
+    let dir = std::env::temp_dir().join(format!("sofka-namespace-explicit-{}", std::process::id()));
+    write_config(&dir, "prefer_context_namespace = true\n");
+    for source in ["bookmark", "workspace", "launch"] {
+        for namespace in ["chosen", ""] {
+            let (mut app, _rx) = test_app();
+            app.config = crate::config::ConfigLoader::from_dir(Some(dir.clone()));
+            app.all_contexts = vec!["west".into()];
+            match source {
+                "bookmark" => {
+                    bind_bookmark(&mut app, "pods", "west");
+                    app.bookmarks[0].namespace = Some(namespace.into());
+                    app.handle_key(ctrl(KeyCode::Char('y'))).unwrap();
+                }
+                "workspace" => {
+                    app.workspaces = vec![crate::config::Workspace {
+                        key: Some("ctrl-w".into()),
+                        name: "ops".into(),
+                        context: Some("west".into()),
+                        views: vec![crate::config::WorkspaceView {
+                            name: "pods".into(),
+                            resource: "pods".into(),
+                            namespace: Some(namespace.into()),
+                            ..Default::default()
+                        }],
+                    }];
+                    app.handle_key(ctrl(KeyCode::Char('w'))).unwrap();
+                }
+                _ => {
+                    app.launch_namespace = Some(namespace.into());
+                    type_resource_query(&mut app, "pods @west");
+                }
+            }
+            let mut cluster = Cluster::fake();
+            cluster.context = "west".into();
+            cluster.context_namespace = Some("pinned".into());
+            app.handle_msg(Msg::ContextSwitched {
+                generation: app.generation,
+                name: "west".into(),
+                result: Ok(Box::new(cluster)),
+            });
+            assert_eq!(app.namespace, namespace, "{source}");
+        }
+    }
+    std::fs::remove_dir_all(dir).unwrap();
+}

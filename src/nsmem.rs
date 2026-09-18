@@ -77,9 +77,84 @@ impl NamespaceMemory {
     }
 }
 
+/// Resolve namespace scope. An empty explicit or saved value means all namespaces.
+pub fn resolve_namespace(
+    explicit: Option<String>,
+    prefer_context_namespace: bool,
+    context_namespace: Option<&str>,
+    saved: Option<String>,
+    configured: Option<&str>,
+    fallback: &str,
+) -> String {
+    explicit
+        .or_else(|| {
+            prefer_context_namespace
+                .then_some(context_namespace)
+                .flatten()
+                .map(str::to_owned)
+        })
+        .or(saved)
+        .or_else(|| configured.map(str::to_owned))
+        .unwrap_or_else(|| fallback.to_owned())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn namespace_precedence_keeps_explicit_and_saved_all_namespaces() {
+        for explicit in [Some("chosen"), Some("")] {
+            assert_eq!(
+                resolve_namespace(
+                    explicit.map(str::to_owned),
+                    true,
+                    Some("Y"),
+                    Some("X".into()),
+                    Some("configured"),
+                    "default"
+                ),
+                explicit.unwrap()
+            );
+        }
+        assert_eq!(
+            resolve_namespace(
+                None,
+                false,
+                Some("Y"),
+                Some("X".into()),
+                Some("configured"),
+                "default"
+            ),
+            "X"
+        );
+        assert_eq!(
+            resolve_namespace(
+                None,
+                true,
+                Some("Y"),
+                Some("X".into()),
+                Some("configured"),
+                "default"
+            ),
+            "Y"
+        );
+        assert_eq!(
+            resolve_namespace(
+                None,
+                true,
+                None,
+                Some(String::new()),
+                Some("configured"),
+                "default"
+            ),
+            ""
+        );
+        assert_eq!(
+            resolve_namespace(None, true, None, None, None, "default"),
+            "default"
+        );
+    }
 
     #[test]
     fn set_get_roundtrip() {

@@ -61,6 +61,8 @@ enum PluginMergeMode {
 pub struct Config {
     /// Namespace to start in when none is given on the CLI.
     pub default_namespace: Option<String>,
+    /// Use the explicit kubeconfig namespace before saved namespace history.
+    pub prefer_context_namespace: bool,
     /// Resource to open on launch when none is given on the CLI.
     pub default_resource: Option<String>,
     /// Disable every action that could modify the cluster (or run arbitrary

@@ -287,6 +287,8 @@ pub struct Cluster {
     /// when disconnected or when the optional version request fails.
     pub server_version: String,
     pub default_namespace: String,
+    /// Namespace explicitly set in the kubeconfig context, without a fallback.
+    pub context_namespace: Option<String>,
     /// Context name to pass to `kubectl` shell-outs (`--context`). `None` when
     /// we connected without a named kubeconfig context (e.g. in-cluster), in
     /// which case kubectl falls back to its own default.
@@ -488,6 +490,7 @@ impl Cluster {
         let cluster_name = cluster_name_for(&context).unwrap_or_default();
         let mut cluster = Self {
             client,
+            context_namespace: context_namespace(&context),
             context,
             cluster_name,
             cluster_url,
@@ -575,6 +578,7 @@ impl Cluster {
         Self {
             client,
             cli_context: (!context.is_empty()).then(|| context.clone()),
+            context_namespace: context_namespace(&context),
             context,
             cluster_name,
             cluster_url,
@@ -1195,6 +1199,7 @@ impl Cluster {
         let mut cluster = Self {
             client,
             context: "test".into(),
+            context_namespace: None,
             cluster_name: "test-cluster".into(),
             cluster_url: "https://127.0.0.1:6443".into(),
             server_version: String::new(),
