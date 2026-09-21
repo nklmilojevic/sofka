@@ -34280,3 +34280,34 @@ async fn plugin_reload_ignores_cancelled_and_stale_completions() {
         assert!(!app.ctx_reload, "{case}");
     }
 }
+
+#[tokio::test]
+async fn plugin_reload_updates_context_command_completion() {
+    for contexts in [vec!["added".to_string(), "renamed".to_string()], vec![]] {
+        let (mut app, mut rx) = test_app();
+        app.all_contexts = vec!["removed".into(), "old-name".into()];
+        app.plugins = vec![kubeconfig_reload_plugin()];
+        plugin_command(&mut app, "example-plugin");
+        app.handle_msg(plugin_result(&mut rx).await);
+        app.handle_msg(Msg::Contexts {
+            generation: app.generation,
+            list: contexts.clone(),
+        });
+        app.handle_key(press(KeyCode::Esc)).unwrap();
+        app.handle_key(press(KeyCode::Char(':'))).unwrap();
+        for c in "ctx ".chars() {
+            app.handle_key(press(KeyCode::Char(c))).unwrap();
+        }
+        let suggestions: Vec<_> = app
+            .cmd_suggestions
+            .iter()
+            .map(|s| s.label.clone())
+            .collect();
+        assert_eq!(suggestions, contexts);
+        app.handle_msg(Msg::Contexts {
+            generation: app.generation.wrapping_sub(1),
+            list: vec!["stale".into()],
+        });
+        assert_eq!(app.all_contexts, contexts);
+    }
+}

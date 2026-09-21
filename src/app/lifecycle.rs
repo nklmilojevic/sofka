@@ -1797,6 +1797,7 @@ impl App {
                 self.ns_state.select(Some(index));
             }
             Msg::Contexts { generation, list } if generation == self.generation => {
+                self.all_contexts = list.clone();
                 if list.is_empty() {
                     self.mode = Mode::Table;
                     self.flash_warn("no contexts found in kubeconfig");
