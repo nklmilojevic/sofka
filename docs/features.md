@@ -881,6 +881,9 @@ pod is rejected; browse through a pod that already mounts the claim instead.
   focus and retains the report for reopening. Background runs stay unobtrusive.
 - **Shared execution** limits output and concurrency.
   It cancels processes on timeout, navigation, or `:plugin-cancel`.
+- **Plugin kubeconfig reload** lets a successful report request a fresh context
+  list and open the context selector. The user selects the context before
+  sofka reconnects, including when the context name stays the same.
 - **Safety controls** apply read-only mode, confirmation, and guardrails to plugins.
   Load-test plugins require a network-load declaration.
 - **Managed port-forwards** supply a local endpoint for a selected pod or service.

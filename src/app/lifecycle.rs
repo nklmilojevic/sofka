@@ -1404,6 +1404,7 @@ impl App {
                 title,
                 lines,
                 warn,
+                action,
             } if generation == self.generation && run == self.plugin_run => {
                 self.plugin_task = None;
                 self.plugin_claim = None;
@@ -1449,6 +1450,11 @@ impl App {
                         owner.pending = false;
                     }
                     self.borrow_status(message, failed);
+                }
+                if !failed && matches!(action, Some(crate::plugins::ReportAction::ReloadKubeconfig))
+                {
+                    self.ctx_reload = true;
+                    self.open_contexts();
                 }
             }
             Msg::PluginBulkDone {

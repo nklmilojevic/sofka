@@ -1935,6 +1935,7 @@ pub struct App {
     /// Type-to-filter buffer for the context switcher. Plain action keys remain
     /// available until filtering starts.
     pub ctx_filter: String,
+    pub(crate) ctx_reload: bool,
     /// Whether the context switcher is accepting filter input (started by
     /// typing or explicitly with `/` for names that begin with an action key).
     pub ctx_filtering: bool,
@@ -2389,6 +2390,7 @@ impl App {
             ctx_list: Vec::new(),
             ctx_state: ListState::default(),
             ctx_filter: String::new(),
+            ctx_reload: false,
             ctx_filtering: false,
             sort_picker_state: ListState::default(),
             sort_picker_filter: String::new(),

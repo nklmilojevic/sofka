@@ -188,6 +188,7 @@ pub enum Msg {
         claim: StatusClaim,
         title: String,
         lines: Vec<String>,
+        action: Option<crate::plugins::ReportAction>,
         /// Set when the plugin failed or timed out (a nonzero exit, stderr).
         warn: Option<String>,
     },

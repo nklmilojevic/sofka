@@ -580,6 +580,14 @@ struct Report {
     title: String,
     #[serde(default)]
     sections: Vec<Section>,
+    #[serde(default)]
+    action: Option<ReportAction>,
+}
+
+#[derive(Clone, Copy, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ReportAction {
+    ReloadKubeconfig,
 }
 
 #[derive(Deserialize)]
@@ -595,6 +603,12 @@ struct Section {
 }
 
 pub fn render_report(bytes: &[u8]) -> Result<Vec<String>, String> {
+    render_report_with_action(bytes).map(|(lines, _)| lines)
+}
+
+pub(crate) fn render_report_with_action(
+    bytes: &[u8],
+) -> Result<(Vec<String>, Option<ReportAction>), String> {
     if bytes.len() > MAX_BYTES {
         return Err("report exceeds 1 MiB".into());
     }
@@ -648,7 +662,7 @@ pub fn render_report(bytes: &[u8]) -> Result<Vec<String>, String> {
             lines.push(report_row(&row, &widths));
         }
     }
-    Ok(lines.finish())
+    Ok((lines.finish(), report.action))
 }
 
 fn report_row(cells: &[String], widths: &[usize]) -> String {

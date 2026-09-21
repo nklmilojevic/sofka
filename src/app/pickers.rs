@@ -738,7 +738,7 @@ impl App {
             self.mode = Mode::Table;
             self.ctx_filter.clear();
             self.ctx_filtering = false;
-            self.switch_context(name);
+            self.switch_context_inner(name, self.ctx_reload);
         }
     }
 
@@ -811,9 +811,13 @@ impl App {
     /// Reconnecting re-runs API discovery, which can take seconds, so it runs
     /// off-thread; the new cluster (or error) arrives as `Msg::ContextSwitched`.
     pub(super) fn switch_context(&mut self, name: String) {
-        // Re-selecting the current context is a no-op — unless we never
-        // connected to it, in which case picking it again is a retry.
-        if name == self.cluster.context && self.cluster.connected {
+        self.switch_context_inner(name, false);
+    }
+
+    fn switch_context_inner(&mut self, name: String, reload: bool) {
+        // Selecting the current context again does nothing unless a plugin
+        // requested a reload or the initial connection failed.
+        if !reload && name == self.cluster.context && self.cluster.connected {
             return;
         }
         // Re-selecting the target of the live connection is also a no-op. A
@@ -873,6 +877,7 @@ impl App {
     /// re-resolved so per-cluster/per-context overrides (aliases, plugins,
     /// skin, defaults) follow the new context.
     pub(super) fn apply_context_switch(&mut self, name: String, mut cluster: Box<Cluster>) {
+        self.ctx_reload = false;
         let previous_kind = self.kind.clone().filter(|_| self.cluster.connected);
         self.stop_notifications();
         let resolved = self.config.resolve(&name, &cluster.cluster_name);

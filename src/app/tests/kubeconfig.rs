@@ -71,3 +71,80 @@ async fn wrapped_kubeconfig_reaches_discovery_on_startup_and_context_selection()
     }
     std::fs::remove_dir_all(directory).unwrap();
 }
+
+#[tokio::test]
+async fn plugin_reload_reads_the_changed_kubeconfig_file() {
+    const CHILD: &str = "SOFKA_TEST_PLUGIN_KUBECONFIG";
+    if let Ok(directory) = std::env::var(CHILD) {
+        let directory = std::path::Path::new(&directory);
+        let config = |name| {
+            format!(
+                "apiVersion: v1
+kind: Config
+contexts:
+- name: {name}
+  context:
+    cluster: example
+    user: example
+current-context: {name}
+"
+            )
+        };
+        let path = directory.join("config");
+        let replacement = directory.join("replacement");
+        std::fs::write(&path, config("before")).unwrap();
+        std::fs::write(&replacement, config("after")).unwrap();
+        let (mut app, mut rx) = test_app();
+        let context = app.cluster.context.clone();
+        let mut plugin = kubeconfig_reload_plugin();
+        let report = plugin.args[0].clone();
+        plugin.command = "/bin/sh".into();
+        plugin.args = vec![
+            "-c".into(),
+            r#"cp "$1" "$2" && printf '%s' "$3""#.into(),
+            "reload-test".into(),
+            replacement.to_str().unwrap().into(),
+            path.to_str().unwrap().into(),
+            report,
+        ];
+        app.plugins = vec![plugin];
+        plugin_command(&mut app, "example-plugin");
+        app.handle_msg(plugin_result(&mut rx).await);
+        let result = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let msg = rx.recv().await.unwrap();
+                if matches!(msg, Msg::Contexts { .. } | Msg::Error { .. }) {
+                    break msg;
+                }
+            }
+        })
+        .await
+        .unwrap();
+        app.handle_msg(result);
+        assert_eq!(app.mode, Mode::Contexts);
+        assert_eq!(app.ctx_list, ["after"]);
+        assert_eq!(app.cluster.context, context);
+        return;
+    }
+    let directory =
+        std::env::temp_dir().join(format!("sofka-plugin-kubeconfig-{}", std::process::id()));
+    std::fs::create_dir_all(&directory).unwrap();
+    let output = tokio::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "app::tests::kubeconfig::plugin_reload_reads_the_changed_kubeconfig_file",
+            "--nocapture",
+        ])
+        .env(CHILD, &directory)
+        .env("KUBECONFIG", directory.join("config"))
+        .output()
+        .await
+        .unwrap();
+    std::fs::remove_dir_all(directory).unwrap();
+    assert!(
+        output.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}

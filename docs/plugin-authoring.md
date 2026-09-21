@@ -376,6 +376,43 @@ Return a nonzero exit code for an execution error.
 }
 ```
 
+### Request a kubeconfig reload
+
+A plugin that writes a kubeconfig file can add `"action": "reload-kubeconfig"`
+to its report:
+
+```json
+{
+  "schema_version": 1,
+  "title": "Cluster configuration is ready",
+  "action": "reload-kubeconfig"
+}
+```
+
+Use `target = "context"` and `output = "report"` for a cluster selection plugin.
+Sofka accepts this request only when the process exits with code `0` and the
+complete report is valid. For a run with several targets, all targets must
+succeed. Failed, cancelled, timed-out, and stale runs cannot open the selector.
+Unknown action names make the report invalid. Popup and background output do
+not process report actions.
+
+Sofka reads the kubeconfig context list again and opens the context selector.
+The current connection stays active until the user selects a context.
+Selecting the current context also creates a new connection, because its
+configuration may have changed. Escape closes the selector without changing
+the connection. The reload request remains pending for the next context
+selection. The report remains available through `:plugin-activity`.
+
+The plugin must write a kubeconfig file that sofka already reads. Changing
+`KUBECONFIG` in a child process cannot change the environment of the running
+sofka process. Sofka does not watch kubeconfig files for changes.
+
+This action requires a sofka build with kubeconfig reload support. Older
+releases reject the report field. Set the package's minimum sofka version to
+the release that first includes this support when you publish the plugin.
+
+### Report sections
+
 Each section requires a title.
 The `lines`, `columns`, and `rows` fields are optional.
 All text and table cells must be strings.

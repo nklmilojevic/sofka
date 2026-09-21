@@ -414,9 +414,11 @@ impl App {
             let mut lines = crate::plugins::Lines::default();
             let mut failures = crate::plugins::Lines::default();
             let mut failed = 0;
+            let mut action = None;
             while let Some((label, outcome)) = results.next().await {
-                let (ok, block, reason) =
+                let (ok, block, reason, requested_action) =
                     reduce_plugin_outcome(timeout, outcome, mode == PluginMode::Report);
+                action = action.or(requested_action);
                 if !ok {
                     failed += 1;
                     failures.push(format!("{label}: {reason}"));
@@ -433,6 +435,7 @@ impl App {
                     claim,
                     title,
                     lines: lines.finish(),
+                    action: action.filter(|_| failed == 0),
                     warn: (failed > 0).then(|| format!("{failed} of {total} failed")),
                 },
                 _ => Msg::PluginBulkDone {
@@ -644,19 +647,27 @@ fn reduce_plugin_outcome(
     timeout: u64,
     outcome: SpawnOutcome,
     report: bool,
-) -> (bool, Vec<String>, String) {
-    if report {
+) -> (
+    bool,
+    Vec<String>,
+    String,
+    Option<crate::plugins::ReportAction>,
+) {
+    let outcome = if report {
         match outcome {
-            Ok(Ok(out)) if out.status.success() => match crate::plugins::render_report(&out.stdout)
-            {
-                Ok(lines) => (true, lines, String::new()),
-                Err(e) => (false, vec![e.clone()], e),
-            },
-            other => reduce_outcome(timeout, other),
+            Ok(Ok(out)) if out.status.success() => {
+                return match crate::plugins::render_report_with_action(&out.stdout) {
+                    Ok((lines, action)) => (true, lines, String::new(), action),
+                    Err(e) => (false, vec![e.clone()], e, None),
+                };
+            }
+            other => other,
         }
     } else {
-        reduce_outcome(timeout, outcome)
-    }
+        outcome
+    };
+    let (ok, lines, reason) = reduce_outcome(timeout, outcome);
+    (ok, lines, reason, None)
 }
 
 fn exit_label(status: &std::process::ExitStatus) -> String {
