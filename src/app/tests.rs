@@ -27927,7 +27927,7 @@ async fn configured_node_trend_columns_show_history_in_wide_mode() {
         });
     };
     let node = json!({
-        "apiVersion": "v1", "kind": "Node", "metadata": {"name": "node"},
+        "apiVersion": "v1", "kind": "Node", "metadata": {"name": "node", "uid": "a"},
         "status": {"allocatable": {"cpu": "2", "memory": "1Gi"}}
     });
     install_views(
@@ -27941,7 +27941,7 @@ async fn configured_node_trend_columns_show_history_in_wide_mode() {
     "#,
     );
     palette(&mut app, "nodes");
-    apply(&mut app, node);
+    apply(&mut app, node.clone());
     let (headers, _) = app.snapshot_table();
     assert!(!headers.iter().any(|h| h.ends_with("-TREND")));
     metrics(&mut app, 500);
@@ -27956,6 +27956,16 @@ async fn configured_node_trend_columns_show_history_in_wide_mode() {
     retype_filter(&mut app, "mem-trend>60");
     assert!(row_names(&app).is_empty());
     app.handle_key(press(KeyCode::Esc)).unwrap();
+
+    let mut replaced = node.clone();
+    replaced["metadata"]["uid"] = json!("b");
+    apply(&mut app, replaced);
+    let (headers, rows) = app.snapshot_table();
+    let cpu = headers.iter().position(|h| h == "CPU-TREND").unwrap();
+    assert_eq!(rows[0][cpu], "·".repeat(12));
+    metrics(&mut app, 1000);
+    let (_, rows) = app.snapshot_table();
+    assert_eq!(rows[0][cpu], format!("{}▄", "·".repeat(11)));
 
     palette(&mut app, "pods");
     palette(&mut app, "nodes");

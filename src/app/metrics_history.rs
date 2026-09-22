@@ -58,8 +58,8 @@ impl ContainerHistory {
     }
 }
 
-/// Peak (cpu, memory) per bin, oldest first.
-type NodeBins = VecDeque<(u64, (i64, i64))>;
+/// The node's UID and its peak (cpu, memory) per bin, oldest first.
+type NodeBins = (Option<String>, VecDeque<(u64, (i64, i64))>);
 
 /// Node usage history for the trend columns: the peak (cpu, memory) sample
 /// per 25-second bin, counted from the first sample so bins never shift.
@@ -75,7 +75,12 @@ impl NodeHistory {
         Some(now.saturating_duration_since(self.start?).as_secs() / NODE_BIN_SECONDS)
     }
 
-    fn record(&mut self, generation: u64, data: &HashMap<String, (i64, i64)>, now: Instant) {
+    fn record(
+        &mut self,
+        generation: u64,
+        data: impl IntoIterator<Item = (String, Option<String>, (i64, i64))>,
+        now: Instant,
+    ) {
         if self.generation != generation {
             *self = Self {
                 generation,
@@ -86,8 +91,13 @@ impl NodeHistory {
             self.start = Some(now);
             0
         });
-        for (name, &(cpu, mem)) in data {
-            let bins = self.nodes.entry(name.clone()).or_default();
+        for (name, uid, (cpu, mem)) in data {
+            let (known, bins) = self.nodes.entry(name).or_default();
+            // A node recreated under the same name starts a new history.
+            if *known != uid {
+                *known = uid;
+                bins.clear();
+            }
             match bins.back_mut() {
                 Some((last, peak)) if *last == bin => {
                     *peak = (peak.0.max(cpu), peak.1.max(mem));
@@ -96,7 +106,7 @@ impl NodeHistory {
             }
         }
         let oldest = (bin + 1).saturating_sub(NODE_BINS);
-        self.nodes.retain(|_, bins| {
+        self.nodes.retain(|_, (_, bins)| {
             while bins.front().is_some_and(|(b, _)| *b < oldest) {
                 bins.pop_front();
             }
@@ -104,10 +114,20 @@ impl NodeHistory {
         });
     }
 
-    fn cell(&self, name: &str, allocatable: Option<i64>, cpu: bool, now: Instant) -> String {
-        let (Some(bin), Some(bins)) = (self.bin(now), self.nodes.get(name)) else {
+    fn cell(
+        &self,
+        name: &str,
+        uid: Option<&str>,
+        allocatable: Option<i64>,
+        cpu: bool,
+        now: Instant,
+    ) -> String {
+        let (Some(bin), Some((known, bins))) = (self.bin(now), self.nodes.get(name)) else {
             return "·".repeat(NODE_BINS as usize);
         };
+        if known.as_deref() != uid {
+            return "·".repeat(NODE_BINS as usize);
+        }
         (0..NODE_BINS)
             .map(|i| {
                 let wanted = (bin + i + 1).checked_sub(NODE_BINS);
@@ -165,8 +185,12 @@ impl App {
 
     pub(super) fn record_node_history(&mut self) {
         if self.kind_plural == "nodes" {
+            let samples = self.metrics.iter().map(|(name, usage)| {
+                let uid = self.store.get(name).and_then(|o| o.metadata.uid.clone());
+                (name.clone(), uid, *usage)
+            });
             self.node_history
-                .record(self.generation, &self.metrics, Instant::now());
+                .record(self.generation, samples, Instant::now());
         }
     }
 
@@ -177,8 +201,13 @@ impl App {
         if self.node_history.generation != self.generation {
             return "·".repeat(NODE_BINS as usize);
         }
-        self.node_history
-            .cell(name, allocatable, cpu, Instant::now())
+        self.node_history.cell(
+            name,
+            obj.metadata.uid.as_deref(),
+            allocatable,
+            cpu,
+            Instant::now(),
+        )
     }
 }
 
@@ -226,30 +255,46 @@ mod tests {
         let mut history = NodeHistory::default();
         let start = Instant::now();
         let at = |secs| start + Duration::from_secs(secs);
-        let sample = |cpu| HashMap::from([("node".to_string(), (cpu, 0))]);
-        history.record(1, &sample(500), at(0));
-        history.record(1, &sample(1000), at(5));
-        history.record(1, &sample(0), at(50));
+        let sample = |cpu| [("node".to_string(), Some("a".to_string()), (cpu, 0))];
+        history.record(1, sample(500), at(0));
+        history.record(1, sample(1000), at(5));
+        history.record(1, sample(0), at(50));
         assert_eq!(
-            history.cell("node", Some(1000), true, at(50)),
+            history.cell("node", Some("a"), Some(1000), true, at(50)),
             "·········█· "
         );
-        assert_eq!(history.cell("node", None, true, at(50)), "·".repeat(12));
         assert_eq!(
-            history.cell("other", Some(1000), true, at(50)),
+            history.cell("node", Some("a"), None, true, at(50)),
             "·".repeat(12)
         );
-        history.record(1, &sample(10), at(300));
         assert_eq!(
-            history.cell("node", Some(1000), true, at(300)),
-            "· ·········▁"
+            history.cell("other", Some("a"), Some(1000), true, at(50)),
+            "·".repeat(12)
         );
-        history.record(1, &HashMap::new(), at(600));
+        assert_eq!(
+            history.cell("node", Some("b"), Some(1000), true, at(50)),
+            "·".repeat(12)
+        );
+        history.record(
+            1,
+            [("node".to_string(), Some("b".to_string()), (1000, 0))],
+            at(55),
+        );
+        assert_eq!(
+            history.cell("node", Some("b"), Some(1000), true, at(55)),
+            format!("{}█", "·".repeat(11))
+        );
+        history.record(1, sample(10), at(300));
+        assert_eq!(
+            history.cell("node", Some("a"), Some(1000), true, at(300)),
+            "···········▁"
+        );
+        history.record(1, [], at(600));
         assert!(history.nodes.is_empty());
-        history.record(2, &sample(1000), at(600));
+        history.record(2, sample(1000), at(600));
         assert_eq!(history.generation, 2);
         assert_eq!(
-            history.cell("node", Some(1000), true, at(600)),
+            history.cell("node", Some("a"), Some(1000), true, at(600)),
             "···········█"
         );
     }
