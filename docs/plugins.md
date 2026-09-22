@@ -185,8 +185,11 @@ dangerous = true          # confirm (showing the exact command) first
   it to `false` to allow a known read-only one.
 - **`confirm`** / **`dangerous`**: prompt before running, showing the exact
   executable and arguments. `dangerous` also shows ⚠.
-- **`shell = true`**: opt into `sh -c`. Placeholders still arrive as positional
-  parameters (`$1`, `$2`, …), never interpolated into the script.
+- **`shell = true`**: opt into `sh -c`. Put placeholders in `args`; they arrive
+  as positional parameters (`$1`, `$2`, …), never interpolated into the script.
+  sofka does not expand a placeholder written in `command`, and `:config` warns
+  about it. For example, use `command = 'kubectl logs -n "$1" "$2" | jq .'` with
+  `args = ["$NAMESPACE", "$NAME"]`.
 - **Bulk**: with rows marked (`space`), a `popup` or `background` plugin runs over
   every marked row and reports partial failures. An interactive `terminal` plugin
   can't run over a set and refuses a marked run.

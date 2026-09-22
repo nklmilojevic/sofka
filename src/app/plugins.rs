@@ -160,7 +160,7 @@ impl App {
                     vec![
                         "sh".into(),
                         "-c".into(),
-                        subst(&plugin.command),
+                        plugin.command.clone(),
                         "sofka".into(),
                     ]
                 } else {

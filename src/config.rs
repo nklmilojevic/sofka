@@ -1274,10 +1274,24 @@ pub fn bookmark_warnings(bookmarks: &[Bookmark]) -> Vec<String> {
     warns
 }
 
+const PLUGIN_PLACEHOLDERS: &[&str] = &[
+    "$NAMESPACE",
+    "$NS",
+    "$NAME",
+    "$CONTEXT",
+    "$CLUSTER",
+    "$RESOURCE",
+    "$GROUP",
+    "$VERSION",
+    "$KIND",
+    "$FILTER",
+];
+
 /// Validation warnings for plugins: an unparseable key chord (see
-/// [`crate::keys::KeyChord::parse`]), an unknown `output` mode, or a malformed
-/// `timeout`. A bad chord disables just that plugin; a bad output/timeout
-/// falls back to the default. Reported, never fatal.
+/// [`crate::keys::KeyChord::parse`]), an unknown `output` mode, a malformed
+/// `timeout`, or a placeholder in a `shell = true` script. A bad chord
+/// disables just that plugin; a bad output/timeout falls back to the default;
+/// a script placeholder is left for `sh` to expand. Reported, never fatal.
 pub fn plugin_warnings(plugins: &[Plugin]) -> Vec<String> {
     let mut warns = Vec::new();
     for p in plugins {
@@ -1298,6 +1312,16 @@ pub fn plugin_warnings(plugins: &[Plugin]) -> Vec<String> {
             && let Err(e) = crate::providers::parse_lookback(t)
         {
             warns.push(format!("plugin {:?}: timeout: {e} — using 30s", p.name));
+        }
+        if p.shell
+            && let Some(placeholder) = PLUGIN_PLACEHOLDERS
+                .iter()
+                .find(|placeholder| p.command.contains(**placeholder))
+        {
+            warns.push(format!(
+                "plugin {:?}: shell command contains {placeholder}, which sofka does not expand there — pass it in args and use \"$1\"",
+                p.name
+            ));
         }
     }
     warns
@@ -2067,6 +2091,39 @@ mod tests {
         assert_eq!(w.len(), 2, "{w:?}");
         assert!(w.iter().any(|s| s.contains("unknown output")));
         assert!(w.iter().any(|s| s.contains("timeout")));
+    }
+
+    #[test]
+    fn plugin_warnings_flag_shell_script_placeholders() {
+        let cfg: Config = toml::from_str(
+            r#"
+            [[plugins]]
+            key = "ctrl-x"
+            name = "script"
+            command = 'kubectl logs -n $NAMESPACE "$1"'
+            args = ["$NAME"]
+            shell = true
+
+            [[plugins]]
+            key = "ctrl-y"
+            name = "positional"
+            command = 'kubectl logs -n "$1" "$2"'
+            args = ["$NAMESPACE", "$NAME"]
+            shell = true
+
+            [[plugins]]
+            key = "ctrl-z"
+            name = "direct"
+            command = "$NAME"
+        "#,
+        )
+        .unwrap();
+        let w = plugin_warnings(&cfg.plugins);
+        assert_eq!(w.len(), 1, "{w:?}");
+        assert!(
+            w[0].contains("\"script\"") && w[0].contains("$NAMESPACE"),
+            "{w:?}"
+        );
     }
 
     #[test]

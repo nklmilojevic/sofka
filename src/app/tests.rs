@@ -12757,6 +12757,46 @@ async fn plugin_placeholders_substitute_as_separate_args() {
     );
 }
 
+#[tokio::test]
+async fn shell_plugin_script_is_not_interpolated() {
+    let (mut app, _rx) = test_app();
+    app.switch_kind("pods");
+    apply(
+        &mut app,
+        json!({"apiVersion": "v1", "kind": "Pod",
+               "metadata": {"name": "a;id", "namespace": "default"}}),
+    );
+    app.table_state.select(Some(0));
+    app.plugins = vec![crate::config::Plugin {
+        key: "ctrl-g".into(),
+        name: "p".into(),
+        command: "echo \"$1\" $FILTER".into(),
+        args: vec!["$FILTER".into()],
+        shell: true,
+        ..Default::default()
+    }];
+    app.handle_key(press(KeyCode::Char('/'))).unwrap();
+    for c in "a;id".chars() {
+        app.handle_key(press(KeyCode::Char(c))).unwrap();
+    }
+    app.handle_key(press(KeyCode::Enter)).unwrap();
+    app.handle_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL))
+        .unwrap();
+    let Some(Suspend::Shell(argv)) = &app.pending else {
+        panic!("plugin did not run");
+    };
+    assert_eq!(
+        argv,
+        &vec![
+            "sh".to_string(),
+            "-c".into(),
+            "echo \"$1\" $FILTER".into(),
+            "sofka".into(),
+            "a;id".into()
+        ]
+    );
+}
+
 /// Two marked pods, cursor on the first.
 fn app_with_two_marked_pods() -> (App, Receiver<Msg>) {
     let (mut app, rx) = test_app();
