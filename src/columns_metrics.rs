@@ -20,6 +20,8 @@ pub enum MetricColumn {
     NodePods,
     NodeCpuUtilization,
     NodeMemoryUtilization,
+    NodeCpuTrend,
+    NodeMemoryTrend,
 }
 
 impl MetricColumn {
@@ -38,6 +40,8 @@ impl MetricColumn {
             "node-pods" => Self::NodePods,
             "node-cpu-utilization" => Self::NodeCpuUtilization,
             "node-memory-utilization" => Self::NodeMemoryUtilization,
+            "node-cpu-trend" => Self::NodeCpuTrend,
+            "node-memory-trend" => Self::NodeMemoryTrend,
             _ => return None,
         })
     }
@@ -46,9 +50,11 @@ impl MetricColumn {
         group.is_empty()
             && match self {
                 Self::Cpu | Self::Memory => matches!(plural, "pods" | "nodes"),
-                Self::NodePods | Self::NodeCpuUtilization | Self::NodeMemoryUtilization => {
-                    plural == "nodes"
-                }
+                Self::NodePods
+                | Self::NodeCpuUtilization
+                | Self::NodeMemoryUtilization
+                | Self::NodeCpuTrend
+                | Self::NodeMemoryTrend => plural == "nodes",
                 _ => plural == "pods",
             }
     }
@@ -62,7 +68,13 @@ impl MetricColumn {
                 | Self::MemoryLimitUtilization
                 | Self::NodeCpuUtilization
                 | Self::NodeMemoryUtilization
+                | Self::NodeCpuTrend
+                | Self::NodeMemoryTrend
         )
+    }
+
+    pub fn trend(self) -> bool {
+        matches!(self, Self::NodeCpuTrend | Self::NodeMemoryTrend)
     }
 
     pub fn cpu(self) -> bool {
@@ -74,6 +86,7 @@ impl MetricColumn {
                 | Self::CpuRequestUtilization
                 | Self::CpuLimitUtilization
                 | Self::NodeCpuUtilization
+                | Self::NodeCpuTrend
         )
     }
 
@@ -99,10 +112,10 @@ impl MetricColumn {
             Self::Cpu => usage.map(|v| v.0),
             Self::Memory => usage.map(|v| v.1),
             Self::NodePods => pods.map(|v| v as i64),
-            Self::NodeCpuUtilization => {
+            Self::NodeCpuUtilization | Self::NodeCpuTrend => {
                 usage_pct(usage?.0, crate::columns::node_allocatable(obj).0)
             }
-            Self::NodeMemoryUtilization => {
+            Self::NodeMemoryUtilization | Self::NodeMemoryTrend => {
                 usage_pct(usage?.1, crate::columns::node_allocatable(obj).1)
             }
             _ => {

@@ -1103,6 +1103,7 @@ impl App {
                 self.metrics = data;
                 self.container_metrics = containers;
                 self.record_container_history(false);
+                self.record_node_history();
                 if sort_uses_metrics
                     || self
                         .parsed_filter()

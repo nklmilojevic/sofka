@@ -1239,6 +1239,7 @@ fn draw_table(frame: &mut Frame, app: &mut App, area: Rect) {
                 ColWidth::Exact(w)
             } else if let Some(metric) = metric_columns[i] {
                 ColWidth::Exact(match metric {
+                    _ if metric.trend() => 12,
                     columns::MetricColumn::NodePods
                     | columns::MetricColumn::NodeCpuUtilization
                     | columns::MetricColumn::NodeMemoryUtilization => 5,

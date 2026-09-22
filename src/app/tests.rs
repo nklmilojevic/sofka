@@ -27917,6 +27917,58 @@ async fn configured_metric_columns_keep_order_values_and_live_filters() {
 }
 
 #[tokio::test]
+async fn configured_node_trend_columns_show_history_in_wide_mode() {
+    let (mut app, _rx) = test_app();
+    let metrics = |app: &mut App, cpu| {
+        app.handle_msg(Msg::Metrics {
+            generation: app.generation,
+            data: HashMap::from([("node".into(), (cpu, 512 * 1024 * 1024))]),
+            containers: HashMap::new(),
+        });
+    };
+    let node = json!({
+        "apiVersion": "v1", "kind": "Node", "metadata": {"name": "node"},
+        "status": {"allocatable": {"cpu": "2", "memory": "1Gi"}}
+    });
+    install_views(
+        &mut app,
+        r#"
+        [views."v1/nodes"]
+        columns = [
+            { name = "CPU-TREND", metric = "node-cpu-trend", wide = true },
+            { name = "MEM-TREND", metric = "node-memory-trend", wide = true },
+        ]
+    "#,
+    );
+    palette(&mut app, "nodes");
+    apply(&mut app, node);
+    let (headers, _) = app.snapshot_table();
+    assert!(!headers.iter().any(|h| h.ends_with("-TREND")));
+    metrics(&mut app, 500);
+    metrics(&mut app, 2000);
+    app.handle_key(press(KeyCode::Char('w'))).unwrap();
+    let (headers, rows) = app.snapshot_table();
+    let cell = |name: &str| rows[0][headers.iter().position(|h| h == name).unwrap()].clone();
+    assert_eq!(cell("CPU-TREND"), format!("{}█", "·".repeat(11)));
+    assert_eq!(cell("MEM-TREND"), format!("{}▄", "·".repeat(11)));
+    type_filter(&mut app, "cpu-trend>=100");
+    assert_eq!(row_names(&app), ["node"]);
+    retype_filter(&mut app, "mem-trend>60");
+    assert!(row_names(&app).is_empty());
+    app.handle_key(press(KeyCode::Esc)).unwrap();
+
+    palette(&mut app, "pods");
+    palette(&mut app, "nodes");
+    apply(
+        &mut app,
+        json!({"apiVersion": "v1", "kind": "Node", "metadata": {"name": "node"}, "status": {"allocatable": {"cpu": "2"}}}),
+    );
+    let (headers, rows) = app.snapshot_table();
+    let cpu = headers.iter().position(|h| h == "CPU-TREND").unwrap();
+    assert_eq!(rows[0][cpu], "·".repeat(12));
+}
+
+#[tokio::test]
 async fn configured_node_metrics_filter_and_refresh_by_source() {
     let (mut app, _rx) = test_app();
     install_views(

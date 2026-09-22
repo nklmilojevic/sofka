@@ -165,6 +165,24 @@ Available metric sources:
 | `cpu-limit-utilization`, `memory-limit-utilization`     | Pods        | Usage as a percentage of the limit             |
 | `node-pods`                                             | Nodes       | Pod count                                      |
 | `node-cpu-utilization`, `node-memory-utilization`       | Nodes       | Usage as a percentage of allocatable resources |
+| `node-cpu-trend`, `node-memory-trend`                   | Nodes       | Usage history over the last five minutes       |
+
+Trend sources are not in the default node columns. Add them to a view:
+
+```toml
+[views."v1/nodes"]
+columns = [
+  { name = "CPU-TREND", metric = "node-cpu-trend", wide = true },
+  { name = "MEM-TREND", metric = "node-memory-trend", wide = true },
+]
+```
+
+Each trend cell has 12 bars in 25-second bins, newest on the right. A bar
+shows the highest sample in its bin as a percentage of allocatable, so nodes of
+different sizes are comparable. A dot marks a bin without a sample or a node
+without allocatable. History is kept for every node while the nodes view is
+open, clears on a view or context change, and is not saved between sessions.
+Sorting, filtering, and the cell color use the latest percentage.
 
 Pod totals sum application containers and native sidecars
 (`initContainers` with `restartPolicy = "Always"`). A declaration in

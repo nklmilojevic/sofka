@@ -2146,6 +2146,7 @@ pub struct App {
     /// Latest pod-container metrics: "ns/pod/container" -> (cpu_m, mem_bytes).
     pub container_metrics: HashMap<String, (i64, i64)>,
     pub(crate) container_history: metrics_history::ContainerHistory,
+    pub(crate) node_history: metrics_history::NodeHistory,
     /// Latest pod count per node (nodes view PODS column). `None` until the
     /// first successful pods list, so "no data yet" renders as "-" instead of
     /// a misleading 0.
@@ -2489,6 +2490,7 @@ impl App {
             metrics: HashMap::new(),
             container_metrics: HashMap::new(),
             container_history: metrics_history::ContainerHistory::default(),
+            node_history: metrics_history::NodeHistory::default(),
             node_pods: None,
             pulse: Pulse::default(),
             xray_items: Vec::new(),

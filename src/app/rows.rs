@@ -1022,6 +1022,9 @@ impl App {
 
     pub(crate) fn live_cell(&self, obj: &DynamicObject, idx: usize) -> Option<String> {
         let metric = self.spec.metric_at(idx)?;
+        if metric.trend() {
+            return Some(self.node_trend_cell(obj, metric.cpu()));
+        }
         Some(metric.format(self.metric_value(obj, metric)))
     }
 

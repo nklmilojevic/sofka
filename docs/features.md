@@ -83,6 +83,11 @@ concurrent drains, and full kubectl drain parity are outside this feature.
   It uses the existing metrics polls and is not saved between sessions.
   The table keeps the current values; the charts show their history.
 
+- **Node trends** - the `node-cpu-trend` and `node-memory-trend` metric
+  sources show five minutes of node CPU and memory as a bar chart in a table
+  column, scaled to allocatable. They are opt-in through `[views]`. See
+  [Views](views.md#built-in-and-metric-columns).
+
 - **Scroll position** appears on the borders of long resource tables, document
   views, logs, and pickers. Tables and unwrapped documents also show horizontal
   position. Wrapped views use display rows. Scrollbars use thin lines. They

@@ -1,8 +1,12 @@
 use super::*;
+use crate::columns::usage_pct;
 use std::time::Instant;
 
 const SAMPLES: usize = 60;
 const BIN_SECONDS: u64 = 5;
+const NODE_BINS: u64 = 12;
+const NODE_BIN_SECONDS: u64 = 25;
+const TREND_LEVELS: [char; 9] = [' ', '▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
 
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct TrendTarget {
@@ -54,6 +58,70 @@ impl ContainerHistory {
     }
 }
 
+/// Peak (cpu, memory) per bin, oldest first.
+type NodeBins = VecDeque<(u64, (i64, i64))>;
+
+/// Node usage history for the trend columns: the peak (cpu, memory) sample
+/// per 25-second bin, counted from the first sample so bins never shift.
+#[derive(Default)]
+pub(crate) struct NodeHistory {
+    generation: u64,
+    start: Option<Instant>,
+    pub(super) nodes: HashMap<String, NodeBins>,
+}
+
+impl NodeHistory {
+    fn bin(&self, now: Instant) -> Option<u64> {
+        Some(now.saturating_duration_since(self.start?).as_secs() / NODE_BIN_SECONDS)
+    }
+
+    fn record(&mut self, generation: u64, data: &HashMap<String, (i64, i64)>, now: Instant) {
+        if self.generation != generation {
+            *self = Self {
+                generation,
+                ..Self::default()
+            };
+        }
+        let bin = self.bin(now).unwrap_or_else(|| {
+            self.start = Some(now);
+            0
+        });
+        for (name, &(cpu, mem)) in data {
+            let bins = self.nodes.entry(name.clone()).or_default();
+            match bins.back_mut() {
+                Some((last, peak)) if *last == bin => {
+                    *peak = (peak.0.max(cpu), peak.1.max(mem));
+                }
+                _ => bins.push_back((bin, (cpu, mem))),
+            }
+        }
+        let oldest = (bin + 1).saturating_sub(NODE_BINS);
+        self.nodes.retain(|_, bins| {
+            while bins.front().is_some_and(|(b, _)| *b < oldest) {
+                bins.pop_front();
+            }
+            !bins.is_empty()
+        });
+    }
+
+    fn cell(&self, name: &str, allocatable: Option<i64>, cpu: bool, now: Instant) -> String {
+        let (Some(bin), Some(bins)) = (self.bin(now), self.nodes.get(name)) else {
+            return "·".repeat(NODE_BINS as usize);
+        };
+        (0..NODE_BINS)
+            .map(|i| {
+                let wanted = (bin + i + 1).checked_sub(NODE_BINS);
+                bins.iter()
+                    .find(|(b, _)| Some(*b) == wanted)
+                    .and_then(|(_, (c, m))| usage_pct(if cpu { *c } else { *m }, allocatable))
+                    .map_or('·', |pct| {
+                        TREND_LEVELS[((pct.clamp(0, 100) * 8 + 99) / 100) as usize]
+                    })
+            })
+            .collect()
+    }
+}
+
 impl App {
     fn container_trend_target(&self) -> Option<TrendTarget> {
         if self.mode != Mode::Containers
@@ -94,6 +162,24 @@ impl App {
         }
         self.container_history.bars(Instant::now(), cpu)
     }
+
+    pub(super) fn record_node_history(&mut self) {
+        if self.kind_plural == "nodes" {
+            self.node_history
+                .record(self.generation, &self.metrics, Instant::now());
+        }
+    }
+
+    pub(crate) fn node_trend_cell(&self, obj: &DynamicObject, cpu: bool) -> String {
+        let (cpu_alloc, mem_alloc) = crate::columns::node_allocatable(obj);
+        let name = obj.metadata.name.as_deref().unwrap_or_default();
+        let allocatable = if cpu { cpu_alloc } else { mem_alloc };
+        if self.node_history.generation != self.generation {
+            return "·".repeat(NODE_BINS as usize);
+        }
+        self.node_history
+            .cell(name, allocatable, cpu, Instant::now())
+    }
 }
 
 #[cfg(test)]
@@ -133,5 +219,38 @@ mod tests {
             uid: Some("b".into()),
         }));
         assert!(history.samples.is_empty());
+    }
+
+    #[test]
+    fn node_bins_keep_peaks_mark_gaps_and_expire() {
+        let mut history = NodeHistory::default();
+        let start = Instant::now();
+        let at = |secs| start + Duration::from_secs(secs);
+        let sample = |cpu| HashMap::from([("node".to_string(), (cpu, 0))]);
+        history.record(1, &sample(500), at(0));
+        history.record(1, &sample(1000), at(5));
+        history.record(1, &sample(0), at(50));
+        assert_eq!(
+            history.cell("node", Some(1000), true, at(50)),
+            "·········█· "
+        );
+        assert_eq!(history.cell("node", None, true, at(50)), "·".repeat(12));
+        assert_eq!(
+            history.cell("other", Some(1000), true, at(50)),
+            "·".repeat(12)
+        );
+        history.record(1, &sample(10), at(300));
+        assert_eq!(
+            history.cell("node", Some(1000), true, at(300)),
+            "· ·········▁"
+        );
+        history.record(1, &HashMap::new(), at(600));
+        assert!(history.nodes.is_empty());
+        history.record(2, &sample(1000), at(600));
+        assert_eq!(history.generation, 2);
+        assert_eq!(
+            history.cell("node", Some(1000), true, at(600)),
+            "···········█"
+        );
     }
 }
