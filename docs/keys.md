@@ -276,7 +276,9 @@ visible list rows. Paging also works while a picker filter is being typed.
 ## Palette completion keys
 
 In the `:` palette, `tab`/`↓` and `shift-tab`/`↑` move through the suggestion
-list and `⏎` runs the highlighted one. Rebind them under `[keys.command]` in
+list, `→` fills the highlighted one into the command so you can keep typing,
+and `⏎` runs the highlighted one. `→` replaces only the word it completes: the
+resource or command name, or the namespace or context argument. Rebind them under `[keys.command]` in
 `config.toml`, for example:
 
 ```toml
@@ -288,7 +290,7 @@ accept = ["ctrl-y", "enter"]
 
 Each value is one [key combination](plugins.md) or a list of combinations.
 It replaces the default set for that action: `["tab", "down"]`,
-`["backtab", "up"]`, or `["enter"]`. Include a default in the list to keep it.
+`["backtab", "up"]`, `["right"]` for `complete`, or `["enter"]`. Include a default in the list to keep it.
 An empty list disables the action. Invalid values report errors. Explicit
 completion bindings take priority over text editing and cancellation.
 To assign `ctrl-c` or `ctrl-e`, first move or disable `quit` or `compact` under

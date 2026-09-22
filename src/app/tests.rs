@@ -7435,6 +7435,79 @@ async fn palette_completion_keys_are_rebindable() {
     assert_eq!(app.mode, Mode::Table);
 }
 
+fn type_in_palette(app: &mut App, text: &str) {
+    for c in text.chars() {
+        app.handle_key(press(KeyCode::Char(c))).unwrap();
+    }
+}
+
+#[tokio::test]
+async fn palette_right_fills_the_resource_and_keeps_typing() {
+    let (mut app, _rx) = test_app();
+    app.ns_list = vec!["<all>".into(), "default".into(), "social".into()];
+    app.handle_key(press(KeyCode::Char(':'))).unwrap();
+    type_in_palette(&mut app, "deploy");
+    app.handle_key(press(KeyCode::Right)).unwrap();
+    assert_eq!(app.mode, Mode::Command);
+    assert_eq!(app.command, "deployments");
+
+    type_in_palette(&mut app, " soc");
+    app.handle_key(press(KeyCode::Right)).unwrap();
+    assert_eq!(app.command, "deployments social");
+
+    app.handle_key(press(KeyCode::Enter)).unwrap();
+    assert_eq!(app.mode, Mode::Table);
+    assert_eq!(app.kind_plural, "deployments");
+    assert_eq!(app.namespace, "social");
+}
+
+#[tokio::test]
+async fn palette_right_replaces_only_the_word_it_completes() {
+    let (mut app, _rx) = test_app();
+    app.all_contexts = vec!["gke-west".into()];
+    app.handle_key(press(KeyCode::Char(':'))).unwrap();
+    type_in_palette(&mut app, "deploy /web");
+    app.handle_key(press(KeyCode::Right)).unwrap();
+    assert_eq!(app.command, "deployments /web");
+
+    app.command.clear();
+    type_in_palette(&mut app, "services @gke");
+    app.handle_key(press(KeyCode::Right)).unwrap();
+    assert_eq!(app.command, "services @gke-west");
+
+    app.command.clear();
+    type_in_palette(&mut app, "ctx gke");
+    app.handle_key(press(KeyCode::Right)).unwrap();
+    assert_eq!(app.command, "ctx gke-west");
+
+    // Nothing to fill leaves the line alone.
+    app.command.clear();
+    type_in_palette(&mut app, "zzzzqqq");
+    assert!(app.cmd_suggestions.is_empty());
+    app.handle_key(press(KeyCode::Right)).unwrap();
+    assert_eq!(app.command, "zzzzqqq");
+}
+
+#[tokio::test]
+async fn palette_complete_is_rebindable() {
+    let (mut app, _rx) = test_app();
+    let keys_cfg: crate::config::Config = toml::from_str(
+        r#"
+        [keys.command]
+        complete = "ctrl-w"
+    "#,
+    )
+    .unwrap();
+    app.keymap = Keymap::compile(&keys_cfg.keys).unwrap();
+    app.handle_key(press(KeyCode::Char(':'))).unwrap();
+    type_in_palette(&mut app, "deploy");
+    app.handle_key(press(KeyCode::Right)).unwrap();
+    assert_eq!(app.command, "deploy", "right was overridden away");
+    // An explicit completion key wins over delete-word.
+    app.handle_key(ctrl(KeyCode::Char('w'))).unwrap();
+    assert_eq!(app.command, "deployments");
+}
+
 #[tokio::test]
 async fn qualified_names_surface_without_doubling_the_list() {
     let (mut app, _rx) = test_app();

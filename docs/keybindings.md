@@ -212,6 +212,7 @@ for those operations.
 | `accept`    | `enter`          |
 | `back`      | `esc`            |
 | `backspace` | `backspace`      |
+| `complete`  | `right`          |
 | `down`      | `tab`, `down`    |
 | `up`        | `backtab`, `up`  |
 

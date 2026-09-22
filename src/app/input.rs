@@ -568,6 +568,10 @@ impl App {
             self.palette_accept();
             return;
         }
+        if key.action == Some(Action::Complete) {
+            self.palette_complete();
+            return;
+        }
         if edit_action(key.action, &mut self.command) {
             self.update_suggestions();
             return;
@@ -598,6 +602,41 @@ impl App {
             self.command = format!("{head} @{}", suggestion.label);
             // Keep the matching list so the next key can select another context.
         }
+    }
+
+    /// Write the highlighted suggestion into the word it completes so typing
+    /// can continue: the first word for commands and resources, the argument
+    /// for namespaces and contexts. Words after it are kept.
+    fn palette_complete(&mut self) {
+        let Some(suggestion) = self.cmd_suggestions.get(self.cmd_sel).cloned() else {
+            return;
+        };
+        let slot = match suggestion.kind {
+            SuggestKind::Namespace | SuggestKind::Context => 1,
+            _ => 0,
+        };
+        let span = self.command.split_whitespace().nth(slot).map(|word| {
+            let start = word.as_ptr() as usize - self.command.as_ptr() as usize;
+            start..start + word.len()
+        });
+        let word = span.clone().map_or("", |span| &self.command[span]);
+        let label = if slot == 1 && word.starts_with('@') {
+            format!("@{}", suggestion.label)
+        } else {
+            suggestion.label
+        };
+        match span {
+            Some(span) => self.command.replace_range(span, &label),
+            None => {
+                let head = self.command.trim_end().len();
+                self.command.truncate(head);
+                if head > 0 {
+                    self.command.push(' ');
+                }
+                self.command.push_str(&label);
+            }
+        }
+        self.update_suggestions();
     }
 
     /// Run the highlighted palette suggestion (or the raw typed text).

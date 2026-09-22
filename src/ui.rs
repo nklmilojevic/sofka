@@ -2761,6 +2761,10 @@ fn build_help(app: &App, width: usize) -> (Vec<Line<'static>>, String) {
         "global command palette - fuzzy over kinds + commands",
     ));
     lines.push(bind(
+        app.keymap.label("command", Action::Complete),
+        "fill the highlighted palette suggestion and keep typing",
+    ));
+    lines.push(bind(
         ":<res> <ns>",
         "switch kind and namespace at once (all/* = all namespaces)",
     ));
@@ -4343,6 +4347,7 @@ fn draw_palette(frame: &mut Frame, app: &mut App, area: Rect) {
         &[
             (Action::Down, "next"),
             (Action::Up, "previous"),
+            (Action::Complete, "fill"),
             (Action::Accept, "run"),
         ],
     );
@@ -5653,6 +5658,7 @@ mod tests {
                 &[
                     (Action::Down, "next"),
                     (Action::Up, "previous"),
+                    (Action::Complete, "fill"),
                     (Action::Accept, "run"),
                 ],
             );

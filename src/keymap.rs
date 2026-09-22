@@ -42,6 +42,7 @@ actions! {
     Close => ("close", "close view"),
     Command => ("command", "command palette"),
     Compact => ("compact", "toggle compact mode"),
+    Complete => ("complete", "fill the highlighted suggestion"),
     Copy => ("copy", "copy"),
     CopyCell => ("copy_cell", "copy cell"),
     CopyName => ("copy_name", "copy name"),
@@ -197,6 +198,8 @@ pub(crate) const LEGACY_PALETTE_KEYS: &[(&str, Action)] = &[
     ("palette_accept", Action::Accept),
 ];
 
+const COMPLETION_ACTIONS: &[Action] = &[Action::Down, Action::Up, Action::Accept, Action::Complete];
+
 const GLOBAL: &[(Action, &[&str])] = &[
     (Action::Quit, &["ctrl-c"]),
     (Action::Compact, &["ctrl-e"]),
@@ -250,6 +253,7 @@ const DEFAULTS: &[(&str, Action, &[&str])] = &[
     ("adjacent", Action::Refresh, &["r"]),
     ("adjacent", Action::Up, &["k", "up"]),
     ("adjacent", Action::Yaml, &["y"]),
+    ("command", Action::Complete, &["right"]),
     ("command", Action::Down, &["tab", "down"]),
     ("command", Action::Up, &["backtab", "up"]),
     ("confirm", Action::Accept, &["y", "Y", "enter"]),
@@ -739,13 +743,13 @@ impl Keymap {
         let scoped =
             |action: Action| command_settings.is_some_and(|c| c.contains_key(action.name()));
         // Explicit completion keys take priority over text editing and cancellation.
-        for &(_, action) in LEGACY_PALETTE_KEYS {
+        for &action in COMPLETION_ACTIONS {
             if !scoped(action) {
                 continue;
             }
             let chords = map.chords("command", action).to_vec();
             for &(edit, _) in INPUT {
-                if LEGACY_PALETTE_KEYS.iter().any(|&(_, a)| a == edit) {
+                if COMPLETION_ACTIONS.contains(&edit) {
                     continue;
                 }
                 map.bindings

@@ -221,6 +221,8 @@ concurrent drains, and full kubectl drain parity are outside this feature.
   `events`, `pf`, `notify`, `find`, `vlogs`, `rightsize`, `fleet`, `skin`,
   `reload`, `config`, `info`). `:` and `?` open the palette and help from every
   navigation screen, then close back to the screen where they were opened.
+  `→` fills the highlighted suggestion into the command so you can keep typing
+  a namespace, `@context`, or `/filter`.
 - **Cross-context resource navigation** - `:pods @production-cluster default`
   switches context, resource, and namespace together without changing kubeconfig's
   `current-context`. Context names after `@` fuzzy-complete: Tab/Shift-Tab or
