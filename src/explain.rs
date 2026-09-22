@@ -93,6 +93,8 @@ pub fn explain(ev: &Evidence) -> Vec<Finding> {
             explain_workload(ev, &name, &mut out)
         }
         "pods" => explain_pod(ev, &name, &mut out),
+        "persistentvolumeclaims" => explain_pvc(ev, &name, &mut out),
+        "services" => explain_service(ev, &name, &mut out),
         _ => explain_generic(ev, &name, &mut out),
     }
     append_events(ev, &mut out);
@@ -275,6 +277,143 @@ fn explain_pod(ev: &Evidence, name: &str, out: &mut Vec<Finding>) {
     if let Some(node) = ptr_str(&pod.data, "/spec/nodeName") {
         out.push(Finding::new(0, Level::Heading, "Placement"));
         out.push(Finding::new(1, Level::Info, format!("node {node}")));
+    }
+}
+
+// ----- persistent volume claims --------------------------------------------
+
+fn explain_pvc(ev: &Evidence, name: &str, out: &mut Vec<Finding>) {
+    let pvc = ev.obj;
+    let d = &pvc.data;
+    let phase = ptr_str(d, "/status/phase").unwrap_or("Unknown");
+    let healthy = phase == "Bound";
+    let level = match phase {
+        "Bound" => Level::Good,
+        "Pending" => Level::Warn,
+        "Lost" => Level::Critical,
+        _ => Level::Warn,
+    };
+
+    out.push(Finding::new(
+        0,
+        level,
+        if healthy {
+            format!("PersistentVolumeClaim/{name} is Bound")
+        } else {
+            format!("PersistentVolumeClaim/{name} is {phase}")
+        },
+    ));
+
+    out.push(Finding::new(0, Level::Heading, "Volume Details"));
+    if let Some(sc) = ptr_str(d, "/spec/storageClassName") {
+        out.push(Finding::new(1, Level::Info, format!("storage class: {sc}")));
+    }
+    if let Some(vol) = ptr_str(d, "/spec/volumeName") {
+        let mut f = Finding::new(1, Level::Info, format!("volume: {vol}"));
+        f = f.with_target(Target {
+            plural: "persistentvolumes".into(),
+            namespace: None,
+            name: vol.to_string(),
+        });
+        out.push(f);
+    }
+    if let Some(req) = ptr_str(d, "/spec/resources/requests/storage") {
+        out.push(Finding::new(
+            1,
+            Level::Info,
+            format!("requested storage: {req}"),
+        ));
+    }
+
+    for cond in conditions(pvc) {
+        let ty = cstr(cond, "type");
+        let status = cstr(cond, "status");
+        let reason = cstr(cond, "reason");
+        let msg = cstr(cond, "message");
+        if status == "True" || status == "Unknown" {
+            let detail = join_reason(reason, msg);
+            out.push(Finding::new(1, Level::Warn, format!("{ty}: {detail}")));
+        }
+    }
+}
+
+// ----- services -----------------------------------------------------------
+
+fn explain_service(ev: &Evidence, name: &str, out: &mut Vec<Finding>) {
+    let svc = ev.obj;
+    let d = &svc.data;
+    let svc_type = ptr_str(d, "/spec/type").unwrap_or("ClusterIP");
+    let cluster_ip = ptr_str(d, "/spec/clusterIP").unwrap_or("");
+    let is_headless = cluster_ip == "None";
+
+    let has_selector = d
+        .pointer("/spec/selector")
+        .and_then(Value::as_object)
+        .is_some_and(|o| !o.is_empty());
+
+    let (headline, level) = if svc_type == "LoadBalancer" {
+        let has_ingress = d
+            .pointer("/status/loadBalancer/ingress")
+            .and_then(Value::as_array)
+            .is_some_and(|arr| !arr.is_empty());
+        if !has_ingress {
+            (
+                format!("Service/{name} is pending LoadBalancer IP/hostname"),
+                Level::Warn,
+            )
+        } else {
+            (
+                format!("Service/{name} is active ({svc_type})"),
+                Level::Good,
+            )
+        }
+    } else {
+        (
+            format!("Service/{name} is active ({svc_type})"),
+            Level::Good,
+        )
+    };
+
+    out.push(Finding::new(0, level, headline));
+
+    out.push(Finding::new(0, Level::Heading, "Network Specs"));
+    if is_headless {
+        out.push(Finding::new(
+            1,
+            Level::Info,
+            "headless service (ClusterIP: None)",
+        ));
+    } else if !cluster_ip.is_empty() {
+        out.push(Finding::new(
+            1,
+            Level::Info,
+            format!("ClusterIP: {cluster_ip}"),
+        ));
+    }
+
+    if has_selector {
+        let matching_pods = ev.pods.len();
+        let ready_pods = ev.pods.iter().filter(|p| pod_is_ready(p)).count();
+        let pod_level = if matching_pods == 0 {
+            Level::Warn
+        } else if ready_pods == 0 {
+            Level::Critical
+        } else if ready_pods < matching_pods {
+            Level::Warn
+        } else {
+            Level::Info
+        };
+        out.push(Finding::new(
+            1,
+            pod_level,
+            format!("endpoints: {ready_pods}/{matching_pods} pods ready matching selector"),
+        ));
+    } else if svc_type != "ExternalName" {
+        out.push(Finding::new(
+            1,
+            Level::Info,
+            "no selector defined (manual endpoints or external)",
+        ));
     }
 }
 
@@ -858,5 +997,71 @@ mod tests {
                     == format!("desired 3 · ready 3 · available {}", available.unwrap_or(0)))
             );
         }
+    }
+
+    #[test]
+    fn pvc_explain_reports_bound_and_pending_states() {
+        let pvc_bound = obj(json!({
+            "apiVersion": "v1", "kind": "PersistentVolumeClaim",
+            "metadata": {"name": "data-pvc", "namespace": "default"},
+            "spec": {"storageClassName": "standard", "volumeName": "pvc-12345", "resources": {"requests": {"storage": "10Gi"}}},
+            "status": {"phase": "Bound"}
+        }));
+        let f_bound = explain(&ev(
+            "PersistentVolumeClaim",
+            "persistentvolumeclaims",
+            &pvc_bound,
+            &[],
+            &[],
+        ));
+        assert_eq!(f_bound[0].level, Level::Good);
+        assert!(f_bound[0].text.contains("is Bound"));
+        assert!(
+            texts(&f_bound)
+                .join("\n")
+                .contains("storage class: standard")
+        );
+        assert!(texts(&f_bound).join("\n").contains("volume: pvc-12345"));
+
+        let pvc_pending = obj(json!({
+            "apiVersion": "v1", "kind": "PersistentVolumeClaim",
+            "metadata": {"name": "data-pvc-pending", "namespace": "default"},
+            "spec": {"storageClassName": "fast", "resources": {"requests": {"storage": "100Gi"}}},
+            "status": {"phase": "Pending"}
+        }));
+        let f_pending = explain(&ev(
+            "PersistentVolumeClaim",
+            "persistentvolumeclaims",
+            &pvc_pending,
+            &[],
+            &[],
+        ));
+        assert_eq!(f_pending[0].level, Level::Warn);
+        assert!(f_pending[0].text.contains("is Pending"));
+    }
+
+    #[test]
+    fn service_explain_reports_loadbalancer_and_endpoints() {
+        let lb_pending = obj(json!({
+            "apiVersion": "v1", "kind": "Service",
+            "metadata": {"name": "web-lb"},
+            "spec": {"type": "LoadBalancer", "clusterIP": "10.96.0.10", "selector": {"app": "web"}},
+            "status": {"loadBalancer": {}}
+        }));
+        let f_lb = explain(&ev("Service", "services", &lb_pending, &[], &[]));
+        assert_eq!(f_lb[0].level, Level::Warn);
+        assert!(f_lb[0].text.contains("pending LoadBalancer IP/hostname"));
+
+        let pod_ready = obj(json!({
+            "apiVersion": "v1", "kind": "Pod", "metadata": {"name": "web-pod-1"},
+            "status": {"phase": "Running", "conditions": [{"type": "Ready", "status": "True"}],
+                       "containerStatuses": [{"name": "c", "ready": true, "state": {"running": {}}}]}
+        }));
+        let f_lb_with_pods = explain(&ev("Service", "services", &lb_pending, &[pod_ready], &[]));
+        assert!(
+            texts(&f_lb_with_pods)
+                .join("\n")
+                .contains("endpoints: 1/1 pods ready")
+        );
     }
 }
