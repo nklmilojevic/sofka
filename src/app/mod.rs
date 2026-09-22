@@ -2429,7 +2429,7 @@ impl App {
             sort_memory: crate::sortmem::SortMemory::default(),
             remember_sort: true,
             mouse_scroll_lines: 3,
-            mouse_enabled: true,
+            mouse_enabled: false,
             sort_memory_path: None,
             namespace_memory: crate::nsmem::NamespaceMemory::default(),
             namespace_memory_path: None,

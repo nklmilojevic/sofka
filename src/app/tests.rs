@@ -3232,6 +3232,17 @@ async fn horizontal_scroll_clips_wide_characters_at_both_edges() {
 }
 
 #[tokio::test]
+async fn mouse_capture_defaults_off_and_can_be_enabled_from_the_palette() {
+    let (mut app, _rx) = test_app();
+    assert!(!app.mouse_enabled);
+    assert!(!app.wants_mouse_capture());
+
+    palette(&mut app, "mouse");
+    assert!(app.mouse_enabled);
+    assert!(app.wants_mouse_capture());
+}
+
+#[tokio::test]
 async fn mouse_command_toggles_capture_from_either_startup_setting() {
     for enabled in [true, false] {
         let (mut app, _rx) = test_app();
@@ -3265,6 +3276,7 @@ async fn mouse_command_toggles_capture_from_either_startup_setting() {
 #[tokio::test]
 async fn document_views_release_mouse_capture_for_text_selection() {
     let (mut app, _rx) = test_app();
+    palette(&mut app, "mouse");
     assert!(app.wants_mouse_capture(), "table keeps capture");
 
     // Every full-screen text view releases capture so click-drag selects text

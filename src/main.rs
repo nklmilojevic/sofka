@@ -546,7 +546,7 @@ async fn run_main(args: Args) -> Result<()> {
         return result;
     }
 
-    app.mouse_enabled = cfg.mouse.unwrap_or(true);
+    app.mouse_enabled = cfg.mouse.unwrap_or(false);
     let mut terminal = ratatui::init();
     if app.wants_mouse_capture() {
         let _ = crossterm::execute!(std::io::stdout(), crossterm::event::EnableMouseCapture);

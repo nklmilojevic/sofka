@@ -312,7 +312,9 @@ concurrent drains, and full kubectl drain parity are outside this feature.
   the previous keymap. Legacy palette settings are migrated with a config
   backup; managed files produce a warning and use the converted keys in memory.
   See [Configure key bindings](keybindings.md).
-- **Mouse support** - the wheel scrolls every view (one wheel event is three
+- **Mouse support** - mouse capture is off by default for terminal text
+  selection. Set `mouse = true` to enable mouse controls at startup.
+  With capture on, the wheel scrolls every view (one wheel event is three
   steps of that view's own up/down; `mouse_scroll_lines` tunes this in views
   with mouse capture), clicking a row selects it, clicking a column header
   sorts by it (click again to flip). Document views (YAML/describe, diff,

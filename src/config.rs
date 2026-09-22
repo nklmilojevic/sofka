@@ -125,9 +125,10 @@ pub struct Config {
     /// [`forward_warnings`].
     pub forwards: Vec<Forward>,
     /// Mouse support (wheel scroll, click-to-select, header-click sort).
-    /// `None` = on. Set `mouse = false` to keep the terminal's native mouse
-    /// behavior (text selection) everywhere. Document views release capture
-    /// on their own regardless — see [`crate::app::App::wants_mouse_capture`].
+    /// Defaults to off for terminal text selection. Set `mouse = true` to
+    /// enable mouse controls, or use `:mouse` for the current session.
+    /// Document views release capture regardless of this setting.
+    /// See [`crate::app::App::wants_mouse_capture`].
     pub mouse: Option<bool>,
     /// Navigation steps per received mouse wheel event in views with mouse
     /// capture. Defaults to 3; `0` is treated as 1 with a warning.
