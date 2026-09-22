@@ -546,13 +546,13 @@ async fn run_main(args: Args) -> Result<()> {
         return result;
     }
 
-    let mouse = cfg.mouse.unwrap_or(true);
+    app.mouse_enabled = cfg.mouse.unwrap_or(true);
     let mut terminal = ratatui::init();
-    if mouse {
+    if app.wants_mouse_capture() {
         let _ = crossterm::execute!(std::io::stdout(), crossterm::event::EnableMouseCapture);
     }
     install_panic_hook(panic_tx);
-    let result = run(&mut terminal, &mut app, &mut rx, mouse).await;
+    let result = run(&mut terminal, &mut app, &mut rx).await;
     // Still inside the runtime, so this actually completes — a spawned delete
     // would not, and the helper pod would sit out its TTL holding the volume.
     app.shutdown_pvc_helper().await;
@@ -1047,7 +1047,6 @@ async fn run(
     terminal: &mut ratatui::DefaultTerminal,
     app: &mut App,
     rx: &mut mpsc::Receiver<store::Msg>,
-    mouse: bool,
 ) -> Result<()> {
     let mut reader = crossterm::event::EventStream::new();
     let mut tick = tokio::time::interval(Duration::from_secs(1));
@@ -1062,8 +1061,8 @@ async fn run(
     let mut dirty = false;
     // Tracks whether mouse capture is currently on, so it can follow the mode:
     // document views release it for native text selection (see
-    // `wants_mouse_capture`). Always false when the config disabled the mouse.
-    let mut captured = mouse;
+    // `wants_mouse_capture`) and the session setting.
+    let mut captured = app.wants_mouse_capture();
     // Reassembles cursor-key escape sequences split mid-read; only ever fed
     // while capture is released, which is the only time they can arrive.
     let mut repair = altscroll::Repair::default();
@@ -1077,7 +1076,7 @@ async fn run(
 
         title.update(app.terminal_title());
 
-        if mouse && app.wants_mouse_capture() != captured {
+        if app.wants_mouse_capture() != captured {
             captured = !captured;
             if captured {
                 let _ =
@@ -1111,7 +1110,7 @@ async fn run(
                             dirty = false;
                         }
                     }
-                    Some(Ok(Event::Mouse(m))) => {
+                    Some(Ok(Event::Mouse(m))) if captured => {
                         app.handle_mouse(m)?;
                         take_suspend(terminal, app, captured);
                         dirty = true;

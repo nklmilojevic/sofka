@@ -320,7 +320,9 @@ concurrent drains, and full kubectl drain parity are outside this feature.
   text natively; the wheel still scrolls them in terminals that translate it to
   arrow keys in the alternate screen (kitty, Ghostty, iTerm2, ...), at the
   terminal's own speed, not `mouse_scroll_lines`. Set
-  `mouse = false` to keep the terminal's native mouse behavior everywhere.
+  `mouse = false` to start with the terminal's native mouse behavior everywhere.
+  Use `:mouse` to switch capture on or off for the current session. With capture
+  off, drag to select text. This command does not change the configuration file.
   sofka also releases the mouse while a suspended command (`kubectl exec`,
   `$EDITOR`) runs.
 - **Compact mode** (`ctrl-e`) - collapse the seven-line header and the footer

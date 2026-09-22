@@ -51,7 +51,8 @@ impl App {
     /// release too. A wheel burst can split one of those escape sequences
     /// mid-read; `crate::altscroll` reassembles them before they reach us.
     pub fn wants_mouse_capture(&self) -> bool {
-        !self.plugin_activity_visible()
+        self.mouse_enabled
+            && !self.plugin_activity_visible()
             && !matches!(
                 self.mode,
                 Mode::Detail

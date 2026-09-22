@@ -229,7 +229,8 @@ readonly          = false  # true disables every mutating action (delete, edit,
 hide_header = false # true hides the header and logo
 compact_mode = false # true starts with a one-line header and no footer
 detail_wrap = false # true starts with document line wrapping enabled
-mouse             = true   # false keeps the terminal's native mouse behavior
+mouse             = true   # startup setting; :mouse switches it for this session
+                           # false keeps the terminal's native mouse behavior
                            # (text selection) instead of scroll/click/sort
 mouse_scroll_lines = 3     # steps per wheel event in captured views; 1 for one step
 terminal_title = true # false disables terminal title changes

@@ -612,6 +612,7 @@ struct PaletteCommand {
 #[derive(Clone, Copy)]
 enum PaletteAction {
     Quit,
+    Mouse,
     Ctx,
     Pulse,
     Xray,
@@ -647,6 +648,10 @@ enum PaletteAction {
 }
 
 const PALETTE_COMMANDS: &[PaletteCommand] = &[
+    PaletteCommand {
+        action: PaletteAction::Mouse,
+        names: &["mouse"],
+    },
     PaletteCommand {
         action: PaletteAction::PluginActivity,
         names: &["plugin-activity"],
@@ -2000,6 +2005,8 @@ pub struct App {
     pub remember_sort: bool,
     /// Steps per received mouse wheel event (`mouse_scroll_lines`, default 3).
     pub mouse_scroll_lines: u16,
+    /// Session setting for mouse capture, initialized from the startup config.
+    pub mouse_enabled: bool,
     /// Where remembered sorts persist (`<state-dir>/sort.toml`, set at
     /// startup); `None` (tests) keeps them in memory only.
     pub sort_memory_path: Option<std::path::PathBuf>,
@@ -2422,6 +2429,7 @@ impl App {
             sort_memory: crate::sortmem::SortMemory::default(),
             remember_sort: true,
             mouse_scroll_lines: 3,
+            mouse_enabled: true,
             sort_memory_path: None,
             namespace_memory: crate::nsmem::NamespaceMemory::default(),
             namespace_memory_path: None,

@@ -745,6 +745,14 @@ impl App {
         match action {
             PaletteAction::PluginActivity => unreachable!(),
             PaletteAction::Quit => self.should_quit = true,
+            PaletteAction::Mouse => {
+                self.mouse_enabled = !self.mouse_enabled;
+                self.set_flash(if self.mouse_enabled {
+                    "mouse capture on"
+                } else {
+                    "mouse capture off: drag to select text"
+                });
+            }
             PaletteAction::Ctx => self.open_contexts(),
             PaletteAction::Pulse => self.open_pulse(),
             PaletteAction::Xray => self.open_xray(),

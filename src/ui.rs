@@ -2784,6 +2784,10 @@ fn build_help(app: &App, width: usize) -> (Vec<Line<'static>>, String) {
     lines.push(bind(":pf", "view/stop background port-forwards"));
     lines.push(bind(":skin", "switch color skin live"));
     lines.push(bind(
+        ":mouse",
+        "switch mouse capture on/off for text selection",
+    ));
+    lines.push(bind(
         ":reload · :config · :info",
         "reload config · config sources + warnings · runtime diagnostics",
     ));
