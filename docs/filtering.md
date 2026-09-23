@@ -5,14 +5,22 @@ Ctrl-U clears the input line. Local terms update as you type; selectors take
 effect on Enter, which starts a new watch scoped at the Kubernetes API.
 Malformed input shows an error and stays open for editing.
 
-Plain text remains one fuzzy pattern, including spaces. It matches namespace,
-name, or an individual displayed column. Structured markers enable these terms:
+Plain text is split into words, and every word must match. A word matches
+contiguous text, ignoring case, in the namespace, the name, or an individual
+displayed column: `istiod` finds `istiod-7c9f` but not `istio-cni-node`. A `|`
+inside a word lists alternatives, so `istiod|istio-cni-node` shows both.
+Kubernetes names and label values cannot contain `|`, so it always means "or".
+Prefix a word with `~` for the loose fuzzy match, where `~khc` finds
+`kube-httpcache-0`. Structured markers enable these terms:
 
 | Expression                         | Meaning                                            |
 | ---------------------------------- | -------------------------------------------------- |
-| `"auth"`                           | Contiguous text match, case-insensitive            |
+| `auth`                             | Contiguous text match, case-insensitive            |
+| `api\|worker`                      | Either text                                        |
+| `"api server"`                     | Contiguous text match with spaces                  |
+| `~khc`                             | Fuzzy match; smart case                            |
 | `/^api/`                           | Regular expression, case-insensitive               |
-| `!canary`                          | Exclude fuzzy matches                              |
+| `!canary`                          | Exclude text matches                               |
 | `label:example100`                 | Label key or value contains text, case-insensitive |
 | `label:"example100"`               | Contiguous label text match, case-insensitive      |
 | `label:/^example[0-9]+$/`          | Label regex match, case-insensitive                |
@@ -43,8 +51,9 @@ boundary or combine text from different labels. Names, annotations, and pod
 template labels are outside this term's scope.
 
 Label patterns match contiguous text and ignore case, whether or not they are
-quoted; they are not fuzzy, because a short fuzzy pattern would match nearly
-every object that carries many labels. A match is not whole-value equality.
+quoted. `label:api|worker` matches either text. Label patterns cannot be fuzzy,
+because a short fuzzy pattern would match nearly every object that carries many
+labels. A match is not whole-value equality.
 Regex patterns use `/pattern/` and also ignore case.
 
 `!label:canary` keeps objects with no matching key or value. Objects without labels
@@ -59,7 +68,7 @@ the current resource, namespace, and API selector scope and do not restart the
 watch. `-l test` still selects objects with the exact label key `test`.
 
 Boolean expressions use spaces or `&&` for AND, `||` for OR, and parentheses
-for grouping. AND binds more tightly than OR. `!text` excludes a fuzzy match;
+for grouping. AND binds more tightly than OR. `!text` excludes a text match;
 `!(expression)` negates a group. For example:
 
 ```text

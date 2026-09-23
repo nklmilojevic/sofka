@@ -382,19 +382,19 @@ fn table(title: &str, columns: &[&str], rows: Vec<Vec<String>>) -> Value {
 /// bulk delete, acting on a different scope than the one on screen is the one
 /// outcome worth failing over.
 fn selectors(filter: Option<&str>) -> Result<(Option<String>, Option<String>)> {
-    use crate::filter::ParsedFilter;
     let filter = filter.unwrap_or_default().trim();
     if filter.is_empty() {
         return Ok((None, None));
     }
-    match crate::filter::parse(filter) {
-        ParsedFilter::Structured(s) if s.terms.is_empty() => Ok((s.labels, s.fields)),
-        _ => anyhow::bail!(
+    let parsed = crate::filter::parse(filter);
+    if !parsed.terms.is_empty() {
+        anyhow::bail!(
             "the view filter '{filter}' narrows the table in ways this command cannot \
              reproduce, and sanitizing the whole namespace instead would delete more \
              than you can see. Clear the filter, or narrow it with -l/-f selectors."
-        ),
+        );
     }
+    Ok((parsed.labels, parsed.fields))
 }
 
 /// Build a client for the request's context. A null context means sofka had no
@@ -978,7 +978,7 @@ mod tests {
         .await;
         let error = sanitize(client, &request_filtered("terminal", false, "web-"), &[])
             .await
-            .expect_err("a fuzzy filter must not be silently ignored");
+            .expect_err("a text filter must not be silently ignored");
         assert!(format!("{error:#}").contains("cannot"), "{error:#}");
         assert!(seen.lock().unwrap().is_empty(), "nothing should be listed");
     }

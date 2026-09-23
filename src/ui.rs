@@ -1352,7 +1352,7 @@ fn draw_table(frame: &mut Frame, app: &mut App, area: Rect) {
             // blue), but a handful of columns keep their own visibility
             // treatment on top: STATUS gets a semantic badge, RESTARTS/CPU/MEM
             // flag outliers, AGE is dimmed (rarely the interesting signal),
-            // and NAME highlights the active fuzzy filter's matched chars.
+            // and NAME highlights the active text filter's matched chars.
             let status_val = style_idx
                 .and_then(|i| cells.get(i))
                 .map(TableCellText::as_str)
@@ -1782,7 +1782,7 @@ fn pod_readiness_blocked(obj: &kube::core::DynamicObject) -> bool {
 }
 
 /// Render the NAME cell, highlighting characters that matched the active
-/// fuzzy row filter (bold yellow) so a scan across many filtered results is
+/// row filter (bold yellow) so a scan across many filtered results is
 /// faster — every visible row already matched, this just shows *where*.
 /// Falls back to a flat `base`-colored cell when there's no active filter.
 fn render_name_cell(app: &App, name: &str, base: Color, forwarded: bool) -> RenderCell<'static> {
@@ -2736,7 +2736,7 @@ fn build_help(app: &App, width: usize) -> (Vec<Line<'static>>, String) {
         } else if action == Action::AutoRefresh && scope == "diff" {
             "toggle refresh (keep the comparison baseline)"
         } else if action == Action::Filter && scope == "table" {
-            "filter rows; label:text searches label keys and values locally"
+            "filter rows: text contiguous, a|b either, ~fuzzy; label:text searches labels locally"
         } else if scope == "table"
             && (action == Action::AllNamespaces || Action::FAVORITE_NAMESPACES.contains(&action))
         {

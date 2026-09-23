@@ -43,7 +43,7 @@ impl App {
 
     /// The parsed form of the active filter, reparsed only when the string
     /// has changed (never per frame — see [`FilterCache`]).
-    pub(super) fn parsed_filter(&self) -> Ref<'_, crate::filter::ParsedFilter> {
+    pub(super) fn parsed_filter(&self) -> Ref<'_, crate::filter::Structured> {
         if self.filter_cache.borrow().raw != self.filter {
             let mut cache = self.filter_cache.borrow_mut();
             cache.raw = self.filter.clone();
@@ -64,7 +64,7 @@ impl App {
         &self,
         o: &DynamicObject,
         key: &RowKey,
-        parsed: &crate::filter::ParsedFilter,
+        parsed: &crate::filter::Structured,
         cells: &mut crate::store::FastMap<RowKey, CellCacheEntry>,
         now: i64,
     ) -> bool {
@@ -85,20 +85,14 @@ impl App {
         &self,
         o: &DynamicObject,
         key: &RowKey,
-        parsed: &crate::filter::ParsedFilter,
+        parsed: &crate::filter::Structured,
         cells: &mut crate::store::FastMap<RowKey, CellCacheEntry>,
         now: i64,
     ) -> bool {
-        use crate::filter::ParsedFilter;
-        match parsed {
-            ParsedFilter::Fuzzy(pat) => {
-                pat.text().is_empty() || self.pattern_match_row(o, pat, key, cells, now)
-            }
-            ParsedFilter::Structured(s) => s
-                .terms
-                .iter()
-                .all(|t| self.eval_term(o, key, t, cells, now) == Some(true)),
-        }
+        parsed
+            .terms
+            .iter()
+            .all(|t| self.eval_term(o, key, t, cells, now) == Some(true))
     }
 
     fn eval_term(
@@ -243,7 +237,7 @@ impl App {
         }
     }
 
-    /// What fuzzy terms match against: "namespace name". Helm rows are backed
+    /// What text terms match against first: "namespace name". Helm rows are backed
     /// by the storage Secret, whose own name (`sh.helm.release.v1.<release>.
     /// v<n>`) isn't what a user typing a filter means — match the release
     /// name instead.
@@ -427,9 +421,10 @@ impl App {
         if !self.filter_server_side() {
             return " ·local";
         }
-        match &*self.parsed_filter() {
-            crate::filter::ParsedFilter::Structured(s) if !s.terms.is_empty() => " ·server+local",
-            _ => " ·server",
+        if self.parsed_filter().terms.is_empty() {
+            " ·server"
+        } else {
+            " ·server+local"
         }
     }
 
@@ -513,12 +508,8 @@ impl App {
         // rebuild once per second even without a watch event.
         let time_dependent_sort =
             sort_header.is_some_and(|h| self.spec.is_time_sort(h, &self.kind_plural));
-        cache.time_sensitive = match &*parsed {
-            crate::filter::ParsedFilter::Structured(s) => {
-                s.terms.iter().any(crate::filter::Term::time_sensitive)
-            }
-            _ => false,
-        } || time_dependent_sort;
+        cache.time_sensitive =
+            parsed.terms.iter().any(crate::filter::Term::time_sensitive) || time_dependent_sort;
         cache.filter_second = now;
         cache.column_widths = None;
 

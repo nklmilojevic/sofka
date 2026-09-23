@@ -1375,7 +1375,7 @@ async fn filter_match_indices_highlight_matched_chars() {
     let (mut app, _rx) = test_app();
     assert_eq!(app.filter_match_indices("kube-httpcache-0"), None); // no filter
 
-    app.filter = "khc".into();
+    app.filter = "~khc".into();
     let idx = app.filter_match_indices("kube-httpcache-0").unwrap();
     // "k", "h", "c" fuzzy-match in order somewhere in the name.
     assert_eq!(idx.len(), 3);
@@ -1398,7 +1398,7 @@ async fn fuzzy_filter_highlights_complete_graphemes_at_char_positions() {
         ("test-elastic-role", "lastic", "lastic"),
     ];
     for (name, filter, expected) in cases {
-        retype_filter(&mut app, filter);
+        retype_filter(&mut app, &format!("~{filter}"));
         let indices = app.filter_match_indices(name).unwrap();
         let highlighted: String = name
             .chars()
@@ -16184,17 +16184,17 @@ async fn inverse_filter_hides_fuzzy_matches() {
     type_filter(&mut app, "!canary");
     assert_eq!(row_names(&app), ["api-1", "worker"]);
 
-    // Terms AND together: positive fuzzy + inverse.
+    // Terms AND together: positive text + inverse.
     app.filter = "api !canary".into();
     app.invalidate_rows();
     assert_eq!(row_names(&app), ["api-1"]);
 }
 
-/// The noise the fuzzy filter is prone to: a subsequence match means a short
+/// The noise fuzzy matching is prone to: a subsequence match means a short
 /// needle like `auth` also drags in every name with a scattered a…u…t…h.
-/// Quoting the term keeps only what a `grep` would find.
+/// Plain and quoted text keep only what a `grep` would find.
 #[tokio::test]
-async fn quoted_filter_matches_only_contiguous_text() {
+async fn plain_filter_matches_only_contiguous_text() {
     let (mut app, _rx) = test_app();
     app.switch_kind("pods");
     for n in ["auth-api-0", "api-gateway-runtime-hash"] {
@@ -16205,9 +16205,12 @@ async fn quoted_filter_matches_only_contiguous_text() {
         );
     }
 
-    // Unquoted, both match: a-u-t-h occurs in "api-gateway-runtime-hash" too.
-    type_filter(&mut app, "auth");
+    // Fuzzy, both match: a-u-t-h occurs in "api-gateway-runtime-hash" too.
+    type_filter(&mut app, "~auth");
     assert_eq!(row_names(&app), ["api-gateway-runtime-hash", "auth-api-0"]);
+
+    retype_filter(&mut app, "auth");
+    assert_eq!(row_names(&app), ["auth-api-0"]);
 
     retype_filter(&mut app, "\"auth\"");
     assert_eq!(row_names(&app), ["auth-api-0"]);
@@ -16215,6 +16218,39 @@ async fn quoted_filter_matches_only_contiguous_text() {
     // Case-insensitive, like every other text term.
     retype_filter(&mut app, "\"AUTH-API\"");
     assert_eq!(row_names(&app), ["auth-api-0"]);
+}
+
+/// `istiod` no longer drags in `istio-cni-node`, and a bare `|` lists
+/// several names at once, as k9s users type it.
+#[tokio::test]
+async fn plain_filter_words_and_pipes_select_names() {
+    let (mut app, _rx) = test_app();
+    app.switch_kind("pods");
+    for n in [
+        "istiod-7c9f",
+        "istio-cni-node-x2d",
+        "istio-ingressgateway-0",
+    ] {
+        apply(
+            &mut app,
+            json!({"apiVersion": "v1", "kind": "Pod",
+                   "metadata": {"name": n, "namespace": "istio-system"}}),
+        );
+    }
+
+    type_filter(&mut app, "istiod");
+    assert_eq!(row_names(&app), ["istiod-7c9f"]);
+
+    retype_filter(&mut app, "istiod|istio-cni-node");
+    assert_eq!(row_names(&app), ["istio-cni-node-x2d", "istiod-7c9f"]);
+    assert_eq!(app.filter_error(), None);
+
+    // Words AND together, each matching the namespace, the name, or a cell.
+    retype_filter(&mut app, "istio-system gateway");
+    assert_eq!(row_names(&app), ["istio-ingressgateway-0"]);
+
+    retype_filter(&mut app, "~icn");
+    assert_eq!(row_names(&app), ["istio-cni-node-x2d"]);
 }
 
 #[tokio::test]
@@ -16261,7 +16297,7 @@ async fn quoted_and_regex_terms_invert_and_combine() {
 /// Literals see the rendered columns like fuzzy terms do — and, unlike fuzzy,
 /// an IP fragment can't match a cell that merely contains its digits in order.
 #[tokio::test]
-async fn quoted_filter_matches_column_cells_without_gaps() {
+async fn plain_filter_matches_column_cells_without_gaps() {
     let (mut app, _rx) = test_app();
     app.switch_kind("services");
     for (n, ip) in [("api", "10.96.13.5"), ("web", "10.9.61.35")] {
@@ -16274,8 +16310,11 @@ async fn quoted_filter_matches_column_cells_without_gaps() {
         );
     }
 
-    type_filter(&mut app, "10.96");
+    type_filter(&mut app, "~10.96");
     assert_eq!(row_names(&app), ["api", "web"]);
+
+    retype_filter(&mut app, "10.96");
+    assert_eq!(row_names(&app), ["api"]);
 
     retype_filter(&mut app, "\"10.96\"");
     assert_eq!(row_names(&app), ["api"]);
@@ -16335,7 +16374,7 @@ async fn malformed_regex_filter_reports_and_keeps_filtering() {
 async fn quoted_and_regex_filters_highlight_the_matched_run() {
     let (mut app, _rx) = test_app();
 
-    retype_filter(&mut app, "khc");
+    retype_filter(&mut app, "~khc");
     let scattered = app.filter_match_indices("kube-httpcache-0").unwrap();
     assert_eq!(scattered.len(), 3);
 
@@ -16361,7 +16400,7 @@ async fn quoted_and_regex_filters_highlight_the_matched_run() {
 }
 
 #[tokio::test]
-async fn fuzzy_filter_matches_any_column_cell() {
+async fn text_filter_matches_any_column_cell() {
     let (mut app, _rx) = test_app();
     app.switch_kind("services");
     for (n, ip) in [("api", "10.96.13.5"), ("web", "172.20.44.9")] {
@@ -16685,7 +16724,7 @@ fn retype_filter(app: &mut App, text: &str) {
 async fn retyping_the_filter_recomputes_the_highlights() {
     let (mut app, _rx) = test_app();
 
-    retype_filter(&mut app, "khc");
+    retype_filter(&mut app, "~khc");
     let first = app.filter_match_indices("kube-httpcache-0").unwrap();
     assert_eq!(first.len(), 3);
     // Asking again reads the memo and must answer identically.
@@ -16726,13 +16765,13 @@ async fn highlights_are_memoized_per_name_not_per_needle() {
 }
 
 #[tokio::test]
-async fn structured_filter_highlights_first_fuzzy_term() {
+async fn structured_filter_highlights_first_positive_text_term() {
     let (mut app, _rx) = test_app();
-    app.filter = "!zzz khc status=Running".into();
+    app.filter = "!zzz ~khc status=Running".into();
     let idx = app.filter_match_indices("kube-httpcache-0").unwrap();
     assert_eq!(idx.len(), 3);
 
-    // No positive fuzzy term → nothing to highlight.
+    // No positive text term → nothing to highlight.
     app.filter = "-l app=api".into();
     assert_eq!(app.filter_match_indices("kube-httpcache-0"), None);
 }
@@ -18368,7 +18407,7 @@ async fn filtering_matches_a_naive_fuzzy_pass() {
         }
         want.sort();
 
-        app.filter = pat.to_string();
+        app.filter = format!("~{pat}");
         app.invalidate_rows();
         let mut got: Vec<String> = (0..app.row_count())
             .filter_map(|i| app.rows_window(i, 1).first().map(|o| row_key(o)))

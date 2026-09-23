@@ -1,13 +1,15 @@
 //! Structured row-filter grammar.
 //!
-//! Plain text with no structured markers stays what it always was: one fuzzy
-//! pattern over "namespace name", falling back to each rendered column cell
-//! (so `/10.96` finds a Service by its CLUSTER-IP). Once any structured marker
-//! appears, the input is split on whitespace and every term must match
+//! Plain text with no structured markers is split on whitespace, and every
+//! word must occur, case-insensitively, in "namespace name" or in one rendered
+//! column cell (so `/10.96` finds a Service by its CLUSTER-IP). Once any
+//! structured marker appears, the input is tokenized and every term must match
 //! (terms are AND-ed, optionally with `&&`; `||` and parentheses combine groups):
 //!
-//! - `text`                   fuzzy match (namespace + name + any column cell)
-//! - `"text"`                 literal match: contiguous, case-insensitive
+//! - `text`                   contiguous, case-insensitive text match
+//! - `a|b`                    either text (`istiod|istio-cni-node`)
+//! - `"text"`                 the same text match, spaces allowed
+//! - `~text`                  fuzzy subsequence match
 //! - `/re/`                   regular expression (case-insensitive)
 //! - `!text`                  inverse match (`!"text"` and `!/re/` too)
 //! - `label:text`             local text match against label keys and values
@@ -16,11 +18,11 @@
 //! - `status=CrashLoopBackOff` column equality (case-insensitive)
 //! - `cpu>500m` `memory>1Gi` `restarts>=5` `age<2h` typed comparisons
 //!
-//! Fuzzy is deliberately loose — `khc` finds `kube-httpcache-0` — which in a
-//! namespace with hundreds of pods makes a short needle like `auth` match
-//! every name with a scattered `a`…`u`…`t`…`h` in it. Quoting the term
-//! (`"auth"`) drops the gaps and matches only what a `grep` would; `/re/`
-//! covers the rest.
+//! Fuzzy is opt-in because it is deliberately loose — `khc` finds
+//! `kube-httpcache-0` — which in a namespace with hundreds of pods makes a
+//! short needle like `auth` match every name with a scattered `a`…`u`…`t`…`h`
+//! in it. Kubernetes names and label values cannot contain `|`, so a bare `|`
+//! inside a word is free to mean "or".
 //!
 //! Comparison operators: `=` (or `==`), `!=`, `>`, `>=`, `<`, `<=`. The
 //! value's type follows the key: `cpu` parses CPU quantities (millicores),
@@ -32,16 +34,6 @@
 //! Quotes preserve spaces in values; parentheses preserve label-selector sets.
 
 /// The parsed form of the filter input.
-#[derive(Debug, Clone, PartialEq)]
-pub enum ParsedFilter {
-    /// The whole input is one pattern (no structured markers) — the original
-    /// `/text` behavior, kept byte-for-byte compatible. Always
-    /// [`Pattern::Fuzzy`]: a `"literal"` or `/re/` is a marker, so it parses
-    /// as a one-term [`Structured`] filter instead.
-    Fuzzy(Pattern),
-    Structured(Structured),
-}
-
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Structured {
     /// Locally-evaluated terms, AND-ed together.
@@ -112,13 +104,14 @@ impl Term {
 /// How a text term matches a row.
 #[derive(Clone)]
 pub enum Pattern {
-    /// Plain text: a fuzzy subsequence match, gaps allowed (`khc` finds
+    /// `~text`: a fuzzy subsequence match, gaps allowed (`khc` finds
     /// `kube-httpcache-0`).
     Fuzzy(String),
-    /// `"text"`: a contiguous case-insensitive substring — what `grep` would
-    /// find, for when fuzzy is too loose to name one thing.
+    /// Plain or `"quoted"` text: a contiguous case-insensitive substring —
+    /// what `grep -i` would find.
     Literal(Literal),
-    /// `/re/`: a case-insensitive regular expression.
+    /// `/re/`: a case-insensitive regular expression. `a|b` compiles to one
+    /// too, from the escaped alternatives.
     Regex(Box<regex::Regex>),
 }
 
@@ -266,55 +259,59 @@ pub enum CmpValue {
     Str(String),
 }
 
-impl ParsedFilter {
+impl Structured {
     pub fn uses_metrics(&self, is_metric: &impl Fn(&str) -> bool) -> bool {
-        matches!(self, Self::Structured(s) if s.terms.iter().any(|t| t.metrics_sensitive(is_metric)))
+        self.terms.iter().any(|t| t.metrics_sensitive(is_metric))
     }
 
     pub fn labels(&self) -> Option<&str> {
-        match self {
-            ParsedFilter::Fuzzy(_) => None,
-            ParsedFilter::Structured(s) => s.labels.as_deref(),
-        }
+        self.labels.as_deref()
     }
 
     pub fn fields(&self) -> Option<&str> {
-        match self {
-            ParsedFilter::Fuzzy(_) => None,
-            ParsedFilter::Structured(s) => s.fields.as_deref(),
-        }
+        self.fields.as_deref()
     }
 
     pub fn error(&self) -> Option<&str> {
-        match self {
-            ParsedFilter::Fuzzy(_) => None,
-            ParsedFilter::Structured(s) => s.error.as_deref(),
-        }
+        self.error.as_deref()
     }
 
-    /// The pattern NAME-cell highlighting should mark: the legacy fuzzy
-    /// pattern, or the first positive text term of a structured filter.
+    /// The pattern NAME-cell highlighting should mark: the first positive
+    /// text term.
     pub fn highlight_pattern(&self) -> Option<&Pattern> {
-        match self {
-            ParsedFilter::Fuzzy(pat) => (!pat.text().is_empty()).then_some(pat),
-            ParsedFilter::Structured(s) => s.terms.iter().find_map(Term::highlight_pattern),
-        }
+        self.terms.iter().find_map(Term::highlight_pattern)
     }
 }
 
-pub fn parse(input: &str) -> ParsedFilter {
+pub fn parse(input: &str) -> Structured {
     let trimmed = input.trim();
-    if trimmed.is_empty() || !is_structured(trimmed) {
-        return ParsedFilter::Fuzzy(Pattern::Fuzzy(trimmed.to_string()));
+    if !is_structured(trimmed) {
+        return plain(trimmed);
     }
 
-    ParsedFilter::Structured(match tokenize(trimmed) {
+    match tokenize(trimmed) {
         Ok(tokens) => parse_tokens(&tokens, 0),
         Err(error) => Structured {
             error: Some(error),
             ..Structured::default()
         },
-    })
+    }
+}
+
+/// Input with no structured markers: every whitespace-separated word is a
+/// text term. Kept apart from the tokenizer so apostrophes and parentheses in
+/// plain text stay literal characters instead of unclosed quotes and groups.
+fn plain(input: &str) -> Structured {
+    let mut s = Structured::default();
+    for word in input.split_whitespace() {
+        match pattern(word) {
+            Ok(pat) => s.terms.push(Term::Text { negate: false, pat }),
+            Err(e) => {
+                s.error.get_or_insert(e);
+            }
+        }
+    }
+    s
 }
 
 fn parse_tokens(tokens: &[String], depth: usize) -> Structured {
@@ -473,10 +470,10 @@ fn parse_tokens(tokens: &[String], depth: usize) -> Structured {
         match pattern(rest) {
             // Fuzzy is too loose across the dozens of labels a node carries:
             // a short needle finds its letters somewhere on nearly every object.
-            Ok(Pattern::Fuzzy(text)) if label.is_some() => terms.push(Term::Label {
-                negate,
-                pat: Pattern::Literal(Literal::new(&text)),
-            }),
+            Ok(Pattern::Fuzzy(_)) if label.is_some() => fail(
+                &mut error,
+                "label patterns cannot be fuzzy; drop the '~'".into(),
+            ),
             Ok(pat) if label.is_some() => terms.push(Term::Label { negate, pat }),
             Ok(pat) => terms.push(Term::Text { negate, pat }),
             Err(e) => fail(&mut error, e),
@@ -491,8 +488,8 @@ fn parse_tokens(tokens: &[String], depth: usize) -> Structured {
     }
 }
 
-/// Whether any token flips the input from a single legacy fuzzy pattern into
-/// the structured grammar. Mirrors the markers `parse` acts on.
+/// Whether any token flips the input from plain words into the structured
+/// grammar. Mirrors the markers `parse` acts on.
 fn is_structured(input: &str) -> bool {
     let structured = |tok: &str| {
         let text = tok.strip_prefix('!').unwrap_or(tok);
@@ -686,8 +683,8 @@ fn regex_end(input: &str, start: usize) -> Option<usize> {
     fallback
 }
 
-/// Classify one text term: `"quoted"` is a literal, `/re/` a regex, anything
-/// else the fuzzy text the filter has always taken.
+/// Classify one text term: `/re/` is a regex, `~text` fuzzy, `a|b` either
+/// text, and plain or `"quoted"` text a literal.
 fn pattern(tok: &str) -> Result<Pattern, String> {
     if let Some(rest) = tok.strip_prefix('"') {
         // The closing quote is optional — the term may still be being typed.
@@ -708,23 +705,50 @@ fn pattern(tok: &str) -> Result<Pattern, String> {
             .map(|re| Pattern::Regex(Box::new(re)))
             .map_err(|_| format!("bad regex '{source}'"));
     }
-    Ok(Pattern::Fuzzy(tok.to_string()))
+    if let Some(rest) = tok.strip_prefix('~') {
+        if rest.is_empty() {
+            return Err("expected text after '~'".into());
+        }
+        return Ok(Pattern::Fuzzy(rest.to_string()));
+    }
+    if tok.contains('|') {
+        // Empty alternatives are skipped so `istiod|` keeps narrowing while
+        // the next name is typed.
+        let alternatives: Vec<&str> = tok.split('|').filter(|s| !s.is_empty()).collect();
+        return match alternatives[..] {
+            [] => Err("expected text around '|'".into()),
+            [text] => Ok(Pattern::Literal(Literal::new(text))),
+            _ => {
+                let source = alternatives
+                    .iter()
+                    .map(|s| regex::escape(s))
+                    .collect::<Vec<_>>()
+                    .join("|");
+                regex::RegexBuilder::new(&source)
+                    .case_insensitive(true)
+                    .build()
+                    .map(|re| Pattern::Regex(Box::new(re)))
+                    .map_err(|_| format!("bad alternatives '{tok}'"))
+            }
+        };
+    }
+    Ok(Pattern::Literal(Literal::new(tok)))
 }
 
 /// A `/re/` term. Both slashes are required, so a lone `/` and text like
-/// `/healthz` stay fuzzy — the same rule the log filter uses.
+/// `/healthz` stay plain text — the same rule the log filter uses.
 fn is_regex(tok: &str) -> bool {
     tok.len() >= 2 && tok.starts_with('/') && tok.ends_with('/')
 }
 
 /// The selector of an attached `-l`/`-f` form (`-lapp=api`). Requires an `=`
-/// so ordinary fuzzy text starting with those letters isn't swallowed.
+/// so ordinary text starting with those letters isn't swallowed.
 fn attached_selector<'a>(tok: &'a str, flag: &str) -> Option<&'a str> {
     tok.strip_prefix(flag).filter(|rest| rest.contains('='))
 }
 
 /// Split `key<op>value` at the operator following a valid key. `None` when
-/// the token has no operator or no leading key — i.e. plain fuzzy text.
+/// the token has no operator or no leading key — i.e. plain text.
 fn split_cmp(tok: &str) -> Option<(&str, Op, &str)> {
     if !tok
         .chars()
@@ -911,7 +935,7 @@ mod tests {
                 assert_eq!(parsed.fields(), None);
                 assert_eq!(parsed.highlight_pattern(), None);
                 assert_eq!(
-                    structured(&input).terms,
+                    parse(&input).terms,
                     [Term::Label {
                         negate,
                         pat: expected.clone(),
@@ -921,22 +945,19 @@ mod tests {
         }
         assert_eq!(
             parse("label:example100 api").highlight_pattern(),
-            Some(&Pattern::Fuzzy("api".into()))
+            Some(&Pattern::Literal(Literal::new("api")))
         );
     }
 
     #[test]
     fn label_prefix_is_reserved_only_at_the_start_of_unquoted_terms() {
         for input in ["Label:api", "labels:api", "prefix-label:api"] {
-            assert_eq!(
-                parse(input),
-                ParsedFilter::Fuzzy(Pattern::Fuzzy(input.into()))
-            );
+            assert_eq!(parse(input).terms, [literal(input)]);
         }
         for input in ["\"label:api\"", "!\"label:api\"", "/label:api/"] {
-            assert!(matches!(structured(input).terms[0], Term::Text { .. }));
+            assert!(matches!(parse(input).terms[0], Term::Text { .. }));
         }
-        let s = structured("-l test -f spec.nodeName=n1 (label:api||!label:worker)");
+        let s = parse("-l test -f spec.nodeName=n1 (label:api||!label:worker)");
         assert_eq!(s.error, None);
         assert_eq!(s.labels.as_deref(), Some("test"));
         assert_eq!(s.fields.as_deref(), Some("spec.nodeName=n1"));
@@ -954,7 +975,7 @@ mod tests {
             r"api\)worker",
         ] {
             let input = format!("!(label:/{source}/||label:canary)&&status=Running");
-            let s = structured(&input);
+            let s = parse(&input);
             assert_eq!(s.error, None, "{input}");
             assert_eq!(s.terms.len(), 2);
             assert_eq!(
@@ -964,13 +985,13 @@ mod tests {
             let Term::Label {
                 pat: Pattern::Regex(re),
                 ..
-            } = &structured(&format!("label:/{source}/")).terms[0]
+            } = &parse(&format!("label:/{source}/")).terms[0]
             else {
                 panic!("expected a label regex: {source}");
             };
             assert_eq!(re.as_str(), source);
         }
-        let s = structured("label:\"api (worker || canary)\" status=Running");
+        let s = parse("label:\"api (worker || canary)\" status=Running");
         assert_eq!(s.error, None);
         assert_eq!(s.terms.len(), 2);
         assert_eq!(
@@ -980,8 +1001,8 @@ mod tests {
                 pat: Pattern::Literal(Literal::new("api (worker || canary)")),
             }
         );
-        assert_eq!(structured("label:\"api").error, None);
-        assert_eq!(structured("!label:\"api").error, None);
+        assert_eq!(parse("label:\"api").error, None);
+        assert_eq!(parse("!label:\"api").error, None);
     }
 
     #[test]
@@ -1002,32 +1023,20 @@ mod tests {
 
     #[test]
     fn boolean_precedence_groups_and_inverse() {
-        let s = structured("api || worker && !canary");
+        let s = parse("api || worker && !canary");
         assert_eq!(s.error, None);
         assert_eq!(
             s.terms,
             vec![Term::Any(vec![
-                Term::All(vec![Term::Text {
-                    negate: false,
-                    pat: Pattern::Fuzzy("api".into())
-                }]),
-                Term::All(vec![
-                    Term::Text {
-                        negate: false,
-                        pat: Pattern::Fuzzy("worker".into())
-                    },
-                    Term::Text {
-                        negate: true,
-                        pat: Pattern::Fuzzy("canary".into())
-                    }
-                ]),
+                Term::All(vec![literal("api")]),
+                Term::All(vec![literal("worker"), not_literal("canary")]),
             ])]
         );
-        let s = structured("-l app=api (status=Running||age>2h) !(restarts>=5)");
+        let s = parse("-l app=api (status=Running||age>2h) !(restarts>=5)");
         assert_eq!(s.error, None);
         assert_eq!(s.labels.as_deref(), Some("app=api"));
         assert!(s.terms.iter().any(Term::time_sensitive));
-        assert_eq!(structured("(name='api server' || !canary)").error, None);
+        assert_eq!(parse("(name='api server' || !canary)").error, None);
         for input in [
             "api ||",
             "|| api",
@@ -1052,7 +1061,7 @@ mod tests {
         assert_eq!(cell_number("NaN"), None);
         assert_eq!(cell_number("5 (2m ago)"), Some(5.0));
         assert_eq!(
-            structured("spec.nodeName=node-3 metadata.namespace=prod status.phase=Running")
+            parse("spec.nodeName=node-3 metadata.namespace=prod status.phase=Running")
                 .terms
                 .len(),
             3
@@ -1061,18 +1070,18 @@ mod tests {
 
     #[test]
     fn sets_quotes_and_explicit_and() {
-        let s = structured("-l app in (api, worker),env=prod && status=Running");
+        let s = parse("-l app in (api, worker),env=prod && status=Running");
         assert_eq!(s.labels.as_deref(), Some("app in (api, worker),env=prod"));
         assert_eq!(s.terms.len(), 1);
         assert_eq!(s.error, None);
         assert_eq!(
-            structured("-l 'app notin (api, worker)' !canary")
+            parse("-l 'app notin (api, worker)' !canary")
                 .labels
                 .as_deref(),
             Some("app notin (api, worker)")
         );
         assert_eq!(
-            structured("name='api server'").terms,
+            parse("name='api server'").terms,
             vec![Term::Cmp(Cmp {
                 key: "name".into(),
                 op: Op::Eq,
@@ -1133,30 +1142,23 @@ mod tests {
         }
     }
 
-    fn structured(input: &str) -> Structured {
-        match parse(input) {
-            ParsedFilter::Structured(s) => s,
-            other => panic!("expected structured parse for '{input}', got {other:?}"),
-        }
-    }
-
-    fn fuzzy(pat: &str) -> Term {
+    fn literal(text: &str) -> Term {
         Term::Text {
             negate: false,
-            pat: Pattern::Fuzzy(pat.into()),
+            pat: Pattern::Literal(Literal::new(text)),
         }
     }
 
-    fn not_fuzzy(pat: &str) -> Term {
+    fn not_literal(text: &str) -> Term {
         Term::Text {
             negate: true,
-            pat: Pattern::Fuzzy(pat.into()),
+            pat: Pattern::Literal(Literal::new(text)),
         }
     }
 
     /// The single text pattern of a one-term filter.
     fn only_pattern(input: &str) -> Pattern {
-        let s = structured(input);
+        let s = parse(input);
         assert_eq!(s.terms.len(), 1, "expected one term in '{input}'");
         match s.terms.into_iter().next() {
             Some(Term::Text { negate: false, pat }) => pat,
@@ -1165,36 +1167,96 @@ mod tests {
     }
 
     #[test]
-    fn plain_text_stays_one_legacy_fuzzy_pattern() {
+    fn plain_words_are_contiguous_text_terms() {
+        assert_eq!(parse(""), Structured::default());
+        assert_eq!(parse("api").terms, [literal("api")]);
+        // Each word is its own term, and all of them must match.
         assert_eq!(
-            parse(""),
-            ParsedFilter::Fuzzy(Pattern::Fuzzy(String::new()))
+            parse("kube system dns").terms,
+            [literal("kube"), literal("system"), literal("dns")]
         );
+        assert_eq!(parse("  api ").terms, [literal("api")]);
+        // A lone dash or dashed name is still text, not a flag.
+        assert_eq!(parse("-longname").terms, [literal("-longname")]);
+        // Quote and group characters are literal in plain text.
+        assert_eq!(parse("it's").terms, [literal("it's")]);
+        assert_eq!(parse("foo)").terms, [literal("foo)")]);
+        assert_eq!(parse("it's").error, None);
+    }
+
+    /// The report behind the default: `istiod` must not match
+    /// `istio-cni-node`, which only contains its letters in order.
+    #[test]
+    fn plain_text_matches_contiguously() {
+        let Pattern::Literal(lit) = only_pattern("istiod") else {
+            panic!("expected a literal term");
+        };
+        assert!(lit.matches("istio-system istiod-7c9f"));
+        assert!(lit.matches("ISTIOD"));
+        assert!(!lit.matches("istio-system istio-cni-node-x2d"));
+    }
+
+    #[test]
+    fn tilde_opts_into_fuzzy() {
+        assert_eq!(only_pattern("~khc"), Pattern::Fuzzy("khc".into()), "plain");
+        let s = parse("!~canary status=Running");
+        assert_eq!(s.error, None);
         assert_eq!(
-            parse("api"),
-            ParsedFilter::Fuzzy(Pattern::Fuzzy("api".into()))
+            s.terms[0],
+            Term::Text {
+                negate: true,
+                pat: Pattern::Fuzzy("canary".into()),
+            }
         );
-        // Spaces included: the whole string is the pattern, as before.
+        for input in ["~", "!~", "api ~"] {
+            assert!(parse(input).error().is_some(), "{input}");
+        }
+        assert!(parse("label:~api").error().is_some());
+    }
+
+    #[test]
+    fn a_bare_pipe_matches_either_text() {
+        for input in ["istiod|istio-cni-node", "!x istiod|istio-cni-node"] {
+            let s = parse(input);
+            assert_eq!(s.error, None, "{input}");
+            let Some(Term::Text {
+                negate: false,
+                pat: Pattern::Regex(re),
+            }) = s.terms.last()
+            else {
+                panic!("expected an alternation in '{input}'");
+            };
+            assert!(re.is_match("istiod-7c9f"));
+            assert!(re.is_match("ISTIO-CNI-NODE-x2d"));
+            assert!(!re.is_match("istio-ingressgateway"));
+        }
+        // The alternatives are text, not regex syntax.
+        let Pattern::Regex(re) = only_pattern("a.b|c+") else {
+            panic!("expected an alternation");
+        };
+        assert!(re.is_match("a.b"));
+        assert!(!re.is_match("axb"));
+        assert!(!re.is_match("cc"));
+        // A trailing pipe while the next name is typed still narrows.
         assert_eq!(
-            parse("kube system dns"),
-            ParsedFilter::Fuzzy(Pattern::Fuzzy("kube system dns".into()))
+            only_pattern("istiod|"),
+            Pattern::Literal(Literal::new("istiod"))
         );
-        // Leading/trailing whitespace is not part of the pattern.
-        assert_eq!(
-            parse("  api "),
-            ParsedFilter::Fuzzy(Pattern::Fuzzy("api".into()))
-        );
-        // A lone dash or dashed name is still fuzzy text, not a flag.
-        assert_eq!(
-            parse("-longname"),
-            ParsedFilter::Fuzzy(Pattern::Fuzzy("-longname".into()))
-        );
+        assert!(parse("|").error().is_some());
+        let Term::Label {
+            pat: Pattern::Regex(re),
+            ..
+        } = &parse("label:api|worker").terms[0]
+        else {
+            panic!("expected a label alternation");
+        };
+        assert!(re.is_match("worker"));
     }
 
     #[test]
     fn inverse_term() {
-        let s = structured("!canary");
-        assert_eq!(s.terms, vec![not_fuzzy("canary")]);
+        let s = parse("!canary");
+        assert_eq!(s.terms, vec![not_literal("canary")]);
         assert_eq!(s.error, None);
     }
 
@@ -1221,7 +1283,7 @@ mod tests {
         };
         assert_eq!(lit.text(), "kube system");
         // Still one term when other terms surround it.
-        let s = structured("\"kube system\" status=Running");
+        let s = parse("\"kube system\" status=Running");
         assert_eq!(s.terms.len(), 2);
     }
 
@@ -1246,23 +1308,17 @@ mod tests {
     }
 
     /// Both slashes are required, so the paths and image tags people filter
-    /// on are still plain fuzzy text.
+    /// on are still plain text.
     #[test]
     fn a_single_slash_is_not_a_regex() {
-        assert_eq!(
-            parse("/healthz"),
-            ParsedFilter::Fuzzy(Pattern::Fuzzy("/healthz".into()))
-        );
-        assert_eq!(parse("/"), ParsedFilter::Fuzzy(Pattern::Fuzzy("/".into())));
-        assert_eq!(
-            parse("nginx/nginx:1.2"),
-            ParsedFilter::Fuzzy(Pattern::Fuzzy("nginx/nginx:1.2".into()))
-        );
+        for input in ["/healthz", "/", "nginx/nginx:1.2"] {
+            assert_eq!(parse(input).terms, [literal(input)]);
+        }
     }
 
     #[test]
     fn quoted_and_regex_terms_invert() {
-        let s = structured("!\"canary\"");
+        let s = parse("!\"canary\"");
         assert_eq!(
             s.terms,
             vec![Term::Text {
@@ -1272,7 +1328,7 @@ mod tests {
         );
         assert_eq!(s.error, None);
 
-        let s = structured("!/canary|debug/");
+        let s = parse("!/canary|debug/");
         let Term::Text { negate, pat } = &s.terms[0] else {
             panic!("expected a text term");
         };
@@ -1284,16 +1340,16 @@ mod tests {
     /// is skipped and reported, never a blank table.
     #[test]
     fn malformed_quoted_and_regex_terms_report_without_blanking() {
-        let s = structured("\"\" api");
-        assert_eq!(s.terms, vec![fuzzy("api")]);
+        let s = parse("\"\" api");
+        assert_eq!(s.terms, vec![literal("api")]);
         assert!(s.error.as_deref().is_some_and(|e| e.contains("quotes")));
 
-        let s = structured("// api");
-        assert_eq!(s.terms, vec![fuzzy("api")]);
+        let s = parse("// api");
+        assert_eq!(s.terms, vec![literal("api")]);
         assert!(s.error.as_deref().is_some_and(|e| e.contains("slashes")));
 
-        let s = structured("/[unclosed/ api");
-        assert_eq!(s.terms, vec![fuzzy("api")]);
+        let s = parse("/[unclosed/ api");
+        assert_eq!(s.terms, vec![literal("api")]);
         assert!(s.error.as_deref().is_some_and(|e| e.contains("bad regex")));
     }
 
@@ -1327,7 +1383,7 @@ mod tests {
             let tokens = tokenize(input).unwrap();
             assert_eq!(tokens.len(), 2, "{input}");
             assert_eq!(tokens[1], "!canary");
-            let parsed = structured(input);
+            let parsed = parse(input);
             assert_eq!(parsed.error, None, "{input}");
             assert!(matches!(
                 &parsed.terms[0],
@@ -1361,23 +1417,23 @@ mod tests {
 
     #[test]
     fn label_selector_variants() {
-        let s = structured("-l app=api,env=prod");
+        let s = parse("-l app=api,env=prod");
         assert_eq!(s.labels.as_deref(), Some("app=api,env=prod"));
         assert!(s.terms.is_empty());
         assert_eq!(s.error, None);
 
         // Attached form and repeated flags joining with a comma.
-        let s = structured("-lapp=api -l env=prod");
+        let s = parse("-lapp=api -l env=prod");
         assert_eq!(s.labels.as_deref(), Some("app=api,env=prod"));
 
         // Bare-key (existence) selectors work in the spaced form.
-        let s = structured("-l app");
+        let s = parse("-l app");
         assert_eq!(s.labels.as_deref(), Some("app"));
     }
 
     #[test]
     fn field_selector() {
-        let s = structured("-f spec.nodeName=node-3");
+        let s = parse("-f spec.nodeName=node-3");
         assert_eq!(s.fields.as_deref(), Some("spec.nodeName=node-3"));
         assert_eq!(s.labels, None);
         assert!(s.terms.is_empty());
@@ -1388,7 +1444,7 @@ mod tests {
     /// once per object per rebuild.
     #[test]
     fn status_equality_and_inequality() {
-        let s = structured("status=CrashLoopBackOff");
+        let s = parse("status=CrashLoopBackOff");
         assert_eq!(
             s.terms,
             vec![Term::Cmp(Cmp {
@@ -1398,7 +1454,7 @@ mod tests {
             })]
         );
 
-        let s = structured("status!=Running");
+        let s = parse("status!=Running");
         assert_eq!(
             s.terms,
             vec![Term::Cmp(Cmp {
@@ -1411,7 +1467,7 @@ mod tests {
 
     #[test]
     fn typed_quantity_comparisons() {
-        let s = structured("cpu>500m");
+        let s = parse("cpu>500m");
         assert_eq!(
             s.terms,
             vec![Term::Cmp(Cmp {
@@ -1424,7 +1480,7 @@ mod tests {
             })]
         );
 
-        let s = structured("cpu>=1");
+        let s = parse("cpu>=1");
         assert_eq!(
             s.terms,
             vec![Term::Cmp(Cmp {
@@ -1437,7 +1493,7 @@ mod tests {
             })]
         );
 
-        let s = structured("memory>1Gi");
+        let s = parse("memory>1Gi");
         assert_eq!(
             s.terms,
             vec![Term::Cmp(Cmp {
@@ -1450,7 +1506,7 @@ mod tests {
             })]
         );
 
-        let s = structured("mem<=512Mi");
+        let s = parse("mem<=512Mi");
         assert_eq!(
             s.terms,
             vec![Term::Cmp(Cmp {
@@ -1463,7 +1519,7 @@ mod tests {
             })]
         );
 
-        let s = structured("restarts>=5");
+        let s = parse("restarts>=5");
         assert_eq!(
             s.terms,
             vec![Term::Cmp(Cmp {
@@ -1476,7 +1532,7 @@ mod tests {
 
     #[test]
     fn age_durations() {
-        let s = structured("age<2h");
+        let s = parse("age<2h");
         assert_eq!(
             s.terms,
             vec![Term::Cmp(Cmp {
@@ -1486,7 +1542,7 @@ mod tests {
             })]
         );
 
-        let s = structured("age>1d2h");
+        let s = parse("age>1d2h");
         assert_eq!(
             s.terms,
             vec![Term::Cmp(Cmp {
@@ -1524,14 +1580,14 @@ mod tests {
 
     #[test]
     fn terms_combine_with_and_semantics() {
-        let s = structured("api !canary -l app=api status=Running");
+        let s = parse("api !canary -l app=api status=Running");
         assert_eq!(s.labels.as_deref(), Some("app=api"));
         assert_eq!(s.error, None);
         assert_eq!(
             s.terms,
             vec![
-                fuzzy("api"),
-                not_fuzzy("canary"),
+                literal("api"),
+                not_literal("canary"),
                 Term::Cmp(Cmp {
                     key: "status".into(),
                     op: Op::Eq,
@@ -1545,23 +1601,23 @@ mod tests {
     fn malformed_terms_report_without_blanking() {
         // Mid-typing states must degrade to "term skipped + error", never a
         // hard failure.
-        let s = structured("-l");
+        let s = parse("-l");
         assert_eq!(s.labels, None);
         assert!(s.error.as_deref().is_some_and(|e| e.contains("-l")));
 
-        let s = structured("cpu>");
+        let s = parse("cpu>");
         assert!(s.terms.is_empty());
         assert!(s.error.as_deref().is_some_and(|e| e.contains("cpu>")));
 
-        let s = structured("cpu>abc");
+        let s = parse("cpu>abc");
         assert!(s.terms.is_empty());
         assert!(s.error.as_deref().is_some_and(|e| e.contains("abc")));
 
-        let s = structured("age<soon");
+        let s = parse("age<soon");
         assert!(s.error.as_deref().is_some_and(|e| e.contains("soon")));
 
-        let s = structured("! api");
-        assert_eq!(s.terms, vec![fuzzy("api")]);
+        let s = parse("! api");
+        assert_eq!(s.terms, vec![literal("api")]);
         assert!(s.error.is_some());
     }
 

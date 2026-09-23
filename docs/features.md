@@ -245,8 +245,9 @@ concurrent drains, and full kubectl drain parity are outside this feature.
 - **Picker paging** - `PgDn` and `PgUp` move one visible page through every
   list picker, including `:ctx` and `:ns`, and keep working while a picker
   filter is being typed.
-- **Filtering** (`/`) with matched-character highlighting: fuzzy text, `"text"`
-  contiguous match, `/re/` regular expression (both case-insensitive), `!text`
+- **Filtering** (`/`) with matched-character highlighting: contiguous text
+  (`"text"` keeps spaces), `a|b` for either name, `~text` fuzzy match, `/re/`
+  regular expression (all case-insensitive except fuzzy's smart case), `!text`
   inverse match (also `!"text"` and `!/re/`), local label key and value search
   (`label:text`, `label:"text"`, `label:/re/`, and `!label:text`),
   `-l`/`-f` label and field selectors (evaluated server-side on

@@ -145,7 +145,7 @@ The essentials. `?` in the app shows everything, or see the
 | Key                  | Action                                                                                            |
 | -------------------- | ------------------------------------------------------------------------------------------------- |
 | `:`                  | command palette - fuzzy over kinds, commands, bookmarks, workspaces (`:deploy social` also works) |
-| `/`                  | filter: fuzzy · `"exact"` · `/regex/` · `!inverse` · `-l`/`-f` selectors · `status=X` `age<2h`    |
+| `/`                  | filter: text · `a\|b` · `~fuzzy` · `/regex/` · `!inverse` · `-l`/`-f` · `status=X` `age<2h`       |
 | `enter` / `esc`      | drill down / go back                                                                              |
 | `j`/`k`, `g`/`G`     | navigate                                                                                          |
 | `ctrl-f` / `ctrl-b`  | page forward / back (also `PgDn` / `PgUp`)                                                        |

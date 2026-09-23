@@ -1518,7 +1518,7 @@ impl PrevRevisions {
 /// reparsed only when the string actually changes — never per frame or row.
 struct FilterCache {
     raw: String,
-    parsed: crate::filter::ParsedFilter,
+    parsed: crate::filter::Structured,
 }
 
 /// Highlight positions per row name for the active filter's pattern.
