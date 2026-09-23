@@ -136,7 +136,8 @@ See [Language choice](plugin-authoring.md#language-choice).
 character (`"g"`), a modifier combination (`"ctrl-g"`, `"alt-x"`, `"shift-b"`), or
 a function or named key (`"f5"`, `"ctrl-f2"`). A built-in key wins over a plugin
 on the same chord. You can [change or disable that built-in binding](keybindings.md)
-to release the key. `:config` reports bindings hidden by built-in actions.
+to release the key. `:config` reports bindings hidden by built-in actions, and the status line
+points to it at startup.
 
 For the minus key, use `"-"` alone or `"ctrl--"`, `"alt--"`, or `"ctrl-alt--"`
 with modifiers. The final two hyphens are the separator and the minus key.

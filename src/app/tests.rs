@@ -29630,6 +29630,52 @@ async fn key_warnings_report_hidden_bindings_without_blocking_released_keys() {
 }
 
 #[tokio::test]
+async fn startup_flashes_hidden_plugin_key_warning() {
+    let (mut app, _rx) = test_app();
+    app.switch_kind("pods");
+    app.plugins = vec![crate::config::Plugin {
+        name: "pretty-logs".into(),
+        key: "shift-l".into(),
+        command: "true".into(),
+        scopes: vec!["pods".into()],
+        mutating: Some(false),
+        ..Default::default()
+    }];
+    app.config_warnings = app.configure_keys(&Default::default());
+    assert_eq!(app.config_warnings.len(), 1, "{:?}", app.config_warnings);
+    assert!(app.config_warnings[0].contains("keys.table.provider_logs"));
+
+    app.flash_config_warnings();
+    assert!(app.flash_err);
+    assert!(app.flash.contains("1 warning(s)"), "{}", app.flash);
+    assert!(app.flash.contains(":config"), "{}", app.flash);
+
+    app.handle_key(press(KeyCode::Char(':'))).unwrap();
+    for c in "config".chars() {
+        app.handle_key(press(KeyCode::Char(c))).unwrap();
+    }
+    app.handle_key(press(KeyCode::Enter)).unwrap();
+    assert_eq!(app.mode, Mode::Detail);
+    let text = app
+        .detail
+        .lines
+        .iter()
+        .cloned()
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(text.contains("pretty-logs"), "{text}");
+    assert!(text.contains("keys.table.provider_logs"), "{text}");
+}
+
+#[tokio::test]
+async fn startup_without_config_warnings_leaves_flash_alone() {
+    let (mut app, _rx) = test_app();
+    app.flash_config_warnings();
+    assert!(!app.flash_err);
+    assert!(!app.flash.contains(":config"), "{}", app.flash);
+}
+
+#[tokio::test]
 async fn shifted_navigation_keeps_default_list_behavior() {
     let defaults = Keymap::default();
     let mut scopes = std::collections::BTreeSet::new();

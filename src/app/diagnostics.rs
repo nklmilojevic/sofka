@@ -146,6 +146,18 @@ impl App {
         self.mode = Mode::Detail;
     }
 
+    /// Startup warnings go to stderr, which the TUI hides at once, so point at
+    /// `:config` from the status line instead.
+    pub fn flash_config_warnings(&mut self) {
+        let n = self.config_warnings.len();
+        if n == 0 || self.flash_err {
+            return;
+        }
+        self.flash_warn(&format!(
+            "config loaded with {n} warning(s) — :config for details"
+        ));
+    }
+
     pub fn flash_discovery_warnings(&mut self) {
         let n = self.cluster.discovery_warnings.len();
         if n == 0 || self.flash_err {

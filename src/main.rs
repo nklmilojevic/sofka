@@ -538,6 +538,7 @@ async fn run_main(args: Args) -> Result<()> {
         app.flash = w.clone();
         app.flash_err = true;
     }
+    app.flash_config_warnings();
     app.flash_discovery_warnings();
 
     if args.snapshot {
