@@ -30,11 +30,12 @@ async fn label_filter_matches_hidden_keys_and_values_with_each_pattern_mode() {
     let generation = app.generation;
     let cases: &[(&str, &[&str])] = &[
         ("example100", &[]),
-        ("label:example100", &["alpha", "beta"]),
+        ("label:example100", &["alpha"]),
+        ("label:xmpl", &[]),
         ("label:test", &["alpha"]),
         ("label:stable", &["alpha"]),
         ("label:Stable", &["alpha"]),
-        ("label:STABLE", &[]),
+        ("label:STABLE", &["alpha"]),
         ("label:\"EXAMPLE100\"", &["alpha"]),
         (r"label:/^EXAMPLE[0-9]+$/", &["alpha"]),
         (r"label:/test.example.com\/type/", &["alpha"]),
@@ -50,6 +51,43 @@ async fn label_filter_matches_hidden_keys_and_values_with_each_pattern_mode() {
         assert_eq!(row_names(&app), expected, "{filter}");
         assert_eq!(app.generation, generation);
         assert_eq!(app.filter_location(), " ·local");
+    }
+}
+
+#[tokio::test]
+async fn label_filter_matches_contiguous_text_across_many_node_labels() {
+    let (mut app, _rx) = test_app();
+    type_resource_query(&mut app, "nodes");
+    for (name, pool, feature) in [
+        ("gpu-1", "vllm-gpu", "ssd"),
+        ("cpu-1", "general", "ups"),
+        ("cpu-2", "general", "ssd"),
+    ] {
+        apply(
+            &mut app,
+            json!({
+                "apiVersion": "v1", "kind": "Node",
+                "metadata": {"name": name, "labels": {
+                    "karpenter.sh/nodepool": pool,
+                    "feature": feature,
+                    "kubernetes.io/hostname": name,
+                    "feature.node.kubernetes.io/usb-ff_0bda_8156.present": "true",
+                    "topology.kubernetes.io/zone": "us-east-1a",
+                }},
+            }),
+        );
+    }
+    let cases: &[(&str, &[&str])] = &[
+        ("label:vllm", &["gpu-1"]),
+        ("label:vllm-gpu", &["gpu-1"]),
+        ("label:VLLM", &["gpu-1"]),
+        ("label:ups", &["cpu-1"]),
+        ("label:nodepool", &["cpu-1", "cpu-2", "gpu-1"]),
+        ("!label:ups", &["cpu-2", "gpu-1"]),
+    ];
+    for &(filter, expected) in cases {
+        retype_filter(&mut app, filter);
+        assert_eq!(row_names(&app), expected, "{filter}");
     }
 }
 

@@ -13,7 +13,7 @@ name, or an individual displayed column. Structured markers enable these terms:
 | `"auth"`                           | Contiguous text match, case-insensitive            |
 | `/^api/`                           | Regular expression, case-insensitive               |
 | `!canary`                          | Exclude fuzzy matches                              |
-| `label:example100`                 | Fuzzy match against label keys and values          |
+| `label:example100`                 | Label key or value contains text, case-insensitive |
 | `label:"example100"`               | Contiguous label text match, case-insensitive      |
 | `label:/^example[0-9]+$/`          | Label regex match, case-insensitive                |
 | `-l app=api,env=prod`              | Kubernetes label selector                          |
@@ -42,10 +42,10 @@ Each key and each value is tested separately. A match cannot cross a key/value
 boundary or combine text from different labels. Names, annotations, and pod
 template labels are outside this term's scope.
 
-Fuzzy label patterns allow gaps. An all-lowercase pattern ignores case; a pattern
-with uppercase characters is case-sensitive. Double quotes select a contiguous
-text match, not whole-value equality. Regex patterns use `/pattern/`. Quoted text
-and regex patterns ignore case, as they do in ordinary row filters.
+Label patterns match contiguous text and ignore case, whether or not they are
+quoted; they are not fuzzy, because a short fuzzy pattern would match nearly
+every object that carries many labels. A match is not whole-value equality.
+Regex patterns use `/pattern/` and also ignore case.
 
 `!label:canary` keeps objects with no matching key or value. Objects without labels
 fail positive label terms and pass their negation. Empty label values remain

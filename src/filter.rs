@@ -471,6 +471,12 @@ fn parse_tokens(tokens: &[String], depth: usize) -> Structured {
             continue;
         }
         match pattern(rest) {
+            // Fuzzy is too loose across the dozens of labels a node carries:
+            // a short needle finds its letters somewhere on nearly every object.
+            Ok(Pattern::Fuzzy(text)) if label.is_some() => terms.push(Term::Label {
+                negate,
+                pat: Pattern::Literal(Literal::new(&text)),
+            }),
             Ok(pat) if label.is_some() => terms.push(Term::Label { negate, pat }),
             Ok(pat) => terms.push(Term::Text { negate, pat }),
             Err(e) => fail(&mut error, e),
@@ -884,7 +890,10 @@ mod tests {
     #[test]
     fn label_patterns_are_local_and_do_not_supply_name_highlights() {
         for (input, expected) in [
-            ("label:example100", Pattern::Fuzzy("example100".into())),
+            (
+                "label:example100",
+                Pattern::Literal(Literal::new("example100")),
+            ),
             (
                 "label:\"example100\"",
                 Pattern::Literal(Literal::new("example100")),
