@@ -229,6 +229,7 @@ means `true`. Sofka refuses a package if these values differ from the catalog.
 | `dangerous`    | Require confirmation and identify the action as dangerous. Default: `false`.               |
 | `port_forward` | Optional remote port for the selected pod or service. See [Port-forwards](#port-forwards). |
 | `inputs`       | Input definitions. See [Inputs](#inputs).                                                  |
+| `prompt`       | When the input form opens: `missing` (default) or `always`. See [Inputs](#inputs).         |
 
 The adapter's working directory is the package directory.
 Use `command = "./adapter"` for an executable in that directory.
@@ -275,7 +276,12 @@ max = 65535
 
 The `port` input has no default.
 The user must supply it before the adapter can start.
-A key chord uses the default input values.
+
+A run from a key chord, or from the command palette without arguments, uses the
+default input values. When an input has no default, sofka first opens a form
+with every input, prefilled with its default. Set `prompt = "always"` on the
+command to open the form even when every input has a default. Arguments typed in
+the command palette never open the form.
 
 | Type       | Permitted values                         |
 | ---------- | ---------------------------------------- |

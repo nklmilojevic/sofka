@@ -43,7 +43,7 @@ impl App {
             // Where the overlay will return to: the table, except for a
             // dialog raised from the PVC browser, which returns there. Getting
             // this wrong reads as "left the view" and stops a running plugin.
-            Mode::Confirm | Mode::Prompt => self.overlay_return(),
+            Mode::Confirm | Mode::Prompt | Mode::PluginForm => self.overlay_return(),
             Mode::Filter | Mode::SortPicker | Mode::CopyPicker => Mode::Table,
             other => other,
         };
@@ -92,6 +92,7 @@ impl App {
                 | Mode::LogFilter
                 | Mode::Confirm
                 | Mode::Prompt
+                | Mode::PluginForm
                 | Mode::SortPicker
                 | Mode::CopyPicker
         );
@@ -228,6 +229,7 @@ impl App {
             Mode::Find => self.key_find(key),
             Mode::PvcExplore => self.key_pvc_explore(key),
             Mode::PortForwardPicker => self.key_port_forward_picker(key),
+            Mode::PluginForm => self.key_plugin_form(key),
         }
         Ok(())
     }
@@ -270,6 +272,7 @@ impl App {
             Mode::Find => "find",
             Mode::PvcExplore => "pvc_explore",
             Mode::PortForwardPicker => "port_forward_picker",
+            Mode::PluginForm => "plugin_form",
         }
     }
 

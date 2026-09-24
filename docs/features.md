@@ -891,6 +891,10 @@ pod is rejected; browse through a pod that already mounts the claim instead.
 - **Named commands** and key chords start adapters without changes to sofka's source code.
   A package can contain several commands with separate scopes, inputs, and safety settings.
 - **Validated inputs** supply named arguments with types, defaults, choices, and limits.
+- **Plugin input form** shows all inputs at once when a command starts from its
+  key chord or without arguments and an input has no default, or the command sets
+  `prompt = "always"`. Fields show their type and limits, `←`/`→` cycle choices
+  and booleans, and errors appear under the field.
 - **JSON reports** show text sections and tables in a searchable document.
 - **Live plugin activity** floats over popup/report runs with a spinner, elapsed
   time, and a bounded, scrollable plain-text stderr tail. `Esc` hides without

@@ -31,7 +31,7 @@ pub struct Input {
 }
 
 impl Input {
-    fn validate(&self, value: &str) -> Result<(), String> {
+    pub fn validate(&self, value: &str) -> Result<(), String> {
         let number = match self.kind.as_str() {
             "string" => None,
             "boolean" if matches!(value, "true" | "false") => None,
@@ -84,6 +84,13 @@ pub fn inputs(plugin: &Plugin, arguments: &str) -> Result<BTreeMap<String, Strin
         supplied.insert(name.clone(), value);
     }
     Ok(supplied)
+}
+
+/// Whether a run without arguments asks for input values first.
+pub fn needs_form(plugin: &Plugin) -> bool {
+    !plugin.inputs.is_empty()
+        && (plugin.prompt.as_deref() == Some("always")
+            || plugin.inputs.values().any(|spec| spec.default.is_none()))
 }
 
 pub fn input_arg(value: &str, inputs: &BTreeMap<String, String>) -> String {

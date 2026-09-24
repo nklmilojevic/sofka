@@ -216,6 +216,8 @@ pub enum Mode {
     /// declared ports for single-select, plus a "Custom…" entry that falls
     /// through to the typed prompt.
     PortForwardPicker,
+    /// Input values for a plugin command started without arguments.
+    PluginForm,
 }
 
 /// A request for the run loop to suspend the TUI and run an interactive
@@ -2257,6 +2259,7 @@ pub struct App {
     pub prompt_label: String,
     pub prompt_input: String,
     prompt_kind: Option<PromptKind>,
+    pub(crate) plugin_form: Option<plugins::PluginForm>,
 
     /// Independent lifecycle for log streams so opening logs doesn't tear down
     /// (and later reload) the underlying table/xray view. Tagged separately from
@@ -2559,6 +2562,7 @@ impl App {
             prompt_label: String::new(),
             prompt_input: String::new(),
             prompt_kind: None,
+            plugin_form: None,
             log_gen: 0,
             log_flag: Arc::new(AtomicU64::new(0)),
             log_tasks: Vec::new(),

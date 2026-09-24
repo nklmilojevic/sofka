@@ -26,7 +26,138 @@ impl PluginActivity {
     }
 }
 
+/// The input form for a plugin command started without arguments.
+pub(crate) struct PluginForm {
+    pub plugin: crate::config::Plugin,
+    pub fields: Vec<PluginFormField>,
+    pub focus: usize,
+}
+
+pub(crate) struct PluginFormField {
+    pub name: String,
+    pub value: String,
+    pub error: Option<String>,
+}
+
+impl PluginForm {
+    pub(crate) fn new(plugin: crate::config::Plugin) -> Self {
+        let fields = plugin
+            .inputs
+            .iter()
+            .map(|(name, spec)| PluginFormField {
+                name: name.clone(),
+                value: spec.default.clone().unwrap_or_default(),
+                error: None,
+            })
+            .collect();
+        Self {
+            plugin,
+            fields,
+            focus: 0,
+        }
+    }
+
+    pub fn spec(&self, field: usize) -> &crate::plugins::Input {
+        &self.plugin.inputs[&self.fields[field].name]
+    }
+
+    /// The values a field cycles through, or `None` for a typed field.
+    pub fn options(&self, field: usize) -> Option<Vec<String>> {
+        let spec = self.spec(field);
+        if !spec.choices.is_empty() {
+            Some(spec.choices.clone())
+        } else if spec.kind == "boolean" {
+            Some(vec!["true".into(), "false".into()])
+        } else {
+            None
+        }
+    }
+
+    fn cycle(&mut self, forward: bool) {
+        let Some(options) = self.options(self.focus) else {
+            return;
+        };
+        let field = &mut self.fields[self.focus];
+        let next = match options.iter().position(|o| *o == field.value) {
+            Some(i) if forward => (i + 1) % options.len(),
+            Some(i) => (i + options.len() - 1) % options.len(),
+            None if forward => 0,
+            None => options.len() - 1,
+        };
+        field.value = options[next].clone();
+        field.error = None;
+    }
+
+    /// Validate every field, recording each error on its field.
+    fn values(&mut self) -> Option<std::collections::BTreeMap<String, String>> {
+        let mut values = std::collections::BTreeMap::new();
+        for i in 0..self.fields.len() {
+            let error = self.spec(i).validate(&self.fields[i].value).err();
+            let field = &mut self.fields[i];
+            field.error = error;
+            values.insert(field.name.clone(), field.value.clone());
+        }
+        if let Some(i) = self.fields.iter().position(|f| f.error.is_some()) {
+            self.focus = i;
+            return None;
+        }
+        Some(values)
+    }
+}
+
 impl App {
+    fn open_plugin_form(&mut self, plugin: crate::config::Plugin) {
+        self.plugin_form = Some(PluginForm::new(plugin));
+        self.mode = Mode::PluginForm;
+    }
+
+    pub(super) fn key_plugin_form(&mut self, key: KeyInput) {
+        let Some(form) = self.plugin_form.as_mut() else {
+            self.mode = self.overlay_return();
+            return;
+        };
+        let count = form.fields.len();
+        match (key.action, key.code) {
+            (Some(Action::Back), _) => {
+                self.plugin_form = None;
+                self.mode = self.overlay_return();
+            }
+            (Some(Action::Accept), _) => {
+                let Some(inputs) = form.values() else {
+                    return;
+                };
+                let plugin = self.plugin_form.take().unwrap().plugin;
+                self.mode = self.overlay_return();
+                self.start_plugin(plugin, inputs);
+            }
+            (Some(Action::Down), _) => form.focus = (form.focus + 1) % count,
+            (Some(Action::Up), _) => form.focus = (form.focus + count - 1) % count,
+            (Some(Action::Right), _) => form.cycle(true),
+            (Some(Action::Left), _) => form.cycle(false),
+            _ if form.options(form.focus).is_some() => {}
+            (action, code) => {
+                let field = &mut form.fields[form.focus];
+                match (action, code) {
+                    (Some(Action::ClearLine | Action::DeleteWord), _) => field.value.clear(),
+                    (Some(Action::Backspace), _) => {
+                        field.value.pop();
+                    }
+                    (_, KeyCode::Char(c))
+                        if !c.is_whitespace()
+                            && !key
+                                .modifiers
+                                .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+                            && field.value.len() < 256 =>
+                    {
+                        field.value.push(c)
+                    }
+                    _ => return,
+                }
+                field.error = None;
+            }
+        }
+    }
+
     /// Run a config-defined plugin bound to `c` if it applies to the current
     /// kind. Blocked in read-only mode: plugins shell out to arbitrary
     /// commands, so we can't know they won't mutate the cluster. Returns
@@ -55,13 +186,6 @@ impl App {
             self.flash_warn(&e);
             return;
         }
-        let inputs = match crate::plugins::inputs(&plugin, arguments) {
-            Ok(inputs) => inputs,
-            Err(e) => {
-                self.flash_warn(&e);
-                return;
-            }
-        };
         // A mutating plugin (the default) is blocked in read-only mode; one
         // explicitly declared read-only stays available.
         if (plugin.mutating.unwrap_or(true) || plugin.network_load) && self.readonly {
@@ -76,6 +200,30 @@ impl App {
             ));
             return;
         }
+        if arguments.trim().is_empty() && crate::plugins::needs_form(&plugin) {
+            if plugin.target.as_deref() != Some("context") && self.action_targets().is_empty() {
+                self.flash_warn("no selection for plugin");
+                return;
+            }
+            self.open_plugin_form(plugin);
+            return;
+        }
+        let inputs = match crate::plugins::inputs(&plugin, arguments) {
+            Ok(inputs) => inputs,
+            Err(e) => {
+                self.flash_warn(&e);
+                return;
+            }
+        };
+        self.start_plugin(plugin, inputs);
+    }
+
+    /// Run a plugin with validated input values.
+    fn start_plugin(
+        &mut self,
+        plugin: crate::config::Plugin,
+        inputs: std::collections::BTreeMap<String, String>,
+    ) {
         let mode = match plugin.output.as_deref() {
             Some("popup") => PluginMode::Popup,
             Some("report") => PluginMode::Report,

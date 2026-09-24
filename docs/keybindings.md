@@ -46,7 +46,7 @@ the line.
   suggestion or `accept = "esc"` to accept it.
 
 Text input modes are `command`, `filter`, `log_filter`, `doc_filter`, `prompt`,
-`sort_picker`, `copy_picker`, `namespaces`, and `context_filter`.
+`plugin_form`, `sort_picker`, `copy_picker`, `namespaces`, and `context_filter`.
 `contexts` is the context browser; `context_filter` is its text entry state.
 Ordinary text and required confirmation text remain input. External editors
 and shells use their own key bindings. Mouse wheel events still move rows,
@@ -489,6 +489,18 @@ for those operations.
 | `backspace` | `backspace`      |
 | `down`      | `down`           |
 | `up`        | `up`             |
+
+### `[keys.plugin_form]`
+
+| Action      | Default bindings |
+| ----------- | ---------------- |
+| `accept`    | `enter`          |
+| `back`      | `esc`            |
+| `backspace` | `backspace`      |
+| `down`      | `tab`, `down`    |
+| `left`      | `left`           |
+| `right`     | `right`          |
+| `up`        | `backtab`, `up`  |
 
 ### `[keys.port_forward_picker]`
 

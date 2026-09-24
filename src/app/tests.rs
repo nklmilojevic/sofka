@@ -10,6 +10,7 @@ mod kubeconfig;
 mod label_filter;
 mod node_roles;
 mod oidc;
+mod plugin_form;
 mod popup_wrapping;
 mod proxy;
 mod restart;
@@ -30209,6 +30210,28 @@ fn key_action_fixture(scope: &str) -> (App, Receiver<Msg>) {
         "find" => Mode::Find,
         "pvc_explore" => Mode::PvcExplore,
         "port_forward_picker" => Mode::PortForwardPicker,
+        "plugin_form" => {
+            let mut plugin = named_plugin("echo", &[]);
+            plugin.inputs = toml::from_str(
+                r#"
+                [count]
+                type = "integer"
+                default = "two"
+                [mode]
+                type = "string"
+                default = "a"
+                choices = ["a", "b", "c"]
+                [name]
+                type = "string"
+                default = "two"
+            "#,
+            )
+            .unwrap();
+            let mut form = super::plugins::PluginForm::new(plugin);
+            form.focus = 1;
+            app.plugin_form = Some(form);
+            Mode::PluginForm
+        }
         _ => panic!("missing fixture for {scope}"),
     };
     app.ctx_filtering = scope == "context_filter";
@@ -30233,6 +30256,11 @@ fn key_action_state(app: &App) -> serde_json::Value {
             "context_filter": app.ctx_filter, "context_filtering": app.ctx_filtering,
             "container": app.container_state.selected(),
             "sort_picker": app.sort_picker_state.selected(), "copy_picker": app.copy_picker_state.selected(),
+            "plugin_form": app.plugin_form.as_ref().map(|form| json!({
+                "focus": form.focus,
+                "values": form.fields.iter().map(|f| &f.value).collect::<Vec<_>>(),
+                "errors": form.fields.iter().map(|f| &f.error).collect::<Vec<_>>(),
+            })),
         },
         "document": {
             "fullscreen": app.document_fullscreen,

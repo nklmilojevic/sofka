@@ -971,6 +971,9 @@ pub struct Plugin {
     pub install: Option<String>,
     #[serde(default)]
     pub inputs: std::collections::BTreeMap<String, crate::plugins::Input>,
+    /// When the input form opens for a run without arguments: `missing`
+    /// (default) only when an input has no default, `always` for any input.
+    pub prompt: Option<String>,
     /// `context` runs once without requiring a selected row; default `selection`.
     pub target: Option<String>,
     /// Declare traffic generation even when no Kubernetes objects are mutated.
@@ -1305,6 +1308,14 @@ pub fn plugin_warnings(plugins: &[Plugin]) -> Vec<String> {
         {
             warns.push(format!(
                 "plugin {:?}: unknown output {o:?} (expected terminal/popup/background/report) — using terminal",
+                p.name
+            ));
+        }
+        if let Some(prompt) = &p.prompt
+            && !matches!(prompt.as_str(), "missing" | "always")
+        {
+            warns.push(format!(
+                "plugin {:?}: unknown prompt {prompt:?} (expected missing/always) — using missing",
                 p.name
             ));
         }

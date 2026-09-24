@@ -471,6 +471,7 @@ fn draw_base(frame: &mut Frame, app: &mut App) {
         Mode::Skins => draw_skins(frame, app, chunks[1]),
         Mode::Snapshots => draw_snapshots(frame, app, chunks[1]),
         Mode::PortForwardPicker => draw_port_forward_picker(frame, app, chunks[1]),
+        Mode::PluginForm => draw_plugin_form(frame, app),
         _ => {}
     }
 
@@ -4335,6 +4336,142 @@ fn draw_text_popup(frame: &mut Frame, app: &mut App, input: bool) {
         app.popup_viewport,
         false,
     );
+}
+
+fn draw_plugin_form(frame: &mut Frame, app: &App) {
+    let Some(form) = app.plugin_form.as_ref() else {
+        return;
+    };
+    let screen = frame.area();
+    let bounds = centered_rect_with_min(90, 70, 0, 0, screen);
+    let initial = centered_rect_with_min(60, 0, 50, 0, bounds);
+    let width = usize::from(initial.width.saturating_sub(2));
+    let name_width = form
+        .fields
+        .iter()
+        .map(|f| f.name.width())
+        .max()
+        .unwrap_or(0);
+    let mut content = Vec::new();
+    for (i, field) in form.fields.iter().enumerate() {
+        let focused = i == form.focus;
+        let spec = form.spec(i);
+        let mut spans = vec![
+            Span::styled(
+                if focused { "▸ " } else { "  " },
+                Style::default().fg(theme::peach()),
+            ),
+            Span::styled(
+                format!("{:name_width$}  ", field.name),
+                if focused {
+                    Style::default()
+                        .fg(theme::text())
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(theme::text())
+                },
+            ),
+        ];
+        if form.options(i).is_some() {
+            spans.push(Span::styled(
+                format!("‹ {} ›", field.value),
+                Style::default().fg(theme::peach()),
+            ));
+        } else {
+            spans.push(Span::styled(
+                field.value.clone(),
+                Style::default().fg(theme::peach()),
+            ));
+            if focused {
+                spans.push(Span::styled("█", Style::default().fg(theme::peach())));
+            }
+        }
+        let range = match (spec.min, spec.max) {
+            (None, None) => String::new(),
+            (min, max) => format!(
+                " {}..{}",
+                min.map(|n| n.to_string()).unwrap_or_default(),
+                max.map(|n| n.to_string()).unwrap_or_default()
+            ),
+        };
+        let unit = if spec.kind == "duration" && !range.is_empty() {
+            " seconds"
+        } else {
+            ""
+        };
+        let required = if spec.default.is_none() {
+            ", required"
+        } else {
+            ""
+        };
+        spans.push(Span::styled(
+            format!("  {}{range}{unit}{required}", spec.kind),
+            theme::dim(),
+        ));
+        content.extend(wrap_line(Line::from(spans), width));
+        if let Some(error) = &field.error {
+            content.extend(wrap_line(
+                Line::styled(
+                    format!("  {:name_width$}  {error}", ""),
+                    Style::default().fg(theme::red()),
+                ),
+                width,
+            ));
+        }
+    }
+    let footer = wrap_line(
+        Line::styled(
+            key_hint(
+                app,
+                "plugin_form",
+                &[
+                    (Action::Down, "next"),
+                    (Action::Up, "previous"),
+                    (Action::Right, "change"),
+                    (Action::Accept, "run"),
+                    (Action::Back, "cancel"),
+                ],
+            ),
+            Style::default().fg(theme::yellow()),
+        ),
+        width,
+    );
+    let height = (content.len() + footer.len() + 3).min(usize::from(u16::MAX)) as u16;
+    let popup = centered_rect_exact(initial.width, height, bounds);
+    clear_region(frame, popup);
+    let color = theme::peach();
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(color))
+        .title(Span::styled(
+            format!(" {} ", form.plugin.name),
+            Style::default().fg(color),
+        ));
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
+    let footer_height = footer
+        .len()
+        .min(usize::from(inner.height.saturating_sub(1))) as u16;
+    let [body, _, controls] = Layout::vertical([
+        Constraint::Min(0),
+        Constraint::Length(1),
+        Constraint::Length(footer_height),
+    ])
+    .areas(inner);
+    // Keep the focused field visible when the form is taller than the screen.
+    let focus_row = form
+        .fields
+        .iter()
+        .take(form.focus)
+        .map(|f| 1 + usize::from(f.error.is_some()))
+        .sum::<usize>();
+    let skip = focus_row.saturating_sub(usize::from(body.height).saturating_sub(2));
+    frame.render_widget(
+        Paragraph::new(content.into_iter().skip(skip).collect::<Vec<_>>()),
+        body,
+    );
+    frame.render_widget(Paragraph::new(footer), controls);
 }
 
 fn draw_palette(frame: &mut Frame, app: &mut App, area: Rect) {

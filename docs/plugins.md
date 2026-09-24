@@ -180,6 +180,9 @@ dangerous = true          # confirm (showing the exact command) first
 - **`requires`** lists required executables. **`install`** supplies instructions when an executable is absent.
 - **`inputs`** defines validated `name=value` arguments.
   See [Inputs](plugin-authoring.md#inputs).
+- **`prompt`** controls the input form for a run without arguments. `missing`
+  (the default) opens it only when an input has no default; `always` opens it
+  for any command with inputs.
 - **`network_load = true`** identifies a load test.
   It requires confirmation and blocks the plugin in read-only mode.
 - **`mutating`** (default `true`): read-only mode blocks a mutating plugin. Set

@@ -323,6 +323,18 @@ guardrails still apply. Canceling keeps the original error visible.
 | `:sanitize [states=…] [dry_run=…]` | Delete the pods the namespace has finished with (pods view). |
 
 `:sanitize` ships with sofka; see [Sanitize pods](../plugins/sanitize/README.md).
+
+A plugin command started from its key chord or with no arguments opens an input
+form when an input has no default, or when the command sets `prompt = "always"`.
+Fields start with their default values. In the form:
+
+- `Tab`/`Shift+Tab` or `↓`/`↑` move between fields.
+- `←`/`→` cycle a field with `choices` or a `boolean` field.
+- `Backspace` removes a character; `Ctrl-U` clears the field.
+- `Enter` validates every field and runs the command. Errors appear under the field.
+- `Esc` cancels without running anything.
+
+Rebind these keys under `[keys.plugin_form]`.
 Popup/report runs open a floating activity panel immediately. In that panel:
 
 - `Ctrl+Alt+T` toggles the popup without cancelling or restarting the job.
