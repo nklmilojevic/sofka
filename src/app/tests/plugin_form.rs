@@ -90,7 +90,7 @@ async fn plugin_form_shows_validation_errors_on_the_field_and_keeps_the_values()
         form.fields[0]
             .error
             .as_deref()
-            .is_some_and(|e| e.contains("unsigned integer")),
+            .is_some_and(|e| e == "required"),
         "{:?}",
         form.fields[0].error
     );
@@ -222,8 +222,79 @@ async fn plugin_form_renders_every_field_with_its_type_and_error() {
     assert!(screen.contains(" Example "), "{screen}");
     assert!(screen.contains("integer 1..65535, required"), "{screen}");
     assert!(screen.contains("‹ all ›"), "{screen}");
-    assert!(screen.contains("expected unsigned integer"), "{screen}");
+    assert!(
+        screen
+            .lines()
+            .any(|line| line.contains("required") && !line.contains("integer")),
+        "the error has its own row: {screen}"
+    );
     assert!(screen.contains("enter:run"), "{screen}");
+}
+
+#[tokio::test]
+async fn plugin_form_rejects_an_untouched_required_string() {
+    let (mut app, _rx) = app_with_pod();
+    let mut plugin = named_plugin("echo", &["${input.target}"]);
+    plugin.inputs = toml::from_str("[target]\ntype = \"string\"").unwrap();
+    app.plugins = vec![plugin];
+    plugin_command(&mut app, "example-plugin");
+    app.handle_key(press(KeyCode::Enter)).unwrap();
+    assert_eq!(app.mode, Mode::PluginForm);
+    assert!(
+        app.pending.is_none(),
+        "an empty required input must not run"
+    );
+    let form = app.plugin_form.as_ref().unwrap();
+    assert_eq!(form.fields[0].error.as_deref(), Some("required"));
+
+    typed(&mut app, "web");
+    app.handle_key(press(KeyCode::Enter)).unwrap();
+    assert_eq!(shell_argv(&mut app), ["echo", "web"]);
+}
+
+#[tokio::test]
+async fn plugin_form_keeps_a_wrapped_focused_field_visible() {
+    let (mut app, _rx) = app_with_pod();
+    let mut plugin = named_plugin("echo", &[]);
+    let inputs = (0..8)
+        .map(|n| {
+            format!(
+                "[input_{n}]\ntype = \"string\"\ndefault = \"{}\"\n",
+                "long-value-".repeat(8)
+            )
+        })
+        .collect::<String>();
+    plugin.inputs = toml::from_str(&inputs).unwrap();
+    plugin.prompt = Some("always".into());
+    app.plugins = vec![plugin];
+    plugin_command(&mut app, "example-plugin");
+    app.handle_key(press(KeyCode::BackTab)).unwrap();
+    assert_eq!(app.plugin_form.as_ref().unwrap().focus, 7);
+
+    let mut terminal = Terminal::new(TestBackend::new(70, 24)).unwrap();
+    terminal
+        .draw(|frame| crate::ui::draw(frame, &mut app))
+        .unwrap();
+    let buffer = terminal.backend().buffer();
+    let screen = (0..24)
+        .map(|y| (0..70).map(|x| buffer[(x, y)].symbol()).collect::<String>())
+        .collect::<Vec<_>>()
+        .join("\n");
+    let focused = screen
+        .lines()
+        .position(|line| line.contains("▸ input_7"))
+        .unwrap_or_else(|| panic!("focused field hidden: {screen}"));
+    assert!(
+        screen
+            .lines()
+            .skip(focused)
+            .any(|line| line.contains("string")),
+        "its wrapped hint stays visible: {screen}"
+    );
+    assert!(
+        !screen.contains("input_0"),
+        "earlier fields scroll away: {screen}"
+    );
 }
 
 #[test]

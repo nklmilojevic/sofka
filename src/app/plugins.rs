@@ -92,7 +92,14 @@ impl PluginForm {
     fn values(&mut self) -> Option<std::collections::BTreeMap<String, String>> {
         let mut values = std::collections::BTreeMap::new();
         for i in 0..self.fields.len() {
-            let error = self.spec(i).validate(&self.fields[i].value).err();
+            let spec = self.spec(i);
+            let value = &self.fields[i].value;
+            // An empty field for an input without a default is still missing.
+            let error = if value.is_empty() && spec.default.is_none() {
+                Some("required".into())
+            } else {
+                spec.validate(value).err()
+            };
             let field = &mut self.fields[i];
             field.error = error;
             values.insert(field.name.clone(), field.value.clone());

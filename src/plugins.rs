@@ -473,6 +473,13 @@ pub fn validate_plugin(plugin: &Plugin) -> Result<(), String> {
     {
         return Err("palette command is reserved by sofka".into());
     }
+    if plugin
+        .prompt
+        .as_deref()
+        .is_some_and(|prompt| !matches!(prompt, "missing" | "always"))
+    {
+        return Err("prompt must be missing or always".into());
+    }
     let warnings = crate::config::plugin_warnings(std::slice::from_ref(plugin));
     if !warnings.is_empty() {
         return Err(warnings.join("; "));
@@ -1156,6 +1163,24 @@ default = "false"
         .unwrap();
         assert_eq!(plugin[0].name, "Local");
         assert!(package.is_none());
+    }
+
+    #[test]
+    fn package_prompt_errors_do_not_promise_a_fallback() {
+        let mut plugin = Plugin {
+            name: "Scan".into(),
+            palette: Some("scan".into()),
+            command: "./adapter".into(),
+            output: Some("report".into()),
+            prompt: Some("always".into()),
+            ..Default::default()
+        };
+        assert_eq!(validate_plugin(&plugin), Ok(()));
+        plugin.prompt = Some("never".into());
+        assert_eq!(
+            validate_plugin(&plugin),
+            Err("prompt must be missing or always".into())
+        );
     }
 
     #[test]

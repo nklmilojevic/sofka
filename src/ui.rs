@@ -4353,8 +4353,10 @@ fn draw_plugin_form(frame: &mut Frame, app: &App) {
         .max()
         .unwrap_or(0);
     let mut content = Vec::new();
+    let mut focus_rows = 0..0;
     for (i, field) in form.fields.iter().enumerate() {
         let focused = i == form.focus;
+        let start = content.len();
         let spec = form.spec(i);
         let mut spans = vec![
             Span::styled(
@@ -4418,6 +4420,9 @@ fn draw_plugin_form(frame: &mut Frame, app: &App) {
                 width,
             ));
         }
+        if focused {
+            focus_rows = start..content.len();
+        }
     }
     let footer = wrap_line(
         Line::styled(
@@ -4459,14 +4464,12 @@ fn draw_plugin_form(frame: &mut Frame, app: &App) {
         Constraint::Length(footer_height),
     ])
     .areas(inner);
-    // Keep the focused field visible when the form is taller than the screen.
-    let focus_row = form
-        .fields
-        .iter()
-        .take(form.focus)
-        .map(|f| 1 + usize::from(f.error.is_some()))
-        .sum::<usize>();
-    let skip = focus_row.saturating_sub(usize::from(body.height).saturating_sub(2));
+    // Keep the focused field and its wrapped rows visible when the form is
+    // taller than the screen.
+    let skip = focus_rows
+        .end
+        .saturating_sub(usize::from(body.height))
+        .min(focus_rows.start);
     frame.render_widget(
         Paragraph::new(content.into_iter().skip(skip).collect::<Vec<_>>()),
         body,
