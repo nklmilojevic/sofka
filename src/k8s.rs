@@ -969,9 +969,10 @@ fn spawn_watch_task(
         let mut using_streaming = streaming_lists.load(Ordering::Acquire) != STREAMING_UNSUPPORTED;
         let mut initializing = true;
         // Distinct from `initializing`, which drives the streaming-list
-        // fallback and must keep its current lifetime: this only records
-        // that a full sync has happened, so a later re-list is a reconnect.
-        let mut synced_once = false;
+        // fallback and must keep its current lifetime: this tracks whether a
+        // list is in flight, so the UI gets exactly one Reset per re-list.
+        // Starts true because the Reset below opens the first list.
+        let mut listing = true;
         let mut stream = watcher(
             api.clone(),
             if using_streaming {
@@ -1013,6 +1014,21 @@ fn spawn_watch_task(
             ) {
                 backoff.reset();
             }
+            // A streaming list restarts after a 410 without an Init event, so
+            // without this Reset the re-list would only upsert and objects
+            // deleted while the watch was down would stay on screen.
+            if !listing
+                && matches!(
+                    event,
+                    Ok(watcher::Event::InitApply(_) | watcher::Event::InitDone)
+                )
+            {
+                listing = true;
+                crate::log_info!("watch.relist", kind = kind, generation = generation);
+                if tx.send(Msg::Reset { generation }).await.is_err() {
+                    break;
+                }
+            }
             let mut retry_delay = None;
             let msg = match event {
                 Ok(watcher::Event::Apply(obj)) | Ok(watcher::Event::InitApply(obj)) => {
@@ -1027,17 +1043,18 @@ fn spawn_watch_task(
                     key: row_key(&obj),
                 },
                 Ok(watcher::Event::Init) => {
-                    if synced_once {
+                    if !listing {
                         // The watcher healed a desync by re-listing. The
                         // UI counts this as a reconnect off the same
                         // message, so nothing extra crosses the channel.
                         crate::log_info!("watch.relist", kind = kind, generation = generation);
                     }
+                    listing = true;
                     Msg::Reset { generation }
                 }
                 Ok(watcher::Event::InitDone) => {
                     initializing = false;
-                    synced_once = true;
+                    listing = false;
                     if using_streaming {
                         // Unsupported is sticky if two startup watches
                         // negotiate concurrently and only one endpoint
@@ -1888,6 +1905,54 @@ clusters:
             STREAMING_SUPPORTED
         );
         assert!(requests.lock().unwrap()[0].contains("sendInitialEvents=true"));
+    }
+
+    #[tokio::test]
+    async fn streaming_relist_after_expiry_resets_the_store() {
+        let pod = |name: &str| {
+            format!(
+                "{{\"type\":\"ADDED\",\"object\":{{\"apiVersion\":\"v1\",\"kind\":\"Pod\",\"metadata\":{{\"name\":\"{name}\",\"namespace\":\"default\",\"resourceVersion\":\"10\"}}}}}}\n"
+            )
+        };
+        let end = "{\"type\":\"BOOKMARK\",\"object\":{\"apiVersion\":\"v1\",\"kind\":\"Pod\",\"metadata\":{\"resourceVersion\":\"10\",\"annotations\":{\"k8s.io/initial-events-end\":\"true\"}}}}\n";
+        let expired = "{\"type\":\"ERROR\",\"object\":{\"kind\":\"Status\",\"apiVersion\":\"v1\",\"status\":\"Failure\",\"message\":\"too old resource version\",\"reason\":\"Expired\",\"code\":410}}\n";
+        let (url, _) = mock_watch_server(vec![
+            ("200 OK", format!("{}{}{end}{expired}", pod("a"), pod("b"))),
+            ("200 OK", format!("{}{end}", pod("a"))),
+        ])
+        .await;
+        let cluster = watch_cluster(&url);
+        let kind = cluster.resolve("pods").unwrap();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(16);
+        let task = cluster.spawn_watch(&kind, "default", None, None, 1, tx);
+        let mut store = crate::store::Store::default();
+        let mut syncs = 0;
+        while syncs < 2 {
+            match tokio::time::timeout(Duration::from_secs(5), rx.recv())
+                .await
+                .expect("watch message timeout")
+                .expect("watch channel closed")
+            {
+                Msg::Reset { .. } => {
+                    store.begin_reset();
+                }
+                Msg::Applied { key, obj, .. } => {
+                    store.apply(key, *obj);
+                }
+                Msg::Deleted { key, .. } => {
+                    store.remove(&key);
+                }
+                Msg::Synced { .. } => {
+                    store.finish_sync();
+                    syncs += 1;
+                }
+                _ => {}
+            }
+        }
+        task.abort();
+        assert_eq!(store.len(), 1);
+        assert!(store.get("default/a").is_some());
+        assert!(store.get("default/b").is_none());
     }
 
     #[tokio::test]
