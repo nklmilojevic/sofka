@@ -14571,6 +14571,51 @@ async fn status_printer_columns_render_and_filter_through_keys() {
 }
 
 #[tokio::test]
+async fn cert_manager_printer_columns_with_spaced_filters_show_ready() {
+    let (mut app, _rx) = test_app();
+    app.switch_kind("certificates");
+    let crd = json!({"spec": {"versions": [{"name": "v1", "additionalPrinterColumns": [
+        {"name": "Ready", "type": "string", "jsonPath": ".status.conditions[?(@.type == \"Ready\")].status"},
+        {"name": "Secret", "type": "string", "jsonPath": ".spec.secretName"},
+        {"name": "Issuer", "type": "string", "priority": 1, "jsonPath": ".spec.issuerRef.name"},
+        {"name": "Status", "type": "string", "priority": 1, "jsonPath": ".status.conditions[?(@.type == \"Ready\")].message"},
+        {"name": "Age", "type": "date", "jsonPath": ".metadata.creationTimestamp"}
+    ]}]}});
+    app.handle_msg(Msg::PrinterColumns {
+        generation: app.generation,
+        resource: app.cluster.resolve("certificates").unwrap().resource_key(),
+        view: Box::new(crate::views::printer_columns_view(&crd, "v1")),
+    });
+    apply(
+        &mut app,
+        json!({
+            "apiVersion": "cert-manager.io/v1", "kind": "Certificate",
+            "metadata": {"name": "wildcard", "namespace": "default"},
+            "spec": {"secretName": "wildcard-tls", "issuerRef": {"name": "letsencrypt"}},
+            "status": {"conditions": [
+                {"type": "Ready", "status": "False", "message": "Issuing certificate"}
+            ]}
+        }),
+    );
+    assert_eq!(
+        app.display_headers().to_vec(),
+        ["NAME", "READY", "SECRET", "AGE"]
+    );
+    app.handle_key(press(KeyCode::Char('w'))).unwrap();
+    assert_eq!(
+        app.display_headers().to_vec(),
+        ["NAME", "READY", "SECRET", "ISSUER", "STATUS", "AGE"]
+    );
+    let rows = app.rows();
+    app.ensure_table_cell_cache(&rows);
+    let cache = app.table_cell_cache();
+    let (cells, status_idx) = cache.get(&row_key(rows[0])).unwrap();
+    assert_eq!(cells[1], "False");
+    assert_eq!(cells[4], "Issuing certificate");
+    assert_eq!(status_idx, Some(1));
+}
+
+#[tokio::test]
 async fn user_view_wins_over_printer_columns() {
     let (mut app, _rx) = test_app();
     install_views(

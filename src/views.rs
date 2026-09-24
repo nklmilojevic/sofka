@@ -1118,7 +1118,8 @@ pub fn printer_columns_view(crd: &Value, version: &str) -> Option<View> {
 }
 
 /// Recognize a condition equality filter on `type` or `status` with a simple
-/// output field. Accept single or double quotes, with optional outer braces.
+/// output field. Accept single or double quotes, spaces inside the filter,
+/// and optional outer braces.
 /// Return the selector, value, and output field, or `None` for other paths.
 pub fn condition_json_path(path: &str) -> Option<(ConditionMatch, String, String)> {
     let p = path.trim();
@@ -1126,9 +1127,10 @@ pub fn condition_json_path(path: &str) -> Option<(ConditionMatch, String, String
         .strip_prefix('{')
         .and_then(|s| s.strip_suffix('}'))
         .unwrap_or(p);
-    let rest = p.strip_prefix(".status.conditions[?(@.")?;
+    let rest = p.strip_prefix(".status.conditions[?(")?;
+    let rest = rest.trim_start().strip_prefix("@.")?;
     let (selector, rest) = rest.split_once("==")?;
-    let selector = match selector {
+    let selector = match selector.trim_end() {
         "type" => ConditionMatch::Type,
         "status" => ConditionMatch::Status,
         _ => return None,
@@ -1389,6 +1391,21 @@ mod tests {
                 "Ready".into(),
                 "lastTransitionTime".into()
             ))
+        );
+        // cert-manager writes the filter with spaces around `==`.
+        for path in [
+            r#".status.conditions[?(@.type == "Ready")].status"#,
+            r#".status.conditions[?( @.type=="Ready" )].status"#,
+            "{.status.conditions[?(@.type == 'Ready')].status}",
+        ] {
+            assert_eq!(
+                condition_json_path(path),
+                Some((ConditionMatch::Type, "Ready".into(), "status".into()))
+            );
+        }
+        assert_eq!(
+            condition_json_path(".status.conditions[?(@.status == 'True')].reason"),
+            Some((ConditionMatch::Status, "True".into(), "reason".into()))
         );
         // Nested fields, wildcards, and non-condition paths stay untranslated.
         assert_eq!(
