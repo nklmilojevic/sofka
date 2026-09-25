@@ -403,7 +403,8 @@ concurrent drains, and full kubectl drain parity are outside this feature.
   describe. Relations are data: a built-in table for core kinds, extended per
   CRD with `[[views."…".refs]]` and `children`. A ref whose target kind is a
   field of the object (an ExternalSecret's `secretStoreRef.kind`) reads it
-  with `kind_path` from a list of candidate `kinds`. Reverse lookups stay in
+  with `kind_path` from a list of candidate `kinds`; `group_path` tells apart
+  candidates that share a kind by their API group. Reverse lookups stay in
   the row's namespace unless the rule says `cluster`.
   Press `c` in this view to discover direct children of a namespaced custom
   resource with a UID, including resources with no configured child kinds.

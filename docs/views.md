@@ -437,6 +437,27 @@ that includes one usually wants `reverse = "cluster"`; with `namespace`, a
 selected ClusterSecretStore lists only the ExternalSecrets in the namespace
 the table shows.
 
+Two candidates can share a kind, like the Gateway API's and Istio's `Gateway`.
+When the element also names its API group, `group_path` reads it from the same
+element, and a candidate then has to match both kind and group:
+
+```toml
+[[views."gateway.networking.k8s.io/httproutes".refs]]
+path       = "/spec/parentRefs/*/name"
+kind_path  = "/spec/parentRefs/*/kind"
+group_path = "/spec/parentRefs/*/group"
+group      = "gateway.networking.k8s.io"  # when the element has no group
+kinds      = ["gateways.gateway.networking.k8s.io", "gateways.networking.istio.io"]
+relation   = "attaches to"
+```
+
+An empty group (`group: ""`) names the core group, as a `Service` backendRef
+does. An element without a group takes `group`; without `group`, it matches
+by kind alone, the first candidate with that kind. `group_path` needs
+`kind_path`, its `*` segments follow the same arrays as `path`, and `group`
+needs `group_path`. An element that falls back to the default `kind` isn't
+checked against its group. Reverse lookups match the group the same way.
+
 Each lookup reads the current source object. Press `r` to include changes to
 its references, such as a new pod node assignment or PVC binding. If the source
 was deleted or replaced, the view reports the error. Return to the table to

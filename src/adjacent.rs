@@ -80,6 +80,10 @@ pub struct RefRule {
     pub kind: String,
     pub kind_path: Option<String>,
     pub kinds: Vec<String>,
+    /// Where the element's API group lives, beside its kind: `""` names the
+    /// core group, and a missing group takes `group`, else any group.
+    pub group_path: Option<String>,
+    pub group: Option<String>,
     /// Relation label shown on the row: "mounts", "runs on".
     pub relation: String,
     pub reverse: Reverse,
@@ -117,6 +121,8 @@ impl BuiltinRef {
             kind: self.kind.to_string(),
             kind_path: None,
             kinds: Vec::new(),
+            group_path: None,
+            group: None,
             relation: self.relation.to_string(),
             reverse: self.reverse,
         }
@@ -453,7 +459,7 @@ pub fn pointer_pairs(
     path: &str,
     namespace_path: Option<&str>,
 ) -> Vec<(String, Option<String>)> {
-    pointer_hits(obj, path, namespace_path, None)
+    pointer_hits(obj, path, namespace_path, None, None)
         .into_iter()
         .map(|hit| (hit.name, hit.namespace))
         .collect()
@@ -464,6 +470,7 @@ pub struct Hit {
     pub name: String,
     pub namespace: Option<String>,
     pub kind: Option<String>,
+    pub group: Option<String>,
 }
 
 pub fn pointer_hits(
@@ -471,6 +478,7 @@ pub fn pointer_hits(
     path: &str,
     namespace_path: Option<&str>,
     kind_path: Option<&str>,
+    group_path: Option<&str>,
 ) -> Vec<Hit> {
     let Some(segs) = segments(path) else {
         return Vec::new();
@@ -479,6 +487,7 @@ pub fn pointer_hits(
     expand(obj, &segs, &mut Vec::new(), &mut hits);
     let ns_segs = namespace_path.and_then(segments);
     let kind_segs = kind_path.and_then(segments);
+    let group_segs = group_path.and_then(segments);
     hits.into_iter()
         .map(|(taken, name)| Hit {
             name,
@@ -488,6 +497,11 @@ pub fn pointer_hits(
             kind: kind_segs
                 .as_deref()
                 .and_then(|segs| value_at(obj, segs, &taken)),
+            group: group_segs
+                .as_deref()
+                .and_then(|segs| node_at(obj, segs, &taken))
+                .and_then(Value::as_str)
+                .map(str::to_string),
         })
         .collect()
 }
@@ -498,11 +512,20 @@ fn rule_hits(obj: &Value, rule: &RefRule) -> Vec<Hit> {
         &rule.path,
         rule.namespace_path.as_deref(),
         rule.kind_path.as_deref(),
+        rule.group_path.as_deref(),
     )
 }
 
 /// The string at a pointer whose `*`s are filled from `indices`, in order.
 fn value_at(obj: &Value, segs: &[String], indices: &[usize]) -> Option<String> {
+    match node_at(obj, segs, indices)? {
+        Value::String(s) if !s.is_empty() => Some(s.clone()),
+        _ => None,
+    }
+}
+
+/// The value at a pointer whose `*`s are filled from `indices`, in order.
+fn node_at<'a>(obj: &'a Value, segs: &[String], indices: &[usize]) -> Option<&'a Value> {
     let mut node = obj;
     let mut idx = indices.iter();
     for seg in segs {
@@ -513,10 +536,7 @@ fn value_at(obj: &Value, segs: &[String], indices: &[usize]) -> Option<String> {
             _ => return None,
         };
     }
-    match node {
-        Value::String(s) if !s.is_empty() => Some(s.clone()),
-        _ => None,
-    }
+    Some(node)
 }
 
 // ----- the gather plan --------------------------------------------------
@@ -645,7 +665,7 @@ pub fn plan(
         }
         let mut forwards: Vec<Forward> = Vec::new();
         for hit in rule_hits(&value, &rule) {
-            let Some(target) = targets.pick(&rule, hit.kind.as_deref()) else {
+            let Some(target) = targets.pick(&rule, &hit) else {
                 continue;
             };
             if rule.is_dynamic()
@@ -761,12 +781,12 @@ impl Targets {
         }
     }
 
-    fn pick(&self, rule: &RefRule, named: Option<&str>) -> Option<&KindRef> {
+    fn pick(&self, rule: &RefRule, hit: &Hit) -> Option<&KindRef> {
         if !rule.is_dynamic() {
             return self.all.first();
         }
-        match named {
-            Some(named) => self.all.iter().find(|t| kind_is_named(t, named)),
+        match hit.kind.as_deref() {
+            Some(named) => self.all.iter().find(|t| element_names(rule, hit, t, named)),
             None => self
                 .default
                 .as_ref()
@@ -784,6 +804,17 @@ fn kind_is_named(kind: &KindRef, name: &str) -> bool {
         || kind.plural.eq_ignore_ascii_case(name)
         || (!kind.ar.group.is_empty()
             && format!("{}.{}", kind.plural, kind.ar.group).eq_ignore_ascii_case(name))
+}
+
+/// Whether an element naming kind `named` names `kind`: the group it gives,
+/// or the rule's default, must be `kind`'s too.
+fn element_names(rule: &RefRule, hit: &Hit, kind: &KindRef, named: &str) -> bool {
+    kind_is_named(kind, named)
+        && hit
+            .group
+            .as_deref()
+            .or(rule.group.as_deref())
+            .is_none_or(|group| kind.ar.group.eq_ignore_ascii_case(group))
 }
 
 /// Why a rule can't be followed: a cluster-scoped object naming a namespaced
@@ -830,7 +861,7 @@ pub fn names_source(
 ) -> bool {
     let value = serde_json::to_value(o).unwrap_or(Value::Null);
     rule_hits(&value, rule).into_iter().any(|hit| {
-        if hit.name != source_name || !hit_names_kind(rule, hit.kind.as_deref(), default, source) {
+        if hit.name != source_name || !hit_names_kind(rule, &hit, default, source) {
             return false;
         }
         let Some(source_ns) = source_ns else {
@@ -844,17 +875,12 @@ pub fn names_source(
     })
 }
 
-fn hit_names_kind(
-    rule: &RefRule,
-    named: Option<&str>,
-    default: Option<&KindRef>,
-    source: &KindRef,
-) -> bool {
+fn hit_names_kind(rule: &RefRule, hit: &Hit, default: Option<&KindRef>, source: &KindRef) -> bool {
     if !rule.is_dynamic() {
         return true;
     }
-    match named {
-        Some(named) => kind_is_named(source, named),
+    match hit.kind.as_deref() {
+        Some(named) => element_names(rule, hit, source, named),
         None => default.is_some_and(|d| same_kind(d, source)),
     }
 }
@@ -1739,6 +1765,187 @@ mod tests {
         assert_eq!(rules[0].kinds, ["secretstores"]);
         assert_eq!(rules[0].kind, "");
         assert!(rules[0].is_dynamic());
+    }
+
+    #[test]
+    fn a_group_path_tells_kinds_of_the_same_name_apart() {
+        let (views, warnings) = crate::views::compile(
+            &toml::from_str::<crate::config::Config>(
+                r#"
+                [[views.httproutes.refs]]
+                path = "/spec/parentRefs/*/name"
+                kind_path = "/spec/parentRefs/*/kind"
+                group_path = "/spec/parentRefs/*/group"
+                group = "gateway.networking.k8s.io"
+                kinds = ["gateways.networking.istio.io", "gateways.gateway.networking.k8s.io", "services"]
+                relation = "attaches to"
+                "#,
+            )
+            .unwrap()
+            .views,
+        );
+        assert!(warnings.is_empty(), "{warnings:?}");
+        let istio = kind("networking.istio.io", "Gateway", "gateways", true);
+        let gateway = kind("gateway.networking.k8s.io", "Gateway", "gateways", true);
+        let service = kind("", "Service", "services", true);
+        let route_kind = kind("gateway.networking.k8s.io", "HTTPRoute", "httproutes", true);
+        let mut kinds = cluster();
+        kinds.0.extend([
+            istio.clone(),
+            gateway.clone(),
+            service.clone(),
+            route_kind.clone(),
+        ]);
+        let route = obj(
+            json!({"apiVersion": "gateway.networking.k8s.io/v1", "kind": "HTTPRoute",
+            "metadata": {"name": "web", "namespace": "shop"},
+            "spec": {"parentRefs": [
+                {"name": "public", "kind": "Gateway", "group": "gateway.networking.k8s.io"},
+                {"name": "mesh", "kind": "Gateway", "group": "networking.istio.io"},
+                {"name": "defaulted", "kind": "Gateway"},
+                {"name": "api", "kind": "Service", "group": ""},
+                {"name": "stray", "kind": "Gateway", "group": "example.com"},
+            ]}}),
+        );
+        let plan = self::plan(&views, &kinds, &route_kind, &route, "shop");
+        assert!(plan.warns.is_empty(), "{:?}", plan.warns);
+        let forward: Vec<_> = plan
+            .forward
+            .iter()
+            .map(|f| {
+                (
+                    f.target.ar.group.as_str(),
+                    f.target.plural.as_str(),
+                    f.refs.clone(),
+                )
+            })
+            .collect();
+        let refs = |names: &[&str]| -> Vec<(String, String)> {
+            names
+                .iter()
+                .map(|n| (n.to_string(), "shop".to_string()))
+                .collect()
+        };
+        assert_eq!(
+            forward,
+            [
+                (
+                    "gateway.networking.k8s.io",
+                    "gateways",
+                    refs(&["public", "defaulted"])
+                ),
+                ("networking.istio.io", "gateways", refs(&["mesh"])),
+                ("", "services", refs(&["api"])),
+            ]
+        );
+
+        let istio_obj = obj(
+            json!({"apiVersion": "networking.istio.io/v1", "kind": "Gateway",
+            "metadata": {"name": "public", "namespace": "shop"}}),
+        );
+        let plan = self::plan(&views, &kinds, &istio, &istio_obj, "shop");
+        let back = plan
+            .backward
+            .iter()
+            .find(|b| b.from.plural == "httproutes")
+            .expect("routes are listed for an Istio gateway");
+        let names = |source: &KindRef, name: &str| {
+            names_source(&route, &back.rule, None, source, name, Some("shop"))
+        };
+        assert!(names(&gateway, "public"));
+        assert!(!names(&istio, "public"));
+        assert!(names(&istio, "mesh"));
+        assert!(!names(&gateway, "mesh"));
+        assert!(names(&gateway, "defaulted"));
+        assert!(!names(&istio, "defaulted"));
+        assert!(names(&service, "api"));
+        assert!(!names(&gateway, "stray") && !names(&istio, "stray"));
+    }
+
+    #[test]
+    fn without_a_group_default_an_element_without_a_group_matches_by_kind() {
+        let (views, warnings) = crate::views::compile(
+            &toml::from_str::<crate::config::Config>(
+                r#"
+                [[views.httproutes.refs]]
+                path = "/spec/parentRefs/*/name"
+                kind_path = "/spec/parentRefs/*/kind"
+                group_path = "/spec/parentRefs/*/group"
+                kinds = ["gateways.networking.istio.io", "gateways.gateway.networking.k8s.io"]
+                "#,
+            )
+            .unwrap()
+            .views,
+        );
+        assert!(warnings.is_empty(), "{warnings:?}");
+        let route_kind = kind("gateway.networking.k8s.io", "HTTPRoute", "httproutes", true);
+        let mut kinds = cluster();
+        kinds.0.extend([
+            kind("networking.istio.io", "Gateway", "gateways", true),
+            kind("gateway.networking.k8s.io", "Gateway", "gateways", true),
+            route_kind.clone(),
+        ]);
+        let route = obj(
+            json!({"apiVersion": "gateway.networking.k8s.io/v1", "kind": "HTTPRoute",
+            "metadata": {"name": "web", "namespace": "shop"},
+            "spec": {"parentRefs": [{"name": "public", "kind": "Gateway"}]}}),
+        );
+        let plan = self::plan(&views, &kinds, &route_kind, &route, "shop");
+        assert_eq!(plan.forward.len(), 1);
+        assert_eq!(plan.forward[0].target.ar.group, "networking.istio.io");
+    }
+
+    #[test]
+    fn a_group_path_follows_the_kind_path_rules() {
+        let (views, warnings) = crate::views::compile(
+            &toml::from_str::<crate::config::Config>(
+                r#"
+                [[views.httproutes.refs]]
+                path = "/spec/parentRefs/*/name"
+                kind = "gateways"
+                group_path = "/spec/parentRefs/*/group"
+
+                [[views.httproutes.refs]]
+                path = "/spec/parentRefs/*/name"
+                kind_path = "/spec/parentRefs/*/kind"
+                group_path = "spec/parentRefs/*/group"
+                kinds = ["gateways"]
+
+                [[views.httproutes.refs]]
+                path = "/spec/parentRefs/*/name"
+                kind_path = "/spec/parentRefs/*/kind"
+                group_path = "/spec/other/*/group"
+                kinds = ["gateways"]
+
+                [[views.httproutes.refs]]
+                path = "/spec/parentRefs/*/name"
+                kind_path = "/spec/parentRefs/*/kind"
+                group = "gateway.networking.k8s.io"
+                kinds = ["gateways"]
+
+                [[views.httproutes.refs]]
+                path = "/spec/parentRefs/*/name"
+                kind_path = "/spec/parentRefs/*/kind"
+                group_path = "/spec/parentRefs/*/group"
+                group = ""
+                kinds = ["services"]
+                "#,
+            )
+            .unwrap()
+            .views,
+        );
+        assert_eq!(warnings.len(), 4, "{warnings:?}");
+        assert!(warnings[0].contains("ref 1") && warnings[0].contains("needs kind_path"));
+        assert!(warnings[1].contains("ref 2") && warnings[1].contains("JSON Pointer"));
+        assert!(warnings[2].contains("ref 3") && warnings[2].contains("same arrays"));
+        assert!(warnings[3].contains("ref 4") && warnings[3].contains("needs group_path"));
+        let rules = &views["httproutes"].refs;
+        assert_eq!(rules.len(), 1);
+        assert_eq!(
+            rules[0].group_path.as_deref(),
+            Some("/spec/parentRefs/*/group")
+        );
+        assert_eq!(rules[0].group.as_deref(), Some(""));
     }
 
     #[test]

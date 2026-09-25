@@ -4389,6 +4389,129 @@ async fn adjacent_reverse_lookup_matches_the_kind_named_by_the_object() {
     );
 }
 
+fn gateway_views(app: &mut App) {
+    app.cluster
+        .register_kind("gateway.networking.k8s.io", "Gateway", "gateways", true);
+    app.cluster
+        .register_kind("networking.istio.io", "Gateway", "gateways", true);
+    app.cluster
+        .register_kind("gateway.networking.k8s.io", "HTTPRoute", "httproutes", true);
+    let cfg: crate::config::Config = toml::from_str(
+        r#"
+        [[views.httproutes.refs]]
+        path = "/spec/parentRefs/*/name"
+        kind_path = "/spec/parentRefs/*/kind"
+        group_path = "/spec/parentRefs/*/group"
+        group = "gateway.networking.k8s.io"
+        kinds = ["gateways.networking.istio.io", "gateways.gateway.networking.k8s.io"]
+        relation = "attaches to"
+    "#,
+    )
+    .unwrap();
+    let (views, warnings) = crate::views::compile(&cfg.views);
+    assert!(warnings.is_empty(), "{warnings:?}");
+    app.user_views = views;
+}
+
+fn http_route(name: &str, parent_refs: serde_json::Value) -> serde_json::Value {
+    json!({"apiVersion":"gateway.networking.k8s.io/v1","kind":"HTTPRoute",
+        "metadata":{"name":name,"namespace":"default","uid":format!("{name}-uid")},
+        "spec":{"parentRefs":parent_refs}})
+}
+
+#[tokio::test]
+async fn adjacent_follows_the_group_named_by_the_object() {
+    let root = http_route(
+        "web",
+        json!([
+            {"name":"public","kind":"Gateway","group":"gateway.networking.k8s.io"},
+            {"name":"mesh","kind":"Gateway","group":"networking.istio.io"},
+            {"name":"edge","kind":"Gateway"},
+        ]),
+    );
+    let (app, rx) = test_app();
+    let mut app = app;
+    gateway_views(&mut app);
+    let (mut app, mut rx, responses, requests) =
+        health_report_app_with(app, rx, "httproutes", root.clone());
+    {
+        let mut replies = responses.lock().unwrap();
+        replies.insert(
+            "/apis/gateway.networking.k8s.io/v1/namespaces/default/httproutes/web".into(),
+            (200, root),
+        );
+        for (group, name) in [
+            ("gateway.networking.k8s.io", "public"),
+            ("networking.istio.io", "mesh"),
+            ("gateway.networking.k8s.io", "edge"),
+        ] {
+            replies.insert(
+                format!("/apis/{group}/v1/namespaces/default/gateways/{name}"),
+                (200, json!({"apiVersion":format!("{group}/v1"),"kind":"Gateway","metadata":{"name":name,"namespace":"default"}})),
+            );
+        }
+    }
+    app.handle_key(press(KeyCode::Char('u'))).unwrap();
+    receive_adjacent(&mut app, &mut rx).await;
+    let mut items: Vec<_> = app
+        .adjacent_items
+        .iter()
+        .map(|it| (it.name.as_str(), it.plural.as_str(), it.relation.as_str()))
+        .collect();
+    items.sort();
+    assert_eq!(
+        items,
+        [
+            ("edge", "gateways.gateway.networking.k8s.io", "attaches to"),
+            ("mesh", "gateways.networking.istio.io", "attaches to"),
+            (
+                "public",
+                "gateways.gateway.networking.k8s.io",
+                "attaches to"
+            ),
+        ]
+    );
+    let requests = requests.lock().unwrap();
+    assert!(
+        !requests
+            .iter()
+            .any(|path| path.contains("networking.istio.io") && !path.ends_with("/mesh"))
+    );
+}
+
+#[tokio::test]
+async fn adjacent_reverse_lookup_matches_the_group_named_by_the_object() {
+    let root = json!({"apiVersion":"networking.istio.io/v1","kind":"Gateway",
+        "metadata":{"name":"public","namespace":"default","uid":"gateway-uid"}});
+    let (mut app, rx) = test_app();
+    gateway_views(&mut app);
+    let (mut app, mut rx, responses, _) =
+        health_report_app_with(app, rx, "gateways.networking.istio.io", root.clone());
+    {
+        let mut replies = responses.lock().unwrap();
+        replies.insert(
+            "/apis/networking.istio.io/v1/namespaces/default/gateways/public".into(),
+            (200, root),
+        );
+        replies.insert(
+            "/apis/gateway.networking.k8s.io/v1/namespaces/default/httproutes".into(),
+            (200, json!({"apiVersion":"gateway.networking.k8s.io/v1","kind":"HTTPRouteList","metadata":{},"items":[
+                http_route("istio", json!([{"name":"public","kind":"Gateway","group":"networking.istio.io"}])),
+                http_route("gateway-api", json!([{"name":"public","kind":"Gateway","group":"gateway.networking.k8s.io"}])),
+                http_route("defaulted", json!([{"name":"public","kind":"Gateway"}])),
+            ]})),
+        );
+    }
+    app.handle_key(press(KeyCode::Char('u'))).unwrap();
+    receive_adjacent(&mut app, &mut rx).await;
+    let names: Vec<_> = app
+        .adjacent_items
+        .iter()
+        .map(|it| (it.name.as_str(), it.relation.as_str()))
+        .collect();
+    assert_eq!(names, [("istio", "attaches to")]);
+}
+
 #[tokio::test]
 async fn adjacent_rules_share_pod_lists_and_refresh_reads_them_again() {
     let root = json!({"apiVersion":"v1","kind":"Secret","metadata":{"name":"credentials","namespace":"default","uid":"secret-uid"}});

@@ -506,6 +506,12 @@ pub fn compile(
                 .map(|k| k.trim().to_lowercase())
                 .filter(|k| !k.is_empty())
                 .collect();
+            let group_path = r
+                .group_path
+                .as_deref()
+                .map(str::trim)
+                .filter(|p| !p.is_empty());
+            let group = r.group.as_deref().map(str::trim);
             let mut problem = None;
             if !path.starts_with('/') {
                 problem = Some(format!(
@@ -526,6 +532,20 @@ pub fn compile(
             {
                 problem = Some(format!(
                     "kind_path '{p}' does not follow the same arrays as path '{path}'"
+                ));
+            } else if let Some(p) = group_path
+                && !p.starts_with('/')
+            {
+                problem = Some(format!("group_path '{p}' is not a JSON Pointer"));
+            } else if group_path.is_some() && kind_path.is_none() {
+                problem = Some("group_path needs kind_path, the kind it qualifies".to_string());
+            } else if group.is_some() && group_path.is_none() {
+                problem = Some("group needs group_path, where the group is read from".to_string());
+            } else if let Some(p) = group_path
+                && !wildcards_align(path, p)
+            {
+                problem = Some(format!(
+                    "group_path '{p}' does not follow the same arrays as path '{path}'"
                 ));
             } else if let Some(p) = r.namespace_path.as_deref().map(str::trim)
                 && !p.starts_with('/')
@@ -566,6 +586,8 @@ pub fn compile(
                 kind: kind.to_string(),
                 kind_path: kind_path.map(str::to_string),
                 kinds,
+                group_path: group_path.map(str::to_string),
+                group: group.map(str::to_string),
                 relation: r
                     .relation
                     .as_deref()

@@ -840,6 +840,8 @@ pub struct RefConfig {
     pub kind: String,
     pub kind_path: Option<String>,
     pub kinds: Vec<String>,
+    pub group_path: Option<String>,
+    pub group: Option<String>,
     pub relation: Option<String>,
     pub reverse: Option<String>,
     /// Where the target's namespace lives when it isn't the row's own.
