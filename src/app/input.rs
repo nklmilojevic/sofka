@@ -628,7 +628,8 @@ impl App {
             return;
         };
         let slot = match suggestion.kind {
-            SuggestKind::Namespace | SuggestKind::Context => 1,
+            SuggestKind::Namespace => namespace_word(&self.command).unwrap_or(1),
+            SuggestKind::Context => 1,
             _ => 0,
         };
         let span = self.command.split_whitespace().nth(slot).map(|word| {
@@ -977,14 +978,26 @@ impl App {
                     && !self.command.ends_with(char::is_whitespace)
                 {
                     self.suggest_contexts(context);
-                } else {
+                    return;
+                }
+                if self.cluster.resolve(&head).is_none() {
                     self.cmd_suggestions.clear();
                     self.cmd_sel = 0;
+                    return;
                 }
-                return;
             }
             if self.cluster.resolve(&head).is_some() {
-                self.suggest_namespaces(&arg);
+                match namespace_word(&self.command) {
+                    Some(slot) => {
+                        let arg = self.command.split_whitespace().nth(slot).unwrap_or("");
+                        let arg = arg.to_string();
+                        self.suggest_namespaces(&arg);
+                    }
+                    None => {
+                        self.cmd_suggestions.clear();
+                        self.cmd_sel = 0;
+                    }
+                }
                 return;
             }
         }
@@ -1604,6 +1617,31 @@ fn is_ctx_command(head: &str) -> bool {
     PALETTE_COMMANDS
         .iter()
         .any(|c| matches!(c.action, PaletteAction::Ctx) && c.names.contains(&head))
+}
+
+/// Index of the word a `:resource` query reads as its namespace, following
+/// `ResourceQuery::parse`: the value after `-n`/`--namespace`, else the first
+/// bare word. `None` unless that word is the one being typed.
+fn namespace_word(command: &str) -> Option<usize> {
+    if command.contains(" /") {
+        return None;
+    }
+    let words: Vec<&str> = command.split_whitespace().collect();
+    let typing = if command.ends_with(char::is_whitespace) {
+        words.len()
+    } else {
+        words.len().checked_sub(1)?
+    };
+    let mut i = 1;
+    let slot = loop {
+        match words.get(i).copied() {
+            Some("-n" | "--namespace") => break i + 1,
+            Some("--context") => i += 2,
+            Some(word) if word.starts_with(['-', '@']) => i += 1,
+            _ => break i,
+        }
+    };
+    (slot == typing).then_some(slot)
 }
 
 /// Order scored palette completions: score descending, then label length,

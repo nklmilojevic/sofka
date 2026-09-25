@@ -7622,6 +7622,62 @@ async fn palette_right_replaces_only_the_word_it_completes() {
 }
 
 #[tokio::test]
+async fn palette_right_fills_the_namespace_after_a_flag() {
+    let (mut app, _rx) = test_app();
+    app.ns_list = vec![
+        "<all>".into(),
+        "kube-node-lease".into(),
+        "kube-system".into(),
+    ];
+    app.handle_key(press(KeyCode::Char(':'))).unwrap();
+    type_in_palette(&mut app, "pods -n kube-sys");
+    app.handle_key(press(KeyCode::Right)).unwrap();
+    assert_eq!(app.command, "pods -n kube-system");
+
+    app.command.clear();
+    type_in_palette(&mut app, "pods --context west --namespace kube-sys");
+    app.handle_key(press(KeyCode::Right)).unwrap();
+    assert_eq!(app.command, "pods --context west --namespace kube-system");
+
+    app.command.clear();
+    type_in_palette(&mut app, "pods @west kube-sys");
+    app.handle_key(press(KeyCode::Right)).unwrap();
+    assert_eq!(app.command, "pods @west kube-system");
+
+    app.command.clear();
+    type_in_palette(&mut app, "pods -n ");
+    app.handle_key(press(KeyCode::Right)).unwrap();
+    assert_eq!(app.command, "pods -n all");
+
+    app.command.clear();
+    type_in_palette(&mut app, "pods -n kube-sys");
+    app.handle_key(press(KeyCode::Right)).unwrap();
+    app.handle_key(press(KeyCode::Enter)).unwrap();
+    assert_eq!(app.mode, Mode::Table);
+    assert_eq!(app.kind_plural, "pods");
+    assert_eq!(app.namespace, "kube-system");
+}
+
+#[tokio::test]
+async fn palette_offers_namespaces_only_while_one_is_typed() {
+    let (mut app, _rx) = test_app();
+    app.ns_list = vec!["<all>".into(), "kube-system".into()];
+    app.handle_key(press(KeyCode::Char(':'))).unwrap();
+    for typed in [
+        "pods -n",
+        "pods -n kube-sys --context w",
+        "pods -n kube-sys /api",
+        "pods kube-sys extra",
+    ] {
+        app.command.clear();
+        type_in_palette(&mut app, typed);
+        assert!(app.cmd_suggestions.is_empty(), "{typed}");
+        app.handle_key(press(KeyCode::Right)).unwrap();
+        assert_eq!(app.command, typed);
+    }
+}
+
+#[tokio::test]
 async fn palette_complete_is_rebindable() {
     let (mut app, _rx) = test_app();
     let keys_cfg: crate::config::Config = toml::from_str(
