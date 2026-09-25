@@ -448,24 +448,29 @@ pub fn bundled() -> Vec<Result<Plugin, String>> {
 pub(crate) fn command_conflicts(left: &Plugin, right: &Plugin) -> bool {
     left.name == right.name
         || (left.palette.is_some() && left.palette == right.palette)
-        || (same_key(&left.key, &right.key) && scopes_overlap(&left.scopes, &right.scopes))
+        || keys_conflict(&left.key, &left.scopes, &right.key, &right.scopes)
 }
 
-fn same_key(left: &str, right: &str) -> bool {
+/// Whether two key bindings would fire on the same keypress in some view.
+pub(crate) fn keys_conflict(
+    left: &str,
+    left_scopes: &[String],
+    right: &str,
+    right_scopes: &[String],
+) -> bool {
     if left.is_empty() || right.is_empty() {
         return false;
     }
-    match (
+    let same = match (
         crate::keys::KeyChord::parse(left),
         crate::keys::KeyChord::parse(right),
     ) {
-        (Ok(left), Ok(right)) => left == right,
+        (Ok(left), Ok(right)) => crate::keymap::overlaps(&left, &right),
         _ => left == right,
-    }
-}
-
-fn scopes_overlap(left: &[String], right: &[String]) -> bool {
-    left.is_empty() || right.is_empty() || left.iter().any(|scope| right.contains(scope))
+    };
+    same && (left_scopes.is_empty()
+        || right_scopes.is_empty()
+        || left_scopes.iter().any(|scope| right_scopes.contains(scope)))
 }
 
 pub fn validate_plugin(plugin: &Plugin) -> Result<(), String> {
@@ -1112,7 +1117,7 @@ default = "false"
                 .replace("key = \"x\"", "key = \"shift-x\""),
             scoped_manifest(
                 "scopes = [\"pods\"]",
-                "key = \"control-x\"\nscopes = [\"pods\"]",
+                "key = \"control-X\"\nscopes = [\"pods\"]",
             )
             .replace("key = \"x\"", "key = \"ctrl-x\""),
         ] {

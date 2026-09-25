@@ -325,8 +325,7 @@ impl Catalog {
                     }
                     let mut names = HashSet::new();
                     let mut palettes = HashSet::new();
-                    let mut keys = HashSet::new();
-                    for command in commands {
+                    for (index, command) in commands.iter().enumerate() {
                         if command.name.trim().is_empty()
                             || !names.insert(&command.name)
                             || (command.palette.is_none() && command.key.is_none())
@@ -338,10 +337,19 @@ impl Catalog {
                                     || crate::app::plugin_command_reserved(palette)
                                     || !palettes.insert(palette)
                             })
-                            || command
-                                .key
-                                .as_ref()
-                                .is_some_and(|key| key.trim().is_empty() || !keys.insert(key))
+                            || command.key.as_ref().is_some_and(|key| {
+                                key.trim().is_empty()
+                                    || commands[..index].iter().any(|other| {
+                                        other.key.as_ref().is_some_and(|other_key| {
+                                            crate::plugins::keys_conflict(
+                                                key,
+                                                &command.scopes,
+                                                other_key,
+                                                &other.scopes,
+                                            )
+                                        })
+                                    })
+                            })
                         {
                             return Err(
                                 "invalid or duplicate catalog command name, palette, or key".into(),
@@ -1286,8 +1294,7 @@ mod tests {
         }
     }
 
-    #[test]
-    fn command_catalogs_reject_mixed_empty_and_duplicate_definitions() {
+    fn command_catalog() -> serde_json::Value {
         let mut value = serde_json::to_value(catalog()).unwrap();
         value["schema_version"] = 2.into();
         let release = value["plugins"][0]["versions"][0].as_object_mut().unwrap();
@@ -1308,6 +1315,12 @@ mod tests {
         command.insert("args".into(), serde_json::json!(["status"]));
         command.insert("scopes".into(), serde_json::json!(["certificates"]));
         release.insert("commands".into(), serde_json::json!([command]));
+        value
+    }
+
+    #[test]
+    fn command_catalogs_reject_mixed_empty_and_duplicate_definitions() {
+        let value = command_catalog();
         Catalog::parse(&serde_json::to_vec(&value).unwrap()).unwrap();
         for case in [
             "schema",
@@ -1348,6 +1361,40 @@ mod tests {
             serde_json::from_value::<Catalog>(mixed).is_err(),
             "cached catalogs must reject mixed forms too"
         );
+    }
+
+    #[test]
+    fn command_catalogs_share_keys_only_across_disjoint_scopes() {
+        let with_keys = |first: (&str, serde_json::Value), second: (&str, serde_json::Value)| {
+            let mut value = command_catalog();
+            let commands = value["plugins"][0]["versions"][0]["commands"]
+                .as_array_mut()
+                .unwrap();
+            let mut other = commands[0].clone();
+            other["name"] = "Renew".into();
+            other["palette"] = "cert-manager-renew".into();
+            commands.push(other);
+            for (command, (key, scopes)) in commands.iter_mut().zip([first, second]) {
+                command["key"] = key.into();
+                command["scopes"] = scopes;
+            }
+            Catalog::parse(&serde_json::to_vec(&value).unwrap())
+        };
+        let pods = || serde_json::json!(["pods"]);
+        let deployments = || serde_json::json!(["deployments"]);
+        with_keys(("x", pods()), ("x", deployments())).unwrap();
+        for (first, second) in [
+            (
+                ("x", pods()),
+                ("x", serde_json::json!(["pods", "services"])),
+            ),
+            (("x", pods()), ("x", serde_json::json!([]))),
+            (("ctrl-x", pods()), ("ctrl-X", pods())),
+            (("X", pods()), ("shift-x", pods())),
+        ] {
+            let case = format!("{first:?} {second:?}");
+            assert!(with_keys(first, second).is_err(), "accepted {case}");
+        }
     }
 
     #[test]
