@@ -33,7 +33,7 @@ jobs:
           persist-credentials: false
       - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
         with:
-          version: "0.12.18"
+          version: "0.12.19"
           python-version: "3.12"
       - id: matrix
         run: echo "matrix=$(uv run --locked python scripts/release_packages.py matrix)" >> "$GITHUB_OUTPUT"
@@ -69,7 +69,7 @@ jobs:
           persist-credentials: false
       - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
         with:
-          version: "0.12.18"
+          version: "0.12.19"
           python-version: "3.12"
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
         with:
