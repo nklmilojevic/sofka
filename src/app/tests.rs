@@ -4403,6 +4403,7 @@ fn gateway_views(app: &mut App) {
         kind_path = "/spec/parentRefs/*/kind"
         group_path = "/spec/parentRefs/*/group"
         group = "gateway.networking.k8s.io"
+        kind = "gateways.gateway.networking.k8s.io"
         kinds = ["gateways.networking.istio.io", "gateways.gateway.networking.k8s.io"]
         relation = "attaches to"
     "#,
@@ -4427,10 +4428,10 @@ async fn adjacent_follows_the_group_named_by_the_object() {
             {"name":"public","kind":"Gateway","group":"gateway.networking.k8s.io"},
             {"name":"mesh","kind":"Gateway","group":"networking.istio.io"},
             {"name":"edge","kind":"Gateway"},
+            {"name":"sidecar","group":"networking.istio.io"},
         ]),
     );
-    let (app, rx) = test_app();
-    let mut app = app;
+    let (mut app, rx) = test_app();
     gateway_views(&mut app);
     let (mut app, mut rx, responses, requests) =
         health_report_app_with(app, rx, "httproutes", root.clone());
@@ -4444,6 +4445,7 @@ async fn adjacent_follows_the_group_named_by_the_object() {
             ("gateway.networking.k8s.io", "public"),
             ("networking.istio.io", "mesh"),
             ("gateway.networking.k8s.io", "edge"),
+            ("networking.istio.io", "sidecar"),
         ] {
             replies.insert(
                 format!("/apis/{group}/v1/namespaces/default/gateways/{name}"),
@@ -4469,14 +4471,15 @@ async fn adjacent_follows_the_group_named_by_the_object() {
                 "gateways.gateway.networking.k8s.io",
                 "attaches to"
             ),
+            ("sidecar", "gateways.networking.istio.io", "attaches to"),
         ]
     );
     let requests = requests.lock().unwrap();
-    assert!(
-        !requests
-            .iter()
-            .any(|path| path.contains("networking.istio.io") && !path.ends_with("/mesh"))
-    );
+    assert!(!requests.iter().any(|path| {
+        path.contains("networking.istio.io")
+            && !path.ends_with("/mesh")
+            && !path.ends_with("/sidecar")
+    }));
 }
 
 #[tokio::test]
@@ -4499,17 +4502,23 @@ async fn adjacent_reverse_lookup_matches_the_group_named_by_the_object() {
                 http_route("istio", json!([{"name":"public","kind":"Gateway","group":"networking.istio.io"}])),
                 http_route("gateway-api", json!([{"name":"public","kind":"Gateway","group":"gateway.networking.k8s.io"}])),
                 http_route("defaulted", json!([{"name":"public","kind":"Gateway"}])),
+                http_route("kindless", json!([{"name":"public","group":"networking.istio.io"}])),
+                http_route("kindless-default", json!([{"name":"public"}])),
             ]})),
         );
     }
     app.handle_key(press(KeyCode::Char('u'))).unwrap();
     receive_adjacent(&mut app, &mut rx).await;
-    let names: Vec<_> = app
+    let mut names: Vec<_> = app
         .adjacent_items
         .iter()
         .map(|it| (it.name.as_str(), it.relation.as_str()))
         .collect();
-    assert_eq!(names, [("istio", "attaches to")]);
+    names.sort();
+    assert_eq!(
+        names,
+        [("istio", "attaches to"), ("kindless", "attaches to")]
+    );
 }
 
 #[tokio::test]

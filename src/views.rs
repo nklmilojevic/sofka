@@ -533,6 +533,8 @@ pub fn compile(
                 problem = Some(format!(
                     "kind_path '{p}' does not follow the same arrays as path '{path}'"
                 ));
+            } else if r.group_path.is_some() && group_path.is_none() {
+                problem = Some("group_path is empty".to_string());
             } else if let Some(p) = group_path
                 && !p.starts_with('/')
             {

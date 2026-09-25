@@ -447,6 +447,7 @@ path       = "/spec/parentRefs/*/name"
 kind_path  = "/spec/parentRefs/*/kind"
 group_path = "/spec/parentRefs/*/group"
 group      = "gateway.networking.k8s.io"  # when the element has no group
+kind       = "gateways.gateway.networking.k8s.io"  # when it has no kind
 kinds      = ["gateways.gateway.networking.k8s.io", "gateways.networking.istio.io"]
 relation   = "attaches to"
 ```
@@ -455,8 +456,9 @@ An empty group (`group: ""`) names the core group, as a `Service` backendRef
 does. An element without a group takes `group`; without `group`, it matches
 by kind alone, the first candidate with that kind. `group_path` needs
 `kind_path`, its `*` segments follow the same arrays as `path`, and `group`
-needs `group_path`. An element that falls back to the default `kind` isn't
-checked against its group. Reverse lookups match the group the same way.
+needs `group_path`. An element without a kind takes the default `kind` in the
+group it names, so `{name: mesh, group: networking.istio.io}` reaches Istio's
+Gateway. Reverse lookups match the group the same way.
 
 Each lookup reads the current source object. Press `r` to include changes to
 its references, such as a new pod node assignment or PVC binding. If the source

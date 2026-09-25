@@ -790,7 +790,7 @@ impl Targets {
             None => self
                 .default
                 .as_ref()
-                .and_then(|d| self.all.iter().find(|t| same_kind(t, d))),
+                .and_then(|d| self.all.iter().find(|t| default_names(rule, hit, d, t))),
         }
     }
 }
@@ -804,6 +804,19 @@ fn kind_is_named(kind: &KindRef, name: &str) -> bool {
         || kind.plural.eq_ignore_ascii_case(name)
         || (!kind.ar.group.is_empty()
             && format!("{}.{}", kind.plural, kind.ar.group).eq_ignore_ascii_case(name))
+}
+
+/// Whether an element without a kind names `kind` through the rule's
+/// `default`: the default's kind, in the group the element gives or the
+/// rule's default group, else the default itself.
+fn default_names(rule: &RefRule, hit: &Hit, default: &KindRef, kind: &KindRef) -> bool {
+    match hit.group.as_deref().or(rule.group.as_deref()) {
+        Some(group) => {
+            kind.ar.kind.eq_ignore_ascii_case(&default.ar.kind)
+                && kind.ar.group.eq_ignore_ascii_case(group)
+        }
+        None => same_kind(default, kind),
+    }
 }
 
 /// Whether an element naming kind `named` names `kind`: the group it gives,
@@ -881,7 +894,7 @@ fn hit_names_kind(rule: &RefRule, hit: &Hit, default: Option<&KindRef>, source: 
     }
     match hit.kind.as_deref() {
         Some(named) => element_names(rule, hit, source, named),
-        None => default.is_some_and(|d| same_kind(d, source)),
+        None => default.is_some_and(|d| default_names(rule, hit, d, source)),
     }
 }
 
@@ -1777,6 +1790,7 @@ mod tests {
                 kind_path = "/spec/parentRefs/*/kind"
                 group_path = "/spec/parentRefs/*/group"
                 group = "gateway.networking.k8s.io"
+                kind = "gateways.gateway.networking.k8s.io"
                 kinds = ["gateways.networking.istio.io", "gateways.gateway.networking.k8s.io", "services"]
                 relation = "attaches to"
                 "#,
@@ -1805,6 +1819,8 @@ mod tests {
                 {"name": "defaulted", "kind": "Gateway"},
                 {"name": "api", "kind": "Service", "group": ""},
                 {"name": "stray", "kind": "Gateway", "group": "example.com"},
+                {"name": "kindless-mesh", "group": "networking.istio.io"},
+                {"name": "kindless"},
             ]}}),
         );
         let plan = self::plan(&views, &kinds, &route_kind, &route, "shop");
@@ -1832,9 +1848,13 @@ mod tests {
                 (
                     "gateway.networking.k8s.io",
                     "gateways",
-                    refs(&["public", "defaulted"])
+                    refs(&["public", "defaulted", "kindless"])
                 ),
-                ("networking.istio.io", "gateways", refs(&["mesh"])),
+                (
+                    "networking.istio.io",
+                    "gateways",
+                    refs(&["mesh", "kindless-mesh"])
+                ),
                 ("", "services", refs(&["api"])),
             ]
         );
@@ -1850,7 +1870,14 @@ mod tests {
             .find(|b| b.from.plural == "httproutes")
             .expect("routes are listed for an Istio gateway");
         let names = |source: &KindRef, name: &str| {
-            names_source(&route, &back.rule, None, source, name, Some("shop"))
+            names_source(
+                &route,
+                &back.rule,
+                back.default.as_ref(),
+                source,
+                name,
+                Some("shop"),
+            )
         };
         assert!(names(&gateway, "public"));
         assert!(!names(&istio, "public"));
@@ -1860,6 +1887,10 @@ mod tests {
         assert!(!names(&istio, "defaulted"));
         assert!(names(&service, "api"));
         assert!(!names(&gateway, "stray") && !names(&istio, "stray"));
+        assert!(names(&istio, "kindless-mesh"));
+        assert!(!names(&gateway, "kindless-mesh"));
+        assert!(names(&gateway, "kindless"));
+        assert!(!names(&istio, "kindless"));
     }
 
     #[test]
@@ -1929,16 +1960,23 @@ mod tests {
                 group_path = "/spec/parentRefs/*/group"
                 group = ""
                 kinds = ["services"]
+
+                [[views.httproutes.refs]]
+                path = "/spec/parentRefs/*/name"
+                kind_path = "/spec/parentRefs/*/kind"
+                group_path = " "
+                kinds = ["gateways"]
                 "#,
             )
             .unwrap()
             .views,
         );
-        assert_eq!(warnings.len(), 4, "{warnings:?}");
+        assert_eq!(warnings.len(), 5, "{warnings:?}");
         assert!(warnings[0].contains("ref 1") && warnings[0].contains("needs kind_path"));
         assert!(warnings[1].contains("ref 2") && warnings[1].contains("JSON Pointer"));
         assert!(warnings[2].contains("ref 3") && warnings[2].contains("same arrays"));
         assert!(warnings[3].contains("ref 4") && warnings[3].contains("needs group_path"));
+        assert!(warnings[4].contains("ref 6") && warnings[4].contains("group_path is empty"));
         let rules = &views["httproutes"].refs;
         assert_eq!(rules.len(), 1);
         assert_eq!(
