@@ -86,6 +86,8 @@ Inline plugin entries and their input definitions ignore unknown fields to prese
 
 An inline `[[plugins]]` entry has priority over a package with the same name or command.
 The first package has priority over a later duplicate.
+Two commands can share a key when their `scopes` do not overlap.
+An empty `scopes` list overlaps every scope.
 Built-in commands and resource names have priority over plugin commands.
 To remove a package, remove its directory.
 Then enter `:reload`.

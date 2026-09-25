@@ -18732,6 +18732,38 @@ async fn plugin_commands_respect_scope_dependencies_and_builtin_precedence() {
 }
 
 #[tokio::test]
+async fn one_key_runs_the_plugin_scoped_to_the_current_kind() {
+    let (mut app, _rx) = app_with_pod();
+    app.plugins = [("pods", "pod-x"), ("deployments", "deployment-x")]
+        .into_iter()
+        .map(|(scope, arg)| crate::config::Plugin {
+            name: arg.into(),
+            key: "x".into(),
+            scopes: vec![scope.into()],
+            ..named_plugin("echo", &[arg])
+        })
+        .collect();
+    app.handle_key(press(KeyCode::Char('x'))).unwrap();
+    let Some(Suspend::Shell(argv)) = app.pending.take() else {
+        panic!("pod plugin not invoked");
+    };
+    assert_eq!(argv, ["echo", "pod-x"]);
+
+    app.switch_kind("deployments");
+    apply(
+        &mut app,
+        json!({"apiVersion": "apps/v1", "kind": "Deployment",
+               "metadata": {"name": "web", "namespace": "default"}}),
+    );
+    app.table_state.select(Some(0));
+    app.handle_key(press(KeyCode::Char('x'))).unwrap();
+    let Some(Suspend::Shell(argv)) = app.pending.take() else {
+        panic!("deployment plugin not invoked");
+    };
+    assert_eq!(argv, ["echo", "deployment-x"]);
+}
+
+#[tokio::test]
 async fn network_load_plugins_confirm_and_obey_readonly_and_guardrails() {
     let (mut app, _rx) = app_with_pod();
     let mut plugin = named_plugin("echo", &[]);
