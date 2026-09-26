@@ -63,7 +63,8 @@ Linux releases also include DEB, RPM, Arch Linux, and Alpine APK packages.
 See [release packages](docs/release-packages.md) for installation and platform limits.
 
 ```sh
-brew install nklmilojevic/sofka/sofka   # Homebrew (macOS/Linux)
+brew install nklmilojevic/sofka/sofka   # Homebrew project tap (macOS/Linux)
+brew install sofka                      # Homebrew official core tap (macOS/Linux)
 nix run github:nklmilojevic/sofka       # Nix, nothing to install
 cargo install sofka                     # Cargo
 ```
