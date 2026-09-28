@@ -1718,6 +1718,7 @@ struct ViewKey {
     resource: GroupVersionResource,
     kind_plural: String,
     namespace: String,
+    namespaces: Vec<String>,
     labels: Option<String>,
     fields: Option<String>,
 }
@@ -1788,6 +1789,9 @@ pub struct App {
     pub kind_plural: String,
     /// Active namespace; empty string means "all namespaces".
     pub namespace: String,
+    namespace_patterns: HashMap<String, Vec<String>>,
+    namespace_request: u64,
+    namespace_errors: HashMap<String, String>,
     pub labels: Option<String>,
     pub fields: Option<String>,
     pub owner: Option<OwnerScope>,
@@ -2324,6 +2328,9 @@ impl App {
             kind: None,
             kind_plural: String::new(),
             namespace,
+            namespace_patterns: HashMap::new(),
+            namespace_request: 0,
+            namespace_errors: HashMap::new(),
             labels: None,
             fields: None,
             owner: None,
@@ -2675,6 +2682,8 @@ mod lifecycle;
 mod logs;
 mod metrics_history;
 mod mouse;
+mod namespace_patterns;
+pub use namespace_patterns::NamespacePatternAction;
 mod navigation;
 mod notify;
 mod overlays;

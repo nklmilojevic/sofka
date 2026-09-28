@@ -907,7 +907,7 @@ impl App {
 
     pub(super) fn view_namespace(&self) -> Option<&str> {
         self.kind.as_ref().filter(|kind| kind.namespaced)?;
-        (!self.all_namespaces()).then_some(self.namespace.as_str())
+        (!self.all_namespaces() && !self.namespace_is_pattern()).then_some(self.namespace.as_str())
     }
 
     /// The user-configured view matching the current kind, if any. Synthetic
@@ -976,7 +976,7 @@ impl App {
     pub fn show_namespace_column(&self) -> bool {
         self.kind
             .as_ref()
-            .map(|k| k.namespaced && self.all_namespaces())
+            .map(|k| k.namespaced && (self.all_namespaces() || self.namespace_is_pattern()))
             .unwrap_or(false)
     }
 

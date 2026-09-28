@@ -593,8 +593,17 @@ impl App {
     }
 
     pub(super) fn set_namespace(&mut self, sel: String) {
+        let normalized = normalize_ns(&sel);
+        if namespace_patterns::is_pattern(&normalized) {
+            self.resolve_namespace_pattern(normalized, NamespacePatternAction::Select);
+            return;
+        }
+        self.apply_namespace_selection(normalized);
+    }
+
+    pub(super) fn apply_namespace_selection(&mut self, sel: String) {
         self.save_history_filter();
-        self.namespace = normalize_ns(&sel);
+        self.namespace = sel.clone();
         self.drop_owner_scope();
         self.note_recent_namespace(&sel);
         self.remember_namespace();

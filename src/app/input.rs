@@ -391,7 +391,7 @@ impl App {
         match (key.action, key.code) {
             (Some(Action::Delete), _) => self.request_delete(false),
             (Some(Action::ForceDelete), _) => self.request_delete(true),
-            (Some(Action::Refresh), _) => self.start_watch(),
+            (Some(Action::Refresh), _) => self.refresh_namespace_selection(),
             (Some(Action::Faults), _) if self.kind_plural == "pods" => {
                 if !self.try_bookmark_key(key.event())
                     && !self.try_workspace_key(key.event())
@@ -535,7 +535,7 @@ impl App {
                 } else if self.kind_plural == "helmhistory" {
                     self.request_helm_rollback();
                 } else {
-                    self.start_watch();
+                    self.refresh_namespace_selection();
                 }
             }
             // Action menu on the marked rows, or current: Flux

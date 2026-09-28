@@ -140,13 +140,34 @@ impl App {
             ar: kind.ar.clone(),
             namespaced: kind.namespaced,
         };
-        let plan = crate::adjacent::plan(
+        let mut plan = crate::adjacent::plan(
             &self.user_views,
             &ClusterKinds(&self.cluster),
             &source,
             &obj,
             &self.namespace,
         );
+
+        if self.namespace_is_pattern() {
+            plan.backward = plan
+                .backward
+                .into_iter()
+                .flat_map(|backward| {
+                    if backward.scope == self.namespace {
+                        self.watch_namespaces()
+                            .into_iter()
+                            .map(|scope| {
+                                let mut scoped = backward.clone();
+                                scoped.scope = scope;
+                                scoped
+                            })
+                            .collect::<Vec<_>>()
+                    } else {
+                        vec![backward]
+                    }
+                })
+                .collect();
+        }
 
         let client = self.cluster.client.clone();
         let tx = self.tx.clone();

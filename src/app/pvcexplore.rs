@@ -1094,6 +1094,10 @@ impl App {
     /// always confirmed, because the sweep is by label and the user cannot see
     /// what it will hit first.
     pub(super) fn request_pvc_clean(&mut self) {
+        if self.namespace_is_pattern() {
+            self.flash_warn("select one namespace or all namespaces to clean PVC helpers");
+            return;
+        }
         if self.deny_readonly() {
             return;
         }

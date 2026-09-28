@@ -34,6 +34,20 @@ impl App {
             self.flash_warn(&format!("No resource matches '{}'", query.resource));
             return;
         };
+        if let Some(ns) = &query.namespace
+            && namespace_patterns::is_pattern(&normalize_ns(ns))
+        {
+            self.resolve_namespace_pattern(normalize_ns(ns), NamespacePatternAction::Query(query));
+            return;
+        }
+        self.apply_resolved_resource_query(query, kind);
+    }
+
+    pub(super) fn apply_resolved_resource_query(
+        &mut self,
+        query: crate::filter::ResourceQuery,
+        kind: Kind,
+    ) {
         self.save_history_filter();
         if let Some(ns) = &query.namespace {
             self.namespace = normalize_ns(ns);
@@ -60,6 +74,15 @@ impl App {
     /// Switch kind and (optionally) namespace in one move (`:deploy social`).
     /// `all`/`*` as the namespace selects all namespaces.
     pub fn switch_kind_ns(&mut self, input: &str, ns: Option<&str>) {
+        if let Some(ns) = ns.filter(|ns| namespace_patterns::is_pattern(&normalize_ns(ns)))
+            && self.cluster.resolve(input).is_some()
+        {
+            self.resolve_namespace_pattern(
+                normalize_ns(ns),
+                NamespacePatternAction::Resource(input.to_string()),
+            );
+            return;
+        }
         match self.cluster.resolve(input) {
             Some(kind) => {
                 if let Some(name) = ns
@@ -145,9 +168,20 @@ impl App {
         self.start_watch();
     }
 
-    pub(super) fn namespace_label(&self) -> String {
+    pub fn namespace_label(&self) -> String {
         if self.namespace.is_empty() {
             "all namespaces".to_string()
+        } else if let Some(names) = self.namespace_patterns.get(&self.namespace) {
+            let incomplete = if self.namespace_errors.is_empty() {
+                ""
+            } else {
+                ", incomplete"
+            };
+            format!(
+                "{} ({} namespaces{incomplete})",
+                self.namespace,
+                names.len()
+            )
         } else {
             self.namespace.clone()
         }
@@ -315,6 +349,13 @@ impl App {
     /// selectors and sent to the API, so those filter terms are evaluated
     /// server-side; the generation bump drops the superseded stream.
     pub fn start_watch(&mut self) {
+        if self.namespace_is_pattern() && !self.namespace_patterns.contains_key(&self.namespace) {
+            self.bump_generation();
+            self.resolve_namespace_pattern(self.namespace.clone(), NamespacePatternAction::Resume);
+            return;
+        }
+        self.namespace_request += 1;
+        self.namespace_errors.clear();
         let Some(kind) = self.kind.clone() else {
             return;
         };
@@ -357,12 +398,16 @@ impl App {
             resource: kind.resource_key(),
             kind_plural: self.kind_plural.clone(),
             namespace: self.namespace.clone(),
+            namespaces: self.watch_namespaces(),
             labels: watch_labels.clone(),
             fields: watch_fields.clone(),
         };
         self.store.clear();
         if let Some(cached) = self.view_cache.get(&key) {
             self.store.seed(cached.clone());
+        }
+        if self.namespace_is_pattern() && kind.namespaced {
+            self.store.set_namespaces(&self.watch_namespaces());
         }
         self.watch_key = Some(key);
         self.metrics.clear();
@@ -380,15 +425,7 @@ impl App {
         self.apply_remembered_sort();
         self.apply_view_sort();
         self.maybe_fetch_printer_columns(&kind);
-        let handle = self.cluster.spawn_watch(
-            &kind,
-            &self.namespace,
-            watch_labels,
-            watch_fields,
-            self.generation,
-            self.tx.clone(),
-        );
-        self.tasks.push(handle);
+        self.start_namespace_watches(&kind, watch_labels, watch_fields);
 
         if self.metrics_columns() {
             self.spawn_metrics_poll();
@@ -400,6 +437,7 @@ impl App {
         // Refresh RBAC allow-list when the namespace changes.
         if self.last_rbac_ns.as_deref() != Some(self.namespace.as_str()) {
             self.last_rbac_ns = Some(self.namespace.clone());
+            self.rbac_allowed = None;
             self.refresh_rbac();
         }
     }
@@ -451,6 +489,8 @@ impl App {
     /// resources, and possibly different RBAC, must never be redisplayed).
     pub(super) fn clear_view_cache(&mut self) {
         self.watch_key = None;
+        self.namespace_patterns.clear();
+        self.namespace_request += 1;
         self.view_cache.clear();
         self.view_cache_order.clear();
     }
@@ -502,7 +542,8 @@ impl App {
 
     pub(super) fn server_table_eligible(&self) -> bool {
         let Some(kind) = &self.kind else { return false };
-        !kind.ar.group.is_empty()
+        !self.namespace_is_pattern()
+            && !kind.ar.group.is_empty()
             && kind.ar.plural.to_lowercase() == self.kind_plural
             && !crate::columns::has_curated(&kind.ar.group, &self.kind_plural)
             && self.active_user_view().is_none_or(|v| v.columns.is_empty())
@@ -555,6 +596,9 @@ impl App {
     /// Query SelfSubjectRulesReview for the active namespace to learn which
     /// resources the user can list, so the palette can hide the rest.
     pub(super) fn refresh_rbac(&self) {
+        if self.namespace_is_pattern() {
+            return;
+        }
         use k8s_openapi::api::authorization::v1::{
             SelfSubjectRulesReview, SelfSubjectRulesReviewSpec,
         };
@@ -636,7 +680,11 @@ impl App {
         let tx = self.tx.clone();
         let genr = self.generation;
         let flag = self.gen_flag.clone();
-        let ns = self.namespace.clone();
+        let namespaces = if mkind.namespaced {
+            self.watch_namespaces()
+        } else {
+            vec![String::new()]
+        };
         let ar = mkind.ar.clone();
         let namespaced = mkind.namespaced;
         let is_node = base == "nodes";
@@ -646,43 +694,57 @@ impl App {
                 if flag.load(Ordering::SeqCst) != genr {
                     break;
                 }
-                let api: Api<DynamicObject> = if namespaced && !ns.is_empty() {
-                    Api::namespaced_with(client.clone(), &ns, &ar)
-                } else {
-                    Api::all_with(client.clone(), &ar)
-                };
-                let msg = match api.list(&ListParams::default()).await {
-                    Ok(list) => {
-                        let mut data = HashMap::new();
-                        let mut containers = HashMap::new();
-                        for item in list {
-                            let name = item.metadata.name.clone().unwrap_or_default();
-                            let key = match &item.metadata.namespace {
-                                Some(n) => format!("{n}/{name}"),
-                                None => name,
-                            };
-                            if !is_node {
-                                for (container, usage) in container_usage_of(&item) {
-                                    containers.insert(format!("{key}/{container}"), usage);
-                                }
-                            }
-                            data.insert(key, usage_of(&item, is_node));
+                let mut items = Vec::new();
+                let mut failure = None;
+                let mut succeeded = false;
+                for ns in &namespaces {
+                    let api: Api<DynamicObject> = if namespaced && !ns.is_empty() {
+                        Api::namespaced_with(client.clone(), ns, &ar)
+                    } else {
+                        Api::all_with(client.clone(), &ar)
+                    };
+                    match api.list(&ListParams::default()).await {
+                        Ok(list) => {
+                            succeeded = true;
+                            items.extend(list.items);
                         }
-                        Msg::Metrics {
-                            generation: genr,
-                            data,
-                            containers,
+                        Err(error) => {
+                            failure = Some(format!("{ns}: {error}"));
                         }
                     }
-                    // A present-but-broken metrics API previously died here in
-                    // silence, leaving the CPU/MEM columns frozen forever.
-                    Err(e) => Msg::MetricsError {
+                }
+                let msg = {
+                    let mut data = HashMap::new();
+                    let mut containers = HashMap::new();
+                    for item in items {
+                        let name = item.metadata.name.clone().unwrap_or_default();
+                        let key = match &item.metadata.namespace {
+                            Some(n) => format!("{n}/{name}"),
+                            None => name,
+                        };
+                        if !is_node {
+                            for (container, usage) in container_usage_of(&item) {
+                                containers.insert(format!("{key}/{container}"), usage);
+                            }
+                        }
+                        data.insert(key, usage_of(&item, is_node));
+                    }
+                    Msg::Metrics {
                         generation: genr,
-                        error: e.to_string(),
-                    },
+                        data,
+                        containers,
+                    }
                 };
-                if tx.send(msg).await.is_err() {
+                if succeeded && tx.send(msg).await.is_err() {
                     break;
+                }
+                if let Some(error) = failure {
+                    let _ = tx
+                        .send(Msg::MetricsError {
+                            generation: genr,
+                            error,
+                        })
+                        .await;
                 }
                 tokio::time::sleep(Duration::from_secs(5)).await;
             }
@@ -967,6 +1029,48 @@ impl App {
             None
         };
         match msg {
+            Msg::NamespacePattern {
+                generation,
+                request,
+                pattern,
+                action,
+                result,
+            } if generation == self.generation && request == self.namespace_request => {
+                self.finish_namespace_pattern(pattern, action, result);
+            }
+            Msg::NamespaceWatch {
+                generation,
+                namespace,
+                event,
+            } if generation == self.generation => match *event {
+                Msg::Reset { .. } => {
+                    if self.store.namespace_synced(&namespace) {
+                        self.watch_reconnects = self.watch_reconnects.saturating_add(1);
+                    }
+                    self.store.begin_namespace_reset(&namespace);
+                }
+                Msg::Synced { .. } => {
+                    self.store.finish_namespace_sync(&namespace);
+                    self.namespace_errors.remove(&namespace);
+                    self.clear_rows_cache();
+                }
+                Msg::Error { error, .. } => {
+                    self.namespace_errors
+                        .insert(namespace.clone(), error.clone());
+                    self.handle_msg_inner(Msg::Error {
+                        generation,
+                        error: format!("{namespace}: {error}; results incomplete"),
+                    });
+                }
+                event => {
+                    if matches!(event, Msg::Applied { .. } | Msg::Deleted { .. })
+                        && self.store.namespace_synced(&namespace)
+                    {
+                        self.namespace_errors.remove(&namespace);
+                    }
+                    self.handle_msg(event);
+                }
+            },
             Msg::Reset { generation } if generation == self.generation => {
                 // A reset after the view already synced is the watcher healing
                 // a desync by re-listing — the one place a reconnect is

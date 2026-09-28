@@ -145,6 +145,23 @@ concurrent drains, and full kubectl drain parity are outside this feature.
   visible when you filter the list. The active and context default namespaces
   are available even if namespace listing is restricted. Favourites, recent
   namespaces, and shortcuts keep their existing order. Startup rules do not change.
+- **Namespace patterns**: `:ns *-crons` selects names that end with `-crons`.
+  `*` matches zero or more characters, and `?` matches one character. Patterns
+  match the full name and are case-sensitive. A bare `*` still selects all
+  namespaces. This is wildcard syntax, not regular expression syntax.
+  sofka lists namespaces, then watches resources only in matching namespaces.
+  Namespace discovery requires permission to list namespaces. If discovery fails
+  or no names match, the current selection stays active. The header shows the
+  pattern and match count. Watch errors identify the namespace and mark results
+  as incomplete. Each namespace has separate watch reset state.
+  Run the command again or press `ctrl-r` to update the set.
+  New namespaces are not added automatically. Each match needs a separate watch,
+  so a large match count can increase API load. History and resource navigation
+  reuse the resolved set. Metrics and Xray use that set too.
+  CRD columns remain available; server Table fallback is disabled for patterns.
+  Select one namespace for `:can-i`. Select one namespace or all namespaces for
+  context plugins and PVC helper cleanup. Object actions use the selected
+  object's namespace.
 - **Namespace commands**: `:ns <name>` changes namespace and keeps the current
   resource view, as the namespace switcher does. `:namespace` and `:namespaces`
   accept the same argument; `all` and `*` select all namespaces. From the

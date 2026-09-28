@@ -416,6 +416,18 @@ impl App {
     }
 
     pub(super) fn set_namespace_and_return(&mut self, name: &str) {
+        if namespace_patterns::is_pattern(&normalize_ns(name)) {
+            self.resolve_namespace_pattern(
+                normalize_ns(name),
+                NamespacePatternAction::Resource("namespaces".into()),
+            );
+            return;
+        }
+        self.prepare_namespace_return();
+        self.set_namespace(name.to_string());
+    }
+
+    pub(super) fn prepare_namespace_return(&mut self) {
         // Return to the view we came from if there is one; otherwise (a `:ns`
         // root switch clears the stack) drop into pods scoped to the chosen
         // namespace — namespaces aren't namespaced, so staying on the list would
@@ -433,6 +445,5 @@ impl App {
             self.reset_sort();
             self.table_state.select(Some(0));
         }
-        self.set_namespace(name.to_string());
     }
 }

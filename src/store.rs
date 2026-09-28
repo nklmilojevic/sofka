@@ -264,6 +264,18 @@ pub enum Msg {
         success: String,
         failure: String,
     },
+    NamespacePattern {
+        generation: u64,
+        request: u64,
+        pattern: String,
+        action: crate::app::NamespacePatternAction,
+        result: Result<Vec<String>, String>,
+    },
+    NamespaceWatch {
+        generation: u64,
+        namespace: String,
+        event: Box<Msg>,
+    },
     /// Namespace list for the switcher, fetched off-thread.
     Namespaces {
         generation: u64,
@@ -543,12 +555,16 @@ pub struct Store {
     /// of the table blanking out while the initial list streams in.
     pending: Option<Items>,
     pub synced: bool,
+    namespace_pending: HashMap<String, Items>,
+    namespace_ready: HashMap<String, bool>,
 }
 
 impl Store {
     pub fn clear(&mut self) {
         self.version += 1;
         self.items.clear();
+        self.namespace_pending.clear();
+        self.namespace_ready.clear();
         self.pending = None;
         self.synced = false;
     }
@@ -558,6 +574,8 @@ impl Store {
     pub fn seed(&mut self, items: Items) {
         self.version += 1;
         self.items = items;
+        self.namespace_pending.clear();
+        self.namespace_ready.clear();
         self.pending = None;
         self.synced = false;
     }
@@ -566,6 +584,8 @@ impl Store {
     /// empty.
     pub fn take_items(&mut self) -> Items {
         self.version += 1;
+        self.namespace_pending.clear();
+        self.namespace_ready.clear();
         self.pending = None;
         self.synced = false;
         std::mem::take(&mut self.items)
@@ -602,10 +622,49 @@ impl Store {
         }
     }
 
+    pub fn set_namespaces(&mut self, namespaces: &[String]) {
+        self.namespace_ready = namespaces.iter().map(|ns| (ns.clone(), false)).collect();
+    }
+
+    pub fn namespace_synced(&self, namespace: &str) -> bool {
+        self.namespace_ready
+            .get(namespace)
+            .copied()
+            .unwrap_or(false)
+    }
+
+    pub fn begin_namespace_reset(&mut self, namespace: &str) {
+        self.version += 1;
+        self.synced = false;
+        self.namespace_ready.insert(namespace.to_string(), false);
+        self.namespace_pending
+            .insert(namespace.to_string(), Items::default());
+    }
+
+    pub fn finish_namespace_sync(&mut self, namespace: &str) {
+        self.version += 1;
+        if let Some(fresh) = self.namespace_pending.remove(namespace) {
+            self.items
+                .retain(|_, obj| obj.metadata.namespace.as_deref() != Some(namespace));
+            self.items.extend(fresh);
+        }
+        self.namespace_ready.insert(namespace.to_string(), true);
+        self.synced = self.namespace_ready.values().all(|ready| *ready);
+    }
+
     pub fn apply(&mut self, key: String, obj: DynamicObject) -> StoreMutation {
         self.version += 1;
         let key: RowKey = key.into();
         let obj = Arc::new(obj);
+        if let Some(pending) = obj
+            .metadata
+            .namespace
+            .as_ref()
+            .and_then(|ns| self.namespace_pending.get_mut(ns))
+        {
+            pending.insert(key, obj);
+            return StoreMutation::Buffered;
+        }
         match &mut self.pending {
             Some(pending) => {
                 pending.insert(key, obj);
@@ -620,6 +679,13 @@ impl Store {
 
     pub fn remove(&mut self, key: &str) -> StoreMutation {
         self.version += 1;
+        if let Some(pending) = key
+            .split_once('/')
+            .and_then(|(ns, _)| self.namespace_pending.get_mut(ns))
+        {
+            pending.remove(key);
+            return StoreMutation::Buffered;
+        }
         match &mut self.pending {
             Some(pending) => {
                 pending.remove(key);
@@ -637,10 +703,15 @@ impl Store {
     /// timeline diffs, where [`Self::get`]'s stale visible copy would be wrong
     /// if the same object came through the buffer twice.
     pub fn latest(&self, key: &str) -> Option<&Arc<DynamicObject>> {
-        self.pending
-            .as_ref()
+        key.split_once('/')
+            .and_then(|(ns, _)| self.namespace_pending.get(ns))
             .and_then(|p| p.get(key))
-            .or_else(|| self.items.get(key))
+            .or_else(|| {
+                self.pending
+                    .as_ref()
+                    .and_then(|p| p.get(key))
+                    .or_else(|| self.items.get(key))
+            })
     }
 
     /// Monotonic mutation counter — see [`Self::version`]'s field docs.

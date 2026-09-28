@@ -246,6 +246,10 @@ impl App {
 
         // Marked rows drive a bulk run; otherwise the single selection.
         let targets = if plugin.target.as_deref() == Some("context") {
+            if self.namespace_is_pattern() {
+                self.flash_warn("select one namespace or all namespaces for a context plugin");
+                return;
+            }
             vec![(String::new(), self.namespace.clone())]
         } else {
             self.action_targets()

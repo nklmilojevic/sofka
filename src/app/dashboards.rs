@@ -156,7 +156,7 @@ impl App {
         let tx = self.tx.clone();
         let genr = self.generation;
         let flag = self.gen_flag.clone();
-        let ns = self.namespace.clone();
+        let namespaces = self.watch_namespaces();
 
         let handle = tokio::spawn(async move {
             loop {
@@ -164,11 +164,24 @@ impl App {
                     break;
                 }
                 let mut warn = None;
-                let roots = list_or_warn(&client, &root_ar, root_nsd, &ns, &mut warn).await;
+                let mut roots = Vec::new();
+                for ns in if root_nsd {
+                    namespaces.clone()
+                } else {
+                    vec![String::new()]
+                } {
+                    roots.extend(list_or_warn(&client, &root_ar, root_nsd, &ns, &mut warn).await);
+                }
                 let mut pool: Vec<(String, DynamicObject)> = Vec::new();
                 for (label, ar, namespaced) in &pool_kinds {
-                    for o in list_or_warn(&client, ar, *namespaced, &ns, &mut warn).await {
-                        pool.push((label.clone(), o));
+                    for ns in if *namespaced {
+                        namespaces.clone()
+                    } else {
+                        vec![String::new()]
+                    } {
+                        for o in list_or_warn(&client, ar, *namespaced, &ns, &mut warn).await {
+                            pool.push((label.clone(), o));
+                        }
                     }
                 }
 

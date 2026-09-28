@@ -10,6 +10,10 @@ impl App {
     /// namespace, from a `SelfSubjectRulesReview`. Rendered as a scrollable
     /// document (arrives as [`Msg::Detail`]).
     pub(super) fn open_can_i(&mut self) {
+        if self.namespace_is_pattern() {
+            self.flash_warn("select one namespace to review its permissions");
+            return;
+        }
         self.set_return_mode();
         let client = self.cluster.client.clone();
         let tx = self.tx.clone();
@@ -68,6 +72,10 @@ impl App {
             .next()
             .map(normalize_ns)
             .unwrap_or_else(|| self.namespace.clone());
+        if namespace_patterns::is_pattern(&ns) {
+            self.flash_warn("select one namespace or pass an exact namespace to review access");
+            return;
+        }
         let scope = if ns.is_empty() {
             "cluster-wide".to_string()
         } else {

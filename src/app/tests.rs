@@ -8,6 +8,7 @@ use tokio::sync::mpsc::{self, Receiver};
 mod flux;
 mod kubeconfig;
 mod label_filter;
+mod namespace_patterns;
 mod node_roles;
 mod oidc;
 mod plugin_form;
