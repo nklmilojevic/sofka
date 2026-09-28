@@ -286,11 +286,28 @@ warning and the view is ignored.
 
 Custom columns also overlay sofka's curated core-resource views. Pods already
 show `IP` and `NODE` after toggling wide mode with `w`, and nodes always show
-`VERSION`. Press `w` in the nodes view to show `LABELS` as comma-separated
-`key=value` pairs in key order. Nodes without labels show `<none>`.
+`VERSION`. Press `w` in the nodes view to show `INTERNAL-IP`, `EXTERNAL-IP`,
+and `LABELS`. The IP columns select entries in `status.addresses` by type,
+independent of array order. Multiple addresses of the same type, including
+IPv4 and IPv6, are separated by commas. Missing or empty addresses show `<none>`.
+`LABELS` shows comma-separated `key=value` pairs in key order.
+Nodes without labels show `<none>`.
 Use `/` to find text in the visible labels. To filter by an exact label, press
 `/`, enter `-l karpenter.sh/nodepool=default`, then press Enter. Label selectors
 also work with wide mode off. Use the label key and value for your cluster.
+
+Use a built-in IP column to show the address in the default view without an
+array index:
+
+```toml
+[[views."v1/nodes".columns]]
+name = "INTERNAL-IP"
+builtin = "INTERNAL-IP"
+```
+
+Use `builtin = "EXTERNAL-IP"` for external addresses. Add `wide = true` to
+show a configured column only in wide mode. Custom `path` columns still use
+JSON Pointer and do not support general JSONPath filters.
 
 Custom columns can show individual labels or annotations. Extra node topology
 and provisioning details can come from labels:

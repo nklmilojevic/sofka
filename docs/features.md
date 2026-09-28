@@ -202,7 +202,8 @@ concurrent drains, and full kubectl drain parity are outside this feature.
   can supply the view. Explicit views and built-in columns keep their priority.
   Table cells use watch updates, periodic refresh, and a polling fallback.
   `w` toggles wide-only columns (kubectl `-o wide`), including
-  node labels. Add `@<namespace>` to a view key to select columns for one
+  node IP addresses and labels. IP addresses are selected by type, independent
+  of array order. Add `@<namespace>` to a view key to select columns for one
   namespace. See
   [Views and thresholds](views.md).
 - **Drill-down navigation** with a breadcrumb stack: workload/service → pods,

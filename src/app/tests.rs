@@ -14555,6 +14555,124 @@ async fn user_view_adds_provider_label_columns_to_curated_nodes() {
 }
 
 #[tokio::test]
+async fn node_ip_columns_select_addresses_by_type_in_wide_mode() {
+    let (mut app, _rx) = test_app();
+    app.switch_kind("nodes");
+    let narrow_headers = app.display_headers().to_vec();
+    assert!(
+        !narrow_headers
+            .iter()
+            .any(|h| h == "INTERNAL-IP" || h == "EXTERNAL-IP")
+    );
+    let cases = [
+        (
+            json!([
+                {"type": "Hostname", "address": "worker-1"},
+                {"type": "ExternalIP", "address": "203.0.113.5"},
+                {"type": "InternalIP", "address": "10.0.0.5"},
+                {"type": "InternalIP", "address": "fd00::5"},
+                {"type": "ExternalIP", "address": "2001:db8::5"}
+            ]),
+            "10.0.0.5,fd00::5",
+            "203.0.113.5,2001:db8::5",
+        ),
+        (
+            json!([
+                {"type": "InternalIP", "address": "10.0.0.6"},
+                {"type": "Hostname", "address": "worker-1"},
+                {"type": "ExternalIP", "address": "203.0.113.6"}
+            ]),
+            "10.0.0.6",
+            "203.0.113.6",
+        ),
+        (
+            json!([
+                {"type": "Hostname", "address": "worker-1"},
+                {"type": "InternalIP", "address": ""},
+                {"type": "InternalIP", "address": null},
+                {"type": "InternalIP", "address": 7},
+                {"type": "ExternalIP"},
+                {"type": "ExternalIP", "address": ""},
+                {"address": "10.0.0.7"}
+            ]),
+            "<none>",
+            "<none>",
+        ),
+        (json!([]), "<none>", "<none>"),
+        (Value::Null, "<none>", "<none>"),
+    ];
+    app.handle_key(press(KeyCode::Char('w'))).unwrap();
+    let headers = app.display_headers().to_vec();
+    let internal = headers.iter().position(|h| h == "INTERNAL-IP").unwrap();
+    let external = headers.iter().position(|h| h == "EXTERNAL-IP").unwrap();
+    for (version, (addresses, internal_ip, external_ip)) in cases.into_iter().enumerate() {
+        let mut obj = json!({
+            "apiVersion": "v1", "kind": "Node",
+            "metadata": {"name": "worker-1", "resourceVersion": version.to_string()},
+            "status": {}
+        });
+        if !addresses.is_null() {
+            obj["status"]["addresses"] = addresses;
+        }
+        apply(&mut app, obj);
+        let rows = app.rows();
+        app.ensure_table_cell_cache(&rows);
+        let cache = app.table_cell_cache();
+        let (cells, _) = cache.get(&row_key(rows[0])).unwrap();
+        assert_eq!(cells[internal], internal_ip);
+        assert_eq!(cells[external], external_ip);
+    }
+    app.handle_key(press(KeyCode::Char('w'))).unwrap();
+    assert_eq!(app.display_headers().to_vec(), narrow_headers);
+}
+
+#[tokio::test]
+async fn node_ip_builtin_columns_work_in_custom_views() {
+    let (mut app, _rx) = test_app();
+    install_views(
+        &mut app,
+        r#"
+        [views."v1/nodes"]
+        replace = true
+        columns = [
+            { name = "NAME", builtin = "NAME" },
+            { name = "IP", builtin = "INTERNAL-IP" },
+            { name = "PUBLIC-IP", builtin = "EXTERNAL-IP", wide = true },
+        ]
+    "#,
+    );
+    app.switch_kind("nodes");
+    apply(
+        &mut app,
+        json!({
+            "apiVersion": "v1", "kind": "Node",
+            "metadata": {"name": "worker-1"},
+            "status": {"addresses": [
+                {"type": "Hostname", "address": "worker-1"},
+                {"type": "ExternalIP", "address": "203.0.113.5"},
+                {"type": "InternalIP", "address": "10.0.0.5"}
+            ]}
+        }),
+    );
+    app.handle_key(press(KeyCode::Char('w'))).unwrap();
+    assert_eq!(app.display_headers().to_vec(), ["NAME", "IP", "PUBLIC-IP"]);
+    {
+        let rows = app.rows();
+        app.ensure_table_cell_cache(&rows);
+        let cache = app.table_cell_cache();
+        let (cells, _) = cache.get(&row_key(rows[0])).unwrap();
+        assert_eq!(cells, &["worker-1", "10.0.0.5", "203.0.113.5"]);
+    }
+    app.handle_key(press(KeyCode::Char('w'))).unwrap();
+    assert_eq!(app.display_headers().to_vec(), ["NAME", "IP"]);
+    let rows = app.rows();
+    app.ensure_table_cell_cache(&rows);
+    let cache = app.table_cell_cache();
+    let (cells, _) = cache.get(&row_key(rows[0])).unwrap();
+    assert_eq!(cells, &["worker-1", "10.0.0.5"]);
+}
+
+#[tokio::test]
 async fn node_wide_labels_render_filter_and_refresh() {
     let (mut app, _rx) = test_app();
     app.switch_kind("nodes");

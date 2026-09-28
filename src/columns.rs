@@ -173,6 +173,8 @@ const NODE_COLUMNS: &[Column] = &[
     column("ROLES", col_node_roles),
     column("TAINTS", col_node_taints),
     column("VERSION", col_node_version),
+    wide_column("INTERNAL-IP", col_node_internal_ip),
+    wide_column("EXTERNAL-IP", col_node_external_ip),
     wide_column("LABELS", col_node_labels),
     column("AGE", col_age),
 ];
@@ -1222,6 +1224,28 @@ fn col_node_taints<'a>(ctx: &CellContext<'a>) -> Cow<'a, str> {
 
 fn col_node_version<'a>(ctx: &CellContext<'a>) -> Cow<'a, str> {
     Cow::Borrowed(sget(ctx.data, &["status", "nodeInfo", "kubeletVersion"]).unwrap_or_default())
+}
+
+fn col_node_internal_ip<'a>(ctx: &CellContext<'a>) -> Cow<'a, str> {
+    node_addresses(ctx.data, "InternalIP")
+}
+
+fn col_node_external_ip<'a>(ctx: &CellContext<'a>) -> Cow<'a, str> {
+    node_addresses(ctx.data, "ExternalIP")
+}
+
+fn node_addresses<'a>(data: &'a Value, address_type: &str) -> Cow<'a, str> {
+    let addresses: Vec<&str> = array(data, "/status/addresses")
+        .iter()
+        .filter(|entry| entry.get("type").and_then(Value::as_str) == Some(address_type))
+        .filter_map(|entry| entry.get("address").and_then(Value::as_str))
+        .filter(|address| !address.is_empty())
+        .collect();
+    match addresses.as_slice() {
+        [] => Cow::Borrowed("<none>"),
+        [address] => Cow::Borrowed(address),
+        _ => Cow::Owned(addresses.join(",")),
+    }
 }
 
 fn col_node_labels<'a>(ctx: &CellContext<'a>) -> Cow<'a, str> {
