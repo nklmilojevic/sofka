@@ -182,6 +182,8 @@ impl App {
                 self.namespace,
                 names.len()
             )
+        } else if self.namespace_is_pattern() {
+            format!("{} (unresolved)", self.namespace)
         } else {
             self.namespace.clone()
         }

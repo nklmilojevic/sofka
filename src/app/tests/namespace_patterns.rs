@@ -393,3 +393,98 @@ async fn namespace_patterns_return_from_namespace_list_and_cancel_older_request(
     assert_eq!(app.namespace, "*-crons");
     assert_eq!(app.watch_namespaces(), vec!["a-crons"]);
 }
+
+#[tokio::test]
+async fn namespace_patterns_failed_restore_keeps_pattern_without_fallback() {
+    for result in [Ok(vec![]), Err("namespace listing forbidden".into())] {
+        let (mut app, _rx) = pattern_app();
+        app.namespace = "*-crons".into();
+        type_resource_query(&mut app, "pods");
+        let generation = app.generation;
+        let task_count = app.tasks.len();
+        app.handle_msg(Msg::NamespacePattern {
+            generation,
+            request: app.namespace_request,
+            pattern: "*-crons".into(),
+            action: NamespacePatternAction::Resume,
+            result,
+        });
+        assert_eq!(app.namespace, "*-crons");
+        assert_eq!(app.namespace_label(), "*-crons (unresolved)");
+        assert!(app.watch_namespaces().is_empty());
+        assert!(app.store.is_empty());
+        assert!(app.watch_key.is_none());
+        assert_eq!(
+            app.generation, generation,
+            "failure must not start a fallback watch"
+        );
+        assert_eq!(app.tasks.len(), task_count);
+        assert!(
+            app.flash
+                .contains("pattern unresolved; no resources loaded")
+        );
+        app.handle_key(ctrl(KeyCode::Char('r'))).unwrap();
+        resolve(&mut app, &["a-crons"]);
+        assert_eq!(app.watch_namespaces(), vec!["a-crons"]);
+    }
+}
+
+#[tokio::test]
+async fn namespace_patterns_api_failed_restore_never_loads_default_namespace() {
+    let names = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let (cluster, mut requests) = pattern_api(names.clone());
+    let (tx, mut rx) = mpsc::channel(1024);
+    let mut app = App::new(cluster, tx);
+    app.namespace = "*-crons".into();
+    type_resource_query(&mut app, "pods");
+    drain_until(&mut app, &mut rx, |a| {
+        a.flash.contains("pattern unresolved; no resources loaded")
+    })
+    .await;
+    assert_eq!(app.namespace, "*-crons");
+    assert!(app.store.is_empty());
+    while let Ok(uri) = requests.try_recv() {
+        assert_eq!(uri.path(), "/api/v1/namespaces");
+    }
+    *names.lock().unwrap() = vec!["a-crons".into()];
+    app.handle_key(ctrl(KeyCode::Char('r'))).unwrap();
+    drain_until(&mut app, &mut rx, |a| a.store.synced).await;
+    assert!(app.store.get("a-crons/same").is_some());
+    assert!(app.store.get("default/same").is_none());
+}
+
+#[tokio::test]
+async fn namespace_patterns_relist_removes_cached_and_live_keys_only_in_its_namespace() {
+    let (mut app, _rx) = pattern_app();
+    type_resource_query(&mut app, "pods");
+    type_resource_query(&mut app, "ns *-crons");
+    resolve(&mut app, &["a-crons", "b-crons"]);
+    let generation = app.generation;
+    for ns in ["a-crons", "b-crons"] {
+        watch(&mut app, ns, Msg::Reset { generation });
+        pod(&mut app, ns, "cached");
+        watch(&mut app, ns, Msg::Synced { generation });
+    }
+    type_resource_query(&mut app, "nodes");
+    app.handle_key(press(KeyCode::Char('['))).unwrap();
+    assert_eq!(app.store.len(), 2);
+    let generation = app.generation;
+    watch(&mut app, "a-crons", Msg::Reset { generation });
+    watch(&mut app, "a-crons", Msg::Synced { generation });
+    assert!(app.store.get("a-crons/cached").is_none());
+    assert!(app.store.get("b-crons/cached").is_some());
+    pod(&mut app, "a-crons", "live");
+    pod(&mut app, "a-crons", "deleted");
+    watch(
+        &mut app,
+        "a-crons",
+        Msg::Deleted {
+            generation,
+            key: "a-crons/deleted".into(),
+        },
+    );
+    watch(&mut app, "a-crons", Msg::Reset { generation });
+    watch(&mut app, "a-crons", Msg::Synced { generation });
+    assert_eq!(app.store.len(), 1);
+    assert!(app.store.get("b-crons/cached").is_some());
+}

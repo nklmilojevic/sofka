@@ -151,7 +151,10 @@ concurrent drains, and full kubectl drain parity are outside this feature.
   namespaces. This is wildcard syntax, not regular expression syntax.
   sofka lists namespaces, then watches resources only in matching namespaces.
   Namespace discovery requires permission to list namespaces. If discovery fails
-  or no names match, the current selection stays active. The header shows the
+  or no names match, the current selection stays active. If a saved pattern
+  cannot be resolved at startup or after a context switch, the pattern stays
+  selected with an empty view and an `unresolved` label. Press `ctrl-r` to retry
+  or select an exact namespace. The header shows the
   pattern and match count. Watch errors identify the namespace and mark results
   as incomplete. Each namespace has separate watch reset state.
   Run the command again or press `ctrl-r` to update the set.

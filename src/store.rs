@@ -1,6 +1,6 @@
 //! In-memory store of the currently-watched resource set.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -557,6 +557,7 @@ pub struct Store {
     pub synced: bool,
     namespace_pending: HashMap<String, Items>,
     namespace_ready: HashMap<String, bool>,
+    namespace_keys: HashMap<String, HashSet<RowKey>>,
 }
 
 impl Store {
@@ -565,6 +566,7 @@ impl Store {
         self.items.clear();
         self.namespace_pending.clear();
         self.namespace_ready.clear();
+        self.namespace_keys.clear();
         self.pending = None;
         self.synced = false;
     }
@@ -576,6 +578,7 @@ impl Store {
         self.items = items;
         self.namespace_pending.clear();
         self.namespace_ready.clear();
+        self.namespace_keys.clear();
         self.pending = None;
         self.synced = false;
     }
@@ -586,6 +589,7 @@ impl Store {
         self.version += 1;
         self.namespace_pending.clear();
         self.namespace_ready.clear();
+        self.namespace_keys.clear();
         self.pending = None;
         self.synced = false;
         std::mem::take(&mut self.items)
@@ -624,6 +628,20 @@ impl Store {
 
     pub fn set_namespaces(&mut self, namespaces: &[String]) {
         self.namespace_ready = namespaces.iter().map(|ns| (ns.clone(), false)).collect();
+        self.namespace_keys = namespaces
+            .iter()
+            .map(|ns| (ns.clone(), HashSet::new()))
+            .collect();
+        for (key, obj) in &self.items {
+            if let Some(keys) = obj
+                .metadata
+                .namespace
+                .as_ref()
+                .and_then(|ns| self.namespace_keys.get_mut(ns))
+            {
+                keys.insert(key.clone());
+            }
+        }
     }
 
     pub fn namespace_synced(&self, namespace: &str) -> bool {
@@ -644,8 +662,14 @@ impl Store {
     pub fn finish_namespace_sync(&mut self, namespace: &str) {
         self.version += 1;
         if let Some(fresh) = self.namespace_pending.remove(namespace) {
-            self.items
-                .retain(|_, obj| obj.metadata.namespace.as_deref() != Some(namespace));
+            let keys = self
+                .namespace_keys
+                .entry(namespace.to_string())
+                .or_default();
+            for key in keys.drain() {
+                self.items.remove(&key);
+            }
+            keys.extend(fresh.keys().cloned());
             self.items.extend(fresh);
         }
         self.namespace_ready.insert(namespace.to_string(), true);
@@ -670,10 +694,20 @@ impl Store {
                 pending.insert(key, obj);
                 StoreMutation::Buffered
             }
-            None => match self.items.insert(key, obj) {
-                Some(_) => StoreMutation::Updated,
-                None => StoreMutation::Inserted,
-            },
+            None => {
+                if let Some(keys) = obj
+                    .metadata
+                    .namespace
+                    .as_ref()
+                    .and_then(|ns| self.namespace_keys.get_mut(ns))
+                {
+                    keys.insert(key.clone());
+                }
+                match self.items.insert(key, obj) {
+                    Some(_) => StoreMutation::Updated,
+                    None => StoreMutation::Inserted,
+                }
+            }
         }
     }
 
@@ -691,10 +725,18 @@ impl Store {
                 pending.remove(key);
                 StoreMutation::Buffered
             }
-            None => match self.items.remove(key) {
-                Some(_) => StoreMutation::Removed,
-                None => StoreMutation::Unchanged,
-            },
+            None => {
+                if let Some(keys) = key
+                    .split_once('/')
+                    .and_then(|(ns, _)| self.namespace_keys.get_mut(ns))
+                {
+                    keys.remove(key);
+                }
+                match self.items.remove(key) {
+                    Some(_) => StoreMutation::Removed,
+                    None => StoreMutation::Unchanged,
+                }
+            }
         }
     }
 

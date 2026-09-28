@@ -30,7 +30,13 @@ impl App {
         self.namespace_patterns
             .get(&self.namespace)
             .cloned()
-            .unwrap_or_else(|| vec![self.namespace.clone()])
+            .unwrap_or_else(|| {
+                if self.namespace_is_pattern() {
+                    Vec::new()
+                } else {
+                    vec![self.namespace.clone()]
+                }
+            })
     }
 
     pub(super) fn refresh_namespace_selection(&mut self) {
@@ -103,24 +109,22 @@ impl App {
         let mut names = match result {
             Ok(names) if !names.is_empty() => names,
             result => {
-                // A restored pattern can need discovery before its first watch.
-                if self.namespace_is_pattern()
-                    && !self.namespace_patterns.contains_key(&self.namespace)
-                {
-                    self.namespace = self
-                        .watch_key
-                        .as_ref()
-                        .map(|key| key.namespace.clone())
-                        .filter(|ns| !is_pattern(ns))
-                        .unwrap_or_else(|| self.cluster.default_namespace.clone());
-                    if is_pattern(&self.namespace) {
-                        self.namespace.clear();
-                    }
-                    self.start_watch();
+                let unresolved = self.namespace_is_pattern()
+                    && !self.namespace_patterns.contains_key(&self.namespace);
+                if unresolved {
+                    self.store.clear();
+                    self.watch_key = None;
+                    self.namespace_errors.clear();
+                    self.clear_rows_cache();
                 }
+                let state = if unresolved {
+                    "pattern unresolved; no resources loaded"
+                } else {
+                    "selection unchanged"
+                };
                 self.flash_warn(&match result {
-                    Ok(_) => format!("no namespaces match {pattern}; selection unchanged"),
-                    Err(error) => format!("cannot select {pattern}: {error}; selection unchanged"),
+                    Ok(_) => format!("no namespaces match {pattern}; {state}"),
+                    Err(error) => format!("cannot select {pattern}: {error}; {state}"),
                 });
                 return;
             }
