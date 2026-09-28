@@ -382,6 +382,7 @@ impl App {
         self.clear_progress_flash();
         self.stop_plugins();
         self.cancel_adjacent_request();
+        self.cancel_rbac();
         self.generation += 1;
         self.container_history = metrics_history::ContainerHistory::default();
         self.gen_flag.store(self.generation, Ordering::SeqCst);
@@ -960,6 +961,7 @@ impl App {
         self.clear_progress_flash();
         self.stop_plugins();
         self.cancel_adjacent_request();
+        self.cancel_rbac();
         self.generation += 1;
         self.container_history = metrics_history::ContainerHistory::default();
         self.gen_flag.store(self.generation, Ordering::SeqCst);
@@ -1331,6 +1333,11 @@ impl App {
                 );
                 self.pulse = data;
             }
+            Msg::RbacReport {
+                generation,
+                request,
+                report,
+            } => self.receive_rbac(generation, request, report),
             Msg::Rbac {
                 generation,
                 ns,

@@ -368,6 +368,7 @@ fn draw_base(frame: &mut Frame, app: &mut App) {
         Mode::Help => draw_help(frame, app, chunks[1]),
         Mode::Pulse => draw_pulse(frame, app, chunks[1]),
         Mode::Xray => draw_xray(frame, app, chunks[1]),
+        Mode::Rbac => draw_rbac(frame, app, chunks[1]),
         Mode::Explain => draw_explain(frame, app, chunks[1]),
         Mode::Gitops => draw_gitops(frame, app, chunks[1]),
         Mode::Argocd => draw_argocd(frame, app, chunks[1]),
@@ -408,6 +409,7 @@ fn draw_base(frame: &mut Frame, app: &mut App) {
             Mode::Help => draw_help(frame, app, chunks[1]),
             Mode::Pulse => draw_pulse(frame, app, chunks[1]),
             Mode::Xray => draw_xray(frame, app, chunks[1]),
+            Mode::Rbac => draw_rbac(frame, app, chunks[1]),
             Mode::Explain => draw_explain(frame, app, chunks[1]),
             Mode::Gitops => draw_gitops(frame, app, chunks[1]),
             Mode::Argocd => draw_argocd(frame, app, chunks[1]),
@@ -795,6 +797,7 @@ fn header_hints(app: &App) -> Vec<Line<'static>> {
             | Mode::Gitops
             | Mode::Argocd
             | Mode::Adjacent
+            | Mode::Rbac
             | Mode::PortForwards
     ) {
         return Vec::new();
@@ -2798,6 +2801,18 @@ fn build_help(app: &App, width: usize) -> (Vec<Line<'static>>, String) {
         "reload config · config sources + warnings · runtime diagnostics",
     ));
     lines.push(bind(
+        ":users / :groups",
+        "subjects from RBAC bindings; Enter shows directly bound rules",
+    ));
+    lines.push(bind(
+        ":policy [u:name | g:name | s:ns/name]",
+        "directly bound rules; no argument uses the selected service account",
+    ));
+    lines.push(bind(
+        "Enter on RBAC roles/bindings",
+        "show rules; r refreshes; Esc returns",
+    ));
+    lines.push(bind(
         ":can-i",
         "what you can do here · :can-i <verb> <resource> [ns] checks one action",
     ));
@@ -4569,6 +4584,58 @@ fn draw_palette(frame: &mut Frame, app: &mut App, area: Rect) {
 }
 
 /// Xray hierarchical tree (owner → children → containers).
+fn draw_rbac(frame: &mut Frame, app: &mut App, area: Rect) {
+    let show_scrollbars = app.scrollbars_visible();
+    if app.rbac.pending {
+        frame.render_widget(
+            Paragraph::new("Reading RBAC data...").block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(app.rbac.document.title.clone()),
+            ),
+            area,
+        );
+    } else if matches!(app.rbac.query, Some(crate::app::rbac::Query::Subjects(_))) {
+        let mut items: Vec<ListItem> = app
+            .rbac
+            .subjects
+            .iter()
+            .map(|(s, count)| ListItem::new(format!("{}    {count} binding(s)", s.label())))
+            .collect();
+        if items.is_empty() {
+            items.push(ListItem::new("No subjects found in the data read."));
+        }
+        let warning_height = if app.rbac.warnings.is_empty() { 0 } else { 3 };
+        let areas =
+            Layout::vertical([Constraint::Length(warning_height), Constraint::Min(0)]).split(area);
+        if warning_height > 0 {
+            frame.render_widget(
+                Paragraph::new(format!("INCOMPLETE: {}", app.rbac.warnings.join("; ")))
+                    .wrap(ratatui::widgets::Wrap { trim: false })
+                    .style(Style::default().fg(theme::yellow())),
+                areas[0],
+            );
+        }
+        render_framed_list(
+            frame,
+            show_scrollbars,
+            areas[1],
+            items,
+            Span::styled(format!(" {} ", app.rbac.document.title), theme::title()),
+            &mut app.rbac.selection,
+        );
+    } else {
+        draw_scrollable(
+            frame,
+            show_scrollbars,
+            false,
+            &mut app.rbac.document,
+            area,
+            theme::sky(),
+        );
+    }
+}
+
 fn draw_xray(frame: &mut Frame, app: &mut App, area: Rect) {
     let show_scrollbars = app.scrollbars_visible();
     let glyph = |kind: &str| match kind {
