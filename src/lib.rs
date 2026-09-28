@@ -39,6 +39,7 @@ pub mod plugin_install;
 pub mod plugins;
 pub mod providers;
 pub mod pvcexplore;
+pub mod rbac;
 pub mod redact;
 pub mod rightsize;
 pub mod sanitize;

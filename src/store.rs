@@ -31,6 +31,11 @@ pub enum RefreshContent {
 /// Messages flowing from watch tasks to the UI loop. Tagged with a
 /// `generation` so messages from a superseded watch can be discarded.
 pub enum Msg {
+    RbacReport {
+        generation: u64,
+        request: u64,
+        report: crate::app::rbac::Report,
+    },
     Drain {
         claim: StatusClaim,
         message: String,

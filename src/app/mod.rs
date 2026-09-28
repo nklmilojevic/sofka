@@ -186,6 +186,7 @@ pub enum Mode {
     Prompt,
     Pulse,
     Xray,
+    Rbac,
     /// Deterministic "why is this unhealthy?" explanation for the selection.
     Explain,
     /// Session-local state-change history for the selection.
@@ -618,6 +619,9 @@ enum PaletteAction {
     Ctx,
     Pulse,
     Xray,
+    Users,
+    Groups,
+    Policy,
     Explain,
     Timeline,
     Gitops,
@@ -693,6 +697,18 @@ const PALETTE_COMMANDS: &[PaletteCommand] = &[
     PaletteCommand {
         action: PaletteAction::Argocd,
         names: &["argocd", "argo"],
+    },
+    PaletteCommand {
+        action: PaletteAction::Users,
+        names: &["users"],
+    },
+    PaletteCommand {
+        action: PaletteAction::Groups,
+        names: &["groups"],
+    },
+    PaletteCommand {
+        action: PaletteAction::Policy,
+        names: &["policy"],
     },
     PaletteCommand {
         action: PaletteAction::CanI,
@@ -2177,6 +2193,7 @@ pub struct App {
     /// Parent of the explain view. Kept separately because an evidence view
     /// (logs/events) temporarily uses `return_mode` to return to Explain.
     explain_return: Mode,
+    pub rbac: rbac::State,
     /// Adjacent view: the connected objects, cursor, title, and the object
     /// they were gathered for (kept so `r` can re-gather).
     pub adjacent_items: Vec<crate::store::AdjacentItem>,
@@ -2516,6 +2533,7 @@ impl App {
             explain_request: 0,
             explain_claim: None,
             explain_return: Mode::Table,
+            rbac: rbac::State::default(),
             adjacent_items: Vec::new(),
             adjacent_state: ListState::default(),
             adjacent_title: String::new(),
@@ -2681,6 +2699,7 @@ mod overlays;
 mod pickers;
 mod plugins;
 mod pvcexplore;
+pub mod rbac;
 mod refresh;
 mod rightsize;
 mod rows;

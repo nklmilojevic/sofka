@@ -13,6 +13,7 @@ mod oidc;
 mod plugin_form;
 mod popup_wrapping;
 mod proxy;
+mod rbac;
 mod restart;
 mod scale;
 mod server_table;
@@ -14073,7 +14074,7 @@ async fn help_search_keeps_section_headings_with_matching_bindings() {
             .collect();
         let text = rows.join("\n");
         if filter == "enter" {
-            let mut matches = 1; // The command section heading also matches.
+            let mut matches = 3; // The command heading and two RBAC command rows also match.
             for (scope, action, _) in app.keymap.entries() {
                 let label = app.keymap.label(scope, action);
                 if !label.contains("enter") {
@@ -30544,6 +30545,7 @@ fn key_action_fixture(scope: &str) -> (App, Receiver<Msg>) {
         "prompt" => Mode::Prompt,
         "pulse" => Mode::Pulse,
         "xray" => Mode::Xray,
+        "rbac" => Mode::Rbac,
         "explain" => Mode::Explain,
         "timeline" => Mode::Timeline,
         "gitops" => Mode::Gitops,

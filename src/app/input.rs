@@ -102,6 +102,9 @@ impl App {
         {
             self.clear_document_source();
         }
+        if self.should_quit || (before == Mode::Rbac && self.mode != Mode::Rbac && !overlay) {
+            self.cancel_rbac();
+        }
         if self.should_quit || (self.plugin_run == run && self.mode != before && !overlay) {
             self.stop_plugins();
         }
@@ -215,6 +218,7 @@ impl App {
             Mode::Prompt => self.key_prompt(key),
             Mode::Pulse => self.key_pulse(key),
             Mode::Xray => self.key_xray(key),
+            Mode::Rbac => self.key_rbac(key),
             Mode::Explain => self.key_explain(key),
             Mode::Timeline => self.key_timeline(key),
             Mode::Gitops => self.key_gitops(key),
@@ -258,6 +262,7 @@ impl App {
             Mode::Prompt => "prompt",
             Mode::Pulse => "pulse",
             Mode::Xray => "xray",
+            Mode::Rbac => "rbac",
             Mode::Explain => "explain",
             Mode::Timeline => "timeline",
             Mode::Gitops => "gitops",
@@ -679,6 +684,7 @@ impl App {
         self.cancel_gitops_request();
         self.cancel_argocd_request();
         self.cancel_adjacent_request();
+        self.cancel_rbac();
         self.help_return = Mode::Table;
         self.palette_return = Mode::Table;
         let query_head = typed.split_whitespace().next().unwrap_or("");
@@ -818,6 +824,9 @@ impl App {
             PaletteAction::Argocd => self.open_argocd(),
             PaletteAction::Adjacent => self.open_adjacent(),
             PaletteAction::CanI => self.open_can_i(),
+            PaletteAction::Users => self.open_rbac_subjects(crate::rbac::SubjectKind::User),
+            PaletteAction::Groups => self.open_rbac_subjects(crate::rbac::SubjectKind::Group),
+            PaletteAction::Policy => self.open_policy(""),
             PaletteAction::Journal => self.open_journal(),
             PaletteAction::Debug => self.request_debug(None),
             PaletteAction::DebugClean => self.request_debug_cleanup(),
@@ -886,6 +895,10 @@ impl App {
             } else {
                 self.start_find(&rest);
             }
+            return true;
+        }
+        if let Some(args) = cmd.strip_prefix("policy ") {
+            self.open_policy(args.trim());
             return true;
         }
         // `:can-i <verb> <resource> [ns]` checks one action; bare `:can-i`

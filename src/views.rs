@@ -176,6 +176,10 @@ const DRILL_PLACEHOLDERS: &[&str] = &["name", "namespace"];
 /// so [`compile`] rejects it with a warning instead of letting it sit there
 /// doing nothing. Keep in step with the match in `src/app/navigation.rs`.
 pub const BUILTIN_DRILLS: &[&str] = &[
+    "roles",
+    "clusterroles",
+    "rolebindings",
+    "clusterrolebindings",
     "namespaces",
     "nodes",
     "deployments",
@@ -460,7 +464,14 @@ pub fn compile(
                 .map_or(key.as_str(), |(resource, _)| resource)
                 .to_lowercase();
             let plural = key_plural(&key_lc);
-            if BUILTIN_DRILLS.contains(&plural) {
+            let rbac_plural = matches!(
+                plural,
+                "roles" | "clusterroles" | "rolebindings" | "clusterrolebindings"
+            );
+            let rbac_group = key_lc
+                .split_once('/')
+                .is_none_or(|(group, _)| group == "rbac.authorization.k8s.io");
+            if BUILTIN_DRILLS.contains(&plural) && (!rbac_plural || rbac_group) {
                 warnings.push(format!(
                     "views.\"{key}\": drill is ignored — `enter` on {plural} has a \
                      built-in drill-down that config doesn't replace"
@@ -1820,6 +1831,32 @@ mod tests {
                 .any(|w| w.contains("`enter` on deployments")),
             "{warnings:?}"
         );
+    }
+
+    #[test]
+    fn rbac_drills_leave_other_api_groups_configurable() {
+        for plural in [
+            "roles",
+            "clusterroles",
+            "rolebindings",
+            "clusterrolebindings",
+        ] {
+            for prefix in [
+                "",
+                "rbac.authorization.k8s.io/",
+                "rbac.authorization.k8s.io/v1/",
+                "example.com/",
+                "example.com/v1/",
+            ] {
+                let key = format!("{prefix}{plural}");
+                let (views, warnings) = compile_toml(&format!(
+                    "[views.\"{key}\"]\ndrill = {{ kind = \"secrets\" }}"
+                ));
+                let custom = prefix.starts_with("example.com/");
+                assert_eq!(views[&key].drill.is_some(), custom, "{key}");
+                assert_eq!(warnings.is_empty(), custom, "{key}: {warnings:?}");
+            }
+        }
     }
 
     #[test]

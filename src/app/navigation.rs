@@ -46,6 +46,14 @@ impl App {
                 Some(sel) => self.drill_to_pods(ns, Some(sel), None, format!("svc/{name}")),
                 None => self.flash_warn("service has no selector"),
             },
+            "roles" | "clusterroles" | "rolebindings" | "clusterrolebindings"
+                if self
+                    .kind
+                    .as_ref()
+                    .is_some_and(|k| k.ar.group == "rbac.authorization.k8s.io") =>
+            {
+                self.open_rbac_object(&obj)
+            }
             "pods" => self.open_containers(&obj),
             "cronjobs" => self.drill_into_cronjob_jobs(&obj),
             // enter on a CRD lists its custom resources, not its YAML.

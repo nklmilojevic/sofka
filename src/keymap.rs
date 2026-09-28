@@ -248,6 +248,7 @@ const VIEW_SCOPES: &[&str] = &[
     "gitops",
     "argocd",
     "adjacent",
+    "rbac",
     "diff",
     "events",
     "flux_menu",
@@ -261,6 +262,16 @@ const VIEW_SCOPES: &[&str] = &[
 ];
 
 const DEFAULTS: &[(&str, Action, &[&str])] = &[
+    ("rbac", Action::Accept, &["enter"]),
+    ("rbac", Action::Back, &["esc"]),
+    ("rbac", Action::Close, &["q"]),
+    ("rbac", Action::Down, &["j", "down"]),
+    ("rbac", Action::Up, &["k", "up"]),
+    ("rbac", Action::First, &["g", "home"]),
+    ("rbac", Action::Last, &["G", "end"]),
+    ("rbac", Action::Refresh, &["r"]),
+    ("rbac", Action::PageDown, &["ctrl-f", "pagedown"]),
+    ("rbac", Action::PageUp, &["ctrl-b", "pageup"]),
     ("adjacent", Action::Accept, &["enter"]),
     ("adjacent", Action::Back, &["esc"]),
     ("adjacent", Action::Close, &["q"]),
