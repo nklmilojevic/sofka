@@ -14569,8 +14569,10 @@ async fn node_ip_columns_select_addresses_by_type_in_wide_mode() {
             json!([
                 {"type": "Hostname", "address": "worker-1"},
                 {"type": "ExternalIP", "address": "203.0.113.5"},
+                {"type": "InternalIP", "address": " \t"},
                 {"type": "InternalIP", "address": "10.0.0.5"},
                 {"type": "InternalIP", "address": "fd00::5"},
+                {"type": "ExternalIP", "address": "\r\n "},
                 {"type": "ExternalIP", "address": "2001:db8::5"}
             ]),
             "10.0.0.5,fd00::5",
@@ -14594,6 +14596,14 @@ async fn node_ip_columns_select_addresses_by_type_in_wide_mode() {
                 {"type": "ExternalIP"},
                 {"type": "ExternalIP", "address": ""},
                 {"address": "10.0.0.7"}
+            ]),
+            "<none>",
+            "<none>",
+        ),
+        (
+            json!([
+                {"type": "InternalIP", "address": " \t\n"},
+                {"type": "ExternalIP", "address": "\r\n "}
             ]),
             "<none>",
             "<none>",

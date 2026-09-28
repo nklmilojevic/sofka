@@ -1239,7 +1239,7 @@ fn node_addresses<'a>(data: &'a Value, address_type: &str) -> Cow<'a, str> {
         .iter()
         .filter(|entry| entry.get("type").and_then(Value::as_str) == Some(address_type))
         .filter_map(|entry| entry.get("address").and_then(Value::as_str))
-        .filter(|address| !address.is_empty())
+        .filter(|address| !address.trim().is_empty())
         .collect();
     match addresses.as_slice() {
         [] => Cow::Borrowed("<none>"),
