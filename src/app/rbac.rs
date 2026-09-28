@@ -1,7 +1,7 @@
 use super::*;
 use crate::rbac::{Bindings, ObjectRef, Subject, SubjectKind};
 use k8s_openapi::api::rbac::v1::{ClusterRole, ClusterRoleBinding, PolicyRule, Role, RoleBinding};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Clone, Debug)]
 pub enum Query {
@@ -36,10 +36,21 @@ pub struct State {
     pub document: Scrollable,
     pub warnings: Vec<String>,
     pub pending: bool,
-    history: Vec<(Query, Option<usize>)>,
+    history: Vec<(Query, Option<Subject>)>,
+    selection_target: Option<Subject>,
     request: u64,
     task: Option<JoinHandle<()>>,
     claim: Option<StatusClaim>,
+}
+
+impl State {
+    fn selected_subject(&self) -> Option<Subject> {
+        self.selection
+            .selected()
+            .and_then(|i| self.subjects.get(i))
+            .map(|(subject, _)| subject.clone())
+            .or_else(|| self.selection_target.clone())
+    }
 }
 
 impl App {
@@ -47,7 +58,7 @@ impl App {
         self.set_return_mode();
         self.rbac.history.clear();
         self.rbac.selection.select(None);
-        self.load_rbac(Query::Subjects(kind));
+        self.load_rbac(Query::Subjects(kind), None);
     }
 
     pub(super) fn open_policy(&mut self, args: &str) {
@@ -75,7 +86,7 @@ impl App {
         };
         self.set_return_mode();
         self.rbac.history.clear();
-        self.load_rbac(Query::Subject(subject));
+        self.load_rbac(Query::Subject(subject), None);
     }
 
     pub(super) fn open_rbac_object(&mut self, obj: &DynamicObject) {
@@ -91,10 +102,10 @@ impl App {
         };
         self.set_return_mode();
         self.rbac.history.clear();
-        self.load_rbac(Query::Object(target));
+        self.load_rbac(Query::Object(target), None);
     }
 
-    fn load_rbac(&mut self, query: Query) {
+    fn load_rbac(&mut self, query: Query, selection: Option<Subject>) {
         self.cancel_rbac();
         let request = self.rbac.request;
         let generation = self.generation;
@@ -103,6 +114,8 @@ impl App {
             wrap: true,
             ..Default::default()
         };
+        self.rbac.selection_target = selection;
+        self.rbac.selection.select(None);
         self.rbac.subjects.clear();
         self.rbac.warnings.clear();
         self.rbac.pending = true;
@@ -144,12 +157,16 @@ impl App {
         if let Some(claim) = self.rbac.claim.take() {
             self.clear_claimed_status(claim);
         }
-        let selected = self.rbac.selection.selected().unwrap_or(0);
         self.rbac.subjects = report.subjects;
-        self.rbac.selection.select(
-            (!self.rbac.subjects.is_empty())
-                .then_some(selected.min(self.rbac.subjects.len().saturating_sub(1))),
-        );
+        let selected = match &self.rbac.selection_target {
+            Some(subject) => self
+                .rbac
+                .subjects
+                .iter()
+                .position(|(candidate, _)| candidate == subject),
+            None => (!self.rbac.subjects.is_empty()).then_some(0),
+        };
+        self.rbac.selection.select(selected);
         let mut lines = Vec::new();
         for warning in &report.warnings {
             lines.push(format!("INCOMPLETE: {warning}"));
@@ -166,8 +183,7 @@ impl App {
             Some(Action::Back | Action::Close) => {
                 self.cancel_rbac();
                 if let Some((query, selection)) = self.rbac.history.pop() {
-                    self.rbac.selection.select(selection);
-                    self.load_rbac(query);
+                    self.load_rbac(query, selection);
                 } else {
                     self.mode = self.return_mode;
                     self.restore_selection();
@@ -175,7 +191,8 @@ impl App {
             }
             Some(Action::Refresh) => {
                 if let Some(query) = self.rbac.query.clone() {
-                    self.load_rbac(query);
+                    let selection = self.rbac.selected_subject();
+                    self.load_rbac(query, selection);
                 }
             }
             Some(Action::Accept) if subjects => {
@@ -187,11 +204,9 @@ impl App {
                     .cloned()
                 {
                     if let Some(query) = self.rbac.query.clone() {
-                        self.rbac
-                            .history
-                            .push((query, self.rbac.selection.selected()));
+                        self.rbac.history.push((query, Some(subject.clone())));
                     }
-                    self.load_rbac(Query::Subject(subject));
+                    self.load_rbac(Query::Subject(subject), None);
                 }
             }
             Some(Action::Down) if subjects => list_step(&mut self.rbac.selection, len, true),
@@ -276,15 +291,17 @@ async fn append_grants(
     grants: Vec<crate::rbac::Grant>,
     report: &mut Report,
 ) {
-    let mut cache = BTreeMap::new();
+    let roles: BTreeSet<_> = grants.iter().map(|grant| grant.role.clone()).collect();
+    let cache: BTreeMap<_, _> = futures_util::stream::iter(roles)
+        .map(|role| async move {
+            let rules = role_rules(client, &role).await;
+            (role, rules)
+        })
+        .buffer_unordered(8)
+        .collect()
+        .await;
     for grant in grants {
-        let rules = match cache.get(&grant.role) {
-            Some(rules) => rules,
-            None => {
-                let rules = role_rules(client, &grant.role).await;
-                cache.entry(grant.role.clone()).or_insert(rules)
-            }
-        };
+        let rules = &cache[&grant.role];
         report.lines.push(String::new());
         report
             .lines

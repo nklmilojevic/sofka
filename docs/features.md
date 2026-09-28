@@ -405,7 +405,9 @@ concurrent drains, and full kubectl drain parity are outside this feature.
   Each rule keeps its source binding, source role, namespace scope, resource
   names, subresources, and non-resource URLs. A RoleBinding to a ClusterRole
   remains limited to namespaced resources in the binding's namespace.
-  The view reads data on open and on `r`; `Esc` returns. It needs permission
+  The view reads data on open and on `r`; `Esc` returns. Refresh keeps the
+  selected subject. If that subject is no longer listed, the selection clears.
+  It needs permission
   to list bindings and get referenced roles. Failed reads are marked
   **INCOMPLETE**. Empty results mean no matches in the data read.
   This view shows direct subject matches. It does not resolve group membership

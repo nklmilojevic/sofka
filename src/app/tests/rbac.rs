@@ -559,3 +559,170 @@ async fn enter_on_roles_in_another_api_group_keeps_the_configured_drill() {
     assert_eq!(app.kind_plural, "secrets");
     assert_eq!(app.fields.as_deref(), Some("metadata.name=custom"));
 }
+
+fn subject_fixtures(names: &[&str]) -> Responses {
+    let mut responses = fixtures();
+    responses
+        .get_mut(&format!("{BASE}/rolebindings"))
+        .unwrap()
+        .1["items"] = json!(
+        names
+            .iter()
+            .map(|name| binding(
+                "RoleBinding",
+                Some("a"),
+                name,
+                "Role",
+                "reader",
+                json!([{"kind":"User","name":name}])
+            ))
+            .collect::<Vec<_>>()
+    );
+    responses
+}
+
+#[tokio::test]
+async fn refresh_and_back_keep_subject_identity_when_rows_move_or_disappear() {
+    let (mut app, mut rx) = test_app();
+    app.cluster.client = client(subject_fixtures(&["alice", "bob", "carol"])).0;
+    palette(&mut app, "users");
+    let msg = reply(&mut rx).await;
+    app.handle_msg(msg);
+    app.handle_key(press(KeyCode::Down)).unwrap();
+    assert_eq!(app.rbac.selection.selected(), Some(1));
+    app.cluster.client = client(subject_fixtures(&["aaron", "alice", "bob", "carol"])).0;
+    app.handle_key(press(KeyCode::Char('r'))).unwrap();
+    let old = reply(&mut rx).await;
+    app.handle_key(press(KeyCode::Char('r'))).unwrap();
+    app.handle_msg(old);
+    let msg = reply(&mut rx).await;
+    app.handle_msg(msg);
+    assert_eq!(app.rbac.selection.selected(), Some(2));
+    app.handle_key(press(KeyCode::Enter)).unwrap();
+    let msg = reply(&mut rx).await;
+    app.handle_msg(msg);
+    assert!(app.rbac.document.title.ends_with("User bob"));
+    app.cluster.client = client(subject_fixtures(&["bob", "carol"])).0;
+    app.handle_key(press(KeyCode::Esc)).unwrap();
+    let msg = reply(&mut rx).await;
+    app.handle_msg(msg);
+    assert_eq!(app.rbac.selection.selected(), Some(0));
+    assert_eq!(app.rbac.subjects[0].0, Subject::User("bob".into()));
+    app.cluster.client = client(subject_fixtures(&["alice", "carol"])).0;
+    app.handle_key(press(KeyCode::Char('r'))).unwrap();
+    let msg = reply(&mut rx).await;
+    app.handle_msg(msg);
+    assert_eq!(app.rbac.selection.selected(), None);
+    app.handle_key(press(KeyCode::Enter)).unwrap();
+    assert!(matches!(
+        app.rbac.query,
+        Some(super::super::rbac::Query::Subjects(_))
+    ));
+    assert!(!app.rbac.pending);
+}
+
+#[tokio::test]
+async fn role_reads_run_in_bounded_parallel_and_output_stays_ordered() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let (mut app, mut rx) = test_app();
+    let mut responses = fixtures();
+    let mut bindings = Vec::new();
+    for i in 0..20 {
+        let name = format!("role-{i:02}");
+        bindings.push(binding(
+            "RoleBinding",
+            Some("a"),
+            &name,
+            "Role",
+            &name,
+            json!([{"kind":"User","name":"alice"}]),
+        ));
+        responses.insert(
+            format!("{BASE}/namespaces/a/roles/{name}"),
+            (200, role("Role", Some("a"), &name, "pods")),
+        );
+    }
+    bindings.push(binding(
+        "RoleBinding",
+        Some("b"),
+        "duplicate",
+        "ClusterRole",
+        "shared",
+        json!([{"kind":"User","name":"alice"}]),
+    ));
+    bindings.push(binding(
+        "RoleBinding",
+        Some("c"),
+        "duplicate",
+        "ClusterRole",
+        "shared",
+        json!([{"kind":"User","name":"alice"}]),
+    ));
+    responses
+        .get_mut(&format!("{BASE}/rolebindings"))
+        .unwrap()
+        .1["items"] = json!(bindings);
+    let active = Arc::new(AtomicUsize::new(0));
+    let peak = Arc::new(AtomicUsize::new(0));
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let (a, p, c) = (active.clone(), peak.clone(), calls.clone());
+    app.cluster.client = kube::Client::new(
+        tower::service_fn(move |request: http::Request<kube::client::Body>| {
+            let path = request.uri().path().to_string();
+            let (status, body) = responses.get(&path).cloned().unwrap_or((403, json!({
+                "apiVersion":"v1", "kind":"Status", "status":"Failure", "reason":"Forbidden", "code":403, "message":"unused test request"
+            })));
+            let role_read = path.contains("/roles/") || path.contains("/clusterroles/");
+            let (active, peak, calls) = (a.clone(), p.clone(), c.clone());
+            async move {
+                if role_read {
+                    calls.lock().unwrap().push(path.clone());
+                    let count = active.fetch_add(1, Ordering::SeqCst) + 1;
+                    peak.fetch_max(count, Ordering::SeqCst);
+                    tokio::time::sleep(Duration::from_millis(if path.ends_with("00") {
+                        40
+                    } else {
+                        10
+                    }))
+                    .await;
+                    active.fetch_sub(1, Ordering::SeqCst);
+                }
+                Ok::<_, std::convert::Infallible>(
+                    http::Response::builder()
+                        .status(status)
+                        .body(http_body_util::Full::new(hyper::body::Bytes::from(
+                            body.to_string(),
+                        )))
+                        .unwrap(),
+                )
+            }
+        }),
+        "default",
+    );
+    palette(&mut app, "policy u:alice");
+    let msg = reply(&mut rx).await;
+    app.handle_msg(msg);
+    let peak = peak.load(Ordering::SeqCst);
+    assert!(peak > 1 && peak <= 8, "peak concurrency: {peak}");
+    assert_eq!(
+        calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|path| path.ends_with("/shared"))
+            .count(),
+        1
+    );
+    assert_eq!(calls.lock().unwrap().len(), 21);
+    let lines: Vec<_> = app
+        .rbac
+        .document
+        .lines
+        .iter()
+        .filter(|line| line.starts_with("Binding:"))
+        .collect();
+    let mut sorted = lines.clone();
+    sorted.sort();
+    assert_eq!(lines, sorted);
+    assert!(app.rbac.warnings.is_empty());
+}
