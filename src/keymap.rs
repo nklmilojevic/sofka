@@ -150,6 +150,7 @@ impl Action {
     pub fn kinds(self) -> Option<&'static [&'static str]> {
         match self {
             Self::Faults | Self::Attach | Self::PreviousLogs => Some(&["pods"]),
+            Self::PortForward => Some(&["pods", "services"]),
             Self::Inspect => Some(&["secrets", "persistentvolumeclaims"]),
             Self::Cordon | Self::Uncordon | Self::Drain => Some(&["nodes"]),
             Self::SetImage => Some(&[

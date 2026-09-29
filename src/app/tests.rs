@@ -30904,6 +30904,132 @@ async fn kind_specific_keys_fall_through_to_plugins_on_other_kinds() {
 }
 
 #[tokio::test]
+async fn port_forward_keys_follow_resource_scope() {
+    for (binding, event, config) in [
+        ("f", press(KeyCode::Char('f')), ""),
+        ("F", press(KeyCode::Char('F')), ""),
+        (
+            "shift-f",
+            KeyEvent::new(KeyCode::Char('F'), KeyModifiers::SHIFT),
+            "",
+        ),
+        (
+            "ctrl-y",
+            ctrl(KeyCode::Char('y')),
+            "[keys.table]\nport_forward = ['ctrl-y']",
+        ),
+    ] {
+        for (resource, kind, builtin) in [
+            ("persistentvolumes", "PersistentVolume", false),
+            ("persistentvolumeclaims", "PersistentVolumeClaim", false),
+            ("pods", "Pod", true),
+            ("services", "Service", true),
+        ] {
+            let (mut app, _rx) = test_app();
+            app.cluster
+                .register_kind("", kind, resource, resource != "persistentvolumes");
+            app.switch_kind(resource);
+            assert_eq!(app.kind_plural, resource);
+            apply(
+                &mut app,
+                json!({
+                    "apiVersion": "v1", "kind": kind,
+                    "metadata": {"name": "test", "namespace": "default", "resourceVersion": "1"}
+                }),
+            );
+            app.table_state.select(Some(0));
+            app.plugins = vec![crate::config::Plugin {
+                name: "scoped-command".into(),
+                key: binding.into(),
+                command: "true".into(),
+                scopes: vec![resource.into()],
+                mutating: Some(false),
+                ..Default::default()
+            }];
+            let cfg: crate::config::Config = toml::from_str(config).unwrap();
+            app.configure_keys(&cfg.keys);
+            app.handle_key(event).unwrap();
+            if builtin {
+                assert_eq!(app.mode, Mode::PortForwardPicker, "{resource}: {binding}");
+                assert!(app.pending.is_none(), "{resource}: {binding}");
+            } else {
+                assert!(
+                    matches!(app.pending, Some(Suspend::Shell(_))),
+                    "{resource}: {binding}: {}",
+                    app.flash
+                );
+                assert_eq!(app.mode, Mode::Table);
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn port_forward_key_opens_bookmarks_and_workspaces_on_other_kinds() {
+    for workspace in [false, true] {
+        let (mut app, _rx) = app_with_pvc("Bound");
+        if workspace {
+            app.workspaces = vec![crate::config::Workspace {
+                name: "ops".into(),
+                key: Some("f".into()),
+                views: vec![crate::config::WorkspaceView {
+                    name: "Services".into(),
+                    resource: "services".into(),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }];
+        } else {
+            app.bookmarks = vec![crate::config::Bookmark {
+                name: "services".into(),
+                key: Some("f".into()),
+                resource: "services".into(),
+                ..Default::default()
+            }];
+        }
+        app.handle_key(press(KeyCode::Char('f'))).unwrap();
+        assert_eq!(app.kind_plural, "services");
+    }
+}
+
+#[tokio::test]
+async fn port_forward_key_warns_when_no_user_binding_matches() {
+    let (mut app, _rx) = app_with_pvc("Bound");
+    app.handle_key(press(KeyCode::Char('f'))).unwrap();
+    assert!(app.flash.contains("port-forward applies to pods/services"));
+    assert_eq!(app.mode, Mode::Table);
+    assert!(app.pending.is_none());
+}
+
+#[tokio::test]
+async fn port_forward_key_warnings_follow_plugin_scopes() {
+    for (scopes, expected) in [
+        (vec!["persistentvolumes", "persistentvolumeclaims"], 0),
+        (vec!["pods"], 1),
+        (vec!["services"], 1),
+        (vec!["persistentvolumeclaims", "pods"], 1),
+        (vec![], 1),
+    ] {
+        let (mut app, _rx) = test_app();
+        app.plugins = vec![crate::config::Plugin {
+            name: "scoped-command".into(),
+            key: "f".into(),
+            scopes: scopes.iter().map(|s| s.to_string()).collect(),
+            ..Default::default()
+        }];
+        let warnings = app.configure_keys(&Default::default());
+        assert_eq!(
+            warnings
+                .iter()
+                .filter(|w| w.contains("keys.table.port_forward"))
+                .count(),
+            expected,
+            "{scopes:?}: {warnings:?}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn kind_specific_key_warnings_follow_plugin_scopes() {
     let (mut app, _rx) = test_app();
     let cordon_warnings = |app: &mut App, scopes: &[&str]| {
