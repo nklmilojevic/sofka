@@ -61,13 +61,36 @@ pub(crate) fn client_builder(
     }
     // Kube-rs exposes exec expiry only through its standard client builder.
     // Retain that metadata when the opt-in path needs a custom transport.
-    let expiration = if config.auth_info.exec.is_some() {
+    let mut expiration = if config.auth_info.exec.is_some() {
         *ClientBuilder::try_from(config.clone())?
             .build()
             .valid_until()
     } else {
         None
     };
+    if config.auth_info.exec.is_some() && tls.client_auth_cert_resolver.has_certs() {
+        // A later exec call can return a different identity. Never report an
+        // expiry after the certificate that this TLS client will send.
+        let schemes = tls
+            .crypto_provider()
+            .signature_verification_algorithms
+            .supported_schemes();
+        let identity = tls
+            .client_auth_cert_resolver
+            .resolve(&[], &schemes)
+            .context("cannot resolve the installed client certificate")?;
+        let leaf = identity
+            .cert
+            .first()
+            .context("client certificate chain is empty")?;
+        let not_after: std::time::SystemTime = parse_certificate(leaf)?
+            .validity()
+            .not_after
+            .to_datetime()
+            .into();
+        let not_after = not_after.try_into()?;
+        expiration = Some(expiration.map_or(not_after, |expiry| expiry.min(not_after)));
+    }
     Ok(connect(config, tls, auth)?.with_valid_until(expiration))
 }
 
@@ -789,7 +812,27 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn exec_credentials_keep_standard_resolution_and_expiration() {
-        for disabled in [false, true] {
+        for (disabled, pinned, later_expiry, expected_expiry) in [
+            (
+                false,
+                false,
+                Some("2098-01-01T00:00:00Z"),
+                "2098-01-01T00:00:00Z",
+            ),
+            (
+                true,
+                false,
+                Some("2098-01-01T00:00:00Z"),
+                "2098-01-01T00:00:00Z",
+            ),
+            (
+                false,
+                true,
+                Some("2125-01-01T00:00:00Z"),
+                "2120-01-01T00:00:00Z",
+            ),
+            (false, true, None, "2120-01-01T00:00:00Z"),
+        ] {
             let (url, task) = server(SERVER, &rustls::version::TLS13).await;
             let directory = std::env::temp_dir().join(format!(
                 "sofka-exec-{}-{}",
@@ -801,20 +844,20 @@ mod tests {
             ));
             std::fs::create_dir(&directory).unwrap();
             let counter = directory.join("count");
-            let credential = |expiration| {
+            let credential = |pem: &[u8], key: &[u8], expiration: Option<&str>| {
                 serde_json::json!({
                     "apiVersion": "client.authentication.k8s.io/v1", "kind": "ExecCredential",
                     "status": {
                         "expirationTimestamp": expiration,
-                        "clientCertificateData": std::str::from_utf8(CLIENT_V3).unwrap(),
-                        "clientKeyData": std::str::from_utf8(KEY).unwrap()
+                        "clientCertificateData": std::str::from_utf8(pem).unwrap(),
+                        "clientKeyData": std::str::from_utf8(key).unwrap()
                     }
                 })
                 .to_string()
             };
             let mut config = without_identity(&config());
             config.cluster_url = url;
-            if disabled {
+            if pinned {
                 config.root_cert = Some(vec![
                     CertificateDer::from_pem_slice(SERVER).unwrap().to_vec(),
                 ]);
@@ -836,8 +879,8 @@ esac
 "#, "sofka-exec-test", counter.to_str().unwrap()],
                 "interactiveMode": "Never",
                 "env": [
-                    {"name": "SOFKA_TEST_EXEC_FIRST", "value": credential("2099-01-01T00:00:00Z")},
-                    {"name": "SOFKA_TEST_EXEC_LAST", "value": credential("2098-01-01T00:00:00Z")}
+                    {"name": "SOFKA_TEST_EXEC_FIRST", "value": credential(CLIENT_V3, KEY, Some("2120-01-01T00:00:00Z"))},
+                    {"name": "SOFKA_TEST_EXEC_LAST", "value": credential(CLIENT_P521, CLIENT_P521_KEY, later_expiry)}
                 ]
             }))
             .unwrap(),
@@ -848,11 +891,8 @@ esac
             let client = result.unwrap();
             // The default path resolves auth, TLS identity, and expiry once.
             // The opt-in path also needs the standard builder for expiry.
-            assert_eq!(count.trim(), if disabled { "5" } else { "3" });
-            assert_eq!(
-                client.valid_until().unwrap().to_string(),
-                "2098-01-01T00:00:00Z"
-            );
+            assert_eq!(count.trim(), if disabled || pinned { "5" } else { "3" });
+            assert_eq!(client.valid_until().unwrap().to_string(), expected_expiry);
             tokio::time::timeout(
                 std::time::Duration::from_secs(5),
                 client.apiserver_version(),
