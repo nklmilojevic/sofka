@@ -314,7 +314,10 @@ include those conditions. Row filters can search the route paths.
   field picker over the selected row's displayed columns (full values, never
   the width-truncated cell text) - type to match a column name or its value
   (an IP, an image, a node), `⏎` copies it. Falls back to OSC 52 on remote
-  terminals without a local clipboard tool.
+  terminals without a local clipboard tool. On WSL, sofka first tries `clip.exe`
+  from `PATH` to copy to the Windows clipboard, including inside tmux. This
+  requires Windows interoperability. If `clip.exe` is missing or fails, sofka
+  tries the other clipboard tools, then OSC 52.
 - **RBAC-aware palette browse** - the empty `:` list hides kinds you cannot
   `list`. An explicit search checks the full discovery catalog, because some
   delegated authorizers return incomplete rule reviews.

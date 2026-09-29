@@ -518,8 +518,16 @@ pub(super) fn list_page(state: &mut ListState, len: usize, rows: usize, down: bo
 /// Copy text to the system clipboard via the first available OS tool, falling
 /// back to OSC 52 for remote terminals where local clipboard tools are absent.
 pub(super) fn copy_to_clipboard(text: &str) -> bool {
-    use std::io::Write;
-    use std::process::{Command, Stdio};
+    if std::env::var_os("WSL_INTEROP").is_some() || std::env::var_os("WSL_DISTRO_NAME").is_some() {
+        // Use a BOM and UTF-16LE so clip.exe does not use the Windows code page.
+        let input: Vec<u8> = std::iter::once(0xfeff)
+            .chain(text.encode_utf16())
+            .flat_map(u16::to_le_bytes)
+            .collect();
+        if copy_with_tool("clip.exe", &[], &input) {
+            return true;
+        }
+    }
     let candidates: &[(&str, &[&str])] = &[
         ("pbcopy", &[]),
         ("wl-copy", &[]),
@@ -527,28 +535,34 @@ pub(super) fn copy_to_clipboard(text: &str) -> bool {
         ("xsel", &["--clipboard", "--input"]),
     ];
     for (cmd, args) in candidates {
-        let Ok(mut child) = Command::new(cmd)
-            .args(*args)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-        else {
-            continue; // tool not installed — try the next one
-        };
-        // Write must finish (and the pipe close) before we wait, or the child
-        // can block; report success only if the write and the process succeed.
-        let wrote = child
-            .stdin
-            .take()
-            .map(|mut stdin| stdin.write_all(text.as_bytes()).is_ok())
-            .unwrap_or(false);
-        let ok = child.wait().map(|s| s.success()).unwrap_or(false);
-        if wrote && ok {
+        if copy_with_tool(cmd, args, text.as_bytes()) {
             return true;
         }
     }
     copy_to_clipboard_osc52(text)
+}
+
+fn copy_with_tool(cmd: &str, args: &[&str], input: &[u8]) -> bool {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+
+    let Ok(mut child) = Command::new(cmd)
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+    else {
+        return false;
+    };
+    // Close stdin before waiting. Both the write and the process must succeed.
+    let wrote = child
+        .stdin
+        .take()
+        .map(|mut stdin| stdin.write_all(input).is_ok())
+        .unwrap_or(false);
+    let ok = child.wait().map(|s| s.success()).unwrap_or(false);
+    wrote && ok
 }
 
 pub(super) fn copy_to_clipboard_osc52(text: &str) -> bool {
