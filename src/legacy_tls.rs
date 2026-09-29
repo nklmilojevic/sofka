@@ -468,8 +468,21 @@ mod tests {
         pem: &[u8],
         version: &'static rustls::SupportedProtocolVersion,
     ) -> (Uri, JoinHandle<Result<String>>) {
-        let tls = ServerConfig::builder_with_protocol_versions(&[version])
-            .with_client_cert_verifier(Arc::new(PinnedClient))
+        server_with_auth(pem, version, true).await
+    }
+
+    async fn server_with_auth(
+        pem: &[u8],
+        version: &'static rustls::SupportedProtocolVersion,
+        client_auth: bool,
+    ) -> (Uri, JoinHandle<Result<String>>) {
+        let builder = ServerConfig::builder_with_protocol_versions(&[version]);
+        let builder = if client_auth {
+            builder.with_client_cert_verifier(Arc::new(PinnedClient))
+        } else {
+            builder.with_no_client_auth()
+        };
+        let tls = builder
             .with_single_cert(
                 vec![CertificateDer::from_pem_slice(pem).unwrap()],
                 PrivateKeyDer::from_pem_slice(SERVER_KEY).unwrap(),
@@ -727,6 +740,54 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
+    async fn pinned_leaf_connects_with_static_and_exec_tokens() {
+        for protocol in [&rustls::version::TLS12, &rustls::version::TLS13] {
+            for exec in [false, true] {
+                let (url, task) = server_with_auth(SERVER, protocol, false).await;
+                let mut config = without_identity(&config());
+                config.cluster_url = url;
+                config.root_cert = Some(vec![
+                    CertificateDer::from_pem_slice(SERVER).unwrap().to_vec(),
+                ]);
+                if exec {
+                    let credential = serde_json::json!({
+                        "apiVersion": "client.authentication.k8s.io/v1", "kind": "ExecCredential",
+                        "status": {"token": "test-token", "expirationTimestamp": "2099-01-01T00:00:00Z"}
+                    }).to_string();
+                    config.auth_info.exec = Some(
+                        serde_json::from_value(serde_json::json!({
+                            "apiVersion": "client.authentication.k8s.io/v1", "command": "sh",
+                            "args": ["-c", "printf '%s' \"$1\"", "sofka-exec-test", credential],
+                            "interactiveMode": "Never"
+                        }))
+                        .unwrap(),
+                    );
+                } else {
+                    config.auth_info.token = Some("test-token".into());
+                }
+                let client = crate::k8s::build_client(config, false, false).unwrap();
+                // Token expiry is managed by the auth layer, not the TLS identity.
+                assert!(client.valid_until().is_none());
+                tokio::time::timeout(
+                    std::time::Duration::from_secs(5),
+                    client.apiserver_version(),
+                )
+                .await
+                .unwrap()
+                .unwrap();
+                let request = task.await.unwrap().unwrap();
+                assert!(
+                    request
+                        .to_ascii_lowercase()
+                        .contains("authorization: bearer test-token"),
+                    "{request}"
+                );
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
     async fn exec_credentials_keep_standard_resolution_and_expiration() {
         for disabled in [false, true] {
             let (url, task) = server(SERVER, &rustls::version::TLS13).await;
@@ -753,11 +814,11 @@ mod tests {
             };
             let mut config = without_identity(&config());
             config.cluster_url = url;
-            config
-                .root_cert
-                .as_mut()
-                .unwrap()
-                .push(CertificateDer::from_pem_slice(PROXY).unwrap().to_vec());
+            if disabled {
+                config.root_cert = Some(vec![
+                    CertificateDer::from_pem_slice(SERVER).unwrap().to_vec(),
+                ]);
+            }
             config.auth_info.exec = Some(
             serde_json::from_value(serde_json::json!({
                 "apiVersion": "client.authentication.k8s.io/v1", "command": "sh",
@@ -804,15 +865,20 @@ esac
     }
 
     #[tokio::test]
-    async fn configured_ca_requires_the_server_private_key_in_tls12_and_tls13() {
-        for protocol in [&rustls::version::TLS12, &rustls::version::TLS13] {
+    async fn configured_certificate_requires_the_server_private_key_in_tls12_and_tls13() {
+        for (protocol, pem) in [
+            (&rustls::version::TLS12, PROXY),
+            (&rustls::version::TLS13, PROXY),
+            (&rustls::version::TLS12, SERVER),
+            (&rustls::version::TLS13, SERVER),
+        ] {
             let provider = rustls::crypto::aws_lc_rs::default_provider();
             let wrong_key = provider
                 .key_provider
                 .load_private_key(PrivateKeyDer::from_pem_slice(KEY).unwrap())
                 .unwrap();
             let cert = CertifiedKey::new(
-                vec![CertificateDer::from_pem_slice(PROXY).unwrap()],
+                vec![CertificateDer::from_pem_slice(pem).unwrap()],
                 wrong_key,
             );
             let tls = ServerConfig::builder_with_protocol_versions(&[protocol])
@@ -823,9 +889,7 @@ esac
             config.cluster_url = format!("https://{}", listener.local_addr().unwrap())
                 .parse()
                 .unwrap();
-            config.root_cert = Some(vec![
-                CertificateDer::from_pem_slice(PROXY).unwrap().to_vec(),
-            ]);
+            config.root_cert = Some(vec![CertificateDer::from_pem_slice(pem).unwrap().to_vec()]);
             let task = tokio::spawn(async move {
                 let (stream, _) = listener.accept().await.unwrap();
                 tokio_rustls::TlsAcceptor::from(Arc::new(tls))

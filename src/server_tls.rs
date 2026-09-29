@@ -1,4 +1,4 @@
-//! Accept a configured CA as the server certificate without disabling TLS checks.
+//! Accept an exact configured server certificate without disabling TLS checks.
 
 use std::sync::Arc;
 
@@ -23,7 +23,6 @@ pub(crate) fn configured_roots(config: &Config) -> Option<&[Vec<u8>]> {
     // These paths must retain kube-rs credential resolution and CA reload behavior.
     if config.accept_invalid_certs
         || config.root_cert_file.is_some()
-        || config.auth_info.exec.is_some()
         || config
             .auth_info
             .auth_provider
@@ -33,29 +32,28 @@ pub(crate) fn configured_roots(config: &Config) -> Option<&[Vec<u8>]> {
         return None;
     }
     config.root_cert.as_deref().filter(|roots| {
-        // A CA without a server name cannot pass hostname verification as a leaf.
+        // A certificate without a server name cannot pass hostname verification.
         // Keep ordinary kubeconfigs on the standard client construction path.
         roots.iter().any(|der| {
-            X509Certificate::from_der(der).is_ok_and(|(_, cert)| {
-                cert.is_ca() && cert.subject_alternative_name().ok().flatten().is_some()
-            })
+            X509Certificate::from_der(der)
+                .is_ok_and(|(_, cert)| cert.subject_alternative_name().ok().flatten().is_some())
         })
     })
 }
 
 pub(crate) fn install(tls: &mut ClientConfig, roots: &[Vec<u8>]) -> anyhow::Result<()> {
-    let verifier = ConfiguredCaVerifier::new(roots, tls.crypto_provider().clone())?;
+    let verifier = ConfiguredCertificateVerifier::new(roots, tls.crypto_provider().clone())?;
     tls.dangerous().set_certificate_verifier(Arc::new(verifier));
     Ok(())
 }
 
 #[derive(Debug)]
-struct ConfiguredCaVerifier {
+struct ConfiguredCertificateVerifier {
     roots: Vec<CertificateDer<'static>>,
     standard: Arc<WebPkiServerVerifier>,
 }
 
-impl ConfiguredCaVerifier {
+impl ConfiguredCertificateVerifier {
     fn new(
         roots: &[Vec<u8>],
         provider: Arc<rustls::crypto::CryptoProvider>,
@@ -71,7 +69,7 @@ impl ConfiguredCaVerifier {
     }
 }
 
-impl ServerCertVerifier for ConfiguredCaVerifier {
+impl ServerCertVerifier for ConfiguredCertificateVerifier {
     fn verify_server_cert(
         &self,
         end_entity: &CertificateDer<'_>,
@@ -90,14 +88,17 @@ impl ServerCertVerifier for ConfiguredCaVerifier {
             Ok(verified) => return Ok(verified),
             Err(error) => error,
         };
-        // WebPKI checks DER, critical extensions, and validity before this error.
-        // No other verification failure qualifies for the exception.
-        if !matches!(
+        // WebPKI checks DER, critical extensions, and validity before these errors.
+        // An exact pin can supply trust when the issuer is absent or the server is a CA.
+        let eligible = matches!(
+            error,
+            Error::InvalidCertificate(CertificateError::UnknownIssuer)
+        ) || matches!(
             &error,
             Error::InvalidCertificate(CertificateError::Other(other))
                 if other.0.downcast_ref::<webpki::Error>() == Some(&webpki::Error::CaUsedAsEndEntity)
-        ) || !self.roots.iter().any(|root| root == end_entity)
-        {
+        );
+        if !eligible || !self.roots.iter().any(|root| root == end_entity) {
             return Err(error);
         }
 
@@ -186,12 +187,12 @@ mod tests {
     const SERVER: &[u8] = include_bytes!("../tests/fixtures/tls/server.pem");
     const NOW: u64 = 1_800_000_000;
 
-    fn verifier(roots: &[&[u8]]) -> ConfiguredCaVerifier {
+    fn verifier(roots: &[&[u8]]) -> ConfiguredCertificateVerifier {
         let roots: Vec<_> = roots
             .iter()
             .map(|pem| CertificateDer::from_pem_slice(pem).unwrap().to_vec())
             .collect();
-        ConfiguredCaVerifier::new(
+        ConfiguredCertificateVerifier::new(
             &roots,
             Arc::new(rustls::crypto::aws_lc_rs::default_provider()),
         )
@@ -199,7 +200,7 @@ mod tests {
     }
 
     fn verify(
-        verifier: &ConfiguredCaVerifier,
+        verifier: &ConfiguredCertificateVerifier,
         pem: &[u8],
         name: &str,
         time: u64,
@@ -211,6 +212,31 @@ mod tests {
             &[],
             UnixTime::since_unix_epoch(Duration::from_secs(time)),
         )
+    }
+
+    #[test]
+    fn pinned_leaf_keeps_certificate_checks() {
+        let verifier = verifier(&[SERVER]);
+        verify(&verifier, SERVER, "localhost", NOW).unwrap();
+        assert!(verify(&verifier, SERVER, "wrong.example", NOW).is_err());
+        for time in [1_500_000_000, 5_000_000_000] {
+            assert!(verify(&verifier, SERVER, "localhost", time).is_err());
+        }
+        // These certificates share the server key but do not match the pin.
+        for pem in [PROXY, SERVER_AUTH] {
+            assert!(verify(&verifier, pem, "localhost", NOW).is_err());
+        }
+    }
+
+    #[test]
+    fn pinned_leaf_allows_exec_credentials() {
+        let mut config = Config::new("https://localhost".parse().unwrap());
+        config.root_cert = Some(vec![
+            CertificateDer::from_pem_slice(SERVER).unwrap().to_vec(),
+        ]);
+        assert!(configured_roots(&config).is_some());
+        config.auth_info.exec = Some(kube::config::ExecConfig::default());
+        assert!(configured_roots(&config).is_some());
     }
 
     #[test]
@@ -319,7 +345,7 @@ mod tests {
         }
         config.auth_info.auth_provider.as_mut().unwrap().name = "oidc".into();
         config.auth_info.exec = Some(kube::config::ExecConfig::default());
-        assert!(configured_roots(&config).is_none());
+        assert!(configured_roots(&config).is_some());
         config.auth_info.exec = None;
         config.accept_invalid_certs = true;
         assert!(configured_roots(&config).is_none());

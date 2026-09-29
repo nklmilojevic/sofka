@@ -448,10 +448,12 @@ env -u HTTPS_PROXY -u https_proxy sofka --check
 clients reject this with `CaUsedAsEndEntity`, even when the kubeconfig trusts
 that exact certificate.
 
-Sofka accepts this setup when the server certificate exactly matches a CA
+Sofka accepts this setup when the server certificate exactly matches a
 certificate in the selected kubeconfig's `certificate-authority` file or
 `certificate-authority-data`. No extra flag is required. This also applies when
-you change contexts or use fleet mode.
+you change contexts or use fleet mode. A pinned leaf certificate (`CA:FALSE`)
+is also accepted when its issuing CA is absent. This avoids `UnknownIssuer`
+for kubeconfigs that trust the server certificate itself.
 
 Sofka still checks the certificate dates, hostname (including `tls-server-name`),
 allowed usage, and TLS signatures. A different certificate with the same key or
@@ -460,9 +462,9 @@ or unsupported critical extensions do not qualify either. Other server
 certificates use standard verification. System trust and in-cluster CA file
 reloads continue to use the kube client verifier.
 
-The exception also applies to `auth-provider` entries with `name: oidc`.
-Kubeconfigs with exec credential plugins or other `auth-provider` entries keep
-standard verification. These providers can run external commands, so they keep
+The exception also applies to exec credential plugins and `auth-provider`
+entries with `name: oidc`. Exec token refresh and client certificate expiry
+continue to use kube-rs credential handling. Other `auth-provider` entries keep
 the standard client construction path.
 
 The `--allow-v1-client-cert` flag is separate. It controls the format of the
