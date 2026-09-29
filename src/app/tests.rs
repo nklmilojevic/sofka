@@ -5,6 +5,7 @@ use serde_json::json;
 use std::time::Instant;
 use tokio::sync::mpsc::{self, Receiver};
 
+#[cfg(unix)]
 mod clipboard;
 mod flux;
 mod kubeconfig;
