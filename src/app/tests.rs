@@ -30303,6 +30303,83 @@ async fn quantity_formats_reject_incompatible_columns_and_keep_valid_columns() {
 }
 
 #[tokio::test]
+async fn malformed_fallback_paths_keep_valid_columns_and_other_settings() {
+    for invalid in [
+        r#"["/spec/first", 42]"#,
+        r#"[false, "/spec/first"]"#,
+        r#"["/spec/first", ["/spec/second"]]"#,
+        r#"["/spec/first", { value = "/spec/second" }]"#,
+        "42",
+        "{ value = 42 }",
+    ] {
+        let text = format!(
+            r#"
+            readonly = true
+            [views."v1/nodes"]
+            replace = true
+            columns = [
+                {{ name = "NAME", builtin = "NAME" }},
+                {{ name = "INVALID", path = {invalid} }},
+                {{ name = "VALUE", path = ["/spec/first", "/spec/second"] }},
+            ]
+            "#,
+        );
+        let cfg: crate::config::Config = toml::from_str(&text).unwrap();
+        assert!(cfg.readonly);
+        let (views, warnings) = crate::views::compile(&cfg.views);
+        assert_eq!(warnings.len(), 1, "{invalid}: {warnings:?}");
+        assert!(warnings[0].contains("column INVALID"));
+        assert!(warnings[0].contains("path must be a string or a list of strings"));
+        let (mut app, _rx) = test_app();
+        app.user_views = views;
+        app.config_warnings = warnings;
+        palette(&mut app, "nodes");
+        apply(
+            &mut app,
+            json!({
+                "apiVersion": "v1", "kind": "Node", "metadata": {"name": "node"},
+                "spec": {"second": "kept"}
+            }),
+        );
+        type_filter(&mut app, "value=kept");
+        let (headers, rows) = app.snapshot_table();
+        assert_eq!(headers, ["NAME", "VALUE"]);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0], ["node", "kept"]);
+    }
+}
+
+#[tokio::test]
+async fn empty_legacy_paths_keep_builtin_and_metric_columns() {
+    let (mut app, _rx) = test_app();
+    install_views(
+        &mut app,
+        r#"
+        [views."v1/nodes"]
+        replace = true
+        columns = [
+            { name = "NAME", path = "", builtin = "NAME" },
+            { name = "CPU", path = "", metric = "cpu", wide = true },
+            { name = "POOL", path = ["/metadata/labels/pool"], wide = true },
+        ]
+    "#,
+    );
+    palette(&mut app, "nodes");
+    apply(
+        &mut app,
+        json!({
+            "apiVersion": "v1", "kind": "Node",
+            "metadata": {"name": "node", "labels": {"pool": "primary"}}
+        }),
+    );
+    app.handle_key(press(KeyCode::Char('w'))).unwrap();
+    let (headers, rows) = app.snapshot_table();
+    assert_eq!(headers, ["NAME", "CPU", "POOL"]);
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0], ["node", "-", "primary"]);
+}
+
+#[tokio::test]
 async fn fallback_paths_render_sort_filter_and_refresh_selected_values() {
     let (mut app, _rx) = test_app();
     install_views(

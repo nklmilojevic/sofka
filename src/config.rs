@@ -876,13 +876,16 @@ pub struct DrillConfig {
 pub enum ColumnPaths {
     Single(String),
     Multiple(Vec<String>),
+    /// Keep invalid values for column validation instead of rejecting the config.
+    Invalid(serde::de::IgnoredAny),
 }
 
 impl ColumnPaths {
-    pub fn as_slice(&self) -> &[String] {
+    pub fn as_slice(&self) -> Option<&[String]> {
         match self {
-            Self::Single(path) => std::slice::from_ref(path),
-            Self::Multiple(paths) => paths,
+            Self::Single(path) => Some(std::slice::from_ref(path)),
+            Self::Multiple(paths) => Some(paths),
+            Self::Invalid(_) => None,
         }
     }
 }

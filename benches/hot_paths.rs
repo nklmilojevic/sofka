@@ -460,6 +460,7 @@ fn custom_columns(c: &mut Criterion) {
     let col = |pointer: &str| sofka::views::UserColumn {
         header: "COL".into(),
         pointer: pointer.into(),
+        fallback_pointers: Vec::new(),
         kind: sofka::views::ColumnKind::Text,
         wide: false,
         width: None,

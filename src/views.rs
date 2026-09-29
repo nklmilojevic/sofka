@@ -339,7 +339,10 @@ pub fn compile(
                     ColumnKind::Text
                 }
             };
-            let sources = usize::from(c.path.is_some())
+            let path = c.path.as_ref().filter(|path| {
+                !matches!(path, crate::config::ColumnPaths::Single(value) if value.is_empty())
+            });
+            let sources = usize::from(path.is_some())
                 + usize::from(c.metric.is_some())
                 + usize::from(c.builtin.is_some());
             if sources != 1 {
@@ -372,14 +375,19 @@ pub fn compile(
                         continue;
                     }
                 };
-                if c.path.is_none() || c.kind.as_deref().unwrap_or("text") != required_type {
+                if path.is_none() || c.kind.as_deref().unwrap_or("text") != required_type {
                     warnings.push(format!("views.\"{key}\": column {header}: format applies only to {required_type} path columns; column skipped"));
                     continue;
                 }
                 kind = formatted_kind;
             }
-            let paths = c.path.as_ref().map_or(&[][..], |paths| paths.as_slice());
-            if c.path.is_some() && paths.is_empty() {
+            let Some(paths) = path.map_or(Some(&[][..]), |paths| paths.as_slice()) else {
+                warnings.push(format!(
+                    "views.\"{key}\": column {header}: path must be a string or a list of strings; column skipped"
+                ));
+                continue;
+            };
+            if path.is_some() && paths.is_empty() {
                 warnings.push(format!(
                     "views.\"{key}\": column {header}: path list must not be empty; column skipped"
                 ));
