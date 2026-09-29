@@ -15014,6 +15014,7 @@ async fn user_view_wins_over_printer_columns() {
             columns: vec![crate::views::UserColumn {
                 header: "THEIRS".into(),
                 pointer: "/status/theirs".into(),
+                fallback_pointers: Vec::new(),
                 kind: crate::views::ColumnKind::Text,
                 wide: false,
                 width: None,
@@ -30299,6 +30300,80 @@ async fn quantity_formats_reject_incompatible_columns_and_keep_valid_columns() {
         assert_eq!(rows[0][1], if format == "cpu" { "4000m" } else { "0Mi" });
         assert_eq!(rows[0][2..], ["4", "1.2.3"]);
     }
+}
+
+#[tokio::test]
+async fn fallback_paths_render_sort_filter_and_refresh_selected_values() {
+    let (mut app, _rx) = test_app();
+    install_views(
+        &mut app,
+        r#"
+        [views."v1/nodes"]
+        replace = true
+        columns = [
+            { name = "NAME", builtin = "NAME" },
+            { name = "NODEPOOL", path = ["/metadata/labels/karpenter.sh~1nodepool", "/metadata/labels/eks.amazonaws.com~1nodegroup"] },
+            { name = "CPU/A", path = ["/status/allocatable/cpu", "/status/capacity/cpu"], type = "quantity", format = "cpu", wide = true },
+        ]
+    "#,
+    );
+    palette(&mut app, "nodes");
+    for (name, labels, allocatable, capacity) in [
+        (
+            "a-high",
+            json!({"karpenter.sh/nodepool": "primary", "eks.amazonaws.com/nodegroup": "ignored"}),
+            json!("2"),
+            "1",
+        ),
+        (
+            "z-low",
+            json!({"eks.amazonaws.com/nodegroup": "fallback"}),
+            Value::Null,
+            "500m",
+        ),
+        ("m-missing", json!({}), Value::Null, "invalid"),
+    ] {
+        apply(
+            &mut app,
+            json!({
+                "apiVersion": "v1", "kind": "Node",
+                "metadata": {"name": name, "labels": labels},
+                "status": {"allocatable": {"cpu": allocatable}, "capacity": {"cpu": capacity}}
+            }),
+        );
+    }
+    app.handle_key(press(KeyCode::Char('w'))).unwrap();
+    let (headers, rows) = app.snapshot_table();
+    assert_eq!(headers, ["NAME", "NODEPOOL", "CPU/A"]);
+    assert_eq!(rows[0], ["a-high", "primary", "2000m"]);
+    assert_eq!(rows[1], ["m-missing", "<none>", "invalid"]);
+    assert_eq!(rows[2], ["z-low", "fallback", "500m"]);
+    app.handle_key(press(KeyCode::Char('S'))).unwrap();
+    for key in "CPU/A".chars() {
+        app.handle_key(press(KeyCode::Char(key))).unwrap();
+    }
+    app.handle_key(press(KeyCode::Enter)).unwrap();
+    assert_eq!(row_names(&app), ["z-low", "a-high", "m-missing"]);
+    type_filter(&mut app, "nodepool=fallback");
+    assert_eq!(row_names(&app), ["z-low"]);
+    app.handle_key(press(KeyCode::Esc)).unwrap();
+    type_filter(&mut app, "cpu/a<1");
+    assert_eq!(row_names(&app), ["z-low"]);
+    apply(
+        &mut app,
+        json!({
+            "apiVersion": "v1", "kind": "Node",
+            "metadata": {"name": "z-low", "resourceVersion": "2",
+                "labels": {"karpenter.sh/nodepool": "new-primary", "eks.amazonaws.com/nodegroup": "fallback"}},
+            "status": {"allocatable": {"cpu": "3"}, "capacity": {"cpu": "500m"}}
+        }),
+    );
+    assert!(row_names(&app).is_empty());
+    app.handle_key(press(KeyCode::Esc)).unwrap();
+    type_filter(&mut app, "nodepool=new-primary");
+    let (_, rows) = app.snapshot_table();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0], ["z-low", "new-primary", "3000m"]);
 }
 
 #[tokio::test]

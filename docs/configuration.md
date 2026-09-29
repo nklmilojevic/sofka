@@ -356,6 +356,10 @@ Every semantic color - row status, severity badges, headers, borders - is derive
 from the active palette, so one skin change lands everywhere at once. `:skin`
 switches live, `:skin gruvbox-dark` applies directly.
 
+Custom columns accept a single `path` string or an ordered list of fallback
+paths. sofka uses the first value that exists and is not `null`. See
+[fallback paths](views.md#fallback-paths) for an example and validation rules.
+
 Custom text path columns accept `format = "image-tag"` to show only the image
 tag. See the [image tag example](views.md#image-tags) for configuration and
 validation rules.

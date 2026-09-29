@@ -103,6 +103,8 @@ pub struct UserColumn {
     pub header: String,
     /// JSON Pointer, or the value to match for a condition lookup.
     pub pointer: String,
+    /// Additional JSON Pointers, tried in order when the value is missing or null.
+    pub fallback_pointers: Vec<String>,
     pub kind: ColumnKind,
     /// Shown only in wide mode (`w`).
     pub wide: bool,
@@ -337,7 +339,7 @@ pub fn compile(
                     ColumnKind::Text
                 }
             };
-            let sources = usize::from(!c.path.is_empty())
+            let sources = usize::from(c.path.is_some())
                 + usize::from(c.metric.is_some())
                 + usize::from(c.builtin.is_some());
             if sources != 1 {
@@ -370,13 +372,22 @@ pub fn compile(
                         continue;
                     }
                 };
-                if c.path.is_empty() || c.kind.as_deref().unwrap_or("text") != required_type {
+                if c.path.is_none() || c.kind.as_deref().unwrap_or("text") != required_type {
                     warnings.push(format!("views.\"{key}\": column {header}: format applies only to {required_type} path columns; column skipped"));
                     continue;
                 }
                 kind = formatted_kind;
             }
-            let mut pointer = c.path.trim().to_string();
+            let paths = c.path.as_ref().map_or(&[][..], |paths| paths.as_slice());
+            if c.path.is_some() && paths.is_empty() {
+                warnings.push(format!(
+                    "views.\"{key}\": column {header}: path list must not be empty; column skipped"
+                ));
+                continue;
+            }
+            let mut pointer = paths
+                .first()
+                .map_or(String::new(), |path| path.trim().to_string());
             if let Some(metric) = &c.metric {
                 let Some(metric) = crate::columns::MetricColumn::parse(metric) else {
                     warnings.push(format!("views.\"{key}\": column {header}: unknown metric '{metric}'; column skipped"));
@@ -395,20 +406,22 @@ pub fn compile(
             // pointer — conditions are found by name because their array
             // order isn't guaranteed by anything.
             if kind == ColumnKind::Condition {
-                if c.path.trim().is_empty() || c.path.contains('/') {
+                if matches!(c.path, Some(crate::config::ColumnPaths::Multiple(_)))
+                    || pointer.is_empty()
+                    || pointer.contains('/')
+                {
                     warnings.push(format!(
                         "views.\"{key}\": column {header}: a condition column's path is the \
-                         condition type name (e.g. \"Ready\"), not a JSON Pointer; column skipped"
+                         condition type name (e.g. \"Ready\"), not a JSON Pointer or list; column skipped"
                     ));
                     continue;
                 }
             } else if !matches!(kind, ColumnKind::Metric(_) | ColumnKind::Builtin)
-                && !c.path.starts_with('/')
+                && let Some(path) = paths.iter().find(|path| !valid_column_pointer(path))
             {
                 warnings.push(format!(
-                    "views.\"{key}\": column {header}: path '{}' is not a JSON Pointer \
-                     (must start with '/', e.g. /status/phase); column skipped",
-                    c.path
+                    "views.\"{key}\": column {header}: path '{path}' is not a JSON Pointer \
+                     (must start with '/' and use only ~0 or ~1 escapes); column skipped"
                 ));
                 continue;
             }
@@ -428,6 +441,11 @@ pub fn compile(
             columns.push(UserColumn {
                 header,
                 pointer,
+                fallback_pointers: paths
+                    .iter()
+                    .skip(1)
+                    .map(|path| path.trim().to_string())
+                    .collect(),
                 kind,
                 wide: c.wide,
                 width: c.width,
@@ -652,6 +670,19 @@ fn wildcards_align(path: &str, sibling: &str) -> bool {
             .all(|(&s, &p)| sibling_segs[..=s] == path_segs[..=p])
 }
 
+fn valid_column_pointer(path: &str) -> bool {
+    if !path.starts_with('/') {
+        return false;
+    }
+    let mut chars = path.chars();
+    while let Some(ch) = chars.next() {
+        if ch == '~' && !matches!(chars.next(), Some('0' | '1')) {
+            return false;
+        }
+    }
+    true
+}
+
 /// Parse a view's `sort` value: `"READY"`, `"READY:asc"`, or `"READY:desc"`.
 fn parse_sort(key: &str, s: &str, warnings: &mut Vec<String>) -> Option<(String, bool)> {
     let (col, dir) = match s.rsplit_once(':') {
@@ -735,6 +766,14 @@ pub(crate) enum Extracted<'a> {
 }
 
 impl<'a> Extracted<'a> {
+    fn is_null(&self) -> bool {
+        match self {
+            Self::Text(_) => false,
+            Self::Json(value) => value.is_null(),
+            Self::Owned(value) => value.is_null(),
+        }
+    }
+
     /// The string form, when the value is one — text, time and quantity
     /// columns all want this and nothing else.
     fn as_str(&self) -> Option<&str> {
@@ -927,7 +966,17 @@ fn cell_value<'a>(obj: &'a DynamicObject, col: &UserColumn) -> Option<Extracted<
         Some(field) => {
             condition_value(obj, &col.pointer, col.condition_match, field).map(Extracted::Json)
         }
-        None => extract_ref(obj, &col.pointer),
+        None => {
+            let first = extract_ref(obj, &col.pointer);
+            if col.fallback_pointers.is_empty() {
+                return first;
+            }
+            first.filter(|value| !value.is_null()).or_else(|| {
+                col.fallback_pointers
+                    .iter()
+                    .find_map(|pointer| extract_ref(obj, pointer).filter(|value| !value.is_null()))
+            })
+        }
     }
 }
 
@@ -1116,6 +1165,7 @@ pub fn printer_columns_view(crd: &Value, version: &str) -> Option<View> {
                 return Some(UserColumn {
                     header: name.to_uppercase(),
                     pointer: cond,
+                    fallback_pointers: Vec::new(),
                     kind,
                     wide,
                     width: None,
@@ -1128,6 +1178,7 @@ pub fn printer_columns_view(crd: &Value, version: &str) -> Option<View> {
             Some(UserColumn {
                 header: name.to_uppercase(),
                 pointer,
+                fallback_pointers: Vec::new(),
                 kind: kind_from_crd(),
                 wide,
                 width: None,
@@ -1272,6 +1323,115 @@ mod tests {
     }
 
     #[test]
+    fn fallback_paths_validate_without_discarding_valid_columns() {
+        let (views, warnings) = compile_toml(
+            r#"
+            [views.nodes]
+            columns = [
+                { name = "SINGLE", path = "/metadata/name" },
+                { name = "LIST", path = ["/metadata/labels/a~1b", "/spec/a~0b", "/spec/items/0"] },
+                { name = "ONE", path = ["/metadata/name"] },
+                { name = "READY", path = "Ready", type = "condition" },
+                { name = "EMPTY", path = [] },
+                { name = "EMPTY-ITEM", path = ["/metadata/name", ""] },
+                { name = "BAD-PREFIX", path = ["spec/name", "/metadata/name"] },
+                { name = "BAD-ESCAPE", path = ["/metadata/name", "/spec/a~2b"] },
+                { name = "TRAILING-ESCAPE", path = "/spec/a~" },
+                { name = "CONDITION-LIST", path = ["Ready"], type = "condition" },
+                { name = "METRIC", path = ["/spec/cpu"], metric = "cpu" },
+                { name = "BUILTIN", path = [], builtin = "NAME" },
+            ]
+            "#,
+        );
+        let columns = &views["nodes"].columns;
+        assert_eq!(
+            columns
+                .iter()
+                .map(|c| c.header.as_str())
+                .collect::<Vec<_>>(),
+            ["SINGLE", "LIST", "ONE", "READY"]
+        );
+        assert_eq!(warnings.len(), 8, "{warnings:?}");
+        assert!(warnings[0].contains("must not be empty"));
+        assert!(
+            warnings[1..5]
+                .iter()
+                .all(|warning| warning.contains("JSON Pointer"))
+        );
+        assert!(warnings[5].contains("condition type name"));
+        assert!(
+            warnings[6..]
+                .iter()
+                .all(|warning| warning.contains("exactly one"))
+        );
+    }
+
+    #[test]
+    fn fallback_paths_select_the_first_present_non_null_value() {
+        let (views, warnings) = compile_toml(
+            r#"
+            [views.nodes]
+            columns = [{ name = "VALUE", path = ["/spec/first", "/spec/second", "/spec/third"] }]
+            "#,
+        );
+        assert!(warnings.is_empty());
+        let column = &views["nodes"].columns[0];
+        for (spec, expected) in [
+            (json!({"first": "first", "second": "second"}), "first"),
+            (json!({"second": "second", "third": "third"}), "second"),
+            (
+                json!({"first": null, "second": null, "third": "third"}),
+                "third",
+            ),
+            (json!({"first": "", "second": "second"}), ""),
+            (json!({"first": 0, "second": 1}), "0"),
+            (json!({"first": false, "second": true}), "false"),
+            (json!({"first": [], "second": "second"}), "[]"),
+            (json!({"first": {}, "second": "second"}), "{}"),
+            (
+                json!({"first": null, "second": null, "third": null}),
+                "<none>",
+            ),
+            (json!({}), "<none>"),
+        ] {
+            let object = obj(json!({"apiVersion": "v1", "kind": "Node", "spec": spec}));
+            assert_eq!(render_cell(&object, column, 0), expected);
+        }
+    }
+
+    #[test]
+    fn fallback_paths_select_values_before_formatting_and_typed_sorting() {
+        let object = obj(json!({"apiVersion": "v1", "kind": "Node", "spec": {
+            "null": null, "cpu": "250m", "number": 12,
+            "image": "registry:5000/app:RC1", "time": "1970-01-01T00:00:10Z",
+            "invalid": "invalid", "empty": "", "zero": 0
+        }}));
+        for (path, kind, rendered, numeric) in [
+            ("cpu", ColumnKind::Quantity, "250m", 0.25),
+            (
+                "cpu",
+                ColumnKind::QuantityFormat(QuantityFormat::Cpu),
+                "250m",
+                0.25,
+            ),
+            ("number", ColumnKind::Number, "12", 12.0),
+            ("time", ColumnKind::Time, "10s", 10.0),
+            ("invalid", ColumnKind::Number, "invalid", f64::MAX),
+            ("empty", ColumnKind::Number, "", f64::MAX),
+            ("zero", ColumnKind::Number, "0", 0.0),
+        ] {
+            let mut column = col("/spec/null", kind);
+            column.fallback_pointers = vec![format!("/spec/{path}"), "/spec/number".into()];
+            assert_eq!(render_cell(&object, &column, 20), rendered);
+            assert!(matches!(sort_value(&object, &column, 20), SortValue::Num(n) if n == numeric));
+        }
+        let mut column = col("/spec/missing", ColumnKind::ImageTag);
+        column.fallback_pointers = vec!["/spec/image".into()];
+        assert_eq!(render_cell(&object, &column, 0), "RC1");
+        assert!(matches!(sort_value(&object, &column, 0), SortValue::Text(tag) if tag == "rc1"));
+    }
+
+    #[test]
     fn image_tag_formats_validate_without_discarding_valid_columns() {
         let (views, warnings) = compile_toml(
             r#"
@@ -1336,6 +1496,7 @@ mod tests {
         UserColumn {
             header: "COL".into(),
             pointer: pointer.into(),
+            fallback_pointers: Vec::new(),
             kind,
             wide: false,
             width: None,

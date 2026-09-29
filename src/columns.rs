@@ -590,6 +590,7 @@ pub fn build_spec(
             cols.push(spec_user(&crate::views::UserColumn {
                 header: header.into(),
                 pointer: String::new(),
+                fallback_pointers: Vec::new(),
                 kind: crate::views::ColumnKind::Metric(metric),
                 wide: false,
                 width: None,
@@ -3538,6 +3539,7 @@ mod tests {
         crate::views::UserColumn {
             header: header.into(),
             pointer: pointer.into(),
+            fallback_pointers: Vec::new(),
             kind,
             wide: false,
             width: None,

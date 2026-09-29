@@ -48,6 +48,34 @@ the layout. By default columns overlay the curated ones: a matching header
 replaces it in place, new columns go before AGE. Invalid entries are skipped with
 a warning in the app - they never take down the TUI.
 
+### Fallback paths
+
+Set `path` to an ordered list of JSON Pointers when the same value can be stored
+in different fields:
+
+```toml
+[[views."v1/nodes".columns]]
+name = "NODEPOOL"
+path = [
+  "/metadata/labels/karpenter.sh~1nodepool",
+  "/metadata/labels/eks.amazonaws.com~1nodegroup",
+]
+```
+
+sofka uses the first value that exists and is not `null`. Empty strings, `0`,
+`false`, and empty arrays or objects are valid values and stop the search.
+If all paths are missing or null, the cell shows `<none>`.
+
+Formatting, sorting, and filtering use the selected value. A value that cannot
+be converted to the column type does not cause sofka to try another path.
+A single string remains valid, and a list with one path is also accepted.
+
+An empty list or an invalid JSON Pointer causes the column to be skipped with
+a configuration warning. Each pointer must start with `/`; use `~0` for `~`
+and `~1` for `/` inside a field name. Set only one of `path`, `metric`, or
+`builtin`. Condition columns still require a single condition name, such as
+`path = "Ready"`; they do not accept lists.
+
 ### Image tags
 
 Use `format = "image-tag"` on a text path column to show the image tag:

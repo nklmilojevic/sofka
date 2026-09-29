@@ -870,6 +870,23 @@ pub struct DrillConfig {
     pub fields: Option<String>,
 }
 
+/// A single path or an ordered list of fallback paths.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+pub enum ColumnPaths {
+    Single(String),
+    Multiple(Vec<String>),
+}
+
+impl ColumnPaths {
+    pub fn as_slice(&self) -> &[String] {
+        match self {
+            Self::Single(path) => std::slice::from_ref(path),
+            Self::Multiple(paths) => paths,
+        }
+    }
+}
+
 /// One column of a [`ViewConfig`]. Everything is optional at parse time so a
 /// half-written column degrades to a validation warning instead of discarding
 /// the whole config file.
@@ -882,8 +899,8 @@ pub struct ViewColumnConfig {
     pub builtin: Option<String>,
     /// Column header (displayed uppercased).
     pub name: String,
-    /// JSON Pointer to the cell value, e.g. `/status/phase`.
-    pub path: String,
+    /// JSON Pointer or ordered fallback paths, e.g. `/status/phase`.
+    pub path: Option<ColumnPaths>,
     /// Value type: `text` (default), `status`, `number`, `quantity`, `time`.
     #[serde(rename = "type")]
     pub kind: Option<String>,
