@@ -57,6 +57,13 @@ pub enum Msg {
     Synced {
         generation: u64,
     },
+    WatchError {
+        generation: u64,
+        error: String,
+    },
+    WatchRecovered {
+        generation: u64,
+    },
     LogLines {
         generation: u64,
         lines: Vec<String>,

@@ -323,6 +323,22 @@ Sofka cannot skip the core API group. If it cannot read `v1`, the connection
 fails with the reason. If aggregated discovery fails, sofka shows the reason
 and reads each API group separately.
 
+### Watch connection errors
+
+`watch failed; retrying: ...` means that sofka could not start or read a
+Kubernetes watch. Sofka retries with increasing delays. The displayed rows can
+be out of date until the watch recovers.
+
+The message clears when the watch recovers. A new connection is enough for a
+watch that resumes from its last resource version. A streaming list must finish
+its initial data transfer first. If more than one namespace has failed, the
+status keeps a remaining failure visible. The error count and last error stay
+in `:info` for diagnosis.
+
+If failures continue, run `SOFKA_LOG=debug sofka pods` and open `:info` to find
+the log path. A connection error alone does not identify whether the cause is
+the network, a proxy, or the API server.
+
 ## TLS session resumption and HTTP 401
 
 Some endpoints, including the AKS endpoints reported in

@@ -764,7 +764,8 @@ impl Cluster {
         generation: u64,
         tx: Sender<Msg>,
     ) -> JoinHandle<()> {
-        let api = watch_api(self.client.clone(), kind, namespace);
+        let client = watch_status_client(self.client.clone(), generation, tx.clone());
+        let api = watch_api(client, kind, namespace);
         let mut cfg = watcher::Config::default().any_semantic();
         if let Some(l) = labels {
             cfg = cfg.labels(&l);
@@ -887,7 +888,7 @@ impl Cluster {
                         *objects = 0;
                         *synced = None;
                     }
-                    Some(Msg::Error { error, .. }) => {
+                    Some(Msg::WatchError { error, .. }) => {
                         *errors += 1;
                         *last_error = Some(error);
                         break;
@@ -956,6 +957,28 @@ fn watch_api(client: Client, kind: &Kind, namespace: &str) -> Api<DynamicObject>
     }
 }
 
+fn watch_status_client(client: Client, generation: u64, tx: Sender<Msg>) -> Client {
+    let namespace = client.default_namespace().to_string();
+    let service = tower::service_fn(move |request: http::Request<kube::client::Body>| {
+        let client = client.clone();
+        let tx = tx.clone();
+        async move {
+            let query = request.uri().query().unwrap_or_default();
+            let params: HashMap<_, _> = form_urlencoded::parse(query.as_bytes()).collect();
+            let resumed = params.get("watch").is_some_and(|v| v == "true")
+                && !params.get("sendInitialEvents").is_some_and(|v| v == "true");
+            let response = client.send(request).await?;
+            // A quiet watch can recover without an object event. Streaming
+            // lists must first reach InitDone before they report recovery.
+            if resumed && response.status().is_success() {
+                let _ = tx.send(Msg::WatchRecovered { generation }).await;
+            }
+            Ok::<_, kube::Error>(response)
+        }
+    });
+    Client::new(service, namespace)
+}
+
 fn spawn_watch_task(
     api: Api<DynamicObject>,
     kind: String,
@@ -994,6 +1017,7 @@ fn spawn_watch_task(
         }
 
         let mut backoff = watcher::DefaultBackoff::default();
+        let mut failed = false;
         while let Some(event) = stream.next().await {
             if using_streaming
                 && initializing
@@ -1013,6 +1037,17 @@ fn spawn_watch_task(
                 Ok(watcher::Event::Apply(_) | watcher::Event::Delete(_) | watcher::Event::InitDone)
             ) {
                 backoff.reset();
+            }
+            if failed
+                && (matches!(
+                    event,
+                    Ok(watcher::Event::Apply(_) | watcher::Event::Delete(_))
+                ) || (using_streaming && matches!(event, Ok(watcher::Event::InitDone))))
+            {
+                failed = false;
+                if tx.send(Msg::WatchRecovered { generation }).await.is_err() {
+                    break;
+                }
             }
             // A streaming list restarts after a 410 without an Init event, so
             // without this Reset the re-list would only upsert and objects
@@ -1078,8 +1113,9 @@ fn spawn_watch_task(
                 }
                 Err(e) => {
                     crate::log_warn!("watch.error", kind = kind, error = e);
+                    failed = true;
                     retry_delay = Some(backoff.next().unwrap_or(Duration::from_secs(30)));
-                    Msg::Error {
+                    Msg::WatchError {
                         generation,
                         error: e.to_string(),
                     }
@@ -1836,7 +1872,7 @@ clusters:
             match msg {
                 Msg::Applied { .. } => applied += 1,
                 Msg::Synced { .. } => return (applied, true),
-                Msg::Error { .. } => return (applied, false),
+                Msg::WatchError { .. } => return (applied, false),
                 _ => {}
             }
         }
@@ -1872,7 +1908,7 @@ clusters:
                     .unwrap()
                     .unwrap()
                 {
-                    Msg::Error { .. } => failures.push(Instant::now()),
+                    Msg::WatchError { .. } => failures.push(Instant::now()),
                     Msg::Synced { .. } => break,
                     _ => {}
                 }
@@ -1987,7 +2023,7 @@ clusters:
         let task = cluster.spawn_watch(&kind, "default", None, None, 1, tx);
         let mut saw_error = false;
         for _ in 0..4 {
-            if let Msg::Error { .. } =
+            if let Msg::WatchError { .. } =
                 tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
                     .await
                     .expect("watch message timeout")

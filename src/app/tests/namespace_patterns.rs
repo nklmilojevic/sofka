@@ -74,7 +74,7 @@ async fn namespace_patterns_keep_independent_relists_and_equal_names() {
     watch(
         &mut app,
         "b-crons",
-        Msg::Error {
+        Msg::WatchError {
             generation,
             error: "forbidden".into(),
         },
@@ -83,8 +83,39 @@ async fn namespace_patterns_keep_independent_relists_and_equal_names() {
     assert!(app.flash.contains("b-crons"));
     watch(&mut app, "b-crons", Msg::Reset { generation });
     watch(&mut app, "b-crons", Msg::Synced { generation });
+    assert!(app.namespace_label().contains("incomplete"));
+    watch(&mut app, "b-crons", Msg::WatchRecovered { generation });
     assert!(!app.namespace_label().contains("incomplete"));
     assert_eq!(app.store.len(), 1);
+}
+
+#[tokio::test]
+async fn namespace_watch_recovery_preserves_other_failures() {
+    let (mut app, _rx) = pattern_app();
+    type_resource_query(&mut app, "pods");
+    type_resource_query(&mut app, "ns *-crons");
+    resolve(&mut app, &["a-crons", "b-crons"]);
+    let generation = app.generation;
+    for ns in ["a-crons", "b-crons"] {
+        watch(
+            &mut app,
+            ns,
+            Msg::WatchError {
+                generation,
+                error: "connection closed".into(),
+            },
+        );
+    }
+    assert!(app.flash.contains("b-crons"));
+    watch(&mut app, "b-crons", Msg::WatchRecovered { generation });
+    assert!(app.flash.contains("a-crons"));
+    assert!(app.flash_err);
+    assert!(app.namespace_label().contains("incomplete"));
+    assert_eq!(app.watch_errors, 2);
+    watch(&mut app, "a-crons", Msg::WatchRecovered { generation });
+    assert!(app.flash.is_empty());
+    assert!(!app.flash_err);
+    assert!(!app.namespace_label().contains("incomplete"));
 }
 
 #[tokio::test]
@@ -121,7 +152,7 @@ async fn namespace_patterns_keep_selection_on_discovery_failure_and_drop_stale_r
     app.handle_msg(Msg::NamespaceWatch {
         generation,
         namespace: "a-crons".into(),
-        event: Box::new(Msg::Error {
+        event: Box::new(Msg::WatchError {
             generation,
             error: "stale".into(),
         }),

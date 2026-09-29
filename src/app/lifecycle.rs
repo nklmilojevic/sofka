@@ -379,6 +379,7 @@ impl App {
         }
         self.applied_filter_labels = filter_labels;
         self.applied_filter_fields = filter_fields;
+        self.clear_watch_error_flash();
         self.clear_progress_flash();
         self.stop_plugins();
         self.cancel_adjacent_request();
@@ -952,7 +953,29 @@ impl App {
         self.tasks.push(handle);
     }
 
+    fn set_watch_error_flash(&mut self, error: String) {
+        self.borrow_status(format!("watch failed; retrying: {error}"), true);
+        self.watch_error_flash = Some(self.flash.clone());
+    }
+
+    fn show_watch_error(&mut self, error: String) {
+        self.watch_errors = self.watch_errors.saturating_add(1);
+        self.last_error = Some(error.clone());
+        crate::log_warn!("view.error", kind = self.kind_plural, error = error);
+        self.set_watch_error_flash(error);
+    }
+
+    fn clear_watch_error_flash(&mut self) -> bool {
+        if self.watch_error_flash.take().as_ref() == Some(&self.flash) {
+            self.borrow_status(String::new(), false);
+            true
+        } else {
+            false
+        }
+    }
+
     pub(super) fn bump_generation(&mut self) {
+        self.clear_watch_error_flash();
         self.stop_resource_refresh();
         self.clear_document_source();
         self.cancel_explain_request();
@@ -1055,25 +1078,27 @@ impl App {
                 }
                 Msg::Synced { .. } => {
                     self.store.finish_namespace_sync(&namespace);
-                    self.namespace_errors.remove(&namespace);
                     self.clear_rows_cache();
                 }
-                Msg::Error { error, .. } => {
+                Msg::WatchError { error, .. } => {
                     self.namespace_errors
                         .insert(namespace.clone(), error.clone());
-                    self.handle_msg_inner(Msg::Error {
-                        generation,
-                        error: format!("{namespace}: {error}; results incomplete"),
-                    });
+                    self.show_watch_error(format!("{namespace}: {error}; results incomplete"));
                 }
-                event => {
-                    if matches!(event, Msg::Applied { .. } | Msg::Deleted { .. })
-                        && self.store.namespace_synced(&namespace)
+                Msg::WatchRecovered { .. } => {
+                    self.namespace_errors.remove(&namespace);
+                    if self.clear_watch_error_flash()
+                        && let Some((namespace, error)) = self
+                            .namespace_errors
+                            .iter()
+                            .min_by_key(|(namespace, _)| *namespace)
                     {
-                        self.namespace_errors.remove(&namespace);
+                        self.set_watch_error_flash(format!(
+                            "{namespace}: {error}; results incomplete"
+                        ));
                     }
-                    self.handle_msg(event);
                 }
+                event => self.handle_msg(event),
             },
             Msg::Reset { generation } if generation == self.generation => {
                 // A reset after the view already synced is the watcher healing
@@ -1129,6 +1154,12 @@ impl App {
                 if self.store.finish_sync() {
                     self.clear_rows_cache();
                 }
+            }
+            Msg::WatchError { generation, error } if generation == self.generation => {
+                self.show_watch_error(error);
+            }
+            Msg::WatchRecovered { generation } if generation == self.generation => {
+                self.clear_watch_error_flash();
             }
             Msg::Error { generation, error } if generation == self.generation => {
                 self.watch_errors = self.watch_errors.saturating_add(1);

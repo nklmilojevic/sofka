@@ -2327,6 +2327,7 @@ impl App {
     /// its confirmation for the full [`FLASH_TTL`] instead of inheriting the
     /// first one's remaining time.
     pub(super) fn set_flash(&mut self, msg: impl Into<String>) {
+        self.watch_error_flash = None;
         self.flash = msg.into();
         self.flash_err = false;
         self.flash_sticky = false;

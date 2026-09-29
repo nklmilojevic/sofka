@@ -21,6 +21,7 @@ mod restart;
 mod scale;
 mod server_table;
 mod synchronized_output;
+mod watch_status;
 
 fn obj(v: serde_json::Value) -> DynamicObject {
     serde_json::from_value(v).unwrap()
@@ -625,7 +626,7 @@ async fn refresh_keeps_pod_updates_and_deletes_working_with_gzip_available() {
         tokio::time::timeout(std::time::Duration::from_secs(3), async {
             loop {
                 let msg = rx.recv().await.expect("watch channel closed");
-                if let Msg::Error { error, .. } = &msg {
+                if let Msg::WatchError { error, .. } = &msg {
                     panic!("watch failed: {error}");
                 }
                 let received = matches!(
@@ -15904,7 +15905,7 @@ async fn unsupported_fields_remain_scoped_and_show_api_error() {
         loop {
             let msg = rx.recv().await.unwrap();
             let done =
-                matches!(&msg, Msg::Error { generation, .. } if *generation == app.generation);
+                matches!(&msg, Msg::WatchError { generation, .. } if *generation == app.generation);
             app.handle_msg(msg);
             if done {
                 break;
@@ -28461,7 +28462,8 @@ async fn refresh_key_reports_auth_errors_without_a_retry_loop() {
             .await
             .unwrap()
             .unwrap();
-        let failed = matches!(&msg, Msg::Error { error, .. } if error.contains("Unauthorized"));
+        let failed =
+            matches!(&msg, Msg::WatchError { error, .. } if error.contains("Unauthorized"));
         app.handle_msg(msg);
         if failed {
             break;

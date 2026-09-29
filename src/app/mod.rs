@@ -1900,6 +1900,7 @@ pub struct App {
     pub scrollbar_activity: Option<std::time::Instant>,
     pub flash: String,
     pub flash_err: bool,
+    pub(super) watch_error_flash: Option<String>,
     /// Last flash text observed by [`App::expire_flash`], so a change can be
     /// detected (and re-timestamped) without touching every call site that
     /// sets `flash` directly.
@@ -2400,6 +2401,7 @@ impl App {
             cmd_sel: 0,
             flash: WELCOME_FLASH.into(),
             flash_err: false,
+            watch_error_flash: None,
             // Pre-seeded so the first tick sees no change and leaves the
             // welcome hint's sticky flag alone.
             flash_seen: WELCOME_FLASH.into(),
