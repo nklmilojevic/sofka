@@ -263,6 +263,7 @@ const INGRESS_COLUMNS: &[Column] = &[
 const HTTPROUTE_COLUMNS: &[Column] = &[
     column("NAME", col_name),
     column("HOSTNAMES", col_httproute_hostnames),
+    column("ROUTES", col_httproute_routes),
     column("AGE", col_age),
 ];
 
@@ -1438,6 +1439,10 @@ fn col_httproute_hostnames<'a>(ctx: &CellContext<'a>) -> Cow<'a, str> {
     Cow::Owned(httproute_hostnames(ctx.data))
 }
 
+fn col_httproute_routes<'a>(ctx: &CellContext<'a>) -> Cow<'a, str> {
+    Cow::Owned(httproute_routes(ctx.data))
+}
+
 fn col_endpoint_count<'a>(ctx: &CellContext<'a>) -> Cow<'a, str> {
     count_endpoints(ctx.data)
 }
@@ -2216,6 +2221,37 @@ fn httproute_hostnames(d: &Value) -> String {
         })
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| "*".into())
+}
+
+fn httproute_routes(d: &Value) -> String {
+    let mut routes = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    let mut add_path = |path: &Value| {
+        let kind = path
+            .get("type")
+            .and_then(Value::as_str)
+            .unwrap_or("PathPrefix");
+        let value = path.get("value").and_then(Value::as_str).unwrap_or("/");
+        if seen.insert((kind.to_owned(), value.to_owned())) {
+            let label = if kind == "PathPrefix" { "Prefix" } else { kind };
+            routes.push(format!("{label} {value}"));
+        }
+    };
+    for rule in array(d, "/spec/rules") {
+        let matches = array(rule, "/matches");
+        if matches.is_empty() {
+            add_path(&Value::Null);
+        } else {
+            for entry in matches {
+                add_path(&entry["path"]);
+            }
+        }
+    }
+    if routes.is_empty() {
+        "<none>".into()
+    } else {
+        routes.join(", ")
+    }
 }
 
 fn count_endpoints(d: &Value) -> Cow<'_, str> {
@@ -3296,7 +3332,7 @@ mod tests {
         );
         assert_eq!(
             headers("gateway.networking.k8s.io", "httproutes"),
-            ["NAME", "HOSTNAMES", "AGE"]
+            ["NAME", "HOSTNAMES", "ROUTES", "AGE"]
         );
         assert_eq!(row[1], "app.example.com,www.example.com");
         assert_eq!(idx, None);
@@ -3315,6 +3351,38 @@ mod tests {
             .0[1],
             "*"
         );
+    }
+
+    #[test]
+    fn httproute_routes_collect_all_matches_and_defaults() {
+        let data = json!({"spec": {"rules": [
+            {"matches": [
+                {"path": {"type": "PathPrefix", "value": "/api"}},
+                {"path": {"type": "Exact", "value": "/api"}},
+                {"path": {"value": "/api"}}
+            ]},
+            {"matches": [
+                {"path": {"type": "RegularExpression", "value": "/v[0-9]+"}},
+                {"headers": [{"name": "x-team", "value": "a"}]},
+                {"path": {"type": "Exact"}}
+            ]},
+            {},
+            {"matches": []},
+            {"matches": [{"path": {}}]}
+        ]}});
+        assert_eq!(
+            httproute_routes(&data),
+            "Prefix /api, Exact /api, RegularExpression /v[0-9]+, Prefix /, Exact /"
+        );
+        for data in [json!({}), json!({"spec": {"rules": []}})] {
+            assert_eq!(httproute_routes(&data), "<none>");
+        }
+        for rule in [json!({}), json!({"matches": []}), json!({"matches": [{}]})] {
+            assert_eq!(
+                httproute_routes(&json!({"spec": {"rules": [rule]}})),
+                "Prefix /"
+            );
+        }
     }
 
     #[test]

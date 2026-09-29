@@ -36019,3 +36019,41 @@ async fn plugin_reload_updates_context_command_completion() {
         assert_eq!(app.all_contexts, contexts);
     }
 }
+
+#[tokio::test]
+async fn httproute_paths_render_and_filter_through_keys() {
+    let (mut app, _rx) = test_app();
+    app.cluster
+        .register_kind("gateway.networking.k8s.io", "HTTPRoute", "httproutes", true);
+    app.switch_kind("httproutes");
+    for (name, rules) in [
+        (
+            "api",
+            json!([
+                {"matches": [{"path": {"value": "/api"}}, {"path": {"type": "Exact", "value": "/health"}}]},
+                {"matches": [{"path": {"value": "/api"}}, {"path": {"value": "/billing"}}]}
+            ]),
+        ),
+        ("fallback", json!([{}])),
+    ] {
+        apply(
+            &mut app,
+            json!({
+                "apiVersion": "gateway.networking.k8s.io/v1", "kind": "HTTPRoute",
+                "metadata": {"name": name, "namespace": "default"},
+                "spec": {"hostnames": ["example.com"], "rules": rules}
+            }),
+        );
+    }
+    type_filter(&mut app, "/billing");
+    assert_eq!(row_names(&app), ["api"]);
+    assert_eq!(
+        app.display_headers().to_vec(),
+        ["NAME", "HOSTNAMES", "ROUTES", "AGE"]
+    );
+    let rows = app.rows();
+    app.ensure_table_cell_cache(&rows);
+    let cache = app.table_cell_cache();
+    let (cells, _) = cache.get(&row_key(rows[0])).unwrap();
+    assert_eq!(cells[2], "Prefix /api, Exact /health, Prefix /billing");
+}

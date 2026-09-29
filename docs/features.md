@@ -60,6 +60,18 @@ result. Navigation stays disabled until the operation ends.
 Persistent defaults, saved profiles, arbitrary kubectl arguments, pod selectors,
 concurrent drains, and full kubectl drain parity are outside this feature.
 
+## HTTPRoute paths
+
+The built-in HTTPRoute view shows a `ROUTES` column with paths from all rules
+and matches, in source order. Each entry includes its match type, such as
+`Prefix /api`, `Exact /health`, or `RegularExpression /v[0-9]+`. Duplicate type
+and path pairs appear once. Rules without matches and matches without a path
+show `Prefix /`. A route without rules shows `<none>`.
+
+The column uses the existing table width limits. Press `y` to see the full
+object, including method, header, and query matches. The path summary does not
+include those conditions. Row filters can search the route paths.
+
 ## Core navigation
 
 - **Container details** show readiness, state or failure reason, and restart
