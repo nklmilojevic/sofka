@@ -7338,6 +7338,32 @@ fn cronjob_manual_job_requires_a_job_template() {
 }
 
 #[tokio::test]
+async fn custom_ctrl_h_binding_keeps_namespace_navigation_and_other_bindings() {
+    let (mut app, _rx) = test_app();
+    let config: crate::config::Config =
+        toml::from_str("[keys.namespaces]\ndown = 'ctrl-h'\n[keys.table]\nnamespaces = 'f8'")
+            .unwrap();
+    app.keymap = Keymap::compile(&config.keys).unwrap();
+    app.ns_list = vec!["<all>".into(), "default".into(), "kube-system".into()];
+    app.handle_key(press(KeyCode::F(8))).unwrap();
+    assert_eq!(app.mode, Mode::Namespaces);
+    app.ns_state.select(Some(0));
+    app.handle_key(ctrl(KeyCode::Char('h'))).unwrap();
+    assert_eq!(app.ns_state.selected(), Some(1));
+    assert!(app.ns_filter.is_empty());
+    app.handle_key(press(KeyCode::Char('h'))).unwrap();
+    assert_eq!(app.ns_filter, "h");
+    app.handle_key(press(KeyCode::Backspace)).unwrap();
+    assert!(app.ns_filter.is_empty());
+    app.handle_key(press(KeyCode::Esc)).unwrap();
+    app.handle_key(press(KeyCode::Char('/'))).unwrap();
+    app.handle_key(press(KeyCode::Char('h'))).unwrap();
+    app.handle_key(ctrl(KeyCode::Char('h'))).unwrap();
+    assert_eq!(app.mode, Mode::Filter);
+    assert!(app.filter.is_empty());
+}
+
+#[tokio::test]
 async fn text_inputs_accept_ctrl_h_as_backspace() {
     for (entry, mode) in [
         (':', Mode::Command),

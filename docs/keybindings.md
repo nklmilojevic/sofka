@@ -41,6 +41,9 @@ the line.
   `accept` in text input modes that support them.
 - A mode table, such as `[keys.logs]` or `[keys.table]`, replaces the shared
   setting for that mode. File order does not affect this precedence.
+- The default `ctrl-h` Backspace alias yields to another action bound to
+  `ctrl-h` in that mode. An explicit `backspace` setting still uses the normal
+  conflict checks.
 - Explicit completion keys under `[keys.command]` take priority over text
   editing and cancellation. For example, use `down = "ctrl-w"` for the next
   suggestion or `accept = "esc"` to accept it.

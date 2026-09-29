@@ -795,6 +795,24 @@ impl Keymap {
                     .retain(|c| !chords.iter().any(|other| overlaps(c, other)));
             }
         }
+        // Keep existing custom Ctrl+H bindings valid when Backspace is inherited.
+        let ctrl_h = KeyChord::parse("ctrl-h").unwrap();
+        for &scope in TEXT_SCOPES {
+            let explicit_backspace = overrides
+                .values()
+                .any(|(targets, _)| targets.contains(&(scope, Action::Backspace)));
+            let bindings = map.bindings.get_mut(scope).unwrap();
+            if !explicit_backspace
+                && bindings.iter().any(|(&action, chords)| {
+                    action != Action::Backspace && chords.iter().any(|c| overlaps(c, &ctrl_h))
+                })
+            {
+                bindings
+                    .get_mut(&Action::Backspace)
+                    .unwrap()
+                    .retain(|c| !overlaps(c, &ctrl_h));
+            }
+        }
         map.cancel_any = !settings
             .get("confirm")
             .and_then(toml::Value::as_table)
@@ -985,6 +1003,50 @@ mod tests {
     #[test]
     fn defaults_have_no_conflicts() {
         assert_eq!(compile("").unwrap(), Keymap::default());
+    }
+
+    #[test]
+    fn custom_ctrl_h_bindings_override_only_the_inherited_alias() {
+        let ctrl_h = KeyEvent::new(KeyCode::Char('h'), KeyModifiers::CONTROL);
+        for (text, scope, action) in [
+            (
+                "[keys.namespaces]\ndown = 'ctrl-h'",
+                "namespaces",
+                Action::Down,
+            ),
+            (
+                "[keys.global]\ncompact = 'ctrl-h'",
+                "filter",
+                Action::Compact,
+            ),
+            (
+                "[keys.input]\nclear_line = 'ctrl-h'",
+                "filter",
+                Action::ClearLine,
+            ),
+        ] {
+            let map = compile(text).unwrap();
+            assert_eq!(map.action(scope, &ctrl_h), Some(action));
+            assert_eq!(map.label(scope, Action::Backspace), "backspace");
+            assert_eq!(
+                map.action(
+                    scope,
+                    &KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE)
+                ),
+                Some(Action::Backspace)
+            );
+        }
+        for text in [
+            "[keys.namespaces]\ndown = 'ctrl-h'\nbackspace = ['backspace', 'ctrl-h']",
+            "[keys.input]\nbackspace = ['backspace', 'ctrl-h']\n[keys.namespaces]\ndown = 'ctrl-h'",
+        ] {
+            assert!(
+                compile(text)
+                    .unwrap_err()
+                    .iter()
+                    .any(|e| e.contains("conflicts"))
+            );
+        }
     }
 
     #[test]
