@@ -226,7 +226,7 @@ const GLOBAL: &[(Action, &[&str])] = &[
 ];
 const INPUT: &[(Action, &[&str])] = &[
     (Action::Back, &["esc"]),
-    (Action::Backspace, &["backspace"]),
+    (Action::Backspace, &["backspace", "ctrl-h"]),
     (Action::Accept, &["enter"]),
     (Action::ClearLine, &["ctrl-u"]),
     (

@@ -275,7 +275,8 @@ visible list rows. Paging also works while a picker filter is being typed.
 
 ## Text inputs (palette, filters, prompts)
 
-`ctrl-u` clears the line, `ctrl-w` / `alt-⌫` delete the previous word.
+`Backspace` or `Ctrl-H` removes a character. `ctrl-u` clears the line,
+`ctrl-w` / `alt-⌫` delete the previous word.
 
 ## Palette completion keys
 

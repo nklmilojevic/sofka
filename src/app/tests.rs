@@ -7338,6 +7338,39 @@ fn cronjob_manual_job_requires_a_job_template() {
 }
 
 #[tokio::test]
+async fn text_inputs_accept_ctrl_h_as_backspace() {
+    for (entry, mode) in [
+        (':', Mode::Command),
+        ('/', Mode::Filter),
+        ('n', Mode::Namespaces),
+    ] {
+        for backspace in [press(KeyCode::Backspace), ctrl(KeyCode::Char('h'))] {
+            let (mut app, _rx) = test_app();
+            app.switch_kind("pods");
+            app.handle_key(press(KeyCode::Char(entry))).unwrap();
+            assert_eq!(app.mode, mode);
+            let text = |app: &App| match mode {
+                Mode::Command => app.command.clone(),
+                Mode::Filter => app.filter.clone(),
+                Mode::Namespaces => app.ns_filter.clone(),
+                _ => unreachable!(),
+            };
+            for c in "hé".chars() {
+                app.handle_key(press(KeyCode::Char(c))).unwrap();
+            }
+            assert_eq!(text(&app), "hé");
+            app.handle_key(backspace).unwrap();
+            assert_eq!(text(&app), "h");
+            app.handle_key(backspace).unwrap();
+            assert_eq!(text(&app), "");
+            app.handle_key(backspace).unwrap();
+            assert_eq!(text(&app), "");
+            assert_eq!(app.mode, mode);
+        }
+    }
+}
+
+#[tokio::test]
 async fn filter_edit_chords_delete_word_and_clear_line() {
     let (mut app, _rx) = test_app();
     app.switch_kind("pods");

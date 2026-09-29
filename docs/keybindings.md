@@ -210,14 +210,14 @@ for those operations.
 
 ### `[keys.command]`
 
-| Action      | Default bindings |
-| ----------- | ---------------- |
-| `accept`    | `enter`          |
-| `back`      | `esc`            |
-| `backspace` | `backspace`      |
-| `complete`  | `right`          |
-| `down`      | `tab`, `down`    |
-| `up`        | `backtab`, `up`  |
+| Action      | Default bindings      |
+| ----------- | --------------------- |
+| `accept`    | `enter`               |
+| `back`      | `esc`                 |
+| `backspace` | `backspace`, `ctrl-h` |
+| `complete`  | `right`               |
+| `down`      | `tab`, `down`         |
+| `up`        | `backtab`, `up`       |
 
 ### `[keys.confirm]`
 
@@ -245,13 +245,13 @@ for those operations.
 
 ### `[keys.context_filter]`
 
-| Action      | Default bindings |
-| ----------- | ---------------- |
-| `accept`    | `enter`          |
-| `back`      | `esc`            |
-| `backspace` | `backspace`      |
-| `down`      | `down`           |
-| `up`        | `up`             |
+| Action      | Default bindings      |
+| ----------- | --------------------- |
+| `accept`    | `enter`               |
+| `back`      | `esc`                 |
+| `backspace` | `backspace`, `ctrl-h` |
+| `down`      | `down`                |
+| `up`        | `up`                  |
 
 ### `[keys.contexts]`
 
@@ -267,13 +267,13 @@ for those operations.
 
 ### `[keys.copy_picker]`
 
-| Action      | Default bindings |
-| ----------- | ---------------- |
-| `accept`    | `enter`          |
-| `back`      | `esc`            |
-| `backspace` | `backspace`      |
-| `down`      | `down`, `ctrl-n` |
-| `up`        | `up`, `ctrl-p`   |
+| Action      | Default bindings      |
+| ----------- | --------------------- |
+| `accept`    | `enter`               |
+| `back`      | `esc`                 |
+| `backspace` | `backspace`, `ctrl-h` |
+| `down`      | `down`, `ctrl-n`      |
+| `up`        | `up`, `ctrl-p`        |
 
 ### `[keys.detail]`
 
@@ -319,11 +319,11 @@ for those operations.
 
 ### `[keys.doc_filter]`
 
-| Action      | Default bindings |
-| ----------- | ---------------- |
-| `accept`    | `enter`          |
-| `back`      | `esc`            |
-| `backspace` | `backspace`      |
+| Action      | Default bindings      |
+| ----------- | --------------------- |
+| `accept`    | `enter`               |
+| `back`      | `esc`                 |
+| `backspace` | `backspace`, `ctrl-h` |
 
 ### `[keys.events]`
 
@@ -362,11 +362,11 @@ for those operations.
 
 ### `[keys.filter]`
 
-| Action      | Default bindings |
-| ----------- | ---------------- |
-| `accept`    | `enter`          |
-| `back`      | `esc`            |
-| `backspace` | `backspace`      |
+| Action      | Default bindings      |
+| ----------- | --------------------- |
+| `accept`    | `enter`               |
+| `back`      | `esc`                 |
+| `backspace` | `backspace`, `ctrl-h` |
 
 ### `[keys.find]`
 
@@ -444,11 +444,11 @@ for those operations.
 
 ### `[keys.log_filter]`
 
-| Action      | Default bindings |
-| ----------- | ---------------- |
-| `accept`    | `enter`          |
-| `back`      | `esc`            |
-| `backspace` | `backspace`      |
+| Action      | Default bindings      |
+| ----------- | --------------------- |
+| `accept`    | `enter`               |
+| `back`      | `esc`                 |
+| `backspace` | `backspace`, `ctrl-h` |
 
 ### `[keys.logs]`
 
@@ -482,25 +482,25 @@ for those operations.
 
 ### `[keys.namespaces]`
 
-| Action      | Default bindings |
-| ----------- | ---------------- |
-| `accept`    | `enter`          |
-| `back`      | `esc`            |
-| `backspace` | `backspace`      |
-| `down`      | `down`           |
-| `up`        | `up`             |
+| Action      | Default bindings      |
+| ----------- | --------------------- |
+| `accept`    | `enter`               |
+| `back`      | `esc`                 |
+| `backspace` | `backspace`, `ctrl-h` |
+| `down`      | `down`                |
+| `up`        | `up`                  |
 
 ### `[keys.plugin_form]`
 
-| Action      | Default bindings |
-| ----------- | ---------------- |
-| `accept`    | `enter`          |
-| `back`      | `esc`            |
-| `backspace` | `backspace`      |
-| `down`      | `tab`, `down`    |
-| `left`      | `left`           |
-| `right`     | `right`          |
-| `up`        | `backtab`, `up`  |
+| Action      | Default bindings      |
+| ----------- | --------------------- |
+| `accept`    | `enter`               |
+| `back`      | `esc`                 |
+| `backspace` | `backspace`, `ctrl-h` |
+| `down`      | `tab`, `down`         |
+| `left`      | `left`                |
+| `right`     | `right`               |
+| `up`        | `backtab`, `up`       |
 
 ### `[keys.port_forward_picker]`
 
@@ -525,11 +525,11 @@ for those operations.
 
 ### `[keys.prompt]`
 
-| Action      | Default bindings |
-| ----------- | ---------------- |
-| `accept`    | `enter`          |
-| `back`      | `esc`            |
-| `backspace` | `backspace`      |
+| Action      | Default bindings      |
+| ----------- | --------------------- |
+| `accept`    | `enter`               |
+| `back`      | `esc`                 |
+| `backspace` | `backspace`, `ctrl-h` |
 
 ### `[keys.pulse]`
 
@@ -591,13 +591,13 @@ for those operations.
 
 ### `[keys.sort_picker]`
 
-| Action      | Default bindings |
-| ----------- | ---------------- |
-| `accept`    | `enter`          |
-| `back`      | `esc`            |
-| `backspace` | `backspace`      |
-| `down`      | `down`, `ctrl-n` |
-| `up`        | `up`, `ctrl-p`   |
+| Action      | Default bindings      |
+| ----------- | --------------------- |
+| `accept`    | `enter`               |
+| `back`      | `esc`                 |
+| `backspace` | `backspace`, `ctrl-h` |
+| `down`      | `down`, `ctrl-n`      |
+| `up`        | `up`, `ctrl-p`        |
 
 ### `[keys.table]`
 
