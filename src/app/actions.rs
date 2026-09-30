@@ -1611,7 +1611,7 @@ impl App {
             )
         };
         let claim = self.claim_status(progress);
-        self.marked.clear();
+        self.clear_marks();
         let ok_message = if let [(name, _)] = targets.as_slice() {
             format!("scaled {name} → {replicas}")
         } else {
@@ -1977,7 +1977,7 @@ impl App {
             format!("{verb} {} {}…", targets.len(), self.kind_plural)
         };
         let claim = self.claim_status(progress);
-        self.marked.clear();
+        self.clear_marks();
         let ok_message = if targets.len() == 1 {
             format!("{verb_done} {}", targets[0].0)
         } else {
@@ -2020,7 +2020,7 @@ impl App {
             format!("{verb} {} {}…", targets.len(), self.kind_plural)
         };
         let claim = self.claim_status(progress);
-        self.marked.clear();
+        self.clear_marks();
         // The controller processes the annotations after the patch succeeds.
         let ok_message = if targets.len() == 1 {
             format!("{action} requested: {}", targets[0].0)
@@ -2060,7 +2060,7 @@ impl App {
             format!("{verb} {} {}…", targets.len(), self.kind_plural)
         };
         let claim = self.claim_status(progress);
-        self.marked.clear();
+        self.clear_marks();
         let ok_message = if targets.len() == 1 {
             format!("{verb_done} {}", targets[0].0)
         } else {
@@ -2141,7 +2141,7 @@ impl App {
             format!("syncing {} {}…", targets.len(), self.kind_plural)
         };
         let claim = self.claim_status(progress);
-        self.marked.clear();
+        self.clear_marks();
         let ok_message = if targets.len() == 1 {
             format!("sync requested: {}", targets[0].0)
         } else {
@@ -2192,7 +2192,7 @@ impl App {
             format!("triggering {} {}…", jobs.len(), self.kind_plural)
         };
         let claim = self.claim_status(progress);
-        self.marked.clear();
+        self.clear_marks();
         let done_label = if jobs.len() == 1 {
             format!("triggered {}", jobs[0].0)
         } else {
@@ -2287,7 +2287,7 @@ impl App {
             format!("refreshing {} {}…", targets.len(), self.kind_plural)
         };
         let claim = self.claim_status(progress);
-        self.marked.clear();
+        self.clear_marks();
         // Likewise a request: the `force-sync` annotation is picked up by the
         // operator on its next pass, so the secret isn't refreshed yet.
         let ok_message = if targets.len() == 1 {

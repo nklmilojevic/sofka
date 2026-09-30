@@ -411,7 +411,7 @@ impl App {
             (Some(Action::Exit), _) => self.should_quit = true,
             (Some(Action::Back), _) => {
                 if !self.marked.is_empty() {
-                    self.marked.clear();
+                    self.clear_marks();
                 } else if !self.filter.is_empty() {
                     self.filter.clear();
                     self.invalidate_rows();

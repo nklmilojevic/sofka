@@ -100,7 +100,7 @@ impl App {
                 ..
             } => {
                 self.do_delete(targets, force, cascade);
-                self.marked.clear();
+                self.clear_marks();
             }
             ConfirmAction::Edit { argv } => {
                 // argv is `<kubectl> edit <kind> <name> [-n <ns>]`; recover the
@@ -135,18 +135,18 @@ impl App {
             }
             ConfirmAction::Drain { targets, options } => {
                 self.do_drain_nodes(targets, options);
-                self.marked.clear();
+                self.clear_marks();
             }
             ConfirmAction::Restart { kind, targets } => {
                 self.do_restart(kind, targets);
-                self.marked.clear();
+                self.clear_marks();
             }
             ConfirmAction::HelmRollback { ns, name, revision } => {
                 self.do_helm_rollback(ns, name, revision);
             }
             ConfirmAction::HelmUninstall { targets } => {
                 self.do_helm_uninstall(targets);
-                self.marked.clear();
+                self.clear_marks();
             }
             ConfirmAction::NodeDebug {
                 node,

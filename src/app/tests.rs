@@ -5738,6 +5738,34 @@ async fn ctrl_space_without_anchor_marks_only_the_cursor_row() {
     app.handle_key(press(KeyCode::End)).unwrap();
     app.handle_key(ctrl(KeyCode::Char(' '))).unwrap();
     assert_marks(&app, &["e"]);
+
+    let (mut app, _rx) = range_app();
+    app.handle_key(press(KeyCode::Char(' '))).unwrap();
+    app.handle_key(press(KeyCode::Esc)).unwrap();
+    app.handle_key(press(KeyCode::Home)).unwrap();
+    app.handle_key(ctrl(KeyCode::Char(' '))).unwrap();
+    app.handle_key(press(KeyCode::End)).unwrap();
+    app.handle_key(ctrl(KeyCode::Char(' '))).unwrap();
+    assert_marks(&app, &["a", "e"]);
+
+    let (mut app, _rx) = range_app();
+    app.handle_key(press(KeyCode::Char(' '))).unwrap();
+    app.handle_key(press(KeyCode::Esc)).unwrap();
+    app.handle_key(press(KeyCode::Home)).unwrap();
+    range_key(&mut app, KeyCode::Down);
+    app.handle_key(press(KeyCode::End)).unwrap();
+    app.handle_key(ctrl(KeyCode::Char(' '))).unwrap();
+    assert_marks(&app, &["a", "b", "e"]);
+}
+
+#[tokio::test]
+async fn ctrl_space_without_a_cursor_row_marks_nothing() {
+    let (mut app, _rx) = range_app();
+    app.handle_key(press(KeyCode::Char(' '))).unwrap();
+    app.table_state.select(None);
+    app.handle_key(ctrl(KeyCode::Char(' '))).unwrap();
+    assert_marks(&app, &["a"]);
+    assert_eq!(app.table_state.selected(), None);
 }
 
 #[tokio::test]

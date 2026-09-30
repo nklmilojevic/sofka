@@ -1259,14 +1259,22 @@ impl App {
         }
     }
 
+    pub(super) fn clear_marks(&mut self) {
+        self.marked.clear();
+        self.mark_anchor = None;
+    }
+
     /// Mark every visible row from the last SPACE mark to the cursor (ctrl-space).
     /// Without a marked anchor in the current rows, only the cursor row is marked.
     pub(super) fn mark_range(&mut self) {
         let keys: Vec<String> = self.rows().iter().map(|obj| row_key(obj)).collect();
-        if keys.is_empty() {
+        let Some(current) = self
+            .table_state
+            .selected()
+            .filter(|&index| index < keys.len())
+        else {
             return;
-        }
-        let current = self.table_state.selected().unwrap_or(0).min(keys.len() - 1);
+        };
         let anchor = self
             .mark_anchor
             .as_ref()
@@ -1276,7 +1284,6 @@ impl App {
         for key in &keys[anchor.min(current)..=anchor.max(current)] {
             self.marked.insert(key.clone());
         }
-        self.table_state.select(Some(current));
     }
 
     /// `(name, ns)` for every row a bulk action applies to: the marked set
