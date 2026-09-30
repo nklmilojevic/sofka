@@ -1851,6 +1851,8 @@ pub struct App {
     /// the view is (re)watched. Bulk actions target this set if non-empty, else
     /// the current selection.
     pub marked: HashSet<String>,
+    /// Row key of the last row marked with SPACE; `ctrl-space` marks from here.
+    mark_anchor: Option<String>,
     range_selection: Option<RangeSelection>,
     /// Column index (into the displayed headers) to sort the table by, or
     /// `None` for the natural namespace/name order.
@@ -2371,6 +2373,7 @@ impl App {
             table_page_rows: 10,
             picker_page_items: 10,
             marked: HashSet::new(),
+            mark_anchor: None,
             range_selection: None,
             sort_column: None,
             sort_origin: SortOrigin::Unset,

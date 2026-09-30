@@ -5694,6 +5694,64 @@ async fn range_selection_handles_empty_single_and_unselected_tables() {
 }
 
 #[tokio::test]
+async fn ctrl_space_marks_from_last_space_mark_to_cursor() {
+    let (mut app, _rx) = range_app();
+    app.handle_key(press(KeyCode::Char(' '))).unwrap();
+    app.handle_key(press(KeyCode::Char(' '))).unwrap();
+    app.handle_key(press(KeyCode::End)).unwrap();
+    app.handle_key(ctrl(KeyCode::Char(' '))).unwrap();
+    assert_marks(&app, &["a", "b", "c", "d", "e"]);
+    assert_eq!(app.table_state.selected(), Some(4));
+
+    let (mut app, _rx) = range_app();
+    app.handle_key(press(KeyCode::Char(' '))).unwrap();
+    app.handle_key(press(KeyCode::End)).unwrap();
+    app.handle_key(press(KeyCode::Up)).unwrap();
+    app.handle_key(press(KeyCode::Char(' '))).unwrap();
+    app.handle_key(ctrl(KeyCode::Char(' '))).unwrap();
+    assert_marks(&app, &["a", "d", "e"]);
+    app.handle_key(press(KeyCode::Home)).unwrap();
+    app.handle_key(press(KeyCode::Down)).unwrap();
+    app.handle_key(press(KeyCode::Down)).unwrap();
+    app.handle_key(ctrl(KeyCode::Char(' '))).unwrap();
+    assert_marks(&app, &["a", "c", "d", "e"]);
+}
+
+#[tokio::test]
+async fn ctrl_space_without_anchor_marks_only_the_cursor_row() {
+    let (mut app, _rx) = range_app();
+    app.handle_key(press(KeyCode::Down)).unwrap();
+    app.handle_key(ctrl(KeyCode::Char(' '))).unwrap();
+    assert_marks(&app, &["b"]);
+
+    let (mut app, _rx) = range_app();
+    app.handle_key(press(KeyCode::Char(' '))).unwrap();
+    app.handle_key(press(KeyCode::Up)).unwrap();
+    app.handle_key(press(KeyCode::Char(' '))).unwrap();
+    app.handle_key(press(KeyCode::End)).unwrap();
+    app.handle_key(ctrl(KeyCode::Char(' '))).unwrap();
+    assert_marks(&app, &["e"]);
+
+    let (mut app, _rx) = range_app();
+    app.handle_key(press(KeyCode::Char(' '))).unwrap();
+    app.handle_key(press(KeyCode::Esc)).unwrap();
+    app.handle_key(press(KeyCode::End)).unwrap();
+    app.handle_key(ctrl(KeyCode::Char(' '))).unwrap();
+    assert_marks(&app, &["e"]);
+}
+
+#[tokio::test]
+async fn ctrl_space_follows_the_visible_row_order() {
+    let (mut app, _rx) = range_app();
+    app.handle_key(press(KeyCode::Down)).unwrap();
+    app.handle_key(press(KeyCode::Char(' '))).unwrap();
+    type_filter(&mut app, "!/^c$/");
+    app.handle_key(press(KeyCode::End)).unwrap();
+    app.handle_key(ctrl(KeyCode::Char(' '))).unwrap();
+    assert_marks(&app, &["b", "d", "e"]);
+}
+
+#[tokio::test]
 async fn range_selection_resets_after_filter_sort_and_view_changes() {
     let (mut app, _rx) = range_app();
     range_key(&mut app, KeyCode::Down);

@@ -309,6 +309,8 @@ include those conditions. Row filters can search the route paths.
 - **Multiselect** (`space`) for bulk delete/kill/suspend/resume/reconcile.
   `Shift+ArrowUp` / `Shift+ArrowDown` extend or reduce a range from a fixed
   starting row. Separate marks remain selected when the range contracts.
+  `ctrl-space` marks every row from the last `space` mark to the cursor, so a
+  block can be marked after jumping with `/`, `PgDn`, or `G`.
   Range marks also work with combined pod logs.
 - **Copy to clipboard** - `c` copies the selected resource's name; `Y` opens a
   field picker over the selected row's displayed columns (full values, never

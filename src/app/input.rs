@@ -447,6 +447,7 @@ impl App {
                 self.toggle_mark();
                 self.move_selection(1);
             }
+            (Some(Action::MarkRange), _) => self.mark_range(),
             (Some(Action::Open), _) => self.drill(),
             (Some(Action::Yaml), _) => self.open_detail(),
             (Some(Action::Describe), _) => self.describe(),

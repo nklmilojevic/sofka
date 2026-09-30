@@ -49,6 +49,7 @@ ownership scope are cleared. Startup still uses the configured default resource.
 | `ctrl-e`                                                     | compact mode: collapse the header + footer (for tiled/multiplexed panes)                                                                                                             |
 | `space`                                                      | mark/unmark row for bulk actions                                                                                                                                                     |
 | `shift-up` / `shift-down`                                    | extend or reduce the marked range from the starting row                                                                                                                              |
+| `ctrl-space`                                                 | mark every row from the last `space` mark to the cursor                                                                                                                              |
 | `/`                                                          | filter: text · `a\|b` · `~fuzzy` · `/regex/` · `!inverse` · `label:text` local label search · `-l`/`-f` selectors (server-side on ⏎) · `status=X` `cpu>500m` `age<2h`                |
 | `Ctrl+Z`                                                     | toggle faults filter in pod views; configured actions take precedence; combine with `/`; press again to turn off                                                                     |
 | `n` / `0`                                                    | namespace switcher / all namespaces; `0` also selects all namespaces inside the switcher while the filter is empty                                                                   |
@@ -106,6 +107,11 @@ Shift+Arrow selects a range in the visible row order. Reversing direction reduce
 the range and keeps separate marks made with `space`. Other keys end the range
 operation. Normal movement keeps marked rows. Filtering, sorting, view changes,
 and changes to the row order reset the range before the next Shift+Arrow press.
+
+`ctrl-space` marks every row between the last row marked with `space` and the
+cursor, in the visible row order. Existing marks stay. Without a marked starting
+row, it marks the current row. Terminals that send `ctrl-@` for `ctrl-space` work
+the same way.
 
 ## Node drain (`D` on a node)
 
