@@ -2091,10 +2091,9 @@ async fn port_forward_handle_key_f_opens_picker() {
 
 #[tokio::test]
 async fn port_forward_picker_select_port_starts_forward() {
-    let listener = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
-    let port = listener.local_addr().unwrap().port();
-    drop(listener);
+    let port = test_port();
     let (mut app, _rx) = test_app();
+    app.pf_probe = stub_pf_probe;
     app.switch_kind("services");
     apply(
         &mut app,
@@ -2114,29 +2113,55 @@ async fn port_forward_picker_select_port_starts_forward() {
     assert_eq!(app.port_forwards[0].target, "svc/web");
 }
 
-fn occupy_forward_port() -> (std::net::TcpListener, Option<std::net::TcpListener>) {
-    let ipv4 = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
-    let port = ipv4.local_addr().unwrap().port();
-    let ipv6 = match std::net::TcpListener::bind((std::net::Ipv6Addr::LOCALHOST, port)) {
-        Ok(listener) => Some(listener),
-        Err(error)
-            if matches!(
-                error.kind(),
-                std::io::ErrorKind::AddrNotAvailable | std::io::ErrorKind::Unsupported
-            ) =>
-        {
-            None
-        }
-        Err(error) => panic!("IPv6 listener failed: {error}"),
-    };
-    (ipv4, ipv6)
+/// Local ports the stubbed probe reports as occupied, per address family.
+static BUSY_PORTS: std::sync::Mutex<std::collections::BTreeSet<(u16, bool)>> =
+    std::sync::Mutex::new(std::collections::BTreeSet::new());
+
+/// Hands every test its own port number, so parallel tests never read each
+/// other's entries.
+static NEXT_TEST_PORT: std::sync::atomic::AtomicU16 = std::sync::atomic::AtomicU16::new(30_000);
+
+fn test_port() -> u16 {
+    NEXT_TEST_PORT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
+/// `App::pf_probe` stand-in: occupied only where a test said so.
+fn stub_pf_probe(address: std::net::IpAddr, port: u16) -> std::io::Result<()> {
+    if BUSY_PORTS
+        .lock()
+        .unwrap()
+        .contains(&(port, address.is_ipv4()))
+    {
+        return Err(std::io::Error::from(std::io::ErrorKind::AddrInUse));
+    }
+    Ok(())
+}
+
+/// Report `port` as occupied on both loopback families until [`free_port`].
+fn occupy_port(port: u16) {
+    let mut busy = BUSY_PORTS.lock().unwrap();
+    busy.insert((port, true));
+    busy.insert((port, false));
+}
+
+/// Report `port` as occupied on one family only, which is enough for a
+/// forward to start.
+fn occupy_port_family(port: u16, ipv4: bool) {
+    BUSY_PORTS.lock().unwrap().insert((port, ipv4));
+}
+
+fn free_port(port: u16) {
+    let mut busy = BUSY_PORTS.lock().unwrap();
+    busy.remove(&(port, true));
+    busy.remove(&(port, false));
 }
 
 #[tokio::test]
 async fn port_forward_picker_keeps_selection_when_local_port_is_in_use() {
-    let listeners = occupy_forward_port();
-    let port = listeners.0.local_addr().unwrap().port();
+    let port = test_port();
+    occupy_port(port);
     let (mut app, _rx) = test_app();
+    app.pf_probe = stub_pf_probe;
     app.switch_kind("services");
     apply(
         &mut app,
@@ -2156,7 +2181,7 @@ async fn port_forward_picker_keeps_selection_when_local_port_is_in_use() {
     assert!(app.flash_err);
     assert!(app.port_forwards.is_empty());
 
-    drop(listeners);
+    free_port(port);
     app.handle_key(press(KeyCode::Enter)).unwrap();
     assert_eq!(app.mode, Mode::Table);
     assert_eq!(app.port_forwards.len(), 1);
@@ -2165,9 +2190,10 @@ async fn port_forward_picker_keeps_selection_when_local_port_is_in_use() {
 
 #[tokio::test]
 async fn port_forward_conflict_can_be_fixed_by_editing_only_the_local_port() {
-    let listeners = occupy_forward_port();
-    let remote = listeners.0.local_addr().unwrap().port();
+    let remote = test_port();
+    occupy_port(remote);
     let (mut app, _rx) = test_app();
+    app.pf_probe = stub_pf_probe;
     app.switch_kind("services");
     apply(
         &mut app,
@@ -2193,9 +2219,7 @@ async fn port_forward_conflict_can_be_fixed_by_editing_only_the_local_port() {
     assert_eq!(app.flash, format!("port {remote} is already in use"));
     assert!(app.port_forwards.is_empty());
 
-    let free = occupy_forward_port();
-    let local = free.0.local_addr().unwrap().port();
-    drop(free);
+    let local = test_port();
     for _ in 0..app.prompt_input.len() {
         app.handle_key(press(KeyCode::Backspace)).unwrap();
     }
@@ -2213,6 +2237,7 @@ async fn port_forward_conflict_can_be_fixed_by_editing_only_the_local_port() {
 #[tokio::test]
 async fn port_forward_local_edit_preserves_input_after_spawn_failure() {
     let (mut app, _rx) = test_app();
+    app.pf_probe = stub_pf_probe;
     let successful_spawner = app.pf_spawner;
     app.pf_spawner = |_| {
         Err(std::io::Error::new(
@@ -2233,9 +2258,7 @@ async fn port_forward_local_edit_preserves_input_after_spawn_failure() {
     app.handle_key(press(KeyCode::Char('f'))).unwrap();
     app.handle_key(press(KeyCode::Down)).unwrap();
     app.handle_key(press(KeyCode::Char('e'))).unwrap();
-    let free = occupy_forward_port();
-    let local = free.0.local_addr().unwrap().port().to_string();
-    drop(free);
+    let local = test_port().to_string();
     for _ in 0..app.prompt_input.len() {
         app.handle_key(press(KeyCode::Backspace)).unwrap();
     }
@@ -2333,9 +2356,10 @@ async fn port_forward_local_edit_validates_input_and_returns_to_selected_row() {
 
 #[tokio::test]
 async fn port_forward_prompt_preserves_input_and_allows_correction() {
-    let listeners = occupy_forward_port();
-    let port = listeners.0.local_addr().unwrap().port();
+    let port = test_port();
+    occupy_port(port);
     let (mut app, _rx) = test_app();
+    app.pf_probe = stub_pf_probe;
     app.switch_kind("services");
     apply(
         &mut app,
@@ -2383,19 +2407,10 @@ async fn port_forward_prompt_preserves_input_and_allows_correction() {
 #[tokio::test]
 async fn port_forward_picker_allows_one_available_loopback_family() {
     for occupy_ipv4 in [true, false] {
-        let (ipv4, ipv6) = occupy_forward_port();
-        let Some(ipv6) = ipv6 else {
-            return;
-        };
-        let port = ipv4.local_addr().unwrap().port();
-        let _occupied = if occupy_ipv4 {
-            drop(ipv6);
-            ipv4
-        } else {
-            drop(ipv4);
-            ipv6
-        };
+        let port = test_port();
+        occupy_port_family(port, occupy_ipv4);
         let (mut app, _rx) = test_app();
+        app.pf_probe = stub_pf_probe;
         app.switch_kind("pods");
         apply(
             &mut app,
@@ -2417,10 +2432,9 @@ async fn port_forward_picker_allows_one_available_loopback_family() {
 
 #[tokio::test]
 async fn port_forward_picker_pod_target_no_svc_prefix() {
-    let listener = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
-    let port = listener.local_addr().unwrap().port();
-    drop(listener);
+    let port = test_port();
     let (mut app, _rx) = test_app();
+    app.pf_probe = stub_pf_probe;
     app.switch_kind("pods");
     apply(
         &mut app,
@@ -2692,10 +2706,9 @@ async fn port_forward_marker_renders_in_table() {
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
 
-    let listener = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
-    let port = listener.local_addr().unwrap().port();
-    drop(listener);
+    let port = test_port();
     let (mut app, _rx) = test_app();
+    app.pf_probe = stub_pf_probe;
     app.switch_kind("services");
     apply(
         &mut app,

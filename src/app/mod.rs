@@ -264,6 +264,17 @@ impl Drop for PortForward {
 /// so the unit suite doesn't require `kubectl` on PATH.
 type PortForwardSpawner = fn(&[String]) -> std::io::Result<tokio::process::Child>;
 
+/// Tries to bind a local port, so the port-forward preflight can tell an
+/// occupied port from a free one. Overridable in tests: binding real ports
+/// makes a test depend on machine-wide state, and a port it releases can be
+/// handed to any other `bind(0)` on the host before the code under test looks
+/// at it.
+type PortForwardProbe = fn(std::net::IpAddr, u16) -> std::io::Result<()>;
+
+fn default_pf_probe(address: std::net::IpAddr, port: u16) -> std::io::Result<()> {
+    std::net::TcpListener::bind((address, port)).map(|_listener| ())
+}
+
 fn default_pf_spawner(argv: &[String]) -> std::io::Result<tokio::process::Child> {
     tokio::process::Command::new(&argv[0])
         .args(&argv[1..])
@@ -2123,6 +2134,9 @@ pub struct App {
     /// Injectable spawner for `kubectl port-forward` children. Tests override
     /// this to avoid depending on `kubectl` being on PATH.
     pf_spawner: PortForwardSpawner,
+    /// Injectable local-port probe for the port-forward preflight. Tests
+    /// override this to avoid depending on real socket state.
+    pub(crate) pf_probe: PortForwardProbe,
     pub pf_state: ListState,
     /// Port-forward picker (`f`): the declared ports of the selected object,
     /// each as a `LOCAL:REMOTE` string, plus a trailing "Custom…" entry.
@@ -2503,6 +2517,7 @@ impl App {
             confirm_return: Mode::Table,
             port_forwards: Vec::new(),
             pf_spawner: default_pf_spawner,
+            pf_probe: default_pf_probe,
             forwards_cfg: Vec::new(),
             pf_picker_items: Vec::new(),
             pf_picker_state: ListState::default(),

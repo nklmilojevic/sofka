@@ -1188,8 +1188,8 @@ impl App {
             std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
             std::net::IpAddr::V6(std::net::Ipv6Addr::LOCALHOST),
         ] {
-            match std::net::TcpListener::bind((address, port)) {
-                Ok(_listener) => available = true,
+            match (self.pf_probe)(address, port) {
+                Ok(()) => available = true,
                 Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => in_use = true,
                 Err(error) => last_error = Some(error),
             }
