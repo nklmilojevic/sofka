@@ -936,6 +936,18 @@ async fn palette_enter_runs_the_highlight_over_an_exact_command_name() {
 }
 
 #[tokio::test]
+async fn palette_enter_keeps_arguments_when_the_highlight_returns_to_the_typed_command() {
+    let (mut app, _rx) = test_app();
+    app.handle_key(press(KeyCode::Char(':'))).unwrap();
+    type_in_palette(&mut app, "fd nginx");
+    assert_eq!(app.cmd_suggestions[app.cmd_sel].label, "find");
+    app.handle_key(press(KeyCode::Down)).unwrap();
+    app.handle_key(press(KeyCode::Up)).unwrap();
+    app.handle_key(press(KeyCode::Enter)).unwrap();
+    assert_eq!(app.mode, Mode::Find, "{}", app.flash);
+}
+
+#[tokio::test]
 async fn shorter_label_wins_fuzzy_score_ties() {
     // Issue #164: skim scores only the matched characters, so `serv` scores
     // `services` and `serviceaccounts` identically; the alphabetical

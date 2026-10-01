@@ -763,7 +763,15 @@ impl App {
                 } else if let Some(s) = picked {
                     match s.kind {
                         SuggestKind::Command => {
-                            if self
+                            // The highlight is back on the command that was
+                            // typed, so run it with its arguments.
+                            let typed_command = head == s.label
+                                || PALETTE_COMMANDS.iter().any(|c| {
+                                    c.names[0] == s.label && c.names.contains(&head.as_str())
+                                });
+                            if typed_command {
+                                self.run_palette_command(&typed);
+                            } else if self
                                 .plugins
                                 .iter()
                                 .any(|p| p.palette.as_deref() == Some(&s.label))
