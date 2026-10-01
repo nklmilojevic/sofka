@@ -14705,6 +14705,68 @@ async fn user_view_overlays_columns_and_applies_initial_sort() {
 }
 
 #[tokio::test]
+async fn user_status_column_colors_crd_words_in_any_case() {
+    let (mut app, _rx) = test_app();
+    install_views(
+        &mut app,
+        r#"
+        [[views."cert-manager.io/v1/certificates".columns]]
+        name = "PHASE"
+        path = "/status/phase"
+        type = "status"
+        "#,
+    );
+    type_resource_query(&mut app, "certificates");
+    for (name, phase) in [
+        // Sorts first and takes the selection highlight.
+        ("selected", "Ready"),
+        ("shoot-a", "healthy"),
+        ("shoot-b", "unhealthy"),
+        ("shoot-c", "progressing"),
+        ("shoot-d", "Processing"),
+        ("shoot-e", "ERROR"),
+    ] {
+        apply(
+            &mut app,
+            json!({"apiVersion": "cert-manager.io/v1", "kind": "Certificate",
+                "metadata": {"name": name, "namespace": "default"},
+                "status": {"phase": phase}}),
+        );
+    }
+
+    for (name, phase, badge, row) in [
+        (
+            "shoot-a",
+            "healthy",
+            crate::theme::green(),
+            crate::theme::blue(),
+        ),
+        (
+            "shoot-b",
+            "unhealthy",
+            crate::theme::red(),
+            crate::theme::red(),
+        ),
+        (
+            "shoot-c",
+            "progressing",
+            crate::theme::yellow(),
+            crate::theme::peach(),
+        ),
+        (
+            "shoot-d",
+            "Processing",
+            crate::theme::yellow(),
+            crate::theme::peach(),
+        ),
+        ("shoot-e", "ERROR", crate::theme::red(), crate::theme::red()),
+    ] {
+        assert_eq!(health_row_color(&mut app, name, phase), badge, "{name}");
+        assert_eq!(health_row_color(&mut app, name, name), row, "{name}");
+    }
+}
+
+#[tokio::test]
 async fn user_view_adds_provider_label_columns_to_curated_nodes() {
     let (mut app, _rx) = test_app();
     install_views(

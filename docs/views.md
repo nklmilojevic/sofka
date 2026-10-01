@@ -38,6 +38,10 @@ wide = true               # only shown in wide mode (`w`)
 `type` is `text` (default), `status`, `number`, `quantity` (`500m`, `1Gi`),
 `time`, or `condition`. Typed columns sort by value, not by text.
 
+The first `status` column colors its badge and the row. Known words such as
+`Healthy`, `Progressing`, `Processing`, `Degraded`, and `Failed` match in any
+letter case, so a CRD that reports `healthy` or `unhealthy` colors like a pod.
+
 For a `condition` column, `path` is the condition **type name** (`Ready`,
 `Available`, `Reconciling`, …). sofka finds it in `status.conditions` by name -
 never by array index, whose order nothing guarantees - renders its `status`
