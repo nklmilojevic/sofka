@@ -67,13 +67,14 @@ impl RefreshSource {
             });
         }
         let mut source = self.read().await?;
-        if !matches!(
-            self.view,
+        match self.view {
             RefreshView::Yaml {
-                managed_fields: true
-            }
-        ) {
-            source.managed_fields_mut().clear();
+                managed_fields: false,
+            } => source.metadata.managed_fields = None,
+            RefreshView::Yaml {
+                managed_fields: true,
+            } => {}
+            _ => source.managed_fields_mut().clear(),
         }
         let lines = match &self.view {
             RefreshView::Yaml { .. } => serde_yaml::to_string(&source)
@@ -283,7 +284,7 @@ impl App {
         self.stop_resource_refresh();
         if !show {
             let mut object = source.object.clone();
-            object.metadata.managed_fields = Some(Vec::new());
+            object.metadata.managed_fields = None;
             self.detail.replace_lines(self.object_yaml(&object).into());
         }
         if running {

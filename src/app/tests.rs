@@ -32090,7 +32090,12 @@ fn managed_fields_app() -> (App, Receiver<Msg>, HealthResponses) {
 async fn yaml_managed_fields_toggle_fetches_and_preserves_refresh_choice() {
     let (mut app, mut rx, _) = managed_fields_app();
     app.handle_key(press(KeyCode::Char('y'))).unwrap();
-    assert!(!app.detail.lines.iter().any(|line| line.contains("kubelet")));
+    assert!(
+        !app.detail
+            .lines
+            .iter()
+            .any(|line| line.contains("managedFields:"))
+    );
     app.handle_key(press(KeyCode::Char('m'))).unwrap();
     app.handle_msg(take_resource_refresh(&mut rx).await);
     assert!(app.detail.lines.iter().any(|line| line.contains("kubelet")));
@@ -32110,17 +32115,32 @@ async fn yaml_managed_fields_toggle_fetches_and_preserves_refresh_choice() {
     app.handle_msg(take_resource_refresh(&mut rx).await);
     assert!(app.detail.lines.iter().any(|line| line.contains("kubelet")));
     app.handle_key(press(KeyCode::Char('m'))).unwrap();
-    assert!(!app.detail.lines.iter().any(|line| line.contains("kubelet")));
+    assert!(
+        !app.detail
+            .lines
+            .iter()
+            .any(|line| line.contains("managedFields:"))
+    );
     assert!(app.refresh_task.is_some());
     app.handle_msg(take_resource_refresh(&mut rx).await);
-    assert!(!app.detail.lines.iter().any(|line| line.contains("kubelet")));
+    assert!(
+        !app.detail
+            .lines
+            .iter()
+            .any(|line| line.contains("managedFields:"))
+    );
     app.handle_key(press(KeyCode::Char('m'))).unwrap();
     app.handle_msg(take_resource_refresh(&mut rx).await);
     assert!(app.detail.lines.iter().any(|line| line.contains("kubelet")));
     assert!(app.refresh_task.is_some());
     app.handle_key(press(KeyCode::Char('q'))).unwrap();
     app.handle_key(press(KeyCode::Char('y'))).unwrap();
-    assert!(!app.detail.lines.iter().any(|line| line.contains("kubelet")));
+    assert!(
+        !app.detail
+            .lines
+            .iter()
+            .any(|line| line.contains("managedFields:"))
+    );
     assert!(app.refresh_task.is_none());
 }
 
@@ -32198,7 +32218,12 @@ async fn yaml_managed_fields_respects_key_configuration_and_document_type() {
     app.handle_msg(take_resource_refresh(&mut rx).await);
     assert!(app.detail.lines.iter().any(|line| line.contains("kubelet")));
     app.handle_key(press(KeyCode::F(2))).unwrap();
-    assert!(!app.detail.lines.iter().any(|line| line.contains("kubelet")));
+    assert!(
+        !app.detail
+            .lines
+            .iter()
+            .any(|line| line.contains("managedFields:"))
+    );
     assert!(app.refresh_task.is_none());
     assert!(app.managed_fields_task.is_none());
     app.handle_key(press(KeyCode::Char('q'))).unwrap();
@@ -32235,7 +32260,7 @@ async fn yaml_refresh_keeps_managed_fields_hidden() {
     app.handle_key(press(KeyCode::Char('j'))).unwrap();
     let lines = app.detail.lines.clone();
     let scroll = app.detail.scroll;
-    assert!(lines.iter().any(|line| line.contains("managedFields: []")));
+    assert!(!lines.iter().any(|line| line.contains("managedFields:")));
 
     app.handle_key(press(KeyCode::Char('r'))).unwrap();
     app.handle_msg(take_resource_refresh(&mut rx).await);
@@ -32250,9 +32275,7 @@ async fn yaml_refresh_keeps_managed_fields_hidden() {
             .object
             .metadata
             .managed_fields
-            .as_ref()
-            .unwrap()
-            .is_empty()
+            .is_none()
     );
     app.handle_key(press(KeyCode::Char('q'))).unwrap();
 }
