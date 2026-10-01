@@ -764,13 +764,14 @@ impl App {
                     match s.kind {
                         SuggestKind::Command => {
                             // The highlight is back on the command that was
-                            // typed, so run it with its arguments.
+                            // typed, so run it with its arguments; one that
+                            // takes none falls back to its bare name.
                             let typed_command = head == s.label
                                 || PALETTE_COMMANDS.iter().any(|c| {
                                     c.names[0] == s.label && c.names.contains(&head.as_str())
                                 });
-                            if typed_command {
-                                self.run_palette_command(&typed);
+                            if typed_command && self.run_palette_command(&typed) {
+                                // handled
                             } else if self
                                 .plugins
                                 .iter()

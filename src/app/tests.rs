@@ -945,6 +945,16 @@ async fn palette_enter_keeps_arguments_when_the_highlight_returns_to_the_typed_c
     app.handle_key(press(KeyCode::Up)).unwrap();
     app.handle_key(press(KeyCode::Enter)).unwrap();
     assert_eq!(app.mode, Mode::Find, "{}", app.flash);
+
+    // A command that takes no arguments still runs by its name.
+    app.handle_key(press(KeyCode::Esc)).unwrap();
+    app.mode = Mode::Table;
+    app.handle_key(press(KeyCode::Char(':'))).unwrap();
+    type_in_palette(&mut app, "skins prod");
+    app.handle_key(press(KeyCode::Down)).unwrap();
+    app.handle_key(press(KeyCode::Up)).unwrap();
+    app.handle_key(press(KeyCode::Enter)).unwrap();
+    assert_eq!(app.mode, Mode::Skins, "{}", app.flash);
 }
 
 #[tokio::test]
