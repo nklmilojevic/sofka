@@ -1899,6 +1899,9 @@ pub struct App {
     pub command: String,
     pub cmd_suggestions: Vec<Suggestion>,
     pub cmd_sel: usize,
+    /// The highlight was moved since the suggestions were last rebuilt, so
+    /// Enter runs it instead of an exact name in the typed text.
+    cmd_navigated: bool,
     pub scrollbar_activity: Option<std::time::Instant>,
     pub flash: String,
     pub flash_err: bool,
@@ -2403,6 +2406,7 @@ impl App {
             command: String::new(),
             cmd_suggestions: Vec::new(),
             cmd_sel: 0,
+            cmd_navigated: false,
             flash: WELCOME_FLASH.into(),
             flash_err: false,
             watch_error_flash: None,

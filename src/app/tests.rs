@@ -896,6 +896,46 @@ async fn exact_alias_outranks_fuzzy_suggestions() {
 }
 
 #[tokio::test]
+async fn palette_enter_runs_the_highlight_over_an_exact_crd_alias() {
+    // Issue #752: `hr` is helmreleases' short name, so Enter used to open
+    // helmreleases even after tab moved the highlight off it.
+    let (mut app, _rx) = test_app();
+    app.handle_key(press(KeyCode::Char(':'))).unwrap();
+    type_in_palette(&mut app, "hr");
+    assert_eq!(app.cmd_suggestions[0].label, "helmreleases");
+    assert_eq!(app.cmd_suggestions[1].label, "horizontalpodautoscalers");
+    app.handle_key(press(KeyCode::Tab)).unwrap();
+    app.handle_key(press(KeyCode::Enter)).unwrap();
+    assert_eq!(app.kind_plural, "horizontalpodautoscalers");
+
+    app.handle_key(press(KeyCode::Char(':'))).unwrap();
+    type_in_palette(&mut app, "hr");
+    app.handle_key(press(KeyCode::Enter)).unwrap();
+    assert_eq!(app.kind_plural, "helmreleases");
+}
+
+#[tokio::test]
+async fn palette_enter_runs_the_highlight_over_an_exact_command_name() {
+    let (mut app, _rx) = test_app();
+    app.handle_key(press(KeyCode::Char(':'))).unwrap();
+    type_in_palette(&mut app, "helm");
+    assert_eq!(app.cmd_suggestions[0].label, "helm");
+    assert_eq!(app.cmd_suggestions[1].label, "helmreleases");
+    app.handle_key(press(KeyCode::Down)).unwrap();
+    app.handle_key(press(KeyCode::Enter)).unwrap();
+    assert_eq!(app.kind_plural, "helmreleases");
+
+    // Typing after moving the highlight resets it to the top suggestion.
+    app.handle_key(press(KeyCode::Char(':'))).unwrap();
+    type_in_palette(&mut app, "helm");
+    app.handle_key(press(KeyCode::Down)).unwrap();
+    app.handle_key(press(KeyCode::Char('x'))).unwrap();
+    app.handle_key(press(KeyCode::Backspace)).unwrap();
+    app.handle_key(press(KeyCode::Enter)).unwrap();
+    assert_eq!(app.kind_plural, "helm");
+}
+
+#[tokio::test]
 async fn shorter_label_wins_fuzzy_score_ties() {
     // Issue #164: skim scores only the matched characters, so `serv` scores
     // `services` and `serviceaccounts` identically; the alphabetical

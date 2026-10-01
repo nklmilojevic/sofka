@@ -572,6 +572,7 @@ impl App {
         if key.action == Some(Action::Down) {
             if !self.cmd_suggestions.is_empty() {
                 self.cmd_sel = (self.cmd_sel + 1) % self.cmd_suggestions.len();
+                self.cmd_navigated = true;
                 self.fill_resource_context();
             }
             return;
@@ -582,6 +583,7 @@ impl App {
                     .cmd_sel
                     .checked_sub(1)
                     .unwrap_or(self.cmd_suggestions.len() - 1);
+                self.cmd_navigated = true;
                 self.fill_resource_context();
             }
             return;
@@ -666,6 +668,7 @@ impl App {
     fn palette_accept(&mut self) {
         let mut typed = self.command.trim().to_string();
         let picked = self.cmd_suggestions.get(self.cmd_sel).cloned();
+        let navigated = std::mem::take(&mut self.cmd_navigated) && picked.is_some();
         self.mode = Mode::Table;
         self.command.clear();
         // Dispatch leaves the view the palette was opened from behind,
@@ -749,12 +752,13 @@ impl App {
             // outranks ours, and the suggestion list already ranks the
             // resource first. After that an exact typed built-in wins
             // (stable muscle memory), then the highlighted suggestion,
-            // then the raw text as a resource.
+            // then the raw text as a resource. A highlight the user moved
+            // to outranks both exact-name rules.
             _ => {
                 let crd_owned = self.cluster.resolve(&head).is_some_and(|k| k.is_custom());
-                if crd_owned {
+                if crd_owned && !navigated {
                     self.switch_kind_ns(&head, ns_arg);
-                } else if self.run_palette_command(&typed) {
+                } else if !navigated && self.run_palette_command(&typed) {
                     // handled
                 } else if let Some(s) = picked {
                     match s.kind {
@@ -964,6 +968,7 @@ impl App {
     /// Only the first word is matched — anything after it is the namespace
     /// argument of `:kind namespace` and must not perturb the kind match.
     pub(super) fn update_suggestions(&mut self) {
+        self.cmd_navigated = false;
         // Once a second word begins (`:<head> <arg>`), complete the argument:
         // context names after `:ctx`, namespaces after a resource kind. Fall
         // through to first-word matching when the head isn't completable, so a
