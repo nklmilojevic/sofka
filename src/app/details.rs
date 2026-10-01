@@ -63,12 +63,21 @@ impl App {
     pub(super) fn show_yaml(&mut self, obj: &DynamicObject) {
         self.stop_resource_refresh();
         self.clear_document_source();
-        self.document_source = self.resource_source(obj, refresh::RefreshView::Yaml);
+        self.document_source = self.resource_source(
+            obj,
+            refresh::RefreshView::Yaml {
+                managed_fields: false,
+            },
+        );
         let title = obj.metadata.name.clone().unwrap_or_else(|| "object".into());
+        let mut object = obj.clone();
+        if let Some(fields) = object.metadata.managed_fields.as_mut() {
+            fields.clear();
+        }
         self.detail = Scrollable {
             wrap: self.detail.wrap,
             title: format!("{title} — YAML"),
-            lines: self.object_yaml(obj).into(),
+            lines: self.object_yaml(&object).into(),
             ..Default::default()
         };
         self.mode = Mode::Detail;

@@ -2735,6 +2735,8 @@ fn build_help(app: &App, width: usize) -> (Vec<Line<'static>>, String) {
             "add visual marker at the log tail (excluded from copy/save)"
         } else if action == Action::Fullscreen {
             "toggle fullscreen for text selection (no borders or scrollbars)"
+        } else if action == Action::ManagedFields && scope == "detail" {
+            "show or hide managedFields (YAML only; hidden when a document opens)"
         } else if action == Action::AutoRefresh && scope == "detail" {
             "toggle refresh (YAML, decoded Secret, describe)"
         } else if action == Action::AutoRefresh && scope == "diff" {

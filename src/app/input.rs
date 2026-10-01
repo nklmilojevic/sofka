@@ -1312,6 +1312,9 @@ impl App {
             (Some(Action::AutoRefresh), _) if matches!(self.mode, Mode::Detail | Mode::Diff) => {
                 self.toggle_resource_refresh()
             }
+            (Some(Action::ManagedFields), _) if self.mode == Mode::Detail => {
+                self.toggle_managed_fields();
+            }
             (Some(Action::ResetBaseline), _) if self.mode == Mode::Diff => {
                 self.reset_diff_baseline();
             }

@@ -12,7 +12,9 @@ pub(super) struct RefreshSource {
 
 #[derive(Clone)]
 pub(super) enum RefreshView {
-    Yaml,
+    Yaml {
+        managed_fields: bool,
+    },
     DecodedSecret,
     Describe(Vec<String>),
     NativeDescribe,
@@ -65,9 +67,16 @@ impl RefreshSource {
             });
         }
         let mut source = self.read().await?;
-        source.managed_fields_mut().clear();
+        if !matches!(
+            self.view,
+            RefreshView::Yaml {
+                managed_fields: true
+            }
+        ) {
+            source.managed_fields_mut().clear();
+        }
         let lines = match &self.view {
-            RefreshView::Yaml => serde_yaml::to_string(&source)
+            RefreshView::Yaml { .. } => serde_yaml::to_string(&source)
                 .map_err(|e| e.to_string())?
                 .lines()
                 .map(String::from)
@@ -169,6 +178,9 @@ impl App {
 
     pub(super) fn stop_resource_refresh(&mut self) {
         self.refresh_generation = self.refresh_generation.wrapping_add(1);
+        if let Some(task) = self.managed_fields_task.take() {
+            task.abort();
+        }
         if let Some(task) = self.refresh_task.take() {
             task.abort();
         }
@@ -255,6 +267,40 @@ impl App {
         }));
         self.flash = "automatic refresh: on (5s)".into();
         self.flash_err = false;
+    }
+
+    pub(super) fn toggle_managed_fields(&mut self) {
+        let Some(source) = self.document_source.as_mut() else {
+            return;
+        };
+        let RefreshView::Yaml { managed_fields } = &mut source.view else {
+            return;
+        };
+        *managed_fields = !*managed_fields;
+        let show = *managed_fields;
+        let source = source.clone();
+        let running = self.refresh_task.is_some();
+        self.stop_resource_refresh();
+        if !show {
+            let mut object = source.object.clone();
+            object.metadata.managed_fields = Some(Vec::new());
+            self.detail.replace_lines(self.object_yaml(&object).into());
+        }
+        if running {
+            self.toggle_resource_refresh();
+        } else if show {
+            let generation = self.refresh_generation;
+            let tx = self.tx.clone();
+            self.managed_fields_task = Some(tokio::spawn(async move {
+                let result = source.refresh().await;
+                let _ = tx.send(Msg::ResourceRefresh { generation, result }).await;
+            }));
+        }
+        self.set_flash(if show {
+            "managedFields: on (reading resource)"
+        } else {
+            "managedFields: off"
+        });
     }
 
     pub(super) fn apply_resource_refresh(&mut self, content: RefreshContent) {

@@ -29105,7 +29105,9 @@ async fn describe_refresh_does_not_replace_plugin_output_and_fallback_refreshes_
     assert!(app.refresh_task.is_some());
     assert!(matches!(
         app.document_source.as_ref().unwrap().view,
-        refresh::RefreshView::Yaml
+        refresh::RefreshView::Yaml {
+            managed_fields: false
+        }
     ));
     assert_eq!(app.detail.lines[0], "fallback");
     app.handle_key(press(KeyCode::Char('q'))).unwrap();
@@ -32066,6 +32068,151 @@ async fn take_resource_refresh(rx: &mut Receiver<Msg>) -> Msg {
     })
     .await
     .expect("resource refresh did not finish")
+}
+
+fn managed_fields_app() -> (App, Receiver<Msg>, HealthResponses) {
+    let fresh = json!({"apiVersion":"v1","kind":"Pod",
+        "metadata":{"name":"web","namespace":"default","uid":"original",
+            "managedFields":[{"manager":"kubelet","operation":"Update","apiVersion":"v1",
+                "fieldsType":"FieldsV1","fieldsV1":{"f:status":{"f:phase":{}}}}]},
+        "status":{"phase":"Running"}});
+    let mut cached = fresh.clone();
+    cached["metadata"]["managedFields"] = json!([]);
+    let (app, rx, responses, _) = health_report_app("pods", cached);
+    responses
+        .lock()
+        .unwrap()
+        .insert("/api/v1/namespaces/default/pods/web".into(), (200, fresh));
+    (app, rx, responses)
+}
+
+#[tokio::test]
+async fn yaml_managed_fields_toggle_fetches_and_preserves_refresh_choice() {
+    let (mut app, mut rx, _) = managed_fields_app();
+    app.handle_key(press(KeyCode::Char('y'))).unwrap();
+    assert!(!app.detail.lines.iter().any(|line| line.contains("kubelet")));
+    app.handle_key(press(KeyCode::Char('m'))).unwrap();
+    app.handle_msg(take_resource_refresh(&mut rx).await);
+    assert!(app.detail.lines.iter().any(|line| line.contains("kubelet")));
+    assert!(app.refresh_task.is_none());
+    assert!(app.managed_fields_task.is_none());
+    assert!(
+        app.selected()
+            .unwrap()
+            .metadata
+            .managed_fields
+            .as_ref()
+            .unwrap()
+            .is_empty()
+    );
+
+    app.handle_key(press(KeyCode::Char('r'))).unwrap();
+    app.handle_msg(take_resource_refresh(&mut rx).await);
+    assert!(app.detail.lines.iter().any(|line| line.contains("kubelet")));
+    app.handle_key(press(KeyCode::Char('m'))).unwrap();
+    assert!(!app.detail.lines.iter().any(|line| line.contains("kubelet")));
+    assert!(app.refresh_task.is_some());
+    app.handle_msg(take_resource_refresh(&mut rx).await);
+    assert!(!app.detail.lines.iter().any(|line| line.contains("kubelet")));
+    app.handle_key(press(KeyCode::Char('m'))).unwrap();
+    app.handle_msg(take_resource_refresh(&mut rx).await);
+    assert!(app.detail.lines.iter().any(|line| line.contains("kubelet")));
+    assert!(app.refresh_task.is_some());
+    app.handle_key(press(KeyCode::Char('q'))).unwrap();
+    app.handle_key(press(KeyCode::Char('y'))).unwrap();
+    assert!(!app.detail.lines.iter().any(|line| line.contains("kubelet")));
+    assert!(app.refresh_task.is_none());
+}
+
+#[tokio::test]
+async fn yaml_managed_fields_ignores_results_after_hide_or_close() {
+    for close in [false, true] {
+        let (mut app, mut rx, _) = managed_fields_app();
+        app.handle_key(press(KeyCode::Char('y'))).unwrap();
+        app.handle_key(press(KeyCode::Char('m'))).unwrap();
+        let pending = take_resource_refresh(&mut rx).await;
+        app.handle_key(press(KeyCode::Char(if close { 'q' } else { 'm' })))
+            .unwrap();
+        let lines = app.detail.lines.clone();
+        app.handle_msg(pending);
+        assert_eq!(app.detail.lines, lines);
+        assert!(app.managed_fields_task.is_none());
+        assert!(app.refresh_task.is_none());
+        assert_eq!(app.mode, if close { Mode::Table } else { Mode::Detail });
+    }
+}
+
+#[tokio::test]
+async fn yaml_managed_fields_reports_read_errors_and_can_retry() {
+    for replaced in [false, true] {
+        let (mut app, mut rx, responses) = managed_fields_app();
+        let path = "/api/v1/namespaces/default/pods/web";
+        let original = responses.lock().unwrap()[path].clone();
+        if replaced {
+            responses.lock().unwrap().get_mut(path).unwrap().1["metadata"]["uid"] =
+                json!("replacement");
+        } else {
+            responses.lock().unwrap().insert(
+                path.into(),
+                (
+                    403,
+                    json!({
+                        "apiVersion":"v1","kind":"Status","status":"Failure",
+                        "reason":"Forbidden","message":"access denied","code":403
+                    }),
+                ),
+            );
+        }
+        app.handle_key(press(KeyCode::Char('y'))).unwrap();
+        let lines = app.detail.lines.clone();
+        app.handle_key(press(KeyCode::Char('m'))).unwrap();
+        app.handle_msg(take_resource_refresh(&mut rx).await);
+        assert_eq!(app.detail.lines, lines);
+        assert!(app.flash_err);
+        assert!(
+            app.flash.contains(if replaced {
+                "was replaced"
+            } else {
+                "access denied"
+            }),
+            "{}",
+            app.flash
+        );
+        assert!(app.managed_fields_task.is_none());
+        responses.lock().unwrap().insert(path.into(), original);
+        app.handle_key(press(KeyCode::Char('m'))).unwrap();
+        app.handle_msg(take_resource_refresh(&mut rx).await);
+        assert!(app.detail.lines.iter().any(|line| line.contains("kubelet")));
+        app.handle_key(press(KeyCode::Char('q'))).unwrap();
+    }
+}
+
+#[tokio::test]
+async fn yaml_managed_fields_respects_key_configuration_and_document_type() {
+    let (mut app, mut rx, _) = managed_fields_app();
+    use_keys(&mut app, "[keys.detail]\nmanaged_fields = 'f2'\n");
+    app.handle_key(press(KeyCode::Char('y'))).unwrap();
+    app.handle_key(press(KeyCode::Char('m'))).unwrap();
+    assert!(app.managed_fields_task.is_none());
+    app.handle_key(press(KeyCode::F(2))).unwrap();
+    app.handle_msg(take_resource_refresh(&mut rx).await);
+    assert!(app.detail.lines.iter().any(|line| line.contains("kubelet")));
+    app.handle_key(press(KeyCode::F(2))).unwrap();
+    assert!(!app.detail.lines.iter().any(|line| line.contains("kubelet")));
+    assert!(app.refresh_task.is_none());
+    assert!(app.managed_fields_task.is_none());
+    app.handle_key(press(KeyCode::Char('q'))).unwrap();
+
+    let secret = json!({"apiVersion":"v1","kind":"Secret",
+        "metadata":{"name":"credentials","namespace":"default"},
+        "data":{"password":"c2VjcmV0"}});
+    let (mut app, _, _, _) = health_report_app("secrets", secret);
+    app.handle_key(press(KeyCode::Char('x'))).unwrap();
+    assert_eq!(app.mode, Mode::Detail);
+    let lines = app.detail.lines.clone();
+    app.handle_key(press(KeyCode::Char('m'))).unwrap();
+    assert_eq!(app.detail.lines, lines);
+    assert!(app.managed_fields_task.is_none());
 }
 
 #[tokio::test]

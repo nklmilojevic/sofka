@@ -207,6 +207,12 @@ The setting stays on across refreshes and new documents for the current session.
 It starts off in a new session and is separate from the Logs fullscreen setting.
 `F` restores the normal layout. `esc` and `q` keep their existing behavior.
 
+In the YAML view, `m` shows or hides `metadata.managedFields`. Fields are hidden
+when a document opens. Showing them reads the full resource from the API. The
+choice stays in effect during automatic refresh. This key does not change
+describe, decoded Secret, or diff views. Use `keys.detail.managed_fields` to
+change the key binding.
+
 Automatic refresh is available in these resource views:
 
 | View                           | Automatic refresh           | Other refresh controls                            |

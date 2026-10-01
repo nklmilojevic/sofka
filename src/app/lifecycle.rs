@@ -1762,7 +1762,9 @@ impl App {
                 if warn.is_some()
                     && let Some(source) = self.document_source.as_mut()
                 {
-                    source.view = refresh::RefreshView::Yaml;
+                    source.view = refresh::RefreshView::Yaml {
+                        managed_fields: false,
+                    };
                 }
                 self.detail.title = title;
                 self.detail.replace_lines(lines.into());
@@ -1796,14 +1798,29 @@ impl App {
             }
             Msg::ResourceRefresh { generation, result }
                 if generation == self.refresh_generation
-                    && self.refresh_task.is_some()
+                    && (self.refresh_task.is_some() || self.managed_fields_task.is_some())
                     && self.resource_refresh_available() =>
             {
+                let one_shot = self.managed_fields_task.take().is_some();
                 match result {
-                    Ok(content) => self.apply_resource_refresh(content),
+                    Ok(content) => {
+                        self.apply_resource_refresh(content);
+                        if one_shot {
+                            self.set_flash("managedFields: on");
+                        }
+                    }
                     Err(error) => {
                         self.stop_resource_refresh();
-                        self.flash_warn(&format!("refresh stopped: {error}"));
+                        if one_shot {
+                            if let Some(source) = self.document_source.as_mut() {
+                                source.view = refresh::RefreshView::Yaml {
+                                    managed_fields: false,
+                                };
+                            }
+                            self.flash_warn(&format!("cannot show managedFields: {error}"));
+                        } else {
+                            self.flash_warn(&format!("refresh stopped: {error}"));
+                        }
                     }
                 }
             }
