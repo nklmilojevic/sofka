@@ -514,25 +514,39 @@ pub fn accent() -> Style {
 /// (healthy, pending, error) keep a distinct pop color so they stand out
 /// against the row tint.
 pub fn status_color(s: &str) -> Color {
-    let s = s.to_ascii_lowercase();
-    if s == "ready,schedulingdisabled" {
-        return yellow();
-    }
-    match s.strip_suffix(",schedulingdisabled").unwrap_or(&s) {
-        s if failure_status(s) => red(),
-        s if s.starts_with("init:") => yellow(),
-        "running" | "ready" | "active" | "bound" | "true" | "deployed" | "synced" | "healthy" => {
-            green()
+    with_lowercase(s, |s| {
+        if s == "ready,schedulingdisabled" {
+            return yellow();
         }
-        // Faded, not "healthy green" — a finished pod isn't running, and a
-        // scaled-to-zero workload isn't serving.
-        "succeeded" | "completed" | "superseded" | "uninstalled" | "scaleddown" => overlay0(),
-        s if pending_status(s) || s == "outofsync" => yellow(),
-        // Matches row_color's killColor — a distinct "on its way out" hue,
-        // not the same bucket as Pending.
-        "terminating" | "uninstalling" => mauve(),
-        "unknown" | "" => overlay1(),
-        _ => text(),
+        match s.strip_suffix(",schedulingdisabled").unwrap_or(s) {
+            s if failure_status(s) => red(),
+            s if s.starts_with("init:") => yellow(),
+            "running" | "ready" | "active" | "bound" | "true" | "deployed" | "synced"
+            | "healthy" => green(),
+            // Faded, not "healthy green" — a finished pod isn't running, and a
+            // scaled-to-zero workload isn't serving.
+            "succeeded" | "completed" | "superseded" | "uninstalled" | "scaleddown" => overlay0(),
+            s if pending_status(s) || s == "outofsync" => yellow(),
+            // Matches row_color's killColor — a distinct "on its way out" hue,
+            // not the same bucket as Pending.
+            "terminating" | "uninstalling" => mauve(),
+            "unknown" | "" => overlay1(),
+            _ => text(),
+        }
+    })
+}
+
+/// Runs `f` on the ASCII-lowercased `s`. Both colorers run for every visible
+/// row on every frame, so status-sized strings are lowered on the stack.
+fn with_lowercase<R>(s: &str, f: impl FnOnce(&str) -> R) -> R {
+    let mut buf = [0u8; 48];
+    match buf.get_mut(..s.len()) {
+        Some(lower) => {
+            lower.copy_from_slice(s.as_bytes());
+            lower.make_ascii_lowercase();
+            f(std::str::from_utf8(lower).expect("ASCII lowercasing keeps UTF-8 valid"))
+        }
+        None => f(&s.to_ascii_lowercase()),
     }
 }
 
@@ -604,16 +618,17 @@ fn failure_status(status: &str) -> bool {
 /// - everything healthy (Running/Ready/Bound/…) **or without a status** → the
 ///   standard row color (blue), so healthy rows read blue like k9s, not white.
 pub fn row_color(s: &str) -> Color {
-    let s = s.to_ascii_lowercase();
-    match s.strip_suffix(",schedulingdisabled").unwrap_or(&s) {
-        s if failure_status(s) => red(),
-        s if s.starts_with("init:") => peach(),
-        s if pending_status(s) => peach(),
-        "completed" | "succeeded" | "superseded" | "uninstalled" | "scaleddown" => overlay0(),
-        // k9s killColor — terminating/deleting rows.
-        "terminating" | "uninstalling" => mauve(),
-        _ => blue(),
-    }
+    with_lowercase(s, |s| {
+        match s.strip_suffix(",schedulingdisabled").unwrap_or(s) {
+            s if failure_status(s) => red(),
+            s if s.starts_with("init:") => peach(),
+            s if pending_status(s) => peach(),
+            "completed" | "succeeded" | "superseded" | "uninstalled" | "scaleddown" => overlay0(),
+            // k9s killColor — terminating/deleting rows.
+            "terminating" | "uninstalling" => mauve(),
+            _ => blue(),
+        }
+    })
 }
 
 /// Foreground tint for a threshold [`Severity`](crate::thresholds::Severity):
@@ -773,6 +788,9 @@ mod tests {
         assert_eq!(row_color("Reconciling"), peach());
         assert_eq!(status_color("SUCCEEDED"), overlay0());
         assert_eq!(status_color("Somethingelse"), text());
+        let long = format!("NotReady,{}", "X".repeat(60));
+        assert_eq!(status_color(&long), red());
+        assert_eq!(row_color(&long), red());
     }
 
     #[test]
