@@ -189,7 +189,9 @@ include those conditions. Row filters can search the route paths.
   and restores its filter and selected row.
 - **Live watch** of any kind through `kube::runtime::watcher`, streamed into an
   in-memory store. Watch requests use uncompressed responses to avoid gzip
-  stream errors. List requests retain gzip compression.
+  stream errors. List requests retain gzip compression. TCP keepalive fails
+  connections to a peer that stopped answering, and the watch restarts on its
+  own after the machine wakes from sleep.
 - **Curated columns** for common kinds (pods, deployments, replicasets,
   statefulsets, daemonsets, services, nodes, namespaces, configmaps, secrets,
   jobs, cronjobs, PVC/PV, ingresses, endpoints, CustomResourceDefinitions), with

@@ -18,6 +18,7 @@ mod popup_wrapping;
 mod proxy;
 mod rbac;
 mod restart;
+mod resume;
 mod scale;
 mod server_table;
 mod synchronized_output;

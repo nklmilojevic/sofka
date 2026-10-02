@@ -1151,6 +1151,7 @@ async fn run(
                 app.reap_port_forwards(); // age columns + drop dead forwards
                 app.expire_flash();
                 app.check_journal_error();
+                app.detect_resume();
                 dirty = true;
             }
             // A held Esc was a real keypress after all, not the head of a

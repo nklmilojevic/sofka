@@ -1,6 +1,6 @@
 //! Kubernetes TLS compatibility and the shared HTTP transport.
 
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
 use anyhow::{Context, Result, bail, ensure};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
@@ -123,9 +123,26 @@ fn v1_config(config: &Config, allow_v1: bool, original_error: kube::Error) -> Re
     legacy_config(config, chain)
 }
 
-fn connect(config: Config, tls: ClientConfig, auth: Option<AuthLayer>) -> Result<Builder> {
+/// Idle time before the kernel probes a connection, matching client-go's dialer.
+const KEEPALIVE_IDLE: Duration = Duration::from_secs(30);
+const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(10);
+const KEEPALIVE_RETRIES: u32 = 3;
+
+/// The client sets no read timeout, so a request sent on a socket whose peer
+/// vanished (a laptop asleep on battery, a NAT that dropped the flow) would
+/// wait forever. Keepalive probes fail such a socket within about a minute
+/// without cutting off quiet watch, log, or port-forward streams.
+fn http_connector() -> HttpConnector {
     let mut connector = HttpConnector::new();
     connector.enforce_http(false);
+    connector.set_keepalive(Some(KEEPALIVE_IDLE));
+    connector.set_keepalive_interval(Some(KEEPALIVE_INTERVAL));
+    connector.set_keepalive_retries(Some(KEEPALIVE_RETRIES));
+    connector
+}
+
+fn connect(config: Config, tls: ClientConfig, auth: Option<AuthLayer>) -> Result<Builder> {
+    let connector = http_connector();
     match config.proxy_url.as_ref() {
         None => transport(connector, config, tls, auth),
         Some(proxy) if proxy.scheme_str() == Some("socks5") => {
@@ -325,6 +342,36 @@ mod tests {
     const SERVER_KEY: &[u8] = include_bytes!("../tests/fixtures/tls/server.key");
     const CLIENT_P521: &[u8] = include_bytes!("../tests/fixtures/tls/client-p521.pem");
     const CLIENT_P521_KEY: &[u8] = include_bytes!("../tests/fixtures/tls/client-p521.key");
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn connections_probe_a_vanished_peer() {
+        use std::os::fd::AsRawFd;
+
+        fn option(fd: i32, level: i32, name: i32) -> i32 {
+            let mut value: libc::c_int = 0;
+            let mut len = std::mem::size_of::<libc::c_int>() as libc::socklen_t;
+            let rc =
+                unsafe { libc::getsockopt(fd, level, name, (&raw mut value).cast(), &raw mut len) };
+            assert_eq!(rc, 0, "getsockopt failed");
+            value
+        }
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let uri: Uri = format!("http://{}", listener.local_addr().unwrap())
+            .parse()
+            .unwrap();
+        let stream = http_connector().oneshot(uri).await.unwrap();
+        let fd = stream.inner().as_raw_fd();
+        #[cfg(target_vendor = "apple")]
+        let idle = libc::TCP_KEEPALIVE;
+        #[cfg(not(target_vendor = "apple"))]
+        let idle = libc::TCP_KEEPIDLE;
+        assert_ne!(option(fd, libc::SOL_SOCKET, libc::SO_KEEPALIVE), 0);
+        assert_eq!(option(fd, libc::IPPROTO_TCP, idle), 30);
+        assert_eq!(option(fd, libc::IPPROTO_TCP, libc::TCP_KEEPINTVL), 10);
+        assert_eq!(option(fd, libc::IPPROTO_TCP, libc::TCP_KEEPCNT), 3);
+    }
 
     fn config() -> Config {
         let mut config = Config::new("https://127.0.0.1:6443/prefix".parse().unwrap());

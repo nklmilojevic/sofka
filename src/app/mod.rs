@@ -1816,6 +1816,10 @@ pub struct App {
 
     pub generation: u64,
     gen_flag: Arc<AtomicU64>,
+    /// Clock readings from the previous tick, compared to spot a wake.
+    resume_clock: Option<resume::Clock>,
+    /// A wake was seen while an overlay was open; restart on return.
+    resume_pending: bool,
     /// Context currently being connected to, paired with the generation that
     /// owns its eventual result.
     context_switch_target: Option<(u64, String)>,
@@ -2361,6 +2365,8 @@ impl App {
             scope_label: None,
             generation: 0,
             gen_flag: Arc::new(AtomicU64::new(0)),
+            resume_clock: None,
+            resume_pending: false,
             context_switch_target: None,
             launch_namespace: None,
             tasks: Vec::new(),
@@ -2721,6 +2727,7 @@ mod plugins;
 mod pvcexplore;
 pub mod rbac;
 mod refresh;
+mod resume;
 mod rightsize;
 mod rows;
 mod snapshot;
