@@ -520,25 +520,68 @@ async fn namespace_patterns_relist_removes_cached_and_live_keys_only_in_its_name
     assert!(app.store.get("b-crons/cached").is_some());
 }
 
+fn recheck(app: &mut App, result: Result<Vec<&str>, &str>) {
+    app.handle_msg(Msg::NamespacePattern {
+        generation: app.generation,
+        request: app.namespace_request,
+        pattern: "*-crons".into(),
+        action: NamespacePatternAction::Refresh,
+        result: result
+            .map(|names| names.into_iter().map(str::to_string).collect())
+            .map_err(str::to_string),
+    });
+}
+
 #[tokio::test]
-async fn waking_reuses_resolved_namespaces_without_moving_the_selection() {
-    let (mut app, _rx) = pattern_app();
-    type_resource_query(&mut app, "pods");
-    type_resource_query(&mut app, "ns *-crons");
-    resolve(&mut app, &["a-crons", "b-crons"]);
-    for ns in ["a-crons", "b-crons"] {
-        pod(&mut app, ns, "web");
+async fn waking_restarts_on_resolved_namespaces_then_picks_up_new_ones() {
+    for (outcome, restarts, label) in [
+        (
+            Ok(vec!["a-crons", "b-crons", "c-crons"]),
+            true,
+            "*-crons (3 namespaces)",
+        ),
+        (
+            Ok(vec!["b-crons", "a-crons"]),
+            false,
+            "*-crons (2 namespaces)",
+        ),
+        (Ok(vec![]), false, "*-crons (2 namespaces)"),
+        (Err("connection refused"), false, "*-crons (2 namespaces)"),
+    ] {
+        let (mut app, mut rx) = pattern_app();
+        type_resource_query(&mut app, "pods");
+        type_resource_query(&mut app, "ns *-crons");
+        resolve(&mut app, &["a-crons", "b-crons"]);
+        for ns in ["a-crons", "b-crons"] {
+            pod(&mut app, ns, "web");
+        }
+        app.table_state.select(Some(1));
+        let history = app.history.len();
+        while rx.try_recv().is_ok() {}
+        let generation = app.generation;
+
+        super::resume::tick_after_sleep(&mut app, std::time::Duration::from_secs(3600));
+        assert!(app.generation > generation, "restarts before the re-check");
+        assert_eq!(app.namespace_label(), "*-crons (2 namespaces)");
+        assert_eq!(app.flash, "reconnected after sleep");
+        let lookup = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                if let Some(Msg::NamespacePattern { action, .. }) = rx.recv().await {
+                    break action;
+                }
+            }
+        })
+        .await
+        .expect("the wake re-checks the pattern");
+        assert!(matches!(lookup, NamespacePatternAction::Refresh));
+
+        let generation = app.generation;
+        recheck(&mut app, outcome.clone());
+        assert_eq!(app.generation > generation, restarts, "{outcome:?}");
+        assert_eq!(app.namespace, "*-crons");
+        assert_eq!(app.namespace_label(), label);
+        assert!(!app.flash_err, "{outcome:?}: {}", app.flash);
+        assert_eq!(app.history.len(), history);
+        assert_eq!(app.table_state.selected(), Some(1));
     }
-    app.table_state.select(Some(1));
-    let history = app.history.len();
-    let generation = app.generation;
-
-    super::resume::tick_after_sleep(&mut app, std::time::Duration::from_secs(3600));
-
-    assert!(app.generation > generation);
-    assert_eq!(app.namespace, "*-crons");
-    assert_eq!(app.namespace_label(), "*-crons (2 namespaces)");
-    assert_eq!(app.flash, "reconnected after sleep");
-    assert_eq!(app.history.len(), history);
-    assert_eq!(app.table_state.selected(), Some(1));
 }
