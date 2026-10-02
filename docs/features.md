@@ -191,7 +191,7 @@ include those conditions. Row filters can search the route paths.
   in-memory store. Watch requests use uncompressed responses to avoid gzip
   stream errors. List requests retain gzip compression. TCP keepalive fails
   connections to a peer that stopped answering, and the watch restarts on its
-  own after the machine wakes from sleep.
+  own after the machine wakes from sleep on macOS and Linux.
 - **Curated columns** for common kinds (pods, deployments, replicasets,
   statefulsets, daemonsets, services, nodes, namespaces, configmaps, secrets,
   jobs, cronjobs, PVC/PV, ingresses, endpoints, CustomResourceDefinitions), with

@@ -931,6 +931,8 @@ impl App {
     /// skin, defaults) follow the new context.
     pub(super) fn apply_context_switch(&mut self, name: String, mut cluster: Box<Cluster>) {
         self.ctx_reload = false;
+        // The new client's watches start on fresh connections.
+        self.resume_pending = false;
         let previous_kind = self.kind.clone().filter(|_| self.cluster.connected);
         self.stop_notifications();
         let resolved = self.config.resolve(&name, &cluster.cluster_name);

@@ -519,3 +519,26 @@ async fn namespace_patterns_relist_removes_cached_and_live_keys_only_in_its_name
     assert_eq!(app.store.len(), 1);
     assert!(app.store.get("b-crons/cached").is_some());
 }
+
+#[tokio::test]
+async fn waking_reuses_resolved_namespaces_without_moving_the_selection() {
+    let (mut app, _rx) = pattern_app();
+    type_resource_query(&mut app, "pods");
+    type_resource_query(&mut app, "ns *-crons");
+    resolve(&mut app, &["a-crons", "b-crons"]);
+    for ns in ["a-crons", "b-crons"] {
+        pod(&mut app, ns, "web");
+    }
+    app.table_state.select(Some(1));
+    let history = app.history.len();
+    let generation = app.generation;
+
+    super::resume::tick_after_sleep(&mut app, std::time::Duration::from_secs(3600));
+
+    assert!(app.generation > generation);
+    assert_eq!(app.namespace, "*-crons");
+    assert_eq!(app.namespace_label(), "*-crons (2 namespaces)");
+    assert_eq!(app.flash, "reconnected after sleep");
+    assert_eq!(app.history.len(), history);
+    assert_eq!(app.table_state.selected(), Some(1));
+}

@@ -36,17 +36,12 @@ pub(crate) fn client_builder(
     allow_v1: bool,
     no_tls_resumption: bool,
 ) -> Result<Builder> {
-    let roots = crate::server_tls::configured_roots(&config);
-    if roots.is_none() && !no_tls_resumption {
-        return match ClientBuilder::try_from(config.clone()) {
-            Ok(builder) => Ok(builder),
-            Err(error) => {
-                let tls = v1_config(&config, allow_v1, error)?;
-                let auth = config.auth_layer()?;
-                connect(config, tls, auth)
-            }
-        };
+    // Every client goes through `connect`: kube-rs builds its own connector
+    // with no way to enable TCP keepalive on it.
+    if rustls::crypto::CryptoProvider::get_default().is_none() {
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
     }
+    let roots = crate::server_tls::configured_roots(&config);
     // Resolve auth before the TLS identity, as kube-rs does.
     let auth = config.auth_layer()?;
     let mut tls = match config.rustls_client_config() {
@@ -59,16 +54,14 @@ pub(crate) fn client_builder(
     if no_tls_resumption {
         tls.resumption = rustls::client::Resumption::disabled();
     }
-    // Kube-rs exposes exec expiry only through its standard client builder.
-    // Retain that metadata when the opt-in path needs a custom transport.
-    let mut expiration = if config.auth_info.exec.is_some() {
-        *ClientBuilder::try_from(config.clone())?
-            .build()
-            .valid_until()
-    } else {
-        None
-    };
+    let mut expiration = None;
     if config.auth_info.exec.is_some() && tls.client_auth_cert_resolver.has_certs() {
+        // Kube-rs exposes exec expiry only through its standard client
+        // builder, and reports one only for an exec-issued certificate.
+        // Building it runs the exec plugin again, so skip it for tokens.
+        expiration = *ClientBuilder::try_from(config.clone())?
+            .build()
+            .valid_until();
         // A later exec call can return a different identity. Never report an
         // expiry after the certificate that this TLS client will send.
         let schemes = tls
@@ -345,10 +338,10 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn connections_probe_a_vanished_peer() {
-        use std::os::fd::AsRawFd;
+    async fn default_clients_probe_a_vanished_peer() {
+        use std::os::fd::RawFd;
 
-        fn option(fd: i32, level: i32, name: i32) -> i32 {
+        fn option(fd: RawFd, level: i32, name: i32) -> i32 {
             let mut value: libc::c_int = 0;
             let mut len = std::mem::size_of::<libc::c_int>() as libc::socklen_t;
             let rc =
@@ -357,12 +350,27 @@ mod tests {
             value
         }
 
+        /// The client's own socket, found by the local port the server saw.
+        fn socket_bound_to(port: u16) -> RawFd {
+            (0..4096)
+                .find(|&fd| {
+                    let mut addr: libc::sockaddr_in = unsafe { std::mem::zeroed() };
+                    let mut len = std::mem::size_of::<libc::sockaddr_in>() as libc::socklen_t;
+                    let rc = unsafe { libc::getsockname(fd, (&raw mut addr).cast(), &raw mut len) };
+                    rc == 0
+                        && i32::from(addr.sin_family) == libc::AF_INET
+                        && u16::from_be(addr.sin_port) == port
+                })
+                .expect("client socket not found")
+        }
+
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let uri: Uri = format!("http://{}", listener.local_addr().unwrap())
-            .parse()
-            .unwrap();
-        let stream = http_connector().oneshot(uri).await.unwrap();
-        let fd = stream.inner().as_raw_fd();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let client =
+            crate::k8s::build_client(Config::new(url.parse().unwrap()), false, false).unwrap();
+        let request = tokio::spawn(async move { client.apiserver_version().await });
+        let (_stream, peer) = listener.accept().await.unwrap();
+        let fd = socket_bound_to(peer.port());
         #[cfg(target_vendor = "apple")]
         let idle = libc::TCP_KEEPALIVE;
         #[cfg(not(target_vendor = "apple"))]
@@ -371,6 +379,7 @@ mod tests {
         assert_eq!(option(fd, libc::IPPROTO_TCP, idle), 30);
         assert_eq!(option(fd, libc::IPPROTO_TCP, libc::TCP_KEEPINTVL), 10);
         assert_eq!(option(fd, libc::IPPROTO_TCP, libc::TCP_KEEPCNT), 3);
+        request.abort();
     }
 
     fn config() -> Config {
@@ -936,9 +945,9 @@ esac
             let count = std::fs::read_to_string(&counter).unwrap();
             std::fs::remove_dir_all(&directory).unwrap();
             let client = result.unwrap();
-            // The default path resolves auth, TLS identity, and expiry once.
-            // The opt-in path also needs the standard builder for expiry.
-            assert_eq!(count.trim(), if disabled || pinned { "5" } else { "3" });
+            // Auth and TLS identity resolve once, then the standard builder
+            // resolves them again to report the exec certificate's expiry.
+            assert_eq!(count.trim(), "5");
             assert_eq!(client.valid_until().unwrap().to_string(), expected_expiry);
             tokio::time::timeout(
                 std::time::Duration::from_secs(5),
@@ -949,6 +958,40 @@ esac
             .unwrap();
             task.await.unwrap().unwrap();
         }
+    }
+
+    #[tokio::test]
+    async fn exec_tokens_run_the_plugin_once_per_credential_use() {
+        let directory = std::env::temp_dir().join(format!(
+            "sofka-exec-token-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&directory).unwrap();
+        let counter = directory.join("count");
+        let mut config = Config::new("https://127.0.0.1:6443".parse().unwrap());
+        config.auth_info.exec = Some(
+            serde_json::from_value(serde_json::json!({
+                "apiVersion": "client.authentication.k8s.io/v1", "command": "sh",
+                "args": ["-c", r#"
+count=0
+if test -f "$1"; then read -r count < "$1"; fi
+printf '%s\n' "$((count + 1))" > "$1"
+printf '%s' '{"apiVersion":"client.authentication.k8s.io/v1","kind":"ExecCredential","status":{"token":"t"}}'
+"#, "sofka-exec-test", counter.to_str().unwrap()],
+                "interactiveMode": "Never"
+            }))
+            .unwrap(),
+        );
+        let result = crate::k8s::build_client(config, false, false);
+        let count = std::fs::read_to_string(&counter).unwrap();
+        std::fs::remove_dir_all(&directory).unwrap();
+        assert!(result.unwrap().valid_until().is_none());
+        // Once for the auth layer, once for the TLS identity lookup.
+        assert_eq!(count.trim(), "2");
     }
 
     #[tokio::test]
