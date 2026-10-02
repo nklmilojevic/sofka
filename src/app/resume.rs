@@ -9,7 +9,7 @@
 
 use std::time::Duration;
 
-use super::{App, Mode, NamespacePatternAction};
+use super::{App, Mode};
 
 /// Sleep between two ticks that counts as a wake. Shorter naps rarely outlast
 /// the server's idle timeouts, and keepalive covers the rest.
@@ -85,13 +85,9 @@ impl App {
             return;
         }
         self.resume_pending = false;
-        // Restart on the namespaces a pattern already resolved to, so a
-        // failed lookup cannot hold the restart back, then pick up any that
-        // started or stopped matching during sleep.
+        // Reuse the namespaces a pattern already resolved to: a fresh lookup
+        // would move the selection and could fail before restarting.
         self.start_watch();
-        if self.namespace_is_pattern() && self.namespace_patterns.contains_key(&self.namespace) {
-            self.resolve_namespace_pattern(self.namespace.clone(), NamespacePatternAction::Refresh);
-        }
         // The restart clears watch errors; any other warning, such as a
         // failed context switch, still applies.
         if !self.flash_err {

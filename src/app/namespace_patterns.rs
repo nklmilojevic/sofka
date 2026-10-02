@@ -5,9 +5,6 @@ pub enum NamespacePatternAction {
     Resource(String),
     Query(crate::filter::ResourceQuery),
     Resume,
-    /// Re-check a pattern whose watch is already running, restarting it only
-    /// when the matching namespaces changed.
-    Refresh,
 }
 
 pub(super) fn is_pattern(value: &str) -> bool {
@@ -109,15 +106,8 @@ impl App {
         action: NamespacePatternAction,
         result: Result<Vec<String>, String>,
     ) {
-        let refresh = matches!(action, NamespacePatternAction::Refresh);
         let mut names = match result {
             Ok(names) if !names.is_empty() => names,
-            // A running watch keeps its namespaces when the re-check fails.
-            Err(error) if refresh => {
-                crate::log_warn!("namespace.refresh", pattern = pattern, error = error);
-                return;
-            }
-            _ if refresh => return,
             result => {
                 let unresolved = self.namespace_is_pattern()
                     && !self.namespace_patterns.contains_key(&self.namespace);
@@ -141,11 +131,6 @@ impl App {
         };
         names.sort();
         names.dedup();
-        if refresh
-            && (self.namespace != pattern || self.namespace_patterns.get(&pattern) == Some(&names))
-        {
-            return;
-        }
         self.namespace_patterns.insert(pattern.clone(), names);
         match action {
             NamespacePatternAction::Resource(resource) => {
@@ -171,7 +156,7 @@ impl App {
                     self.apply_resolved_resource_query(query, kind);
                 }
             }
-            NamespacePatternAction::Resume | NamespacePatternAction::Refresh => self.start_watch(),
+            NamespacePatternAction::Resume => self.start_watch(),
             NamespacePatternAction::Select => self.apply_namespace_selection(pattern),
         }
         self.set_flash(format!("namespace: {}", self.namespace_label()));
