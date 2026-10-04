@@ -1101,10 +1101,14 @@ pub fn watch_error_is_benign(e: &watcher::Error) -> bool {
 
 /// Errors that specifically mean the API server rejected streaming-list
 /// watch parameters. Authentication, throttling, transport, and server errors
-/// remain visible to the user instead of being disguised by a fallback.
+/// remain visible to the user instead of being disguised by a fallback. The
+/// one server error accepted is the apiserver's refusal to stream from a store
+/// without watch progress support, such as kine in KubeSolo.
 fn streaming_lists_unsupported(e: &watcher::Error) -> bool {
-    let unsupported_status =
-        |status: &kube::core::Status| matches!(status.code, 400 | 404 | 405 | 422);
+    let unsupported_status = |status: &kube::core::Status| {
+        matches!(status.code, 400 | 404 | 405 | 422)
+            || (status.code == 500 && status.message.contains("RequestWatchProgress"))
+    };
     match e {
         watcher::Error::WatchStartFailed(kube::Error::Api(status)) => unsupported_status(status),
         watcher::Error::WatchFailed(kube::Error::Api(status)) => unsupported_status(status),
@@ -2060,6 +2064,13 @@ clusters:
         assert!(!streaming_lists_unsupported(
             &watcher::Error::NoResourceVersion
         ));
+        let progress_disabled = watcher::Error::WatchError(Box::new(kube::core::Status {
+            code: 500,
+            reason: "InternalError".into(),
+            message: "a watch stream was requested by the client but the required storage feature RequestWatchProgress is disabled".into(),
+            ..Default::default()
+        }));
+        assert!(streaming_lists_unsupported(&progress_disabled));
     }
 
     async fn mock_watch_server(
@@ -2249,6 +2260,30 @@ clusters:
         let listed = r#"{"apiVersion":"v1","kind":"PodList","metadata":{"resourceVersion":"10"},"items":[{"apiVersion":"v1","kind":"Pod","metadata":{"name":"a","namespace":"default","resourceVersion":"10"}}]}"#.to_string();
         let (url, requests) =
             mock_watch_server(vec![("400 Bad Request", rejected), ("200 OK", listed)]).await;
+        let cluster = watch_cluster(&url);
+        let kind = cluster.resolve("pods").unwrap();
+        let (tx, rx) = tokio::sync::mpsc::channel(16);
+        let task = cluster.spawn_watch(&kind, "default", None, None, 1, tx);
+        assert_eq!(receive_watch_result(rx).await, (1, true));
+        task.abort();
+        assert_eq!(
+            cluster.streaming_lists.load(Ordering::Acquire),
+            STREAMING_UNSUPPORTED
+        );
+        let requests = requests.lock().unwrap();
+        assert!(requests[0].contains("sendInitialEvents=true"));
+        assert!(!requests[1].contains("sendInitialEvents=true"));
+        assert!(!requests[1].contains("watch=true"));
+    }
+
+    #[tokio::test]
+    async fn storage_without_watch_progress_falls_back_to_list_watch() {
+        // kine-backed servers such as KubeSolo accept the streaming watch,
+        // then fail it with a 500 because the store cannot report progress.
+        let rejected = "{\"type\":\"ERROR\",\"object\":{\"kind\":\"Status\",\"apiVersion\":\"v1\",\"status\":\"Failure\",\"message\":\"a watch stream was requested by the client but the required storage feature RequestWatchProgress is disabled\",\"reason\":\"InternalError\",\"code\":500}}\n".to_string();
+        let listed = r#"{"apiVersion":"v1","kind":"PodList","metadata":{"resourceVersion":"10"},"items":[{"apiVersion":"v1","kind":"Pod","metadata":{"name":"a","namespace":"default","resourceVersion":"10"}}]}"#.to_string();
+        let (url, requests) =
+            mock_watch_server(vec![("200 OK", rejected), ("200 OK", listed)]).await;
         let cluster = watch_cluster(&url);
         let kind = cluster.resolve("pods").unwrap();
         let (tx, rx) = tokio::sync::mpsc::channel(16);
