@@ -1084,7 +1084,7 @@ impl App {
                 }
                 Msg::WatchError { error, failure, .. } => {
                     self.namespace_errors
-                        .insert(namespace.clone(), error.clone());
+                        .insert(namespace.clone(), (error.clone(), failure));
                     self.show_watch_error(
                         format!("{namespace}: {error}; results incomplete"),
                         failure,
@@ -1097,14 +1097,15 @@ impl App {
                         self.note_watch_recovered();
                     }
                     if self.clear_watch_error_flash()
-                        && let Some((namespace, error)) = self
+                        && let Some((namespace, (error, failure))) = self
                             .namespace_errors
                             .iter()
                             .min_by_key(|(namespace, _)| *namespace)
                     {
+                        let failure = *failure;
                         self.set_watch_error_flash(
                             format!("{namespace}: {error}; results incomplete"),
-                            WatchFailure::Response,
+                            failure,
                         );
                     }
                 }

@@ -92,7 +92,7 @@ fn renewed_token(app: &App) -> Msg {
 }
 
 /// The plugin runs and fails, as with an expired login.
-async fn fail_renewal(app: &mut App, rx: &mut Receiver<Msg>, at: Timestamp) {
+pub(super) async fn fail_renewal(app: &mut App, rx: &mut Receiver<Msg>, at: Timestamp) {
     app.renew_credentials_at(at);
     assert!(app.credential_attempt.is_some());
     let msg = renewal_result(rx).await;

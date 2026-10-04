@@ -1856,7 +1856,8 @@ pub struct App {
     pub namespace: String,
     namespace_patterns: HashMap<String, Vec<String>>,
     namespace_request: u64,
-    namespace_errors: HashMap<String, String>,
+    /// Each failing namespace's watch error and what its request ran into.
+    namespace_errors: HashMap<String, (String, WatchFailure)>,
     pub labels: Option<String>,
     pub fields: Option<String>,
     pub owner: Option<OwnerScope>,

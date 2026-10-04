@@ -573,3 +573,43 @@ async fn credentials_refused_in_a_pattern_view_renew_until_every_namespace_recov
     app.renew_credentials_at(Timestamp::now());
     assert!(app.credential_attempt.is_none());
 }
+
+#[tokio::test]
+async fn partial_recovery_keeps_the_login_hint_for_a_namespace_still_refused() {
+    use k8s_openapi::jiff::Timestamp;
+    let (mut app, mut rx) = pattern_app();
+    super::credentials::give_exec_certificate(&mut app, super::credentials::fresh());
+    type_resource_query(&mut app, "pods");
+    type_resource_query(&mut app, "ns *-crons");
+    resolve(&mut app, &["a-crons", "b-crons"]);
+    let generation = app.generation;
+    let refuse = |app: &mut App| {
+        for ns in ["a-crons", "b-crons"] {
+            watch(
+                app,
+                ns,
+                Msg::WatchError {
+                    generation,
+                    error: "ApiError: Unauthorized".into(),
+                    failure: WatchFailure::CredentialsRefused,
+                },
+            );
+        }
+    };
+    refuse(&mut app);
+    super::credentials::fail_renewal(&mut app, &mut rx, Timestamp::now()).await;
+    refuse(&mut app);
+
+    watch(&mut app, "b-crons", Msg::WatchRecovered { generation });
+
+    assert!(
+        app.flash.starts_with("watch failed; retrying: a-crons:"),
+        "{}",
+        app.flash
+    );
+    assert!(
+        app.flash.contains("Log in with your credential provider"),
+        "{}",
+        app.flash
+    );
+}
