@@ -348,3 +348,51 @@ async fn an_unauthenticated_watch_without_an_exec_plugin_renews_nothing() {
     app.renew_credentials_at(Timestamp::now());
     assert!(app.credential_attempt.is_none());
 }
+
+#[tokio::test]
+async fn a_certificate_refused_in_the_handshake_renews_before_its_expiry() {
+    let now = Timestamp::now();
+    let (mut app, mut rx) = app_with_exec_certificate_until(fresh());
+    watch_error(&mut app, SEND_REQUEST);
+    app.renew_credentials_at(now);
+    assert!(app.credential_attempt.is_some());
+
+    // Through an ordinary outage the plugin fails too; that stays quiet.
+    let msg = renewal_result(&mut rx).await;
+    app.handle_msg(msg);
+    assert_eq!(app.flash, format!("watch failed; retrying: {SEND_REQUEST}"));
+    watch_error(&mut app, SEND_REQUEST);
+    app.renew_credentials_at(now + SignedDuration::from_secs(10));
+    assert!(app.credential_attempt.is_none(), "retries wait");
+    app.renew_credentials_at(now + SignedDuration::from_secs(30));
+    assert!(app.credential_attempt.is_some());
+}
+
+#[tokio::test]
+async fn a_new_certificate_after_a_handshake_failure_replaces_the_client() {
+    let (mut app, _rx) = app_with_exec_certificate_until(fresh());
+    watch_error(&mut app, SEND_REQUEST);
+    app.renew_credentials_at(Timestamp::now());
+    let generation = app.generation;
+
+    app.handle_msg(renewed(&app, fresh(), RENEWED));
+
+    assert!(app.generation > generation);
+    assert_eq!(app.flash, "renewed cluster credentials");
+}
+
+#[tokio::test]
+async fn transport_failures_of_a_token_client_renew_nothing() {
+    let (mut app, _rx) = app_with_exec_certificate();
+    app.renew_credentials_at(expiry());
+    let config = kube::Config::new("https://127.0.0.1:6443".parse().unwrap());
+    let token = kube::Client::try_from(config).unwrap();
+    app.handle_msg(Msg::CredentialsRenewed {
+        attempt: app.credential_attempt.unwrap(),
+        result: Ok(Box::new(ExecClient::token(token))),
+    });
+
+    watch_error(&mut app, SEND_REQUEST);
+    app.renew_credentials_at(Timestamp::now());
+    assert!(app.credential_attempt.is_none());
+}

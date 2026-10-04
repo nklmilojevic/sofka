@@ -4,9 +4,12 @@
 //! TLS configuration and stays fixed for the client's lifetime. Like
 //! client-go, run the plugin again shortly before the declared expiry, swap
 //! in a client built from the new certificate, and restart the watch on it.
-//! The server refusing the client as unauthenticated also renews it, which
-//! covers clock skew, a revoked certificate, and a plugin that switched to a
-//! token kube-rs cannot refresh because it has no expiry.
+//! The server refusing the client also renews it, which covers clock skew, a
+//! revoked certificate, and a plugin that switched to a token kube-rs cannot
+//! refresh because it has no expiry. A certificate refused in the TLS
+//! handshake looks like any transport failure, so those renew too, quietly:
+//! during an ordinary outage the plugin returns the same certificate or
+//! fails, and neither is news.
 
 use super::{App, Msg};
 use crate::k8s::ExecClient;
@@ -49,13 +52,16 @@ impl App {
             .cluster
             .credential_expiry()
             .is_some_and(|expiry| now.duration_until(expiry) <= RENEW_BEFORE);
-        if !expiring && !self.credential_rejected {
+        let quiet = !expiring && !self.credential_rejected;
+        if quiet && !self.credential_unreachable {
             return;
         }
         let Some(renew) = self.cluster.credential_renewal() else {
             return;
         };
         self.credential_rejected = false;
+        self.credential_unreachable = false;
+        self.credential_attempt_quiet = quiet;
         self.credential_attempts += 1;
         let attempt = self.credential_attempts;
         self.credential_attempt = Some(attempt);
@@ -91,7 +97,9 @@ impl App {
                     context = context,
                     error = error
                 );
-                self.flash_warn(&format!("credential renewal failed: {error}"));
+                if !self.credential_attempt_quiet {
+                    self.flash_warn(&format!("credential renewal failed: {error}"));
+                }
                 self.credential_error = Some(error);
                 return;
             }
@@ -128,10 +136,16 @@ impl App {
     }
 
     /// A watch failed with `error`. Renew on the next tick when the server
-    /// rejected the credentials of a client an exec plugin issued.
+    /// rejected the credentials of a client an exec plugin issued, or when a
+    /// request with its certificate never got an answer.
     pub(super) fn note_watch_failure(&mut self, error: &str) {
-        if is_unauthenticated(error) && self.cluster.renews_credentials() {
+        if !self.cluster.renews_credentials() {
+            return;
+        }
+        if is_unauthenticated(error) {
             self.credential_rejected = true;
+        } else if is_transport_failure(error) && self.cluster.credential_expiry().is_some() {
+            self.credential_unreachable = true;
         }
     }
 
@@ -153,6 +167,7 @@ impl App {
     /// Forget a renewal that belongs to the client a context switch replaced.
     pub(super) fn reset_credential_renewal(&mut self) {
         self.credential_rejected = false;
+        self.credential_unreachable = false;
         self.credential_attempt = None;
         self.credential_retry_at = None;
         self.credential_error = None;
