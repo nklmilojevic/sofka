@@ -1798,9 +1798,12 @@ impl App {
             }
             Msg::ResourceRefresh { generation, result }
                 if generation == self.refresh_generation
-                    && (self.refresh_task.is_some() || self.managed_fields_task.is_some())
+                    && (self.refresh_task.is_some()
+                        || self.managed_fields_task.is_some()
+                        || self.document_reload_task.is_some())
                     && self.resource_refresh_available() =>
             {
+                let reload = self.document_reload_task.take().is_some();
                 let one_shot = self.managed_fields_task.take().is_some();
                 match result {
                     Ok(content) => {
@@ -1818,6 +1821,8 @@ impl App {
                                 };
                             }
                             self.flash_warn(&format!("cannot show managedFields: {error}"));
+                        } else if reload {
+                            self.flash_warn(&format!("cannot reload after edit: {error}"));
                         } else {
                             self.flash_warn(&format!("refresh stopped: {error}"));
                         }

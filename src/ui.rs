@@ -385,6 +385,16 @@ fn draw_base(frame: &mut Frame, app: &mut App) {
         Mode::Confirm | Mode::Prompt if app.over_pvc_browser() => {
             draw_pvc_explore(frame, app, chunks[1])
         }
+        // The Flux warning for `e` in a document view keeps the document
+        // underneath, like the view it returns to.
+        Mode::Confirm if app.confirm_over_document() => draw_scrollable(
+            frame,
+            show_scrollbars,
+            false,
+            &mut app.detail,
+            chunks[1],
+            theme::sky(),
+        ),
         // While the palette is open, keep drawing the view it was opened
         // from, so a global `:` never flashes the table underneath it.
         Mode::Command => match app.palette_return {
@@ -2735,6 +2745,8 @@ fn build_help(app: &App, width: usize) -> (Vec<Line<'static>>, String) {
             "add visual marker at the log tail (excluded from copy/save)"
         } else if action == Action::Fullscreen {
             "toggle fullscreen for text selection (no borders or scrollbars)"
+        } else if action == Action::Edit && scope == "detail" {
+            "edit the displayed resource in $EDITOR (YAML and describe)"
         } else if action == Action::ManagedFields && scope == "detail" {
             "show or hide managedFields (YAML only; hidden when a document opens)"
         } else if action == Action::AutoRefresh && scope == "detail" {
@@ -5384,14 +5396,19 @@ fn navigation_hint(app: &App, width: u16) -> String {
             Action::Help,
         ][..],
     };
+    let editable = scope == "detail" && app.document_editable();
     let available: Vec<_> = preferred
         .iter()
-        .filter(|&&action| {
+        .flat_map(|&action| {
+            let edit = (editable && action == Action::Back).then_some(Action::Edit);
+            std::iter::once(action).chain(edit)
+        })
+        .filter(|&action| {
             app.keymap
                 .entries()
                 .any(|(s, a, _)| s == scope && a == action)
         })
-        .map(|&action| (action, action.description()))
+        .map(|action| (action, action.description()))
         .collect();
     key_hint(app, scope, &available)
 }

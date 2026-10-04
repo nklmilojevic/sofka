@@ -1326,6 +1326,9 @@ impl App {
             (Some(Action::AutoRefresh), _) if matches!(self.mode, Mode::Detail | Mode::Diff) => {
                 self.toggle_resource_refresh()
             }
+            (Some(Action::Edit), _) if self.mode == Mode::Detail => {
+                self.request_document_edit();
+            }
             (Some(Action::ManagedFields), _) if self.mode == Mode::Detail => {
                 self.toggle_managed_fields();
             }

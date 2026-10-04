@@ -698,6 +698,10 @@ include those conditions. Row filters can search the route paths.
   StatefulSet policies, Pod scheduling groups, and Node-local ResourceSlice
   summaries. Node resource accounting includes Pod-level budgets and resize
   status; older API compatibility paths remain available.
+- **Edit from a document** - `e` in the YAML or describe view edits the
+  displayed resource with `kubectl edit`, so a table row that moved while the
+  watch was filling cannot change the target. The document is read again when
+  the editor closes.
 - **Managed fields in YAML** - `m` shows or hides `metadata.managedFields` in the
   YAML view. Fields are hidden when a document opens. Showing them reads the
   full resource from the API. Automatic refresh keeps the current choice.

@@ -182,6 +182,9 @@ impl App {
         if let Some(task) = self.managed_fields_task.take() {
             task.abort();
         }
+        if let Some(task) = self.document_reload_task.take() {
+            task.abort();
+        }
         if let Some(task) = self.refresh_task.take() {
             task.abort();
         }
@@ -199,6 +202,48 @@ impl App {
             self.stop_resource_refresh();
             self.clear_document_source();
         }
+    }
+
+    /// Whether `e` can edit the open document: YAML and describe only. The
+    /// decoded Secret would open the encoded data in the editor.
+    pub fn document_editable(&self) -> bool {
+        self.document_source.as_ref().is_some_and(|source| {
+            matches!(
+                source.view,
+                RefreshView::Yaml { .. } | RefreshView::Describe(_) | RefreshView::NativeDescribe
+            )
+        })
+    }
+
+    /// Whether the open dialog was raised from a document view, so the
+    /// renderer keeps the document underneath it.
+    pub fn confirm_over_document(&self) -> bool {
+        self.confirm_return == Mode::Detail && self.document_source.is_some()
+    }
+
+    /// Read the open document again once an interactive command (the
+    /// editor) returns, so an edit shows without turning on refresh.
+    pub(super) fn reload_document(&mut self) {
+        if self.mode != Mode::Detail || !self.document_editable() {
+            return;
+        }
+        let running = self.refresh_task.is_some();
+        self.stop_resource_refresh();
+        let flash = (self.flash.clone(), self.flash_err);
+        if running {
+            self.toggle_resource_refresh();
+            (self.flash, self.flash_err) = flash;
+            return;
+        }
+        let Some(source) = self.document_source.clone() else {
+            return;
+        };
+        let generation = self.refresh_generation;
+        let tx = self.tx.clone();
+        self.document_reload_task = Some(tokio::spawn(async move {
+            let result = source.refresh().await;
+            let _ = tx.send(Msg::ResourceRefresh { generation, result }).await;
+        }));
     }
 
     pub(super) fn clear_document_source(&mut self) {

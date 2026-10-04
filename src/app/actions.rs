@@ -682,6 +682,38 @@ impl App {
         let Some(obj) = self.selected_ref() else {
             return;
         };
+        let obj = obj.clone();
+        let resource = self.kubectl_resource();
+        self.edit_object(resource, &obj);
+    }
+
+    /// `e` in a YAML or describe view edits the object the document shows,
+    /// not the table row, which can move while the watch is still filling.
+    pub(super) fn request_document_edit(&mut self) {
+        if self.deny_readonly() {
+            return;
+        }
+        let Some(source) = self
+            .document_source
+            .as_ref()
+            .filter(|_| self.document_editable())
+        else {
+            return;
+        };
+        let ar = &source.kind.ar;
+        let resource = if ar.group.is_empty() {
+            ar.plural.clone()
+        } else {
+            format!("{}.{}.{}", ar.plural, ar.version, ar.group)
+        };
+        let obj = source.object.clone();
+        self.edit_object(resource, &obj);
+        if self.mode == Mode::Confirm {
+            self.confirm_return = Mode::Detail;
+        }
+    }
+
+    fn edit_object(&mut self, resource: String, obj: &DynamicObject) {
         let name = obj.metadata.name.clone().unwrap_or_default();
         let ns = obj.metadata.namespace.clone().unwrap_or_default();
         let edit_label = if ns.is_empty() {
@@ -693,7 +725,7 @@ impl App {
         // warn (and confirm) before opening the editor.
         let flux = flux_managed_by(obj);
         let mut argv = self.kubectl_base();
-        argv.extend(["edit".into(), self.kubectl_resource(), name]);
+        argv.extend(["edit".into(), resource, name]);
         if !ns.is_empty() {
             argv.push("-n".into());
             argv.push(ns);

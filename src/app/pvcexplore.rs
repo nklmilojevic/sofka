@@ -975,6 +975,7 @@ impl App {
     /// long; one launched from inside the browser does not, because the browser
     /// is still using it.
     pub fn after_suspend(&mut self) {
+        self.reload_document();
         if !std::mem::take(&mut self.pvc.shell_pending) || self.pvc.active {
             return;
         }

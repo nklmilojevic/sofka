@@ -332,6 +332,7 @@ const DEFAULTS: &[(&str, Action, &[&str])] = &[
     ("detail", Action::Copy, &["c"]),
     ("detail", Action::DecodeSecret, &["x"]),
     ("detail", Action::Down, &["j", "down"]),
+    ("detail", Action::Edit, &["e"]),
     ("detail", Action::Filter, &["/"]),
     ("detail", Action::First, &["g", "home"]),
     ("detail", Action::Fullscreen, &["F"]),

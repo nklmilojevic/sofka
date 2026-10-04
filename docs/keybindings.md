@@ -288,6 +288,7 @@ for those operations.
 | `copy`           | `c`                           |
 | `decode_secret`  | `x`                           |
 | `down`           | `j`, `down`                   |
+| `edit`           | `e`                           |
 | `filter`         | `/`                           |
 | `first`          | `g`, `home`                   |
 | `last`           | `G`, `end`                    |

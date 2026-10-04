@@ -207,6 +207,13 @@ The setting stays on across refreshes and new documents for the current session.
 It starts off in a new session and is separate from the Logs fullscreen setting.
 `F` restores the normal layout. `esc` and `q` keep their existing behavior.
 
+In the YAML and describe views, `e` opens the displayed resource in `$EDITOR`
+(`kubectl edit`), even if the table selection moved while the document was open.
+Read-only mode blocks it, and a Flux-managed resource asks for confirmation
+first. The document is read again when the editor closes. The decoded Secret,
+diff, and events views do not support `e`. Use `keys.detail.edit` to change the
+key binding.
+
 In the YAML view, `m` shows or hides `metadata.managedFields`. Fields are hidden
 when a document opens. Showing them reads the full resource from the API. The
 choice stays in effect during automatic refresh. This key does not change

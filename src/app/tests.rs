@@ -12725,6 +12725,122 @@ async fn editing_unmanaged_object_skips_the_warning() {
     assert!(matches!(app.pending, Some(Suspend::Shell(_))));
 }
 
+fn edit_argv(app: &mut App) -> Vec<String> {
+    let Some(Suspend::Shell(argv)) = app.pending.take() else {
+        panic!("expected the editor to be queued");
+    };
+    argv
+}
+
+#[tokio::test]
+async fn edit_from_yaml_view_targets_the_displayed_object() {
+    let (mut app, _rx) = app_with_pod();
+    apply(
+        &mut app,
+        json!({"apiVersion": "v1", "kind": "Pod",
+               "metadata": {"name": "b", "namespace": "default"}}),
+    );
+    app.table_state.select(Some(0));
+    app.handle_key(press(KeyCode::Char('y'))).unwrap();
+    assert_eq!(app.mode, Mode::Detail);
+    // The watch moves the table cursor while the document is open.
+    app.table_state.select(Some(1));
+    app.handle_key(press(KeyCode::Char('e'))).unwrap();
+    let argv = edit_argv(&mut app);
+    let edit = argv.iter().position(|arg| arg == "edit").unwrap();
+    assert_eq!(argv[edit..], ["edit", "pods", "a", "-n", "default"]);
+    assert_eq!(app.mode, Mode::Detail);
+    assert_eq!(app.journal.len(), 1);
+}
+
+#[tokio::test]
+async fn edit_from_describe_view_opens_the_editor() {
+    let (mut app, _rx) = describe_refresh_app();
+    app.handle_key(press(KeyCode::Char('e'))).unwrap();
+    let argv = edit_argv(&mut app);
+    let edit = argv.iter().position(|arg| arg == "edit").unwrap();
+    assert_eq!(argv[edit..], ["edit", "pods", "web", "-n", "default"]);
+    assert_eq!(app.mode, Mode::Detail);
+}
+
+#[tokio::test]
+async fn edit_from_yaml_view_confirms_flux_managed_objects_over_the_document() {
+    let (mut app, _rx) = test_app();
+    flux_managed_pod(&mut app);
+    app.handle_key(press(KeyCode::Char('y'))).unwrap();
+    app.handle_key(press(KeyCode::Char('e'))).unwrap();
+    assert_eq!(app.mode, Mode::Confirm);
+    assert!(app.confirm_label.contains("Managed by Flux"));
+    assert!(app.confirm_over_document());
+    assert!(app.pending.is_none());
+
+    app.handle_key(press(KeyCode::Esc)).unwrap();
+    assert_eq!(app.mode, Mode::Detail);
+    assert!(app.document_editable());
+    assert!(app.pending.is_none());
+
+    app.handle_key(press(KeyCode::Char('e'))).unwrap();
+    app.handle_key(press(KeyCode::Char('y'))).unwrap();
+    assert_eq!(app.mode, Mode::Detail);
+    assert!(edit_argv(&mut app).contains(&"edit".to_string()));
+    assert!(!app.confirm_over_document());
+}
+
+#[tokio::test]
+async fn edit_from_document_view_respects_read_only_mode() {
+    let (mut app, _rx) = app_with_pod();
+    app.handle_key(press(KeyCode::Char('y'))).unwrap();
+    app.readonly = true;
+    app.handle_key(press(KeyCode::Char('e'))).unwrap();
+    assert!(app.pending.is_none());
+    assert!(app.flash.contains("read-only"));
+    assert_eq!(app.mode, Mode::Detail);
+}
+
+#[tokio::test]
+async fn edit_is_unavailable_in_decoded_secret_and_other_documents() {
+    let (mut app, _rx) = test_app();
+    app.switch_kind("secrets");
+    apply(
+        &mut app,
+        json!({"apiVersion": "v1", "kind": "Secret",
+               "metadata": {"name": "creds", "namespace": "default"},
+               "data": {"token": "c2VjcmV0"}}),
+    );
+    app.table_state.select(Some(0));
+    app.handle_key(press(KeyCode::Char('y'))).unwrap();
+    app.handle_key(press(KeyCode::Char('x'))).unwrap();
+    assert!(app.detail.title.contains("decoded"));
+    app.handle_key(press(KeyCode::Char('e'))).unwrap();
+    assert!(app.pending.is_none());
+    assert_eq!(app.mode, Mode::Detail);
+
+    app.open_journal();
+    app.handle_key(press(KeyCode::Char('e'))).unwrap();
+    assert!(app.pending.is_none());
+    assert_eq!(app.mode, Mode::Detail);
+}
+
+#[tokio::test]
+async fn document_reloads_after_the_editor_closes() {
+    let (mut app, _rx) = app_with_pod();
+    app.handle_key(press(KeyCode::Char('y'))).unwrap();
+    app.handle_key(press(KeyCode::Char('e'))).unwrap();
+    edit_argv(&mut app);
+    app.handle_command_result(None, Ok(()), None);
+    app.after_suspend();
+    assert!(app.document_reload_task.is_some());
+    assert!(app.refresh_task.is_none());
+    app.handle_msg(Msg::ResourceRefresh {
+        generation: app.refresh_generation,
+        result: Ok(refreshed_document(&app, vec!["edited".into()])),
+    });
+    assert_eq!(app.detail.lines[0], "edited");
+    assert!(app.document_reload_task.is_none());
+    assert!(app.refresh_task.is_none());
+    assert_eq!(app.flash, "Command completed.");
+}
+
 #[tokio::test]
 async fn mutating_action_is_recorded_in_the_journal() {
     let (mut app, _rx) = app_with_pod();
@@ -29633,7 +29749,8 @@ async fn edit_and_describe_use_selected_api_resource() {
         ("", "v1", true),
         ("", "v1", false),
     ] {
-        for key in ['e', 'd'] {
+        // `y` then `e` edits from the YAML view.
+        for key in ['e', 'd', 'y'] {
             let (mut app, _rx) = test_app();
             let (kind, plural) = if group.is_empty() {
                 if namespaced {
@@ -29675,7 +29792,10 @@ async fn edit_and_describe_use_selected_api_resource() {
             );
             app.table_state.select(Some(0));
             app.handle_key(press(KeyCode::Char(key))).unwrap();
-            let argv = if key == 'e' {
+            if key == 'y' {
+                app.handle_key(press(KeyCode::Char('e'))).unwrap();
+            }
+            let argv = if key != 'd' {
                 let Some(Suspend::Shell(argv)) = app.pending.take() else {
                     panic!("expected an edit command");
                 };
@@ -29696,10 +29816,10 @@ async fn edit_and_describe_use_selected_api_resource() {
                 "kubectl".to_string(),
                 "--context".into(),
                 "test".into(),
-                if key == 'e' {
-                    "edit".into()
-                } else {
+                if key == 'd' {
                     "describe".into()
+                } else {
+                    "edit".into()
                 },
                 target,
                 "example".into(),
