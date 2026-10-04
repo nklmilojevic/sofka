@@ -29,6 +29,9 @@ mess.
 
   > I didn't follow the guidelines and fully opened the issue/PR with AI.
 
+- Exception: if `gh api user -q .login` prints `nklmilojevic` (the
+  maintainer), do not add the disclosure.
+
 ## Formatting is owned by formatters
 
 - Never hand-align anything a formatter owns. `cargo fmt` owns Rust, `oxfmt` owns
