@@ -541,7 +541,9 @@ include those conditions. Row filters can search the route paths.
   whether it is in git but not the cluster, in the cluster but no longer in git
   (`requiresPruning`), or differs from git, in which case the view points at
   `argocd app diff` for the fields: Argo CD never writes the diff to the
-  Application. `⏎` on an Application row opens this view. Each managed resource is a finding you can `⏎` into. Read entirely from
+  Application. Telling a missing object from a differing one needs per-resource
+  health, which Argo CD only persists with `controller.resource.health.persist`;
+  without it the view says it is one or the other. `⏎` on an Application row opens this view. Each managed resource is a finding you can `⏎` into. Read entirely from
   the Application CRD: no Argo CD API server, no token, no `argocd` binary.
   The headline names how long the current health has held, from
   `status.health.lastTransitionTime` - "Degraded (since 4m)" is a different

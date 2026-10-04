@@ -24905,13 +24905,25 @@ async fn enter_on_an_argocd_application_opens_the_argocd_view() {
     assert_eq!(app.kind_plural, "applications");
 }
 
-/// Another API group's `applications` kind is not Argo's, so `⏎` keeps its
-/// default instead of opening the Argo CD view.
+/// Another API group's `applications` kind is not Argo's, so `⏎` follows a
+/// drill configured under the bare `applications` key instead of opening the
+/// Argo CD view.
 #[tokio::test]
-async fn enter_on_a_non_argocd_application_does_not_open_the_argocd_view() {
+async fn enter_on_a_non_argocd_application_keeps_its_configured_drill() {
     let (mut app, _rx) = test_app();
     app.cluster
         .register_kind("example.com", "Application", "applications", true);
+    app.user_views = views_for(
+        "applications",
+        crate::config::ViewConfig {
+            drill: Some(crate::config::DrillConfig {
+                kind: "secrets".to_string(),
+                labels: None,
+                fields: Some("metadata.name={name}".to_string()),
+            }),
+            ..Default::default()
+        },
+    );
     app.switch_kind("applications.example.com");
     assert_eq!(app.kind.as_ref().unwrap().ar.group, "example.com");
     apply(
@@ -24923,6 +24935,8 @@ async fn enter_on_a_non_argocd_application_does_not_open_the_argocd_view() {
 
     app.handle_key(press(KeyCode::Enter)).unwrap();
     assert_ne!(app.mode, Mode::Argocd);
+    assert_eq!(app.kind_plural, "secrets");
+    assert_eq!(app.fields.as_deref(), Some("metadata.name=a"));
 }
 
 /// An Application deploying into the cluster we are connected to lists what it
@@ -25689,7 +25703,10 @@ async fn argocd_cause_search_does_not_move_the_cursor_off_a_drift_line() {
     let drift_row = app
         .argocd_items
         .iter()
-        .position(|f| f.text == "ConfigMap/settings is OutOfSync: live object differs from git")
+        .position(|f| {
+            f.text
+                == "ConfigMap/settings is OutOfSync: missing from the cluster or differs from git"
+        })
         .expect("drift row");
     app.argocd_state.select(Some(drift_row));
 
@@ -25698,7 +25715,10 @@ async fn argocd_cause_search_does_not_move_the_cursor_off_a_drift_line() {
     let after = app
         .argocd_items
         .iter()
-        .position(|f| f.text == "ConfigMap/settings is OutOfSync: live object differs from git")
+        .position(|f| {
+            f.text
+                == "ConfigMap/settings is OutOfSync: missing from the cluster or differs from git"
+        })
         .expect("drift row still present");
     assert_eq!(
         app.argocd_state.selected(),

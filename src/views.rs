@@ -200,16 +200,20 @@ pub const BUILTIN_DRILLS: &[&str] = &[
     "applicationsets",
 ];
 
-/// The API group a built-in drill is limited to, for plurals generic enough
-/// that another group may define its own kind under the same name. A
-/// configured `drill` on that other group's kind is still honoured.
-fn builtin_drill_group(plural: &str) -> Option<&'static str> {
+/// Whether a configured `drill` under a view key would be shadowed by a
+/// built-in one. Some plurals are generic enough that another API group may
+/// define its own kind under the same name, and that group's drill is still
+/// honoured. RBAC owns its bare plurals; a bare `applications` key predates
+/// the Argo CD drill and stays configurable, so only a key naming `argoproj.io`
+/// is shadowed.
+fn builtin_drill_shadows(key: &str, plural: &str) -> bool {
+    let group = key.split_once('/').map(|(group, _)| group);
     match plural {
         "roles" | "clusterroles" | "rolebindings" | "clusterrolebindings" => {
-            Some("rbac.authorization.k8s.io")
+            group.is_none_or(|g| g == "rbac.authorization.k8s.io")
         }
-        "applications" | "applicationsets" => Some("argoproj.io"),
-        _ => None,
+        "applications" | "applicationsets" => group == Some("argoproj.io"),
+        _ => true,
     }
 }
 
@@ -505,12 +509,7 @@ pub fn compile(
                 .map_or(key.as_str(), |(resource, _)| resource)
                 .to_lowercase();
             let plural = key_plural(&key_lc);
-            let builtin_group = builtin_drill_group(plural).is_none_or(|want| {
-                key_lc
-                    .split_once('/')
-                    .is_none_or(|(group, _)| group == want)
-            });
-            if BUILTIN_DRILLS.contains(&plural) && builtin_group {
+            if BUILTIN_DRILLS.contains(&plural) && builtin_drill_shadows(&key_lc, plural) {
                 warnings.push(format!(
                     "views.\"{key}\": drill is ignored — `enter` on {plural} has a \
                      built-in drill-down that config doesn't replace"
@@ -2055,7 +2054,7 @@ mod tests {
                 let (views, warnings) = compile_toml(&format!(
                     "[views.\"{key}\"]\ndrill = {{ kind = \"secrets\" }}"
                 ));
-                let custom = prefix.starts_with("example.com/");
+                let custom = !prefix.starts_with("argoproj.io/");
                 assert_eq!(views[&key].drill.is_some(), custom, "{key}");
                 assert_eq!(warnings.is_empty(), custom, "{key}: {warnings:?}");
             }

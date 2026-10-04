@@ -1066,18 +1066,22 @@ fn policy_causes(app: &DynamicObject) -> Vec<(Level, String)> {
 /// Managed resources the cluster no longer matches, each with the way it
 /// differs. The field-level diff is computed by Argo CD's controller and never
 /// written to the Application, so a resource that exists on both sides can only
-/// be pointed at `argocd app diff`.
+/// be pointed at `argocd app diff`. Per-resource health is only there when
+/// `controller.resource.health.persist` is on, so without it a resource that
+/// was never created can't be told apart from one that differs.
 fn drift_causes(app: &DynamicObject, resources: &[ManagedResource]) -> Vec<(Level, String)> {
     let mut out = Vec::new();
     let drifted: Vec<&ManagedResource> =
         resources.iter().filter(|r| r.sync == "OutOfSync").collect();
     for r in drifted.iter().take(5) {
         let why = if r.requires_pruning {
-            "in the cluster but no longer in git, so a sync would prune it"
-        } else if r.health == "Missing" {
-            "in git but not created in the cluster"
+            "in the cluster but no longer in git (requires pruning)"
         } else {
-            "live object differs from git"
+            match r.health.as_str() {
+                "Missing" => "in git but not created in the cluster",
+                "" => "missing from the cluster or differs from git",
+                _ => "live object differs from git",
+            }
         };
         out.push((
             Level::Warn,
@@ -1431,7 +1435,7 @@ mod tests {
         let texts = texts(&out);
         assert!(
             texts.iter().any(|t| t
-                == "ConfigMap/old is OutOfSync: in the cluster but no longer in git, so a sync would prune it"),
+                == "ConfigMap/old is OutOfSync: in the cluster but no longer in git (requires pruning)"),
             "{texts:?}"
         );
         assert!(
@@ -1443,6 +1447,33 @@ mod tests {
         // Both differences are fully explained; there is no diff to go look at.
         assert!(
             !texts.iter().any(|t| t.starts_with("field-level diff")),
+            "{texts:?}"
+        );
+    }
+
+    /// Argo CD does not persist per-resource health by default, so an
+    /// OutOfSync resource without it may never have been created.
+    #[test]
+    fn out_of_sync_without_resource_health_does_not_claim_a_live_object() {
+        let mut obj = healthy();
+        obj.data["status"]["sync"]["status"] = json!("OutOfSync");
+        obj.data["status"]["resources"] = json!([
+            {"version": "v1", "kind": "Service", "namespace": "guestbook",
+             "name": "web", "status": "OutOfSync"}
+        ]);
+        let out = describe(&evidence(obj, Destination::Current), now_secs());
+        let texts = texts(&out);
+        assert!(
+            texts
+                .iter()
+                .any(|t| t
+                    == "Service/web is OutOfSync: missing from the cluster or differs from git"),
+            "{texts:?}"
+        );
+        assert!(
+            texts
+                .iter()
+                .any(|t| t == "field-level diff: argocd app diff guestbook"),
             "{texts:?}"
         );
     }
