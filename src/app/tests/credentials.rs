@@ -104,11 +104,21 @@ async fn fail_renewal(app: &mut App, rx: &mut Receiver<Msg>, at: Timestamp) {
     );
 }
 
-fn watch_error(app: &mut App, error: &str) {
+/// A watch error the API server answered, such as a forbidden resource.
+fn answered(app: &mut App, error: &str) {
     app.handle_msg(Msg::WatchError {
         generation: app.generation,
         error: error.into(),
-        credentials_refused: false,
+        failure: WatchFailure::Response,
+    });
+}
+
+/// A watch request that got no answer, as through an outage.
+fn unanswered(app: &mut App, error: &str) {
+    app.handle_msg(Msg::WatchError {
+        generation: app.generation,
+        error: error.into(),
+        failure: WatchFailure::NoResponse,
     });
 }
 
@@ -117,7 +127,7 @@ fn refused(app: &mut App, error: &str) {
     app.handle_msg(Msg::WatchError {
         generation: app.generation,
         error: error.into(),
-        credentials_refused: true,
+        failure: WatchFailure::CredentialsRefused,
     });
 }
 
@@ -217,23 +227,28 @@ async fn a_failed_renewal_explains_refused_requests_and_retries_later() {
         app.flash
     );
 
-    // A certificate the server refused explains the failure; a missing
-    // permission or an outage does not, even after expiry.
-    refused(&mut app, SEND_REQUEST);
-    assert!(
-        app.flash
-            .starts_with(&format!("watch failed; retrying: {SEND_REQUEST}; ")),
-        "{}",
-        app.flash
-    );
-    assert!(app.flash.contains(LOGIN), "{}", app.flash);
-    watch_error(&mut app, "ApiError: pods is forbidden: Forbidden");
+    // With the certificate expired, a refusal or a request that got no
+    // answer keeps its own text and carries the renewal failure after it.
+    for failure in [WatchFailure::CredentialsRefused, WatchFailure::NoResponse] {
+        app.handle_msg(Msg::WatchError {
+            generation: app.generation,
+            error: SEND_REQUEST.into(),
+            failure,
+        });
+        assert!(
+            app.flash
+                .starts_with(&format!("watch failed; retrying: {SEND_REQUEST}; ")),
+            "{failure:?}: {}",
+            app.flash
+        );
+        assert!(app.flash.contains(LOGIN), "{failure:?}: {}", app.flash);
+    }
+    // A missing permission is the API server's answer, not the credentials.
+    answered(&mut app, "ApiError: pods is forbidden: Forbidden");
     assert_eq!(
         app.flash,
         "watch failed; retrying: ApiError: pods is forbidden: Forbidden"
     );
-    watch_error(&mut app, SEND_REQUEST);
-    assert_eq!(app.flash, format!("watch failed; retrying: {SEND_REQUEST}"));
 
     app.renew_credentials_at(expiry() + SignedDuration::from_secs(10));
     assert!(app.credential_attempt.is_none(), "retries wait");
@@ -247,7 +262,7 @@ async fn a_failed_renewal_before_expiry_leaves_unrelated_failures_alone() {
     let (mut app, mut rx) = app_with_exec_certificate_until(valid_until);
     fail_renewal(&mut app, &mut rx, valid_until).await;
 
-    watch_error(&mut app, SEND_REQUEST);
+    unanswered(&mut app, SEND_REQUEST);
     assert_eq!(app.flash, format!("watch failed; retrying: {SEND_REQUEST}"));
     refused(&mut app, "ApiError: Unauthorized");
     assert!(app.flash.contains(LOGIN), "{}", app.flash);
@@ -342,8 +357,8 @@ async fn refused_credentials_renew_a_certificate_before_its_expiry() {
     assert!(app.credential_attempt.is_none());
 
     // An outage or a forbidden resource is not the credentials' fault.
-    watch_error(&mut app, SEND_REQUEST);
-    watch_error(&mut app, "ApiError: pods is forbidden: Forbidden");
+    unanswered(&mut app, SEND_REQUEST);
+    answered(&mut app, "ApiError: pods is forbidden: Forbidden");
     app.renew_credentials_at(now);
     assert!(app.credential_attempt.is_none());
 
@@ -433,7 +448,7 @@ async fn a_token_from_the_plugin_replaces_the_client_and_renews_when_refused() {
         app.credential_attempt.is_none(),
         "a token has no expiry to renew at"
     );
-    watch_error(&mut app, SEND_REQUEST);
+    unanswered(&mut app, SEND_REQUEST);
     app.renew_credentials_at(now);
     assert!(
         app.credential_attempt.is_none(),

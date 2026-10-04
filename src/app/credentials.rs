@@ -11,8 +11,9 @@
 //! keeps renewing every 30 seconds until the watch recovers or a new client
 //! is installed.
 
-use super::{App, Msg};
+use super::{App, Msg, WatchFailure};
 use crate::k8s::ExecClient;
+
 use k8s_openapi::jiff::{SignedDuration, Timestamp};
 
 /// How long before expiry to renew, leaving room for clock skew.
@@ -123,8 +124,8 @@ impl App {
 
     /// A watch failed. Renew on the next tick when the server refused the
     /// credentials of a client an exec plugin issued.
-    pub(super) fn note_watch_failure(&mut self, credentials_refused: bool) {
-        if credentials_refused && self.cluster.renews_credentials() {
+    pub(super) fn note_watch_failure(&mut self, failure: WatchFailure) {
+        if failure == WatchFailure::CredentialsRefused && self.cluster.renews_credentials() {
             self.credential_rejected = true;
         }
     }
@@ -141,14 +142,24 @@ impl App {
     }
 
     /// A watch `error` with the failed renewal's message after it, when the
-    /// server refused the credentials. Other failures, such as an outage or
-    /// a forbidden resource, stay as they are.
+    /// credentials may explain the failure: the server refused them, or the
+    /// certificate has expired and the request got no answer. An API error,
+    /// such as a forbidden resource, stays as it is.
     pub(super) fn credential_error_for(
         &self,
         error: &str,
-        credentials_refused: bool,
+        failure: WatchFailure,
     ) -> Option<String> {
-        if !credentials_refused {
+        let expired = self
+            .cluster
+            .credential_expiry()
+            .is_some_and(|expiry| Timestamp::now() >= expiry);
+        let explains = match failure {
+            WatchFailure::CredentialsRefused => true,
+            WatchFailure::NoResponse => expired,
+            WatchFailure::Response => false,
+        };
+        if !explains {
             return None;
         }
         let hint = self.credential_error.as_ref()?;

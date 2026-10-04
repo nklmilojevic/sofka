@@ -28,6 +28,19 @@ pub enum RefreshContent {
     },
 }
 
+/// What a failed watch request ran into.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WatchFailure {
+    /// The server refused the client's credentials: an Unauthorized
+    /// response, or a TLS alert against its certificate.
+    CredentialsRefused,
+    /// No API response arrived, as when the connection or TLS handshake
+    /// fails.
+    NoResponse,
+    /// The API server answered with an error, such as a forbidden resource.
+    Response,
+}
+
 /// Messages flowing from watch tasks to the UI loop. Tagged with a
 /// `generation` so messages from a superseded watch can be discarded.
 pub enum Msg {
@@ -60,9 +73,7 @@ pub enum Msg {
     WatchError {
         generation: u64,
         error: String,
-        /// The server refused the client's credentials: an Unauthorized
-        /// response, or a TLS alert against its certificate.
-        credentials_refused: bool,
+        failure: WatchFailure,
     },
     WatchRecovered {
         generation: u64,

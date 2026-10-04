@@ -8,7 +8,7 @@ async fn watch_error_stays_until_recovery_and_keeps_diagnostics() {
     app.handle_msg(Msg::WatchError {
         generation,
         error: "connection closed".into(),
-        credentials_refused: false,
+        failure: WatchFailure::Response,
     });
     assert_eq!(app.flash, "watch failed; retrying: connection closed");
     app.flash_since = Instant::now() - Duration::from_secs(30);
@@ -37,7 +37,7 @@ async fn watch_recovery_preserves_a_later_error_and_pending_action() {
     app.handle_msg(Msg::WatchError {
         generation,
         error: "connection closed".into(),
-        credentials_refused: false,
+        failure: WatchFailure::Response,
     });
     app.handle_msg(Msg::WatchRecovered { generation });
     app.handle_msg(Msg::Flash {
@@ -54,7 +54,7 @@ async fn watch_recovery_preserves_a_later_error_and_pending_action() {
     app.handle_msg(Msg::WatchError {
         generation,
         error: "connection closed".into(),
-        credentials_refused: false,
+        failure: WatchFailure::Response,
     });
     app.handle_msg(Msg::Error {
         generation,
@@ -73,14 +73,14 @@ async fn changing_resources_clears_only_the_old_watch_error() {
     app.handle_msg(Msg::WatchError {
         generation,
         error: "connection closed".into(),
-        credentials_refused: false,
+        failure: WatchFailure::Response,
     });
     app.handle_key(press(KeyCode::Char('r'))).unwrap();
     assert!(!app.flash.contains("connection closed"));
     app.handle_msg(Msg::WatchError {
         generation,
         error: "old failure".into(),
-        credentials_refused: false,
+        failure: WatchFailure::Response,
     });
     assert!(!app.flash.contains("old failure"));
 }

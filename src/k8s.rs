@@ -23,7 +23,7 @@ use tokio::sync::mpsc::Sender;
 use tokio::task::JoinHandle;
 
 use crate::diagnostics::Op;
-use crate::store::{Msg, row_key};
+use crate::store::{Msg, WatchFailure, row_key};
 
 pub mod completion;
 mod discovery;
@@ -140,6 +140,31 @@ fn exec_auth_message(error: &(dyn std::error::Error + 'static)) -> Option<String
         source = error.source();
     }
     None
+}
+
+/// What a failed watch request ran into, judged from the error's source
+/// chain rather than its text.
+fn watch_failure(error: &watcher::Error) -> WatchFailure {
+    if credentials_refused(error) {
+        return WatchFailure::CredentialsRefused;
+    }
+    if matches!(
+        error,
+        watcher::Error::WatchError(_) | watcher::Error::NoResourceVersion
+    ) {
+        return WatchFailure::Response;
+    }
+    let mut source: Option<&(dyn std::error::Error + 'static)> = Some(error);
+    while let Some(error) = source {
+        if matches!(
+            error.downcast_ref::<kube::Error>(),
+            Some(kube::Error::Api(_))
+        ) {
+            return WatchFailure::Response;
+        }
+        source = error.source();
+    }
+    WatchFailure::NoResponse
 }
 
 /// Whether the server refused the client's credentials: an Unauthorized
@@ -1257,7 +1282,7 @@ fn spawn_watch_task(
                     Msg::WatchError {
                         generation,
                         error: e.to_string(),
-                        credentials_refused: credentials_refused(&e),
+                        failure: watch_failure(&e),
                     }
                 }
             };
@@ -1582,6 +1607,37 @@ pub(crate) mod tests {
         )));
         let wrapped = kube::Error::Service(Box::new(alert(Alert::CertificateExpired)));
         assert!(refused(&watcher::Error::WatchFailed(wrapped)));
+    }
+
+    #[test]
+    fn watch_failures_tell_refusals_outages_and_api_errors_apart() {
+        use super::{WatchFailure, watch_failure, watcher};
+        use rustls::AlertDescription as Alert;
+        let service = |error: std::io::Error| kube::Error::Service(Box::new(error));
+        assert_eq!(
+            watch_failure(&watcher::Error::WatchStartFailed(status(401))),
+            WatchFailure::CredentialsRefused
+        );
+        assert_eq!(
+            watch_failure(&watcher::Error::WatchFailed(service(alert(
+                Alert::CertificateRevoked
+            )))),
+            WatchFailure::CredentialsRefused
+        );
+        assert_eq!(
+            watch_failure(&watcher::Error::WatchStartFailed(status(403))),
+            WatchFailure::Response
+        );
+        assert_eq!(
+            watch_failure(&watcher::Error::WatchError(Box::default())),
+            WatchFailure::Response
+        );
+        assert_eq!(
+            watch_failure(&watcher::Error::WatchStartFailed(service(
+                std::io::Error::from(std::io::ErrorKind::ConnectionReset)
+            ))),
+            WatchFailure::NoResponse
+        );
     }
 
     #[test]

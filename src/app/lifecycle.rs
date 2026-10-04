@@ -953,20 +953,18 @@ impl App {
         self.tasks.push(handle);
     }
 
-    fn set_watch_error_flash(&mut self, error: String, credentials_refused: bool) {
-        let error = self
-            .credential_error_for(&error, credentials_refused)
-            .unwrap_or(error);
+    fn set_watch_error_flash(&mut self, error: String, failure: WatchFailure) {
+        let error = self.credential_error_for(&error, failure).unwrap_or(error);
         self.borrow_status(format!("watch failed; retrying: {error}"), true);
         self.watch_error_flash = Some(self.flash.clone());
     }
 
-    fn show_watch_error(&mut self, error: String, credentials_refused: bool) {
+    fn show_watch_error(&mut self, error: String, failure: WatchFailure) {
         self.watch_errors = self.watch_errors.saturating_add(1);
         self.last_error = Some(error.clone());
         crate::log_warn!("view.error", kind = self.kind_plural, error = error);
-        self.note_watch_failure(credentials_refused);
-        self.set_watch_error_flash(error, credentials_refused);
+        self.note_watch_failure(failure);
+        self.set_watch_error_flash(error, failure);
     }
 
     fn clear_watch_error_flash(&mut self) -> bool {
@@ -1084,16 +1082,12 @@ impl App {
                     self.store.finish_namespace_sync(&namespace);
                     self.clear_rows_cache();
                 }
-                Msg::WatchError {
-                    error,
-                    credentials_refused,
-                    ..
-                } => {
+                Msg::WatchError { error, failure, .. } => {
                     self.namespace_errors
                         .insert(namespace.clone(), error.clone());
                     self.show_watch_error(
                         format!("{namespace}: {error}; results incomplete"),
-                        credentials_refused,
+                        failure,
                     );
                 }
                 Msg::WatchRecovered { .. } => {
@@ -1110,7 +1104,7 @@ impl App {
                     {
                         self.set_watch_error_flash(
                             format!("{namespace}: {error}; results incomplete"),
-                            false,
+                            WatchFailure::Response,
                         );
                     }
                 }
@@ -1174,9 +1168,9 @@ impl App {
             Msg::WatchError {
                 generation,
                 error,
-                credentials_refused,
+                failure,
             } if generation == self.generation => {
-                self.show_watch_error(error, credentials_refused);
+                self.show_watch_error(error, failure);
             }
             Msg::WatchRecovered { generation } if generation == self.generation => {
                 self.note_watch_recovered();

@@ -31,7 +31,9 @@ use tokio::task::JoinHandle;
 use unicode_width::UnicodeWidthStr;
 
 use crate::k8s::{Cluster, Kind};
-use crate::store::{Msg, Pulse, RowKey, StatusClaim, Store, StoreMutation, XrayItem, row_key};
+use crate::store::{
+    Msg, Pulse, RowKey, StatusClaim, Store, StoreMutation, WatchFailure, XrayItem, row_key,
+};
 
 pub(crate) use guardrails::ConfirmLevel;
 pub use pvcexplore::{Pane, PvcExplore, PvcIntent};
