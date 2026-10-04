@@ -7162,26 +7162,70 @@ async fn argocd_menu_sync_now() {
     assert!(app.flash.contains("syncing guestbook"), "{}", app.flash);
 }
 
-#[tokio::test]
-async fn argocd_menu_sync_with_prune_confirms_first() {
-    let (mut app, _rx) = test_app();
-    app.switch_kind("applications");
-    apply(&mut app, argocd_app("guestbook"));
+type PatchLog = Arc<std::sync::Mutex<Vec<Value>>>;
 
+/// An ArgoCD Applications view whose client records every PATCH (path and
+/// body) and answers it with the patched Application.
+fn argocd_patch_app(names: &[&str]) -> (App, Receiver<Msg>, PatchLog) {
+    use http_body_util::BodyExt;
+    let (mut app, rx) = test_app();
+    app.switch_kind("applications");
+    for name in names {
+        apply(&mut app, argocd_app(name));
+    }
+    let log = PatchLog::default();
+    let shared = log.clone();
+    app.cluster.client = kube::Client::new(
+        tower::service_fn(move |request: http::Request<kube::client::Body>| {
+            let shared = shared.clone();
+            async move {
+                let method = request.method().to_string();
+                let path = request.uri().path().to_string();
+                let body = request.into_body().collect().await.unwrap().to_bytes();
+                let body: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
+                assert_eq!(method, "PATCH", "unexpected request: {method} {path}");
+                shared
+                    .lock()
+                    .unwrap()
+                    .push(json!({"path": path, "body": body}));
+                let name = path.rsplit('/').next().unwrap();
+                let response = argocd_app(name).to_string();
+                Ok::<_, std::convert::Infallible>(
+                    http::Response::builder()
+                        .status(200)
+                        .header("content-type", "application/json")
+                        .body(kube::client::Body::from(response.into_bytes()))
+                        .unwrap(),
+                )
+            }
+        }),
+        "default",
+    );
+    (app, rx, log)
+}
+
+fn open_argocd_menu_item(app: &mut App, item: &str) {
     app.handle_key(press(KeyCode::Char('t'))).unwrap();
-    let idx = ARGOCD_MENU_ITEMS
-        .iter()
-        .position(|s| *s == "Sync with prune")
-        .unwrap();
+    let idx = ARGOCD_MENU_ITEMS.iter().position(|s| *s == item).unwrap();
     app.flux_menu_state.select(Some(idx));
     app.handle_key(press(KeyCode::Enter)).unwrap();
+}
+
+#[tokio::test]
+async fn argocd_menu_sync_with_prune_patches_after_confirmation() {
+    let (mut app, mut rx, log) = argocd_patch_app(&["guestbook"]);
+
+    open_argocd_menu_item(&mut app, "Sync with prune");
     assert_eq!(app.mode, Mode::Confirm);
     assert!(
         app.confirm_label.contains("with prune"),
         "{}",
         app.confirm_label
     );
-    assert!(!app.flash.contains("syncing"), "{}", app.flash);
+    assert!(
+        log.lock().unwrap().is_empty(),
+        "nothing sent before confirming"
+    );
 
     app.handle_key(press(KeyCode::Char('y'))).unwrap();
     assert_eq!(app.mode, Mode::Table);
@@ -7190,24 +7234,133 @@ async fn argocd_menu_sync_with_prune_confirms_first() {
         "{}",
         app.flash
     );
+    drain_until(&mut app, &mut rx, |app| {
+        app.flash.contains("sync with prune requested")
+    })
+    .await;
+    assert!(!app.flash_err, "{}", app.flash);
+    let log = log.lock().unwrap();
+    assert_eq!(log.len(), 1);
+    assert!(
+        log[0]["path"]
+            .as_str()
+            .unwrap()
+            .ends_with("/namespaces/argocd/applications/guestbook"),
+        "{}",
+        log[0]["path"]
+    );
+    assert_eq!(
+        log[0]["body"],
+        json!({"operation": {"sync": {"prune": true}}})
+    );
+    assert!(
+        app.journal
+            .lines()
+            .iter()
+            .any(|l| l.contains("sync with prune"))
+    );
+}
+
+#[tokio::test]
+async fn argocd_menu_sync_now_patches_without_prune() {
+    let (mut app, mut rx, log) = argocd_patch_app(&["guestbook"]);
+
+    open_argocd_menu_item(&mut app, "Sync now");
+    assert_eq!(app.mode, Mode::Table, "a plain sync does not confirm");
+    drain_until(&mut app, &mut rx, |app| {
+        app.flash.contains("sync requested")
+    })
+    .await;
+    let log = log.lock().unwrap();
+    assert_eq!(log.len(), 1);
+    assert_eq!(log[0]["body"], json!({"operation": {"sync": {}}}));
 }
 
 #[tokio::test]
 async fn argocd_menu_sync_with_prune_can_be_declined() {
-    let (mut app, _rx) = test_app();
-    app.switch_kind("applications");
-    apply(&mut app, argocd_app("guestbook"));
+    let (mut app, _rx, log) = argocd_patch_app(&["guestbook"]);
 
-    app.handle_key(press(KeyCode::Char('t'))).unwrap();
-    let idx = ARGOCD_MENU_ITEMS
-        .iter()
-        .position(|s| *s == "Sync with prune")
-        .unwrap();
-    app.flux_menu_state.select(Some(idx));
-    app.handle_key(press(KeyCode::Enter)).unwrap();
+    open_argocd_menu_item(&mut app, "Sync with prune");
     app.handle_key(press(KeyCode::Char('n'))).unwrap();
     assert_eq!(app.mode, Mode::Table);
     assert!(!app.flash.contains("syncing"), "{}", app.flash);
+    assert!(app.journal.is_empty());
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(log.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn argocd_sync_with_prune_respects_a_deny_guardrail() {
+    let (mut app, _rx, log) = argocd_patch_app(&["guestbook"]);
+    app.guardrails = vec![crate::config::Guardrail {
+        actions: vec!["prune".into()],
+        resources: vec!["applications".into()],
+        deny: true,
+        reason: Some("prune through GitOps".into()),
+        ..Default::default()
+    }];
+
+    open_argocd_menu_item(&mut app, "Sync with prune");
+    assert_eq!(app.mode, Mode::Table);
+    assert!(app.confirm_action.is_none());
+    assert!(
+        app.flash.contains("blocked by guardrail") && app.flash.contains("prune through GitOps"),
+        "{}",
+        app.flash
+    );
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(log.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn argocd_sync_with_prune_respects_a_bulk_guardrail() {
+    let (mut app, _rx, log) = argocd_patch_app(&["guestbook", "frontend"]);
+    app.marked.insert("argocd/guestbook".into());
+    app.marked.insert("argocd/frontend".into());
+    app.guardrails = vec![crate::config::Guardrail {
+        actions: vec!["prune".into()],
+        max_bulk: Some(1),
+        ..Default::default()
+    }];
+
+    open_argocd_menu_item(&mut app, "Sync with prune");
+    assert_eq!(app.mode, Mode::Table);
+    assert!(app.flash.contains("exceeds the max"), "{}", app.flash);
+    assert_eq!(app.marked.len(), 2, "marks survive a refused action");
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(log.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn argocd_sync_with_prune_typed_confirmation() {
+    let (mut app, mut rx, log) = argocd_patch_app(&["guestbook"]);
+    app.guardrails = vec![crate::config::Guardrail {
+        actions: vec!["prune".into()],
+        confirmation: Some("type-resource-name".into()),
+        ..Default::default()
+    }];
+
+    open_argocd_menu_item(&mut app, "Sync with prune");
+    assert_eq!(app.mode, Mode::Prompt, "typed confirmation opens a prompt");
+    app.prompt_input = "wrong".into();
+    app.handle_key(press(KeyCode::Enter)).unwrap();
+    assert!(app.flash.contains("did not match"), "{}", app.flash);
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(log.lock().unwrap().is_empty());
+
+    open_argocd_menu_item(&mut app, "Sync with prune");
+    app.prompt_input = "guestbook".into();
+    app.handle_key(press(KeyCode::Enter)).unwrap();
+    drain_until(&mut app, &mut rx, |app| {
+        app.flash.contains("sync with prune requested")
+    })
+    .await;
+    let log = log.lock().unwrap();
+    assert_eq!(log.len(), 1);
+    assert_eq!(
+        log[0]["body"],
+        json!({"operation": {"sync": {"prune": true}}})
+    );
 }
 
 #[tokio::test]
