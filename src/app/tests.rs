@@ -15085,6 +15085,78 @@ async fn user_status_column_default_fills_missing_values() {
 }
 
 #[tokio::test]
+async fn user_condition_column_default_fills_a_missing_condition() {
+    let (mut app, _rx) = test_app();
+    install_views(
+        &mut app,
+        r#"
+        [[views."cert-manager.io/v1/certificates".columns]]
+        name = "SYNCED"
+        path = "Synced"
+        type = "condition"
+        default = "False"
+        "#,
+    );
+    type_resource_query(&mut app, "certificates");
+    for (name, conditions) in [
+        ("machine-a", json!([{"type": "Synced", "status": "True"}])),
+        ("machine-b", json!([{"type": "Other", "status": "True"}])),
+    ] {
+        apply(
+            &mut app,
+            json!({"apiVersion": "cert-manager.io/v1", "kind": "Certificate",
+                "metadata": {"name": name, "namespace": "default"},
+                "status": {"conditions": conditions}}),
+        );
+    }
+
+    assert_eq!(
+        health_row_color(&mut app, "machine-b", "False"),
+        crate::theme::red()
+    );
+    assert_eq!(
+        health_row_color(&mut app, "machine-b", "machine-b"),
+        crate::theme::red()
+    );
+
+    type_filter(&mut app, "synced=false");
+    assert_eq!(row_names(&app), ["machine-b"]);
+}
+
+#[tokio::test]
+async fn formatted_quantity_default_displays_and_compares_as_a_value() {
+    let (mut app, _rx) = test_app();
+    install_views(
+        &mut app,
+        r#"
+        [[views."cert-manager.io/v1/certificates".columns]]
+        name = "REQ"
+        path = "/spec/cpu"
+        type = "quantity"
+        format = "cpu"
+        default = "0"
+        "#,
+    );
+    type_resource_query(&mut app, "certificates");
+    for (name, spec) in [
+        ("machine-a", json!({"cpu": "250m"})),
+        ("machine-b", json!({})),
+    ] {
+        apply(
+            &mut app,
+            json!({"apiVersion": "cert-manager.io/v1", "kind": "Certificate",
+                "metadata": {"name": name, "namespace": "default"},
+                "spec": spec}),
+        );
+    }
+
+    health_row_color(&mut app, "machine-b", "0m");
+
+    type_filter(&mut app, "req<100m");
+    assert_eq!(row_names(&app), ["machine-b"]);
+}
+
+#[tokio::test]
 async fn comparison_filter_reads_a_dotted_user_column_with_its_default() {
     let (mut app, _rx) = test_app();
     install_views(
