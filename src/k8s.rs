@@ -1391,6 +1391,13 @@ impl Cluster {
         }
         self.catalog.sort();
     }
+
+    /// Drop every index entry for one kind, for a test of a cluster that does
+    /// not serve it.
+    pub fn unregister_kind(&mut self, group: &str, kind: &str) {
+        self.registry
+            .retain(|_, k| !(k.ar.group == group && k.ar.kind == kind));
+    }
 }
 
 #[cfg(test)]

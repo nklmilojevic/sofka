@@ -243,7 +243,7 @@ include those conditions. Row filters can search the route paths.
 - **Drill-down navigation** with a breadcrumb stack: workload/service → pods,
   cronjob → its jobs, node → its pods, pod → containers, namespace → re-scope,
   CRD → its custom resources, Argo CD Application or ApplicationSet → the Argo
-  CD view. `esc` goes back.
+  CD view, unless a `[views."applications"].drill` is configured. `esc` goes back.
   Workload pod selection includes both `matchLabels` and `matchExpressions`.
   Drill-down, logs, Explain, and diagnostic bundles apply all requirements,
   including `In`, `NotIn`, `Exists`, and `DoesNotExist`. Services use their

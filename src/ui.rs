@@ -1064,6 +1064,29 @@ fn header_hints(app: &App) -> Vec<Line<'static>> {
             ),
             hint_line(app, &[(Action::Delete, "delete")]),
         ],
+        "applications" | "applicationsets"
+            if app.argocd_kind() && app.configured_drill().is_none() =>
+        {
+            vec![
+                hint_line(
+                    app,
+                    &[
+                        (Action::Open, "argo view"),
+                        (Action::Yaml, "yaml"),
+                        (Action::Describe, "describe"),
+                    ],
+                ),
+                hint_line(
+                    app,
+                    &[
+                        (Action::Edit, "edit"),
+                        (Action::Events, "events"),
+                        (Action::CopyName, "copy name"),
+                    ],
+                ),
+                hint_line(app, &[(Action::Delete, "delete")]),
+            ]
+        }
         _ => vec![
             hint_line(
                 app,
@@ -1114,13 +1137,7 @@ fn header_hints(app: &App) -> Vec<Line<'static>> {
         lines.push(hint_line(app, &[(Action::ActionMenu, "flux menu")]));
     }
     if app.argocd_kind() {
-        lines.push(hint_line(
-            app,
-            &[
-                (Action::Open, "argo view"),
-                (Action::ActionMenu, "suspend/sync"),
-            ],
-        ));
+        lines.push(hint_line(app, &[(Action::ActionMenu, "suspend/sync")]));
     }
     if app.kind_plural == "helmreleases" {
         lines.push(hint_line(app, &[(Action::Open, "helm history")]));
@@ -6485,6 +6502,19 @@ mod tests {
         assert!(!confirm_action_hint(&app, false).contains("toggle force"));
         assert!(confirm_action_hint(&app, true).contains("cascade"));
         assert!(!confirm_action_hint(&app, false).contains("cascade"));
+    }
+
+    /// `⏎` on an Argo CD row opens the Argo CD view, so the hint must not
+    /// also call it YAML.
+    #[tokio::test]
+    async fn argocd_rows_hint_enter_as_the_argo_view() {
+        let (tx, _rx) = tokio::sync::mpsc::channel(16);
+        let mut app = App::new(crate::k8s::Cluster::fake(), tx);
+        app.switch_kind("applications");
+        let text: Vec<String> = header_hints(&app).iter().map(line_text).collect();
+        let text = text.join("\n");
+        assert!(text.contains("argo view"), "{text}");
+        assert_eq!(text.matches("yaml").count(), 1, "{text}");
     }
 
     #[test]

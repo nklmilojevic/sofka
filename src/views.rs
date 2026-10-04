@@ -198,26 +198,7 @@ pub const BUILTIN_DRILLS: &[&str] = &[
     "helm",
     "helmhistory",
     "helmreleases",
-    "applications",
-    "applicationsets",
 ];
-
-/// Whether a configured `drill` under a view key would be shadowed by a
-/// built-in one. Some plurals are generic enough that another API group may
-/// define its own kind under the same name, and that group's drill is still
-/// honoured. RBAC owns its bare plurals; a bare `applications` key predates
-/// the Argo CD drill and stays configurable, so only a key naming `argoproj.io`
-/// is shadowed.
-fn builtin_drill_shadows(key: &str, plural: &str) -> bool {
-    let group = key.split_once('/').map(|(group, _)| group);
-    match plural {
-        "roles" | "clusterroles" | "rolebindings" | "clusterrolebindings" => {
-            group.is_none_or(|g| g == "rbac.authorization.k8s.io")
-        }
-        "applications" | "applicationsets" => group == Some("argoproj.io"),
-        _ => true,
-    }
-}
 
 /// The plural a view key names: the last segment of `apiVersion/plural`,
 /// `group/plural`, or a bare plural, without any `@namespace` suffix. A key
@@ -521,7 +502,14 @@ pub fn compile(
                 .map_or(key.as_str(), |(resource, _)| resource)
                 .to_lowercase();
             let plural = key_plural(&key_lc);
-            if BUILTIN_DRILLS.contains(&plural) && builtin_drill_shadows(&key_lc, plural) {
+            let rbac_plural = matches!(
+                plural,
+                "roles" | "clusterroles" | "rolebindings" | "clusterrolebindings"
+            );
+            let rbac_group = key_lc
+                .split_once('/')
+                .is_none_or(|(group, _)| group == "rbac.authorization.k8s.io");
+            if BUILTIN_DRILLS.contains(&plural) && (!rbac_plural || rbac_group) {
                 warnings.push(format!(
                     "views.\"{key}\": drill is ignored — `enter` on {plural} has a \
                      built-in drill-down that config doesn't replace"
@@ -2123,27 +2111,6 @@ mod tests {
                     "[views.\"{key}\"]\ndrill = {{ kind = \"secrets\" }}"
                 ));
                 let custom = prefix.starts_with("example.com/");
-                assert_eq!(views[&key].drill.is_some(), custom, "{key}");
-                assert_eq!(warnings.is_empty(), custom, "{key}: {warnings:?}");
-            }
-        }
-    }
-
-    #[test]
-    fn argocd_drills_leave_other_api_groups_configurable() {
-        for plural in ["applications", "applicationsets"] {
-            for prefix in [
-                "",
-                "argoproj.io/",
-                "argoproj.io/v1alpha1/",
-                "example.com/",
-                "example.com/v1/",
-            ] {
-                let key = format!("{prefix}{plural}");
-                let (views, warnings) = compile_toml(&format!(
-                    "[views.\"{key}\"]\ndrill = {{ kind = \"secrets\" }}"
-                ));
-                let custom = !prefix.starts_with("argoproj.io/");
                 assert_eq!(views[&key].drill.is_some(), custom, "{key}");
                 assert_eq!(warnings.is_empty(), custom, "{key}: {warnings:?}");
             }

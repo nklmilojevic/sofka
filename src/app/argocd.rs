@@ -107,10 +107,13 @@ impl App {
         let title = self.argocd_title.clone();
         let self_is_app = self.argocd_app_kind();
         let self_is_appset = self.argocd_kind() && !self_is_app;
-        // Resolved here: the spawned task has no cluster registry.
-        let Some(app_kind) = self.cluster.resolve_in_group("Application", ARGOCD_GROUP) else {
+        // Resolved here: the spawned task has no cluster registry. An
+        // ApplicationSet report never fetches an Application, so it does not
+        // need the CRD.
+        let app_kind = self.cluster.resolve_in_group("Application", ARGOCD_GROUP);
+        if app_kind.is_none() && !self_is_appset {
             return;
-        };
+        }
 
         let plurals: KindPlurals = self.cluster.kind_plurals();
         let current_server = self.cluster.cluster_url.clone();
@@ -152,6 +155,9 @@ impl App {
                         argocd::describe_applicationset(&selection, &subject, &resources);
                     return Ok((selection, findings, Destination::Current, resources));
                 }
+                let Some(app_kind) = app_kind else {
+                    return Err("this cluster has no Argo CD Application CRD".to_string());
+                };
 
                 // Either the selection is the Application, or its tracking
                 // metadata names one to fetch.
