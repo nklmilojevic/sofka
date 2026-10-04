@@ -1865,8 +1865,16 @@ pub struct App {
     gen_flag: Arc<AtomicU64>,
     /// Clock readings from the previous tick, compared to spot a wake.
     resume_clock: Option<resume::Clock>,
-    /// A wake was seen while an overlay was open; restart on return.
-    resume_pending: bool,
+    /// Why the watch must restart once the table is showing: a wake, or a
+    /// renewed client.
+    resume_pending: Option<&'static str>,
+    /// An exec plugin is issuing the next client certificate.
+    credential_renewing: bool,
+    /// No renewal attempt before this time.
+    credential_retry_at: Option<k8s_openapi::jiff::Timestamp>,
+    /// Why the last renewal failed. Watch failures show it instead of the
+    /// transport error, which never names the expired certificate.
+    credential_error: Option<String>,
     /// Context currently being connected to, paired with the generation that
     /// owns its eventual result.
     context_switch_target: Option<(u64, String)>,
@@ -2422,7 +2430,10 @@ impl App {
             generation: 0,
             gen_flag: Arc::new(AtomicU64::new(0)),
             resume_clock: None,
-            resume_pending: false,
+            resume_pending: None,
+            credential_renewing: false,
+            credential_retry_at: None,
+            credential_error: None,
             context_switch_target: None,
             launch_namespace: None,
             tasks: Vec::new(),
@@ -2765,6 +2776,7 @@ mod authz;
 mod bookmarks;
 mod bundle;
 mod containers;
+mod credentials;
 mod dashboards;
 mod details;
 mod diagnostics;

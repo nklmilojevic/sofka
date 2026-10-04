@@ -310,6 +310,13 @@ pub enum Msg {
         name: String,
         result: Result<Box<crate::k8s::Cluster>, String>,
     },
+    /// Result of re-running the exec plugin for the client certificate that
+    /// expires at `expiry`.
+    CredentialsRenewed {
+        context: String,
+        expiry: k8s_openapi::jiff::Timestamp,
+        result: Result<Box<kube::Client>, String>,
+    },
     /// Result of an off-thread `kubectl config rename-context` (`r` in the
     /// context switcher).
     ContextRenamed {

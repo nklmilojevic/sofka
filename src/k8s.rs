@@ -11,6 +11,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use futures_util::StreamExt;
+use k8s_openapi::jiff::Timestamp;
 use kube::api::{Api, ListParams};
 use kube::config::{KubeConfigOptions, Kubeconfig};
 use kube::core::{DynamicObject, GroupVersionResource};
@@ -312,6 +313,9 @@ pub struct Cluster {
     pub child_kinds: Vec<Kind>,
     pub discovery_warnings: Vec<String>,
     pub discovery_fallback: Option<String>,
+    /// Config the client was built from, kept while the client holds an
+    /// exec-issued certificate so the plugin can issue the next one.
+    credential_source: Option<Config>,
 }
 
 const STREAMING_UNKNOWN: u8 = 0;
@@ -494,8 +498,10 @@ impl Cluster {
     ) -> Result<Self> {
         let cluster_url = config.cluster_url.to_string();
         let default_namespace = config.default_namespace.clone();
+        let source = config.clone();
         let client = build_client(config, allow_v1_client_cert, no_tls_resumption)
             .context("building kube client")?;
+        let credential_source = client.valid_until().is_some().then_some(source);
         let version_client = client.clone();
 
         let cluster_name = cluster_name_for(&context).unwrap_or_default();
@@ -517,6 +523,7 @@ impl Cluster {
             child_kinds: Vec::new(),
             discovery_warnings: Vec::new(),
             discovery_fallback: None,
+            credential_source,
         };
         // Version is useful metadata, not a connectivity prerequisite. Fetch
         // it alongside discovery so it adds no serial startup latency, and
@@ -604,7 +611,24 @@ impl Cluster {
             child_kinds: Vec::new(),
             discovery_warnings: Vec::new(),
             discovery_fallback: None,
+            credential_source: None,
         }
+    }
+
+    /// When the client's exec-issued certificate expires. kube-rs records the
+    /// expiry but leaves renewal to the caller.
+    pub fn credential_expiry(&self) -> Option<Timestamp> {
+        *self.client.valid_until()
+    }
+
+    /// A job that runs the exec plugin again and builds a client with the
+    /// certificate it returns, or `None` when the client has none to renew.
+    /// The plugin is a blocking subprocess, so run the job off the event loop.
+    pub fn credential_renewal(&self) -> Option<impl FnOnce() -> Result<Client> + Send + 'static> {
+        let config = self.credential_source.clone()?;
+        let allow_v1_client_cert = self.allow_v1_client_cert;
+        let no_tls_resumption = self.no_tls_resumption;
+        Some(move || build_client(config, allow_v1_client_cert, no_tls_resumption))
     }
 
     /// Context name to pass to `kubectl` (`--context`), when known. Keeps
@@ -1256,6 +1280,12 @@ pub const ALIASES: &[(&str, &str)] = &[
 
 #[cfg(any(test, feature = "bench"))]
 impl Cluster {
+    /// Keep `config` for credential renewal, as a connect does when the
+    /// client holds an exec-issued certificate.
+    pub fn keep_credential_source(&mut self, config: Config) {
+        self.credential_source = Some(config);
+    }
+
     /// A connectionless cluster for unit tests: the client points at a dummy
     /// URL (no I/O happens until a request is actually made) and the registry
     /// is a small hand-built set of common kinds.
@@ -1283,6 +1313,7 @@ impl Cluster {
             child_kinds: Vec::new(),
             discovery_warnings: Vec::new(),
             discovery_fallback: None,
+            credential_source: None,
         };
         cluster.register_kind("", "Pod", "pods", true);
         cluster.register_kind("apps", "Deployment", "deployments", true);

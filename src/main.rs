@@ -1152,6 +1152,7 @@ async fn run(
                 app.expire_flash();
                 app.check_journal_error();
                 app.detect_resume();
+                app.renew_credentials();
                 dirty = true;
             }
             // A held Esc was a real keypress after all, not the head of a

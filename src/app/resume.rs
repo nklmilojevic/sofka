@@ -71,27 +71,30 @@ impl App {
                 .saturating_sub(clock.awake.saturating_sub(last.awake));
             if slept >= SLEEP_GAP {
                 crate::log_info!("app.resume", slept_secs = slept.as_secs());
-                self.resume_pending = true;
+                self.resume_pending = Some("reconnected after sleep");
             }
         }
+        self.restart_pending_watch();
+    }
+
+    /// Restart the watch a wake or a client renewal left stale.
+    pub(super) fn restart_pending_watch(&mut self) {
         // Restarting now would discard a context switch in flight, or what
         // the user is looking at in an overlay. A switch that lands clears
-        // the wake; one that fails leaves it for the table it returns to.
-        if !self.resume_pending
-            || self.context_switch_target.is_some()
-            || self.mode != Mode::Table
-            || self.kind.is_none()
-        {
+        // the restart; one that fails leaves it for the table it returns to.
+        if self.context_switch_target.is_some() || self.mode != Mode::Table || self.kind.is_none() {
             return;
         }
-        self.resume_pending = false;
+        let Some(reason) = self.resume_pending.take() else {
+            return;
+        };
         // Reuse the namespaces a pattern already resolved to: a fresh lookup
         // would move the selection and could fail before restarting.
         self.start_watch();
         // The restart clears watch errors; any other warning, such as a
         // failed context switch, still applies.
         if !self.flash_err {
-            self.set_flash("reconnected after sleep");
+            self.set_flash(reason);
         }
     }
 }
