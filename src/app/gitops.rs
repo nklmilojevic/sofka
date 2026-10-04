@@ -201,8 +201,15 @@ impl App {
                     self.restore_selection();
                 }
             }
-            (Some(Action::Down), _) => list_step(&mut self.gitops_state, len, true),
-            (Some(Action::Up), _) => list_step(&mut self.gitops_state, len, false),
+            (Some(Action::Down), _) => {
+                findings_step(&mut self.gitops_state, len, &mut self.findings_scroll, true)
+            }
+            (Some(Action::Up), _) => findings_step(
+                &mut self.gitops_state,
+                len,
+                &mut self.findings_scroll,
+                false,
+            ),
             (Some(Action::First), _) if len > 0 => self.gitops_state.select(Some(0)),
             (Some(Action::Last), _) if len > 0 => self.gitops_state.select(Some(len - 1)),
             (Some(Action::Refresh), _) => self.refresh_gitops(),

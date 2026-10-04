@@ -4809,6 +4809,7 @@ fn draw_findings(
     frame: &mut Frame,
     show_scrollbars: bool,
     wrap: bool,
+    scroll: &mut crate::app::FindingsScroll,
     area: Rect,
     title: String,
     findings: &[crate::explain::Finding],
@@ -4828,11 +4829,12 @@ fn draw_findings(
 
     // Inside the border and the two-column highlight gutter.
     let text_width = usize::from(area.width.saturating_sub(4));
-    let items: Vec<ListItem> = if findings.is_empty() {
-        vec![ListItem::new(Line::from(Span::styled(
+    let visible = usize::from(area.height.saturating_sub(2)).max(1);
+    let rows: Vec<Vec<Line>> = if findings.is_empty() {
+        vec![vec![Line::from(Span::styled(
             empty_msg.to_string(),
             theme::dim(),
-        )))]
+        ))]]
     } else {
         findings
             .iter()
@@ -4851,23 +4853,44 @@ fn draw_findings(
                 }
                 if !wrap {
                     spans.insert(0, Span::raw(indent));
-                    return ListItem::new(Line::from(spans));
+                    return vec![Line::from(spans)];
                 }
                 let hanging = format!("{indent}  ");
                 let rows = wrap_line(Line::from(spans), text_width.saturating_sub(hanging.len()));
-                let lines: Vec<Line> = rows
-                    .into_iter()
+                rows.into_iter()
                     .enumerate()
                     .map(|(row, mut line)| {
                         let prefix = if row == 0 { &indent } else { &hanging };
                         line.spans.insert(0, Span::raw(prefix.clone()));
                         line
                     })
-                    .collect();
-                ListItem::new(lines)
+                    .collect()
             })
             .collect()
     };
+    // A finding taller than the list shows the window `j`/`k` scrolled to;
+    // the list itself only scrolls between findings.
+    scroll.heights = rows.iter().map(Vec::len).collect();
+    scroll.visible = visible;
+    let selected = state.selected();
+    let skip = scroll.skip_for(selected);
+    let items: Vec<ListItem> = rows
+        .into_iter()
+        .enumerate()
+        .map(|(i, lines)| {
+            if Some(i) == selected && lines.len() > visible {
+                ListItem::new(
+                    lines
+                        .into_iter()
+                        .skip(skip)
+                        .take(visible)
+                        .collect::<Vec<_>>(),
+                )
+            } else {
+                ListItem::new(lines)
+            }
+        })
+        .collect();
 
     render_framed_list(
         frame,
@@ -4894,6 +4917,7 @@ fn draw_explain(frame: &mut Frame, app: &mut App, area: Rect) {
         frame,
         show_scrollbars,
         app.findings_wrap,
+        &mut app.findings_scroll,
         area,
         title,
         &app.explain_items,
@@ -4915,6 +4939,7 @@ fn draw_argocd(frame: &mut Frame, app: &mut App, area: Rect) {
         frame,
         show_scrollbars,
         app.findings_wrap,
+        &mut app.findings_scroll,
         area,
         title,
         &app.argocd_items,
@@ -4931,6 +4956,7 @@ fn draw_gitops(frame: &mut Frame, app: &mut App, area: Rect) {
         frame,
         show_scrollbars,
         app.findings_wrap,
+        &mut app.findings_scroll,
         area,
         title,
         &app.gitops_items,

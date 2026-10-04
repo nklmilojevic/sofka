@@ -506,6 +506,41 @@ enum PromptKind {
     },
 }
 
+/// What the last draw of a findings view (explain, GitOps, Argo CD) measured,
+/// and how far the selected finding is scrolled. A wrapped finding can be
+/// taller than the list, and the list only scrolls between findings, so `j`/`k`
+/// walk through such a finding's rows before moving on.
+#[derive(Default)]
+pub struct FindingsScroll {
+    /// Display rows of each finding, in list order.
+    pub heights: Vec<usize>,
+    /// Rows inside the list's border.
+    pub visible: usize,
+    /// The finding `skip` applies to; another selection shows from its top.
+    pub item: Option<usize>,
+    /// Leading rows of `item` scrolled past.
+    pub skip: usize,
+}
+
+impl FindingsScroll {
+    /// Rows of the selected finding scrolled past, clamped to what the
+    /// current layout allows.
+    pub fn skip_for(&self, selected: Option<usize>) -> usize {
+        match selected {
+            Some(i) if self.item == Some(i) => self.skip.min(self.max_skip(i)),
+            _ => 0,
+        }
+    }
+
+    fn max_skip(&self, i: usize) -> usize {
+        self.heights
+            .get(i)
+            .copied()
+            .unwrap_or(1)
+            .saturating_sub(self.visible.max(1))
+    }
+}
+
 #[derive(Default)]
 pub struct Scrollable {
     pub title: String,
@@ -2208,6 +2243,7 @@ pub struct App {
     /// default: a finding's message usually ends in the part that says what
     /// to fix, so clipping it at the right edge hides the answer.
     pub findings_wrap: bool,
+    pub findings_scroll: FindingsScroll,
     /// The object the explain view is investigating, kept so `r` can re-gather.
     pub explain_source: Option<DynamicObject>,
     /// Latest Explain request, independent of the table watch generation.
@@ -2566,6 +2602,7 @@ impl App {
             explain_selection_lost: false,
             explain_title: String::new(),
             findings_wrap: true,
+            findings_scroll: FindingsScroll::default(),
             explain_source: None,
             explain_request: 0,
             explain_claim: None,

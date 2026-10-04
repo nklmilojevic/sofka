@@ -24000,6 +24000,66 @@ async fn explain_shows_a_long_failure_message_in_full_and_w_clips_it() {
 }
 
 #[tokio::test]
+async fn j_and_k_scroll_through_a_finding_taller_than_the_list() {
+    let message = format!(
+        "{}TAILMARK",
+        "admission webhook denied the request ".repeat(80)
+    );
+    let (mut app, _rx) = test_app();
+    app.switch_kind("deployments");
+    apply(
+        &mut app,
+        json!({"apiVersion": "apps/v1", "kind": "Deployment",
+        "metadata": {"name": "hello", "namespace": "default"},
+        "spec": {"replicas": 1},
+        "status": {"replicas": 0, "conditions": [{"type": "ReplicaFailure",
+            "status": "True", "reason": "FailedCreate", "message": message}]}}),
+    );
+    app.handle_key(press(KeyCode::Home)).unwrap();
+    explain_selected_with_pure_evidence(&mut app);
+    let tall = app
+        .explain_items
+        .iter()
+        .position(|f| f.text.ends_with("TAILMARK"))
+        .unwrap();
+    let shows_tail = |app: &mut App| screen_text(app, 80, 24).contains("TAILMARK");
+
+    app.handle_key(press(KeyCode::Char('g'))).unwrap();
+    while app.explain_state.selected() != Some(tall) {
+        screen_text(&mut app, 80, 24);
+        app.handle_key(press(KeyCode::Char('j'))).unwrap();
+    }
+    assert!(!shows_tail(&mut app), "the finding is taller than the list");
+
+    let mut steps = 0;
+    while !shows_tail(&mut app) {
+        app.handle_key(press(KeyCode::Char('j'))).unwrap();
+        assert_eq!(
+            app.explain_state.selected(),
+            Some(tall),
+            "j scrolls within the finding"
+        );
+        steps += 1;
+        assert!(steps < 200, "the tail must become reachable");
+    }
+
+    app.handle_key(press(KeyCode::Char('k'))).unwrap();
+    assert!(
+        !shows_tail(&mut app),
+        "k scrolls back up within the finding"
+    );
+    assert_eq!(app.explain_state.selected(), Some(tall));
+    for _ in 0..steps {
+        app.handle_key(press(KeyCode::Char('k'))).unwrap();
+        screen_text(&mut app, 80, 24);
+    }
+    assert!(
+        app.explain_state.selected() < Some(tall),
+        "past the top row, k moves to the previous finding"
+    );
+}
+
+#[tokio::test]
 async fn w_toggles_wrap_in_the_gitops_and_argocd_views() {
     let (mut app, _rx) = test_app();
     for mode in [Mode::Gitops, Mode::Argocd] {

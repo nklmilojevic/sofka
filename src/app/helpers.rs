@@ -501,6 +501,40 @@ pub(super) fn list_step(state: &mut ListState, len: usize, down: bool) {
     state.select(Some(next));
 }
 
+/// `j`/`k` in a findings view: scroll through the selected finding while it
+/// has rows outside the list, then move to the next finding. Moving up onto a
+/// tall finding lands on its last rows, so stepping back retraces the same rows.
+pub(super) fn findings_step(
+    state: &mut ListState,
+    len: usize,
+    scroll: &mut FindingsScroll,
+    down: bool,
+) {
+    if let Some(i) = state.selected() {
+        let skip = scroll.skip_for(Some(i));
+        if down && skip < scroll.max_skip(i) {
+            scroll.item = Some(i);
+            scroll.skip = skip + 1;
+            return;
+        }
+        if !down && skip > 0 {
+            scroll.item = Some(i);
+            scroll.skip = skip - 1;
+            return;
+        }
+    }
+    let before = state.selected();
+    list_step(state, len, down);
+    let after = state.selected();
+    if after != before {
+        scroll.item = after;
+        scroll.skip = match after {
+            Some(j) if !down => scroll.max_skip(j),
+            _ => 0,
+        };
+    }
+}
+
 pub(super) fn list_page(state: &mut ListState, len: usize, rows: usize, down: bool) {
     if len == 0 {
         return;
