@@ -139,13 +139,11 @@ pub(super) fn argocd_appset_suspend_patch(obj: &DynamicObject, suspend: bool) ->
 /// manual sync — the same mechanism the ArgoCD API server's `SyncApplication`
 /// endpoint uses. The controller fills in the revision from `spec.source`.
 /// A manual sync never prunes unless the operation asks for it;
-/// `syncPolicy.automated.prune` only applies to automated syncs.
+/// `syncPolicy.automated.prune` only applies to automated syncs. `prune` is
+/// always written: a merge patch keeps fields it omits, so a plain sync sent
+/// while a pruning operation is still pending would otherwise prune too.
 pub(super) fn argocd_sync_patch(prune: bool) -> Value {
-    if prune {
-        json!({ "operation": { "sync": { "prune": true } } })
-    } else {
-        json!({ "operation": { "sync": {} } })
-    }
+    json!({ "operation": { "sync": { "prune": prune } } })
 }
 
 pub(super) fn external_secret_refresh_patch(force_sync: &str) -> Value {

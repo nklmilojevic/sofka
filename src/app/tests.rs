@@ -7273,7 +7273,43 @@ async fn argocd_menu_sync_now_patches_without_prune() {
     .await;
     let log = log.lock().unwrap();
     assert_eq!(log.len(), 1);
-    assert_eq!(log[0]["body"], json!({"operation": {"sync": {}}}));
+    assert_eq!(
+        log[0]["body"],
+        json!({"operation": {"sync": {"prune": false}}})
+    );
+}
+
+#[tokio::test]
+async fn argocd_sync_with_prune_patches_every_marked_application() {
+    let (mut app, mut rx, log) = argocd_patch_app(&["guestbook", "frontend", "backend"]);
+    app.marked.insert("argocd/guestbook".into());
+    app.marked.insert("argocd/frontend".into());
+
+    open_argocd_menu_item(&mut app, "Sync with prune");
+    assert_eq!(app.mode, Mode::Confirm);
+    assert!(
+        app.confirm_label.contains("Sync 2 applications with prune"),
+        "{}",
+        app.confirm_label
+    );
+    app.handle_key(press(KeyCode::Char('y'))).unwrap();
+    assert!(app.marked.is_empty());
+    drain_until(&mut app, &mut rx, |app| {
+        app.flash
+            .contains("sync with prune requested: 2 applications")
+    })
+    .await;
+    let log = log.lock().unwrap();
+    let mut paths: Vec<&str> = log
+        .iter()
+        .map(|r| r["path"].as_str().unwrap().rsplit('/').next().unwrap())
+        .collect();
+    paths.sort();
+    assert_eq!(paths, ["frontend", "guestbook"]);
+    assert!(
+        log.iter()
+            .all(|r| r["body"] == json!({"operation": {"sync": {"prune": true}}}))
+    );
 }
 
 #[tokio::test]
@@ -7564,9 +7600,38 @@ fn argocd_appset_resume_without_annotation_defaults_to_sync() {
 #[test]
 fn argocd_sync_patch_sets_operation() {
     let p = argocd_sync_patch(false);
-    assert_eq!(p, json!({"operation": {"sync": {}}}));
+    assert_eq!(p, json!({"operation": {"sync": {"prune": false}}}));
     let p = argocd_sync_patch(true);
     assert_eq!(p, json!({"operation": {"sync": {"prune": true}}}));
+}
+
+/// RFC 7386 JSON merge patch, the semantics the API server applies to
+/// `Patch::Merge`.
+fn merge_patch(target: &mut Value, patch: &Value) {
+    let Some(fields) = patch.as_object() else {
+        *target = patch.clone();
+        return;
+    };
+    if !target.is_object() {
+        *target = json!({});
+    }
+    let map = target.as_object_mut().unwrap();
+    for (key, value) in fields {
+        if value.is_null() {
+            map.remove(key);
+        } else {
+            merge_patch(map.entry(key.clone()).or_insert(Value::Null), value);
+        }
+    }
+}
+
+#[test]
+fn argocd_plain_sync_clears_a_pending_prune() {
+    let mut app = argocd_app("guestbook");
+    merge_patch(&mut app, &argocd_sync_patch(true));
+    assert_eq!(app["operation"]["sync"]["prune"], json!(true));
+    merge_patch(&mut app, &argocd_sync_patch(false));
+    assert_eq!(app["operation"]["sync"]["prune"], json!(false));
 }
 
 fn argocd_appset(name: &str) -> serde_json::Value {
