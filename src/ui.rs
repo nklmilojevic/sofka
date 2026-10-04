@@ -1114,7 +1114,13 @@ fn header_hints(app: &App) -> Vec<Line<'static>> {
         lines.push(hint_line(app, &[(Action::ActionMenu, "flux menu")]));
     }
     if app.argocd_kind() {
-        lines.push(hint_line(app, &[(Action::ActionMenu, "suspend/sync")]));
+        lines.push(hint_line(
+            app,
+            &[
+                (Action::Open, "argo view"),
+                (Action::ActionMenu, "suspend/sync"),
+            ],
+        ));
     }
     if app.kind_plural == "helmreleases" {
         lines.push(hint_line(app, &[(Action::Open, "helm history")]));

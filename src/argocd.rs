@@ -131,6 +131,9 @@ pub struct ManagedResource {
     pub sync: String,
     /// Empty for objects with no health check, such as ConfigMaps.
     pub health: String,
+    /// Live in the cluster but gone from the desired state, so a sync with
+    /// pruning would delete it.
+    pub requires_pruning: bool,
     /// Resolved by the app layer; empty when the cluster does not know the
     /// kind, in which case there is nothing to jump to.
     pub plural: String,
@@ -358,6 +361,10 @@ pub fn managed_resources(app: &DynamicObject) -> Vec<ManagedResource> {
                         .and_then(Value::as_str)
                         .unwrap_or_default()
                         .to_string(),
+                    requires_pruning: r
+                        .get("requiresPruning")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false),
                     plural: String::new(),
                 })
                 .collect()
@@ -1056,18 +1063,41 @@ fn policy_causes(app: &DynamicObject) -> Vec<(Level, String)> {
     Vec::new()
 }
 
-/// Managed resources the cluster no longer matches.
-fn drift_causes(resources: &[ManagedResource]) -> Vec<(Level, String)> {
+/// Managed resources the cluster no longer matches, each with the way it
+/// differs. The field-level diff is computed by Argo CD's controller and never
+/// written to the Application, so a resource that exists on both sides can only
+/// be pointed at `argocd app diff`.
+fn drift_causes(app: &DynamicObject, resources: &[ManagedResource]) -> Vec<(Level, String)> {
     let mut out = Vec::new();
     let drifted: Vec<&ManagedResource> =
         resources.iter().filter(|r| r.sync == "OutOfSync").collect();
     for r in drifted.iter().take(5) {
-        out.push((Level::Warn, format!("{}/{} is OutOfSync", r.kind, r.name)));
+        let why = if r.requires_pruning {
+            "in the cluster but no longer in git, so a sync would prune it"
+        } else if r.health == "Missing" {
+            "in git but not created in the cluster"
+        } else {
+            "live object differs from git"
+        };
+        out.push((
+            Level::Warn,
+            format!("{}/{} is OutOfSync: {why}", r.kind, r.name),
+        ));
     }
     if drifted.len() > 5 {
         out.push((
             Level::Warn,
             format!("… and {} more OutOfSync", drifted.len() - 5),
+        ));
+    }
+    let differs = drifted
+        .iter()
+        .any(|r| !r.requires_pruning && r.health != "Missing");
+    if differs {
+        let name = app.metadata.name.as_deref().unwrap_or_default();
+        out.push((
+            Level::Info,
+            format!("field-level diff: argocd app diff {name}"),
         ));
     }
     out
@@ -1105,7 +1135,7 @@ fn sync_summary(
         ));
     }
 
-    out.extend(drift_causes(&ev.resources));
+    out.extend(drift_causes(app, &ev.resources));
 
     if out.is_empty() {
         let rev = revision(app);
@@ -1376,7 +1406,44 @@ mod tests {
         assert!(
             texts(&out)
                 .iter()
-                .any(|t| t == "Service/guestbook-ui is OutOfSync")
+                .any(|t| t == "Service/guestbook-ui is OutOfSync: live object differs from git")
+        );
+        assert!(
+            texts(&out)
+                .iter()
+                .any(|t| t == "field-level diff: argocd app diff guestbook")
+        );
+    }
+
+    /// The status says which way a resource drifted even though it never
+    /// carries the diff itself.
+    #[test]
+    fn out_of_sync_resources_say_how_they_drifted() {
+        let mut obj = healthy();
+        obj.data["status"]["sync"]["status"] = json!("OutOfSync");
+        obj.data["status"]["resources"] = json!([
+            {"version": "v1", "kind": "ConfigMap", "namespace": "guestbook",
+             "name": "old", "status": "OutOfSync", "requiresPruning": true},
+            {"version": "v1", "kind": "Service", "namespace": "guestbook",
+             "name": "new", "status": "OutOfSync", "health": {"status": "Missing"}}
+        ]);
+        let out = describe(&evidence(obj, Destination::Current), now_secs());
+        let texts = texts(&out);
+        assert!(
+            texts.iter().any(|t| t
+                == "ConfigMap/old is OutOfSync: in the cluster but no longer in git, so a sync would prune it"),
+            "{texts:?}"
+        );
+        assert!(
+            texts
+                .iter()
+                .any(|t| t == "Service/new is OutOfSync: in git but not created in the cluster"),
+            "{texts:?}"
+        );
+        // Both differences are fully explained; there is no diff to go look at.
+        assert!(
+            !texts.iter().any(|t| t.starts_with("field-level diff")),
+            "{texts:?}"
         );
     }
 

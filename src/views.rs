@@ -196,7 +196,22 @@ pub const BUILTIN_DRILLS: &[&str] = &[
     "helm",
     "helmhistory",
     "helmreleases",
+    "applications",
+    "applicationsets",
 ];
+
+/// The API group a built-in drill is limited to, for plurals generic enough
+/// that another group may define its own kind under the same name. A
+/// configured `drill` on that other group's kind is still honoured.
+fn builtin_drill_group(plural: &str) -> Option<&'static str> {
+    match plural {
+        "roles" | "clusterroles" | "rolebindings" | "clusterrolebindings" => {
+            Some("rbac.authorization.k8s.io")
+        }
+        "applications" | "applicationsets" => Some("argoproj.io"),
+        _ => None,
+    }
+}
 
 /// The plural a view key names: the last segment of `apiVersion/plural`,
 /// `group/plural`, or a bare plural, without any `@namespace` suffix. A key
@@ -490,14 +505,12 @@ pub fn compile(
                 .map_or(key.as_str(), |(resource, _)| resource)
                 .to_lowercase();
             let plural = key_plural(&key_lc);
-            let rbac_plural = matches!(
-                plural,
-                "roles" | "clusterroles" | "rolebindings" | "clusterrolebindings"
-            );
-            let rbac_group = key_lc
-                .split_once('/')
-                .is_none_or(|(group, _)| group == "rbac.authorization.k8s.io");
-            if BUILTIN_DRILLS.contains(&plural) && (!rbac_plural || rbac_group) {
+            let builtin_group = builtin_drill_group(plural).is_none_or(|want| {
+                key_lc
+                    .split_once('/')
+                    .is_none_or(|(group, _)| group == want)
+            });
+            if BUILTIN_DRILLS.contains(&plural) && builtin_group {
                 warnings.push(format!(
                     "views.\"{key}\": drill is ignored — `enter` on {plural} has a \
                      built-in drill-down that config doesn't replace"
@@ -2014,6 +2027,27 @@ mod tests {
                 "",
                 "rbac.authorization.k8s.io/",
                 "rbac.authorization.k8s.io/v1/",
+                "example.com/",
+                "example.com/v1/",
+            ] {
+                let key = format!("{prefix}{plural}");
+                let (views, warnings) = compile_toml(&format!(
+                    "[views.\"{key}\"]\ndrill = {{ kind = \"secrets\" }}"
+                ));
+                let custom = prefix.starts_with("example.com/");
+                assert_eq!(views[&key].drill.is_some(), custom, "{key}");
+                assert_eq!(warnings.is_empty(), custom, "{key}: {warnings:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn argocd_drills_leave_other_api_groups_configurable() {
+        for plural in ["applications", "applicationsets"] {
+            for prefix in [
+                "",
+                "argoproj.io/",
+                "argoproj.io/v1alpha1/",
                 "example.com/",
                 "example.com/v1/",
             ] {

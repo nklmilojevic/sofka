@@ -24877,6 +24877,54 @@ async fn receive_argocd_report(app: &mut App, rx: &mut Receiver<Msg>) {
     .expect("argocd report did not finish");
 }
 
+/// `⏎` on an Application row opens the Argo CD view, which names what drifted,
+/// instead of its YAML; `esc` returns to the Application list.
+#[tokio::test]
+async fn enter_on_an_argocd_application_opens_the_argocd_view() {
+    let root = argocd_application(json!({"server": "https://kubernetes.default.svc",
+                                         "namespace": "default"}));
+    let (mut app, mut rx, responses, _) = health_report_app("applications", root.clone());
+    let kind = app.kind.as_ref().unwrap();
+    let path = format!(
+        "/apis/{}/namespaces/default/applications/web",
+        kind.ar.api_version
+    );
+    responses.lock().unwrap().insert(path, (200, root));
+
+    app.handle_key(press(KeyCode::Enter)).unwrap();
+    assert_eq!(app.mode, Mode::Argocd);
+    receive_argocd_report(&mut app, &mut rx).await;
+    let texts: Vec<&str> = app.argocd_items.iter().map(|f| f.text.as_str()).collect();
+    assert!(
+        texts.contains(&"Service/web is OutOfSync: live object differs from git"),
+        "{texts:?}"
+    );
+
+    app.handle_key(press(KeyCode::Esc)).unwrap();
+    assert_eq!(app.mode, Mode::Table);
+    assert_eq!(app.kind_plural, "applications");
+}
+
+/// Another API group's `applications` kind is not Argo's, so `⏎` keeps its
+/// default instead of opening the Argo CD view.
+#[tokio::test]
+async fn enter_on_a_non_argocd_application_does_not_open_the_argocd_view() {
+    let (mut app, _rx) = test_app();
+    app.cluster
+        .register_kind("example.com", "Application", "applications", true);
+    app.switch_kind("applications.example.com");
+    assert_eq!(app.kind.as_ref().unwrap().ar.group, "example.com");
+    apply(
+        &mut app,
+        json!({"apiVersion": "example.com/v1", "kind": "Application",
+               "metadata": {"name": "a", "namespace": "default"}}),
+    );
+    app.table_state.select(Some(0));
+
+    app.handle_key(press(KeyCode::Enter)).unwrap();
+    assert_ne!(app.mode, Mode::Argocd);
+}
+
 /// An Application deploying into the cluster we are connected to lists what it
 /// manages, and `⏎` opens the managed object.
 #[tokio::test]
@@ -24899,7 +24947,7 @@ async fn argocd_view_lists_managed_resources_and_jumps_to_one() {
     assert!(texts.contains(&"Application/web: OutOfSync / Healthy"));
     assert!(texts.contains(&"Managed resources (1)"));
     assert!(texts.contains(&"Service/web: OutOfSync / Healthy"));
-    assert!(texts.contains(&"Service/web is OutOfSync"));
+    assert!(texts.contains(&"Service/web is OutOfSync: live object differs from git"));
     assert!(texts.contains(&"destination this cluster/default"));
 
     app.handle_key(press(KeyCode::Enter)).unwrap();
@@ -25641,7 +25689,7 @@ async fn argocd_cause_search_does_not_move_the_cursor_off_a_drift_line() {
     let drift_row = app
         .argocd_items
         .iter()
-        .position(|f| f.text == "ConfigMap/settings is OutOfSync")
+        .position(|f| f.text == "ConfigMap/settings is OutOfSync: live object differs from git")
         .expect("drift row");
     app.argocd_state.select(Some(drift_row));
 
@@ -25650,7 +25698,7 @@ async fn argocd_cause_search_does_not_move_the_cursor_off_a_drift_line() {
     let after = app
         .argocd_items
         .iter()
-        .position(|f| f.text == "ConfigMap/settings is OutOfSync")
+        .position(|f| f.text == "ConfigMap/settings is OutOfSync: live object differs from git")
         .expect("drift row still present");
     assert_eq!(
         app.argocd_state.selected(),

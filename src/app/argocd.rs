@@ -63,7 +63,7 @@ impl App {
         self.show_argocd(obj);
     }
 
-    fn show_argocd(&mut self, obj: DynamicObject) {
+    pub(super) fn show_argocd(&mut self, obj: DynamicObject) {
         self.set_return_mode();
         let name = obj.metadata.name.clone().unwrap_or_default();
         self.argocd_title = format!("{name} — Argo CD");
