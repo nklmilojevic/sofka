@@ -9,7 +9,10 @@
 //! refresh because it has no expiry. A certificate refused in the TLS
 //! handshake looks like any transport failure, so those renew too, quietly:
 //! during an ordinary outage the plugin returns the same certificate or
-//! fails, and neither is news.
+//! fails, and neither is news. A new certificate that still gets no answer
+//! was not the problem, so a failure streak installs at most one that way.
+//! Either trigger keeps renewing every 30 seconds until the watch recovers
+//! or a new client is installed.
 
 use super::{App, Msg};
 use crate::k8s::ExecClient;
@@ -59,8 +62,6 @@ impl App {
         let Some(renew) = self.cluster.credential_renewal() else {
             return;
         };
-        self.credential_rejected = false;
-        self.credential_unreachable = false;
         self.credential_attempt_quiet = quiet;
         self.credential_attempts += 1;
         let attempt = self.credential_attempts;
@@ -129,6 +130,9 @@ impl App {
             expires = expires.map(|t| t.to_string()).unwrap_or_default()
         );
         self.cluster.install_exec_client(*renewed);
+        self.credential_transport_spent |= self.credential_attempt_quiet;
+        self.credential_rejected = false;
+        self.credential_unreachable = false;
         self.credential_error = None;
         self.credential_retry_at = None;
         self.resume_pending = Some("renewed cluster credentials");
@@ -144,30 +148,40 @@ impl App {
         }
         if is_unauthenticated(error) {
             self.credential_rejected = true;
-        } else if is_transport_failure(error) && self.cluster.credential_expiry().is_some() {
+        } else if is_transport_failure(error)
+            && self.cluster.credential_expiry().is_some()
+            && !self.credential_transport_spent
+        {
             self.credential_unreachable = true;
         }
     }
 
-    /// The failed renewal's message for a watch `error` it explains: an
-    /// unauthenticated response, or a transport failure once the certificate
-    /// has expired. Before expiry the old certificate still works, and other
-    /// failures, such as a forbidden resource, keep their own message.
+    /// The watch works again: whatever the renewal triggers suspected, the
+    /// credentials are fine.
+    pub(super) fn note_watch_recovered(&mut self) {
+        self.credential_rejected = false;
+        self.credential_unreachable = false;
+        self.credential_transport_spent = false;
+        self.credential_error = None;
+    }
+
+    /// A watch `error` with the failed renewal's message after it, when the
+    /// error is one bad credentials explain: an unauthenticated response or
+    /// a request that got no answer. Other failures, such as a forbidden
+    /// resource, stay as they are.
     pub(super) fn credential_error_for(&self, error: &str) -> Option<String> {
-        let expired = self
-            .cluster
-            .credential_expiry()
-            .is_some_and(|expiry| Timestamp::now() >= expiry);
-        if !is_unauthenticated(error) && !(expired && is_transport_failure(error)) {
+        if !is_unauthenticated(error) && !is_transport_failure(error) {
             return None;
         }
-        self.credential_error.clone()
+        let hint = self.credential_error.as_ref()?;
+        Some(format!("{error}; credential renewal failed: {hint}"))
     }
 
     /// Forget a renewal that belongs to the client a context switch replaced.
     pub(super) fn reset_credential_renewal(&mut self) {
         self.credential_rejected = false;
         self.credential_unreachable = false;
+        self.credential_transport_spent = false;
         self.credential_attempt = None;
         self.credential_retry_at = None;
         self.credential_error = None;

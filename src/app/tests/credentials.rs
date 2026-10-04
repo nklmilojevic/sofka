@@ -72,6 +72,19 @@ fn renewed(app: &App, valid_until: Timestamp, certificate: &[u8]) -> Msg {
     }
 }
 
+async fn fail_quietly(app: &mut App, rx: &mut Receiver<Msg>, at: Timestamp) {
+    app.renew_credentials_at(at);
+    assert!(app.credential_attempt.is_some());
+    let msg = renewal_result(rx).await;
+    app.handle_msg(msg);
+    assert!(app.credential_attempt.is_none());
+    assert!(
+        !app.flash.contains("credential renewal failed"),
+        "{}",
+        app.flash
+    );
+}
+
 async fn fail_renewal(app: &mut App, rx: &mut Receiver<Msg>, at: Timestamp) {
     app.renew_credentials_at(at);
     let msg = renewal_result(rx).await;
@@ -273,13 +286,19 @@ async fn a_renewal_for_a_replaced_client_is_dropped() {
 }
 
 #[tokio::test]
-async fn a_failed_renewal_before_expiry_keeps_watch_errors_as_they_are() {
+async fn a_failed_renewal_keeps_the_watch_error_and_adds_the_login_hint() {
     let valid_until = Timestamp::now() + SignedDuration::from_secs(30);
     let (mut app, mut rx) = app_with_exec_certificate_until(valid_until);
     fail_renewal(&mut app, &mut rx, valid_until).await;
 
     watch_error(&mut app, SEND_REQUEST);
-    assert_eq!(app.flash, format!("watch failed; retrying: {SEND_REQUEST}"));
+    assert_eq!(
+        app.flash,
+        format!(
+            "watch failed; retrying: {SEND_REQUEST}; credential renewal failed: \
+             Authentication command failed. Log in with your credential provider, then retry."
+        )
+    );
 }
 
 #[tokio::test]
@@ -357,14 +376,66 @@ async fn a_certificate_refused_in_the_handshake_renews_before_its_expiry() {
     app.renew_credentials_at(now);
     assert!(app.credential_attempt.is_some());
 
-    // Through an ordinary outage the plugin fails too; that stays quiet.
+    // The plugin fails too, as it does through an ordinary outage: no
+    // warning of its own, but the watch error carries the login hint.
     let msg = renewal_result(&mut rx).await;
     app.handle_msg(msg);
     assert_eq!(app.flash, format!("watch failed; retrying: {SEND_REQUEST}"));
     watch_error(&mut app, SEND_REQUEST);
-    app.renew_credentials_at(now + SignedDuration::from_secs(10));
-    assert!(app.credential_attempt.is_none(), "retries wait");
+    assert!(
+        app.flash.contains("Log in with your credential provider"),
+        "{}",
+        app.flash
+    );
+}
+
+#[tokio::test]
+async fn handshake_failures_retry_on_the_timer_after_a_failed_attempt() {
+    let now = Timestamp::now();
+    let (mut app, mut rx) = app_with_exec_certificate_until(fresh());
+    watch_error(&mut app, SEND_REQUEST);
+    fail_quietly(&mut app, &mut rx, now).await;
+
     app.renew_credentials_at(now + SignedDuration::from_secs(30));
+    assert!(app.credential_attempt.is_some());
+}
+
+#[tokio::test]
+async fn a_recovered_watch_stops_handshake_retries() {
+    let now = Timestamp::now();
+    let (mut app, mut rx) = app_with_exec_certificate_until(fresh());
+    watch_error(&mut app, SEND_REQUEST);
+    fail_quietly(&mut app, &mut rx, now).await;
+    app.handle_msg(Msg::WatchRecovered {
+        generation: app.generation,
+    });
+
+    app.renew_credentials_at(now + SignedDuration::from_secs(30));
+    assert!(app.credential_attempt.is_none());
+}
+
+#[tokio::test]
+async fn an_outage_installs_at_most_one_new_certificate_until_the_watch_recovers() {
+    let now = Timestamp::now();
+    let (mut app, _rx) = app_with_exec_certificate_until(fresh());
+    watch_error(&mut app, SEND_REQUEST);
+    app.renew_credentials_at(now);
+    app.handle_msg(renewed(&app, fresh(), RENEWED));
+    let generation = app.generation;
+
+    watch_error(&mut app, SEND_REQUEST);
+    app.renew_credentials_at(now + SignedDuration::from_secs(60));
+    assert!(
+        app.credential_attempt.is_none(),
+        "the new certificate was not the problem"
+    );
+    assert_eq!(app.generation, generation);
+
+    app.handle_msg(Msg::WatchRecovered {
+        generation: app.generation,
+    });
+    watch_error(&mut app, SEND_REQUEST);
+    app.renew_credentials_at(now + SignedDuration::from_secs(60));
     assert!(app.credential_attempt.is_some());
 }
 

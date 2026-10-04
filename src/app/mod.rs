@@ -1879,6 +1879,9 @@ pub struct App {
     /// A request with the exec-issued certificate failed in transport, as one
     /// refused in the TLS handshake does; renew quietly on the next tick.
     credential_unreachable: bool,
+    /// A transport failure already installed a new certificate since the
+    /// watch last worked; further transport failures are not its fault.
+    credential_transport_spent: bool,
     /// The renewal in flight started only from a transport failure, so its
     /// own failure stays out of the status bar.
     credential_attempt_quiet: bool,
@@ -2448,6 +2451,7 @@ impl App {
             credential_rejected: false,
             credential_unreachable: false,
             credential_attempt_quiet: false,
+            credential_transport_spent: false,
             credential_retry_at: None,
             credential_error: None,
             context_switch_target: None,

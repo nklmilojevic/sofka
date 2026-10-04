@@ -1161,7 +1161,7 @@ impl App {
                 self.show_watch_error(error);
             }
             Msg::WatchRecovered { generation } if generation == self.generation => {
-                self.credential_error = None;
+                self.note_watch_recovered();
                 self.clear_watch_error_flash();
             }
             Msg::Error { generation, error } if generation == self.generation => {
