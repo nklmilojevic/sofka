@@ -1087,25 +1087,32 @@ fn header_hints(app: &App) -> Vec<Line<'static>> {
                 hint_line(app, &[(Action::Delete, "delete")]),
             ]
         }
-        _ => vec![
-            hint_line(
-                app,
-                &[
-                    (Action::Open, "yaml"),
-                    (Action::Describe, "describe"),
-                    (Action::Events, "events"),
-                ],
-            ),
-            hint_line(
-                app,
-                &[
-                    (Action::Edit, "edit"),
-                    (Action::CopyName, "copy name"),
-                    (Action::CopyCell, "copy cell"),
-                ],
-            ),
-            hint_line(app, &[(Action::Delete, "delete")]),
-        ],
+        _ => {
+            // `⏎` follows a configured drill or node pointer before it opens
+            // the YAML, the order `App::drill` tries them in.
+            let open = match app.configured_drill() {
+                Some(drill) => drill.kind,
+                None if app.node_pointer().is_some() => "node".to_string(),
+                None => "yaml".to_string(),
+            };
+            let mut first = vec![(Action::Open, open.as_str())];
+            if open != "yaml" {
+                first.push((Action::Yaml, "yaml"));
+            }
+            first.extend([(Action::Describe, "describe"), (Action::Events, "events")]);
+            vec![
+                hint_line(app, &first),
+                hint_line(
+                    app,
+                    &[
+                        (Action::Edit, "edit"),
+                        (Action::CopyName, "copy name"),
+                        (Action::CopyCell, "copy cell"),
+                    ],
+                ),
+                hint_line(app, &[(Action::Delete, "delete")]),
+            ]
+        }
     };
     if app.kind_plural == "machinedeployments"
         && app
@@ -6514,6 +6521,33 @@ mod tests {
         let text: Vec<String> = header_hints(&app).iter().map(line_text).collect();
         let text = text.join("\n");
         assert!(text.contains("argo view"), "{text}");
+        assert_eq!(text.matches("yaml").count(), 1, "{text}");
+    }
+
+    /// With a configured drill, `⏎` runs the drill, so the hint names its
+    /// target and keeps YAML on its own key.
+    #[tokio::test]
+    async fn a_configured_drill_is_hinted_instead_of_yaml() {
+        let (tx, _rx) = tokio::sync::mpsc::channel(16);
+        let mut app = App::new(crate::k8s::Cluster::fake(), tx);
+        let (views, warnings) = crate::views::compile(&std::collections::HashMap::from([(
+            "applications".to_string(),
+            crate::config::ViewConfig {
+                drill: Some(crate::config::DrillConfig {
+                    kind: "secrets".to_string(),
+                    labels: None,
+                    fields: Some("metadata.name={name}".to_string()),
+                }),
+                ..Default::default()
+            },
+        )]));
+        assert!(warnings.is_empty(), "{warnings:?}");
+        app.user_views = views;
+        app.switch_kind("applications");
+        let text: Vec<String> = header_hints(&app).iter().map(line_text).collect();
+        let text = text.join("\n");
+        assert!(text.contains("secrets"), "{text}");
+        assert!(!text.contains("argo view"), "{text}");
         assert_eq!(text.matches("yaml").count(), 1, "{text}");
     }
 

@@ -110,7 +110,7 @@ impl App {
     }
 
     /// The JSON Pointer holding the current kind's node name, if it has one.
-    pub(super) fn node_pointer(&self) -> Option<String> {
+    pub(crate) fn node_pointer(&self) -> Option<String> {
         let ar = &self.kind.as_ref()?.ar;
         crate::views::node_pointer(&self.user_views, ar, self.view_namespace()).map(str::to_string)
     }
