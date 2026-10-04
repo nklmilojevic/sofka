@@ -18,9 +18,21 @@ pub fn ellipsize(s: &str, max: usize) -> String {
     }
 }
 
+/// Collapse every run of whitespace, line breaks included, into one space, so
+/// a multi-line API message reads as a single line that the view can wrap.
+pub fn one_line(s: &str) -> String {
+    s.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn one_line_joins_lines_and_squeezes_whitespace() {
+        assert_eq!(one_line("  a\n  b\tc\r\n"), "a b c");
+        assert_eq!(one_line(""), "");
+    }
 
     #[test]
     fn short_strings_pass_through() {

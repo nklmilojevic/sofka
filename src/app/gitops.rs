@@ -206,6 +206,7 @@ impl App {
             (Some(Action::First), _) if len > 0 => self.gitops_state.select(Some(0)),
             (Some(Action::Last), _) if len > 0 => self.gitops_state.select(Some(len - 1)),
             (Some(Action::Refresh), _) => self.refresh_gitops(),
+            (Some(Action::Wrap), _) => self.toggle_findings_wrap(),
             // Jump to the resource behind the selected chain node.
             (Some(Action::Accept), _) => {
                 let target = self

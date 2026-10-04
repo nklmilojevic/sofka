@@ -2204,6 +2204,10 @@ pub struct App {
     pub explain_state: ListState,
     explain_selection_lost: bool,
     pub explain_title: String,
+    /// Line wrap for the findings views (explain, GitOps, Argo CD). On by
+    /// default: a finding's message usually ends in the part that says what
+    /// to fix, so clipping it at the right edge hides the answer.
+    pub findings_wrap: bool,
     /// The object the explain view is investigating, kept so `r` can re-gather.
     pub explain_source: Option<DynamicObject>,
     /// Latest Explain request, independent of the table watch generation.
@@ -2561,6 +2565,7 @@ impl App {
             explain_state: ListState::default(),
             explain_selection_lost: false,
             explain_title: String::new(),
+            findings_wrap: true,
             explain_source: None,
             explain_request: 0,
             explain_claim: None,

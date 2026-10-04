@@ -23955,6 +23955,64 @@ async fn explain_key_shows_reported_daemonset_availability() {
     assert_eq!(app.mode, Mode::Table);
 }
 
+#[tokio::test]
+async fn explain_shows_a_long_failure_message_in_full_and_w_clips_it() {
+    let message = "pods \"hello-00001-deployment-7d9f-x2k4\" is forbidden: failed quota: \
+        team-quota: must specify limits.cpu for: queue-proxy; limits.memory for: queue-proxy; \
+        requests.memory for: queue-proxy";
+    let (mut app, _rx) = test_app();
+    app.switch_kind("deployments");
+    apply(
+        &mut app,
+        json!({"apiVersion": "apps/v1", "kind": "Deployment",
+        "metadata": {"name": "hello", "namespace": "default"},
+        "spec": {"replicas": 1},
+        "status": {"replicas": 0, "conditions": [{"type": "ReplicaFailure",
+            "status": "True", "reason": "FailedCreate", "message": message}]}}),
+    );
+    app.handle_key(press(KeyCode::Home)).unwrap();
+    explain_selected_with_pure_evidence(&mut app);
+    assert!(
+        app.explain_items
+            .iter()
+            .any(|f| f.text.ends_with("requests.memory for: queue-proxy")),
+        "the message is never cut: {:?}",
+        app.explain_items
+    );
+
+    // Compare without whitespace or borders: wrapped rows split the message
+    // and indent its continuation.
+    let squash = |s: &str| {
+        s.chars()
+            .filter(|c| !c.is_whitespace() && *c != '│')
+            .collect::<String>()
+    };
+    let tail = squash("requests.memory for: queue-proxy");
+    assert!(squash(&screen_text(&mut app, 80, 30)).contains(&tail));
+
+    app.handle_key(press(KeyCode::Char('w'))).unwrap();
+    assert_eq!(app.flash, "wrap: off");
+    assert!(!squash(&screen_text(&mut app, 80, 30)).contains(&tail));
+
+    app.handle_key(press(KeyCode::Char('w'))).unwrap();
+    assert_eq!(app.flash, "wrap: on");
+    assert!(squash(&screen_text(&mut app, 80, 30)).contains(&tail));
+}
+
+#[tokio::test]
+async fn w_toggles_wrap_in_the_gitops_and_argocd_views() {
+    let (mut app, _rx) = test_app();
+    for mode in [Mode::Gitops, Mode::Argocd] {
+        app.mode = mode;
+        app.handle_key(press(KeyCode::Char('w'))).unwrap();
+        assert_eq!(app.flash, "wrap: off");
+        assert!(!app.findings_wrap);
+        app.handle_key(press(KeyCode::Char('w'))).unwrap();
+        assert_eq!(app.flash, "wrap: on");
+        assert!(app.findings_wrap);
+    }
+}
+
 fn expression_workload(include_labels: bool) -> serde_json::Value {
     let mut workload = json!({"apiVersion":"apps/v1","kind":"Deployment",
         "metadata":{"name":"web","namespace":"default","uid":"workload-uid"},

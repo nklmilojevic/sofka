@@ -514,7 +514,7 @@ fn join(status: &str, reason: &str, msg: &str) -> String {
         s.push_str(&format!(" ({reason})"));
     }
     if !msg.is_empty() {
-        s.push_str(&format!(" — {}", short(msg)));
+        s.push_str(&format!(" — {}", crate::text::one_line(msg)));
     }
     s
 }
@@ -528,6 +528,17 @@ fn short(s: &str) -> String {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn condition_messages_are_never_cut() {
+        let msg = format!(
+            "kustomize build failed:\n{}accumulating resources",
+            "x".repeat(200)
+        );
+        let joined = join("False", "BuildFailed", &msg);
+        assert!(joined.ends_with("accumulating resources"), "{joined}");
+        assert!(!joined.contains('\n'));
+    }
 
     fn obj(v: Value) -> DynamicObject {
         serde_json::from_value(v).unwrap()

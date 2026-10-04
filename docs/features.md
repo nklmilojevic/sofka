@@ -430,6 +430,9 @@ include those conditions. Row filters can search the route paths.
   Temporary Events and Logs views keep the parent report active. New findings
   update that report without changing the evidence view. Refresh keeps the
   previous findings until new results arrive.
+  Condition, event, and container messages are shown in full. Long findings
+  wrap under their first row; `w` clips them to one row each instead. The
+  same toggle applies to the GitOps and Argo CD views.
 - **Session-local timeline** (`T` / `:timeline`) - a per-object timestamped log
   of every state change the watch saw: generation bumps, replica and readiness
   changes, pod phase, restarts, waiting reasons, condition flips. Computed from

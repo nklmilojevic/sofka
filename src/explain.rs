@@ -460,7 +460,7 @@ fn pod_problems(pod: &DynamicObject) -> Vec<(Level, String)> {
                 ));
             }
             if !msg.is_empty() && reason != "CrashLoopBackOff" {
-                text.push_str(&format!(" — {}", truncate(msg, 100)));
+                text.push_str(&format!(" — {}", one_line(msg)));
             }
             out.push((pod_level(reason), text));
         } else if let Some(reason) = ptr_str(cs, "/state/terminated/reason") {
@@ -542,9 +542,9 @@ fn ptr_i64(v: &Value, p: &str) -> Option<i64> {
 /// whichever is empty.
 fn join_reason(reason: &str, msg: &str) -> String {
     match (reason.is_empty(), msg.is_empty()) {
-        (false, false) => format!("{reason}: {}", truncate(msg, 120)),
+        (false, false) => format!("{reason}: {}", one_line(msg)),
         (false, true) => reason.to_string(),
-        (true, false) => truncate(msg, 120),
+        (true, false) => one_line(msg),
         (true, true) => "(no detail)".into(),
     }
 }
@@ -557,7 +557,7 @@ fn event_message(e: &DynamicObject, events_v1: bool) -> String {
         ptr_str(d, "/message").or_else(|| ptr_str(d, "/note"))
     }
     .unwrap_or_default();
-    truncate(&raw.replace('\n', " "), 120)
+    one_line(raw)
 }
 
 fn event_time(e: &DynamicObject, events_v1: bool) -> String {
@@ -587,7 +587,7 @@ fn compact_time(raw: &str) -> String {
     }
 }
 
-use crate::text::ellipsize as truncate;
+use crate::text::one_line;
 
 #[cfg(test)]
 mod tests {

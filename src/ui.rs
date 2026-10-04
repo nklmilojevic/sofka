@@ -4801,11 +4801,14 @@ fn draw_fleet(frame: &mut Frame, app: &mut App, area: Rect) {
 /// GitOps views): coloured by level, indented, with a `→` on lines that carry
 /// a jump target — `jumps` says which rows have one, since a view may know of
 /// jumps its findings do not carry. Shows `empty_msg` while the findings are
-/// still gathering.
+/// still gathering. With `wrap`, a finding wider than the list folds onto
+/// further rows indented under its first, so the selection still covers the
+/// whole finding.
 #[allow(clippy::too_many_arguments)]
 fn draw_findings(
     frame: &mut Frame,
     show_scrollbars: bool,
+    wrap: bool,
     area: Rect,
     title: String,
     findings: &[crate::explain::Finding],
@@ -4823,6 +4826,8 @@ fn draw_findings(
         Level::Evidence => theme::subtext0(),
     };
 
+    // Inside the border and the two-column highlight gutter.
+    let text_width = usize::from(area.width.saturating_sub(4));
     let items: Vec<ListItem> = if findings.is_empty() {
         vec![ListItem::new(Line::from(Span::styled(
             empty_msg.to_string(),
@@ -4834,18 +4839,32 @@ fn draw_findings(
             .enumerate()
             .map(|(i, f)| {
                 let indent = "  ".repeat(f.indent as usize);
-                let mut spans = vec![Span::raw(indent)];
                 let style = match f.level {
                     Level::Heading => Style::default()
                         .fg(color(f.level))
                         .add_modifier(Modifier::BOLD),
                     _ => Style::default().fg(color(f.level)),
                 };
-                spans.push(Span::styled(f.text.clone(), style));
+                let mut spans = vec![Span::styled(f.text.clone(), style)];
                 if jumps(i, f) {
                     spans.push(Span::styled("  →", theme::dim()));
                 }
-                ListItem::new(Line::from(spans))
+                if !wrap {
+                    spans.insert(0, Span::raw(indent));
+                    return ListItem::new(Line::from(spans));
+                }
+                let hanging = format!("{indent}  ");
+                let rows = wrap_line(Line::from(spans), text_width.saturating_sub(hanging.len()));
+                let lines: Vec<Line> = rows
+                    .into_iter()
+                    .enumerate()
+                    .map(|(row, mut line)| {
+                        let prefix = if row == 0 { &indent } else { &hanging };
+                        line.spans.insert(0, Span::raw(prefix.clone()));
+                        line
+                    })
+                    .collect();
+                ListItem::new(lines)
             })
             .collect()
     };
@@ -4874,6 +4893,7 @@ fn draw_explain(frame: &mut Frame, app: &mut App, area: Rect) {
     draw_findings(
         frame,
         show_scrollbars,
+        app.findings_wrap,
         area,
         title,
         &app.explain_items,
@@ -4894,6 +4914,7 @@ fn draw_argocd(frame: &mut Frame, app: &mut App, area: Rect) {
     draw_findings(
         frame,
         show_scrollbars,
+        app.findings_wrap,
         area,
         title,
         &app.argocd_items,
@@ -4909,6 +4930,7 @@ fn draw_gitops(frame: &mut Frame, app: &mut App, area: Rect) {
     draw_findings(
         frame,
         show_scrollbars,
+        app.findings_wrap,
         area,
         title,
         &app.gitops_items,

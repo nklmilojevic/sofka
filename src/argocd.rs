@@ -1144,7 +1144,7 @@ fn join(label: &str, message: &str) -> String {
     if message.is_empty() {
         label.to_string()
     } else {
-        format!("{label} — {}", short(message))
+        format!("{label} — {}", crate::text::one_line(message))
     }
 }
 
@@ -1168,6 +1168,17 @@ mod tests {
     use super::*;
     use crate::columns::now_secs;
     use serde_json::json;
+
+    #[test]
+    fn messages_are_never_cut() {
+        let msg = format!(
+            "one or more objects failed to apply:\n{}last",
+            "x".repeat(200)
+        );
+        let joined = join("SyncFailed", &msg);
+        assert!(joined.ends_with("last"), "{joined}");
+        assert!(!joined.contains('\n'));
+    }
 
     fn app(value: serde_json::Value) -> DynamicObject {
         serde_json::from_value(value).expect("valid Application")
