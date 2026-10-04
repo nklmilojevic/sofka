@@ -114,6 +114,8 @@ pub struct UserColumn {
     pub condition_match: ConditionMatch,
     /// The output field for a condition lookup. `Condition` reads `status`.
     pub condition_field: Option<String>,
+    /// Shown, sorted, and colored in place of a missing or null value.
+    pub default: Option<String>,
 }
 
 /// A compiled per-kind view.
@@ -446,6 +448,15 @@ pub fn compile(
                     None
                 }
             };
+            let default = c.default.clone().filter(|_| {
+                let unsupported = matches!(kind, ColumnKind::Metric(_) | ColumnKind::Builtin);
+                if unsupported {
+                    warnings.push(format!(
+                        "views.\"{key}\": column {header}: default applies only to path columns; ignored"
+                    ));
+                }
+                !unsupported
+            });
             columns.push(UserColumn {
                 header,
                 pointer,
@@ -460,6 +471,7 @@ pub fn compile(
                 align,
                 condition_match: ConditionMatch::Type,
                 condition_field: None,
+                default,
             });
         }
         let mut replace = cfg.replace;
@@ -928,10 +940,9 @@ pub fn render_cell(obj: &DynamicObject, col: &UserColumn, now: i64) -> String {
         return "-".into();
     }
     if col.kind == ColumnKind::Condition {
-        return condition_value(obj, &col.pointer, col.condition_match, "status")
-            .and_then(Value::as_str)
-            .map(str::to_string)
-            .unwrap_or_else(|| "<none>".into());
+        return condition_status_or_default(obj, col)
+            .unwrap_or("<none>")
+            .to_string();
     }
     let Some(v) = cell_value(obj, col) else {
         return "<none>".into();
@@ -968,8 +979,27 @@ fn render_image_tag(v: &Extracted<'_>) -> String {
     }
 }
 
-/// Read a non-`Condition` column through a JSON Pointer or condition filter.
-fn cell_value<'a>(obj: &'a DynamicObject, col: &UserColumn) -> Option<Extracted<'a>> {
+/// A `Condition` column's status, or its default when the condition or its
+/// status is absent.
+fn condition_status_or_default<'a>(obj: &'a DynamicObject, col: &'a UserColumn) -> Option<&'a str> {
+    condition_value(obj, &col.pointer, col.condition_match, "status")
+        .filter(|value| !value.is_null())
+        .map_or(col.default.as_deref(), Value::as_str)
+}
+
+/// Read a non-`Condition` column through a JSON Pointer or condition filter,
+/// falling back to the column's default when the value is missing or null.
+fn cell_value<'a>(obj: &'a DynamicObject, col: &'a UserColumn) -> Option<Extracted<'a>> {
+    let value = lookup_value(obj, col);
+    match &col.default {
+        Some(default) => value
+            .filter(|value| !value.is_null())
+            .or(Some(Extracted::Text(default))),
+        None => value,
+    }
+}
+
+fn lookup_value<'a>(obj: &'a DynamicObject, col: &UserColumn) -> Option<Extracted<'a>> {
     match col.condition_field.as_deref() {
         Some(field) => {
             condition_value(obj, &col.pointer, col.condition_match, field).map(Extracted::Json)
@@ -1046,9 +1076,7 @@ fn render_time(v: &Extracted<'_>, now: i64) -> String {
 pub fn sort_value(obj: &DynamicObject, col: &UserColumn, now: i64) -> SortValue {
     if col.kind == ColumnKind::Condition {
         return SortValue::Text(
-            condition_value(obj, &col.pointer, col.condition_match, "status")
-                .and_then(Value::as_str)
-                .map(str::to_string)
+            condition_status_or_default(obj, col)
                 .unwrap_or_default()
                 .to_lowercase(),
         );
@@ -1180,6 +1208,7 @@ pub fn printer_columns_view(crd: &Value, version: &str) -> Option<View> {
                     align: None,
                     condition_match,
                     condition_field,
+                    default: None,
                 });
             }
             let pointer = json_path_to_pointer(json_path)?;
@@ -1193,6 +1222,7 @@ pub fn printer_columns_view(crd: &Value, version: &str) -> Option<View> {
                 align: None,
                 condition_match: ConditionMatch::Type,
                 condition_field: None,
+                default: None,
             })
         })
         .collect();
@@ -1511,12 +1541,71 @@ mod tests {
             align: None,
             condition_match: ConditionMatch::Type,
             condition_field: None,
+            default: None,
         }
     }
 
     fn compile_toml(text: &str) -> (HashMap<String, View>, Vec<String>) {
         let cfg: crate::config::Config = toml::from_str(text).unwrap();
         compile(&cfg.views)
+    }
+
+    #[test]
+    fn default_replaces_missing_and_null_values() {
+        let (views, warnings) = compile_toml(
+            r#"
+            [[views.machines.columns]]
+            name = "PHASE"
+            path = ["/status/phase", "/status/state"]
+            type = "status"
+            default = "Pending"
+
+            [[views.machines.columns]]
+            name = "CPU"
+            path = "/spec/cpu"
+            type = "quantity"
+            format = "cpu"
+            default = "0"
+
+            [[views.machines.columns]]
+            name = "READY"
+            path = "Ready"
+            type = "condition"
+            default = "Unknown"
+
+            [[views.machines.columns]]
+            name = "AGE"
+            builtin = "AGE"
+            default = "new"
+            "#,
+        );
+        assert_eq!(
+            warnings,
+            ["views.\"machines\": column AGE: default applies only to path columns; ignored"]
+        );
+        let cols = &views["machines"].columns;
+        assert_eq!(cols[3].default, None);
+
+        for status in [json!({}), json!({"phase": null, "state": null})] {
+            let object = obj(json!({"status": status}));
+            assert_eq!(render_cell(&object, &cols[0], 0), "Pending");
+            assert!(
+                matches!(sort_value(&object, &cols[0], 0), SortValue::Text(t) if t == "pending")
+            );
+            assert_eq!(render_cell(&object, &cols[1], 0), "0m");
+            assert!(matches!(sort_value(&object, &cols[1], 0), SortValue::Num(n) if n == 0.0));
+            assert_eq!(render_cell(&object, &cols[2], 0), "Unknown");
+        }
+
+        let object = obj(json!({
+            "spec": {"cpu": "250m"},
+            "status": {"state": "Running", "conditions": [{"type": "Ready", "status": "True"}]}
+        }));
+        assert_eq!(render_cell(&object, &cols[0], 0), "Running");
+        assert_eq!(render_cell(&object, &cols[1], 0), "250m");
+        assert_eq!(render_cell(&object, &cols[2], 0), "True");
+        let object = obj(json!({"status": {"phase": ""}}));
+        assert_eq!(render_cell(&object, &cols[0], 0), "");
     }
 
     #[test]

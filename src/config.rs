@@ -915,6 +915,8 @@ pub struct ViewColumnConfig {
     pub width: Option<u16>,
     /// Cell alignment: `left` (default), `center`, `right`.
     pub align: Option<String>,
+    /// Value used when every path is missing or null.
+    pub default: Option<String>,
 }
 
 /// Skin selection. `name` picks a built-in palette (see

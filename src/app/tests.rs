@@ -15041,6 +15041,50 @@ async fn user_status_column_colors_crd_words_in_any_case() {
 }
 
 #[tokio::test]
+async fn user_status_column_default_fills_missing_values() {
+    let (mut app, _rx) = test_app();
+    install_views(
+        &mut app,
+        r#"
+        [[views."cert-manager.io/v1/certificates".columns]]
+        name = "PHASE"
+        path = "/status/phase"
+        type = "status"
+        default = "Pending"
+        "#,
+    );
+    type_resource_query(&mut app, "certificates");
+    for (name, status) in [
+        ("machine-a", json!({"phase": "Running"})),
+        ("machine-b", json!({})),
+        ("machine-c", json!({"phase": null})),
+    ] {
+        apply(
+            &mut app,
+            json!({"apiVersion": "cert-manager.io/v1", "kind": "Certificate",
+                "metadata": {"name": name, "namespace": "default"},
+                "status": status}),
+        );
+    }
+
+    for name in ["machine-b", "machine-c"] {
+        assert_eq!(
+            health_row_color(&mut app, name, "Pending"),
+            crate::theme::yellow(),
+            "{name}"
+        );
+        assert_eq!(
+            health_row_color(&mut app, name, name),
+            crate::theme::peach(),
+            "{name}"
+        );
+    }
+
+    type_filter(&mut app, "pending");
+    assert_eq!(row_names(&app), ["machine-b", "machine-c"]);
+}
+
+#[tokio::test]
 async fn user_view_adds_provider_label_columns_to_curated_nodes() {
     let (mut app, _rx) = test_app();
     install_views(
@@ -15506,6 +15550,7 @@ async fn user_view_wins_over_printer_columns() {
                 align: None,
                 condition_match: crate::views::ConditionMatch::Type,
                 condition_field: None,
+                default: None,
             }],
             ..Default::default()
         })),
