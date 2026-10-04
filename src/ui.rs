@@ -5400,7 +5400,7 @@ fn navigation_hint(app: &App, width: u16) -> String {
             Action::Help,
         ][..],
     };
-    let editable = scope == "detail" && app.document_editable();
+    let editable = scope == "detail" && app.document_editable() && !app.readonly;
     let available: Vec<_> = preferred
         .iter()
         .flat_map(|&action| {

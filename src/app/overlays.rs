@@ -119,6 +119,7 @@ impl App {
                     .unwrap_or_default();
                 self.note_action("edit", label);
                 self.pending = Some(Suspend::Shell(argv));
+                self.reload_after_suspend = self.confirm_over_document();
             }
             ConfirmAction::Exec { ns, name } => {
                 self.exec_into(ns, name, None);

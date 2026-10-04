@@ -1715,6 +1715,12 @@ impl App {
                     self.set_claimed_status(claim, format!("snapshot save failed: {e}"), true)
                 }
             },
+            Msg::DocumentEditRead { generation, result }
+                if generation == self.generation && self.document_edit_task.is_some() =>
+            {
+                self.document_edit_task = None;
+                self.edit_document_object(result);
+            }
             Msg::NativeDescribeReady {
                 generation,
                 claim,

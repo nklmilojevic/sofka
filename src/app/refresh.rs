@@ -250,6 +250,9 @@ impl App {
 
     pub(super) fn clear_document_source(&mut self) {
         self.document_source = None;
+        if let Some(task) = self.document_edit_task.take() {
+            task.abort();
+        }
         if let Some(task) = self.describe_task.take() {
             task.abort();
         }

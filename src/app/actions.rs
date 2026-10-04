@@ -689,10 +689,35 @@ impl App {
 
     /// `e` in a YAML or describe view edits the object the document shows,
     /// not the table row, which can move while the watch is still filling.
+    /// `kubectl edit` goes by name, so the object is read first to make sure
+    /// it was not replaced under the same name while the document was open.
     pub(super) fn request_document_edit(&mut self) {
-        if !self.document_editable() || self.deny_readonly() {
+        if !self.document_editable() || self.deny_readonly() || self.document_edit_task.is_some() {
             return;
         }
+        let Some(source) = self.document_source.clone() else {
+            return;
+        };
+        let generation = self.generation;
+        let tx = self.tx.clone();
+        self.document_edit_task = Some(tokio::spawn(async move {
+            let result = source.read().await.map(Box::new);
+            let _ = tx.send(Msg::DocumentEditRead { generation, result }).await;
+        }));
+    }
+
+    /// The identity check for [`Self::request_document_edit`] came back.
+    pub(super) fn edit_document_object(&mut self, result: Result<Box<DynamicObject>, String>) {
+        if self.mode != Mode::Detail || !self.document_editable() {
+            return;
+        }
+        let fresh = match result {
+            Ok(fresh) => fresh,
+            Err(error) => {
+                self.flash_warn(&format!("cannot edit: {error}"));
+                return;
+            }
+        };
         let Some(source) = self.document_source.as_ref() else {
             return;
         };
@@ -702,10 +727,11 @@ impl App {
         } else {
             format!("{}.{}.{}", ar.plural, ar.version, ar.group)
         };
-        let obj = source.object.clone();
-        self.edit_object(resource, &obj);
+        self.edit_object(resource, &fresh);
         if self.mode == Mode::Confirm {
             self.confirm_return = Mode::Detail;
+        } else {
+            self.reload_after_suspend = true;
         }
     }
 

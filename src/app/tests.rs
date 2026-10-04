@@ -12725,6 +12725,37 @@ async fn editing_unmanaged_object_skips_the_warning() {
     assert!(matches!(app.pending, Some(Suspend::Shell(_))));
 }
 
+/// Press `e` in a document and answer the identity read it starts.
+fn press_document_edit(app: &mut App) {
+    app.handle_key(press(KeyCode::Char('e'))).unwrap();
+    assert!(
+        app.pending.is_none(),
+        "the editor waits for the identity read"
+    );
+    let object = app.document_source.as_ref().unwrap().object.clone();
+    app.document_edit_task.as_ref().unwrap().abort();
+    app.handle_msg(Msg::DocumentEditRead {
+        generation: app.generation,
+        result: Ok(Box::new(object)),
+    });
+}
+
+fn screen_text(app: &mut App, width: u16, height: u16) -> String {
+    use ratatui::{Terminal, backend::TestBackend};
+
+    let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+    terminal.draw(|f| crate::ui::draw(f, app)).unwrap();
+    let buffer = terminal.backend().buffer();
+    (0..buffer.area.height)
+        .map(|y| {
+            (0..buffer.area.width)
+                .map(|x| buffer[(x, y)].symbol())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 fn edit_argv(app: &mut App) -> Vec<String> {
     let Some(Suspend::Shell(argv)) = app.pending.take() else {
         panic!("expected the editor to be queued");
@@ -12745,7 +12776,7 @@ async fn edit_from_yaml_view_targets_the_displayed_object() {
     assert_eq!(app.mode, Mode::Detail);
     // The watch moves the table cursor while the document is open.
     app.table_state.select(Some(1));
-    app.handle_key(press(KeyCode::Char('e'))).unwrap();
+    press_document_edit(&mut app);
     let argv = edit_argv(&mut app);
     let edit = argv.iter().position(|arg| arg == "edit").unwrap();
     assert_eq!(argv[edit..], ["edit", "pods", "a", "-n", "default"]);
@@ -12756,7 +12787,7 @@ async fn edit_from_yaml_view_targets_the_displayed_object() {
 #[tokio::test]
 async fn edit_from_describe_view_opens_the_editor() {
     let (mut app, _rx) = describe_refresh_app();
-    app.handle_key(press(KeyCode::Char('e'))).unwrap();
+    press_document_edit(&mut app);
     let argv = edit_argv(&mut app);
     let edit = argv.iter().position(|arg| arg == "edit").unwrap();
     assert_eq!(argv[edit..], ["edit", "pods", "web", "-n", "default"]);
@@ -12768,7 +12799,7 @@ async fn edit_from_yaml_view_confirms_flux_managed_objects_over_the_document() {
     let (mut app, _rx) = test_app();
     flux_managed_pod(&mut app);
     app.handle_key(press(KeyCode::Char('y'))).unwrap();
-    app.handle_key(press(KeyCode::Char('e'))).unwrap();
+    press_document_edit(&mut app);
     assert_eq!(app.mode, Mode::Confirm);
     assert!(app.confirm_label.contains("Managed by Flux"));
     assert!(app.confirm_over_document());
@@ -12779,7 +12810,7 @@ async fn edit_from_yaml_view_confirms_flux_managed_objects_over_the_document() {
     assert!(app.document_editable());
     assert!(app.pending.is_none());
 
-    app.handle_key(press(KeyCode::Char('e'))).unwrap();
+    press_document_edit(&mut app);
     app.handle_key(press(KeyCode::Char('y'))).unwrap();
     assert_eq!(app.mode, Mode::Detail);
     assert!(edit_argv(&mut app).contains(&"edit".to_string()));
@@ -12793,7 +12824,7 @@ async fn automatic_refresh_survives_a_flux_edit_from_the_document() {
     app.handle_key(press(KeyCode::Char('y'))).unwrap();
     app.handle_key(press(KeyCode::Char('r'))).unwrap();
     assert!(app.refresh_task.is_some());
-    app.handle_key(press(KeyCode::Char('e'))).unwrap();
+    press_document_edit(&mut app);
     assert_eq!(app.mode, Mode::Confirm);
     assert!(app.refresh_task.is_some());
     app.handle_key(press(KeyCode::Char('y'))).unwrap();
@@ -12805,26 +12836,17 @@ async fn automatic_refresh_survives_a_flux_edit_from_the_document() {
 
 #[tokio::test]
 async fn flux_edit_warning_keeps_the_fullscreen_document() {
-    use ratatui::{Terminal, backend::TestBackend};
-
     let (mut app, _rx) = test_app();
     flux_managed_pod(&mut app);
     app.handle_key(press(KeyCode::Char('y'))).unwrap();
     app.handle_key(press(KeyCode::Char('F'))).unwrap();
-    app.handle_key(press(KeyCode::Char('e'))).unwrap();
+    press_document_edit(&mut app);
     assert_eq!(app.mode, Mode::Confirm);
-    let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
-    terminal.draw(|f| crate::ui::draw(f, &mut app)).unwrap();
-    let buffer = terminal.backend().buffer();
-    let rows: Vec<String> = (0..buffer.area.height)
-        .map(|y| {
-            (0..buffer.area.width)
-                .map(|x| buffer[(x, y)].symbol())
-                .collect()
-        })
-        .collect();
-    let screen = rows.join("\n");
-    assert!(rows[0].contains("a — YAML"), "{screen}");
+    let screen = screen_text(&mut app, 120, 30);
+    assert!(
+        screen.lines().next().unwrap().contains("a — YAML"),
+        "{screen}"
+    );
     assert!(screen.contains("Managed by Flux"), "{screen}");
 }
 
@@ -12869,7 +12891,7 @@ async fn edit_is_unavailable_in_decoded_secret_and_other_documents() {
 async fn document_reloads_after_the_editor_closes() {
     let (mut app, _rx) = app_with_pod();
     app.handle_key(press(KeyCode::Char('y'))).unwrap();
-    app.handle_key(press(KeyCode::Char('e'))).unwrap();
+    press_document_edit(&mut app);
     edit_argv(&mut app);
     app.handle_command_result(None, Ok(()), None);
     app.after_suspend();
@@ -12883,6 +12905,59 @@ async fn document_reloads_after_the_editor_closes() {
     assert!(app.document_reload_task.is_none());
     assert!(app.refresh_task.is_none());
     assert_eq!(app.flash, "Command completed.");
+}
+
+#[tokio::test]
+async fn edit_from_document_refuses_an_object_replaced_under_the_same_name() {
+    let (mut app, _rx) = app_with_pod();
+    app.handle_key(press(KeyCode::Char('y'))).unwrap();
+    app.handle_key(press(KeyCode::Char('e'))).unwrap();
+    assert!(app.pending.is_none());
+    app.document_edit_task.as_ref().unwrap().abort();
+    app.handle_msg(Msg::DocumentEditRead {
+        generation: app.generation,
+        result: Err("pods/a was replaced; return to the table and select the new resource".into()),
+    });
+    assert!(app.pending.is_none());
+    assert!(app.flash_err);
+    assert!(app.flash.contains("was replaced"), "{}", app.flash);
+    assert_eq!(app.mode, Mode::Detail);
+    assert!(app.journal.is_empty());
+}
+
+#[tokio::test]
+async fn closing_the_document_drops_a_pending_edit() {
+    let (mut app, _rx) = app_with_pod();
+    app.handle_key(press(KeyCode::Char('y'))).unwrap();
+    app.handle_key(press(KeyCode::Char('e'))).unwrap();
+    let object = app.document_source.as_ref().unwrap().object.clone();
+    app.handle_key(press(KeyCode::Esc)).unwrap();
+    assert!(app.document_edit_task.is_none());
+    app.handle_msg(Msg::DocumentEditRead {
+        generation: app.generation,
+        result: Ok(Box::new(object)),
+    });
+    assert!(app.pending.is_none());
+    assert_eq!(app.mode, Mode::Table);
+}
+
+#[tokio::test]
+async fn other_commands_do_not_reload_the_document() {
+    let (mut app, _rx) = app_with_pod();
+    app.handle_key(press(KeyCode::Char('y'))).unwrap();
+    app.handle_command_result(None, Ok(()), None);
+    app.after_suspend();
+    assert!(app.document_reload_task.is_none());
+    assert!(app.refresh_task.is_none());
+}
+
+#[tokio::test]
+async fn edit_hint_hides_in_read_only_mode() {
+    let (mut app, _rx) = app_with_pod();
+    app.handle_key(press(KeyCode::Char('y'))).unwrap();
+    assert!(screen_text(&mut app, 200, 30).contains("edit"));
+    app.readonly = true;
+    assert!(!screen_text(&mut app, 200, 30).contains("edit"));
 }
 
 #[tokio::test]
@@ -29837,7 +29912,7 @@ async fn edit_and_describe_use_selected_api_resource() {
             app.table_state.select(Some(0));
             app.handle_key(press(KeyCode::Char(key))).unwrap();
             if key == 'y' {
-                app.handle_key(press(KeyCode::Char('e'))).unwrap();
+                press_document_edit(&mut app);
             }
             let argv = if key != 'd' {
                 let Some(Suspend::Shell(argv)) = app.pending.take() else {
