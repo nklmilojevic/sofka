@@ -698,11 +698,19 @@ impl App {
         let Some(source) = self.document_source.clone() else {
             return;
         };
+        self.document_edit_request = self.document_edit_request.wrapping_add(1);
+        let request = self.document_edit_request;
         let generation = self.generation;
         let tx = self.tx.clone();
         self.document_edit_task = Some(tokio::spawn(async move {
             let result = source.read().await.map(Box::new);
-            let _ = tx.send(Msg::DocumentEditRead { generation, result }).await;
+            let _ = tx
+                .send(Msg::DocumentEditRead {
+                    generation,
+                    request,
+                    result,
+                })
+                .await;
         }));
     }
 

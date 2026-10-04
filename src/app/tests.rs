@@ -12736,6 +12736,7 @@ fn press_document_edit(app: &mut App) {
     app.document_edit_task.as_ref().unwrap().abort();
     app.handle_msg(Msg::DocumentEditRead {
         generation: app.generation,
+        request: app.document_edit_request,
         result: Ok(Box::new(object)),
     });
 }
@@ -12916,6 +12917,7 @@ async fn edit_from_document_refuses_an_object_replaced_under_the_same_name() {
     app.document_edit_task.as_ref().unwrap().abort();
     app.handle_msg(Msg::DocumentEditRead {
         generation: app.generation,
+        request: app.document_edit_request,
         result: Err("pods/a was replaced; return to the table and select the new resource".into()),
     });
     assert!(app.pending.is_none());
@@ -12935,10 +12937,46 @@ async fn closing_the_document_drops_a_pending_edit() {
     assert!(app.document_edit_task.is_none());
     app.handle_msg(Msg::DocumentEditRead {
         generation: app.generation,
+        request: app.document_edit_request,
         result: Ok(Box::new(object)),
     });
     assert!(app.pending.is_none());
     assert_eq!(app.mode, Mode::Table);
+}
+
+#[tokio::test]
+async fn a_stale_edit_read_does_not_answer_the_next_document() {
+    let (mut app, _rx) = app_with_pod();
+    apply(
+        &mut app,
+        json!({"apiVersion": "v1", "kind": "Pod",
+               "metadata": {"name": "b", "namespace": "default"}}),
+    );
+    app.table_state.select(Some(0));
+    app.handle_key(press(KeyCode::Char('y'))).unwrap();
+    app.handle_key(press(KeyCode::Char('e'))).unwrap();
+    let stale = app.document_edit_request;
+    let first = app.document_source.as_ref().unwrap().object.clone();
+    app.handle_key(press(KeyCode::Esc)).unwrap();
+    app.handle_key(press(KeyCode::Down)).unwrap();
+    app.handle_key(press(KeyCode::Char('y'))).unwrap();
+    app.handle_key(press(KeyCode::Char('e'))).unwrap();
+    app.document_edit_task.as_ref().unwrap().abort();
+    app.handle_msg(Msg::DocumentEditRead {
+        generation: app.generation,
+        request: stale,
+        result: Ok(Box::new(first)),
+    });
+    assert!(app.pending.is_none());
+    assert!(app.document_edit_task.is_some());
+    let second = app.document_source.as_ref().unwrap().object.clone();
+    app.handle_msg(Msg::DocumentEditRead {
+        generation: app.generation,
+        request: app.document_edit_request,
+        result: Ok(Box::new(second)),
+    });
+    let argv = edit_argv(&mut app);
+    assert_eq!(argv[argv.len() - 3], "b");
 }
 
 #[tokio::test]

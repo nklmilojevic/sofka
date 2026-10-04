@@ -229,6 +229,7 @@ pub enum Msg {
     /// The displayed object read again before `e` opens it in the editor.
     DocumentEditRead {
         generation: u64,
+        request: u64,
         result: Result<Box<DynamicObject>, String>,
     },
     /// Native describe keeps the fresh object for subsequent refresh/decoded views.
