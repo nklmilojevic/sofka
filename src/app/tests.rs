@@ -12787,6 +12787,48 @@ async fn edit_from_yaml_view_confirms_flux_managed_objects_over_the_document() {
 }
 
 #[tokio::test]
+async fn automatic_refresh_survives_a_flux_edit_from_the_document() {
+    let (mut app, _rx) = test_app();
+    flux_managed_pod(&mut app);
+    app.handle_key(press(KeyCode::Char('y'))).unwrap();
+    app.handle_key(press(KeyCode::Char('r'))).unwrap();
+    assert!(app.refresh_task.is_some());
+    app.handle_key(press(KeyCode::Char('e'))).unwrap();
+    assert_eq!(app.mode, Mode::Confirm);
+    assert!(app.refresh_task.is_some());
+    app.handle_key(press(KeyCode::Char('y'))).unwrap();
+    edit_argv(&mut app);
+    app.after_suspend();
+    assert!(app.refresh_task.is_some());
+    assert!(app.document_reload_task.is_none());
+}
+
+#[tokio::test]
+async fn flux_edit_warning_keeps_the_fullscreen_document() {
+    use ratatui::{Terminal, backend::TestBackend};
+
+    let (mut app, _rx) = test_app();
+    flux_managed_pod(&mut app);
+    app.handle_key(press(KeyCode::Char('y'))).unwrap();
+    app.handle_key(press(KeyCode::Char('F'))).unwrap();
+    app.handle_key(press(KeyCode::Char('e'))).unwrap();
+    assert_eq!(app.mode, Mode::Confirm);
+    let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+    terminal.draw(|f| crate::ui::draw(f, &mut app)).unwrap();
+    let buffer = terminal.backend().buffer();
+    let rows: Vec<String> = (0..buffer.area.height)
+        .map(|y| {
+            (0..buffer.area.width)
+                .map(|x| buffer[(x, y)].symbol())
+                .collect()
+        })
+        .collect();
+    let screen = rows.join("\n");
+    assert!(rows[0].contains("a — YAML"), "{screen}");
+    assert!(screen.contains("Managed by Flux"), "{screen}");
+}
+
+#[tokio::test]
 async fn edit_from_document_view_respects_read_only_mode() {
     let (mut app, _rx) = app_with_pod();
     app.handle_key(press(KeyCode::Char('y'))).unwrap();
@@ -12811,8 +12853,10 @@ async fn edit_is_unavailable_in_decoded_secret_and_other_documents() {
     app.handle_key(press(KeyCode::Char('y'))).unwrap();
     app.handle_key(press(KeyCode::Char('x'))).unwrap();
     assert!(app.detail.title.contains("decoded"));
+    app.readonly = true;
     app.handle_key(press(KeyCode::Char('e'))).unwrap();
     assert!(app.pending.is_none());
+    assert!(!app.flash.contains("read-only"), "{}", app.flash);
     assert_eq!(app.mode, Mode::Detail);
 
     app.open_journal();

@@ -251,6 +251,7 @@ fn draw_base(frame: &mut Frame, app: &mut App) {
     let document_mode = match app.mode {
         Mode::DocFilter => app.doc_filter_return,
         Mode::Command => app.palette_return,
+        Mode::Confirm if app.confirm_over_document() => Mode::Detail,
         mode => mode,
     };
     if app.document_fullscreen && matches!(document_mode, Mode::Detail | Mode::Diff | Mode::Events)
@@ -281,6 +282,9 @@ fn draw_base(frame: &mut Frame, app: &mut App) {
         }
         if app.mode == Mode::Command {
             draw_palette(frame, app, chunks[0]);
+        }
+        if app.mode == Mode::Confirm {
+            draw_confirm(frame, app, chunks[0]);
         }
         if needs_prompt {
             draw_prompt(frame, app, chunks[1]);

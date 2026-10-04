@@ -162,6 +162,8 @@ impl App {
     fn refresh_source(&self) -> Option<&RefreshSource> {
         let mode = if self.mode == Mode::DocFilter {
             self.doc_filter_return
+        } else if self.mode == Mode::Confirm && self.confirm_over_document() {
+            Mode::Detail
         } else {
             self.mode
         };

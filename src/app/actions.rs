@@ -690,14 +690,10 @@ impl App {
     /// `e` in a YAML or describe view edits the object the document shows,
     /// not the table row, which can move while the watch is still filling.
     pub(super) fn request_document_edit(&mut self) {
-        if self.deny_readonly() {
+        if !self.document_editable() || self.deny_readonly() {
             return;
         }
-        let Some(source) = self
-            .document_source
-            .as_ref()
-            .filter(|_| self.document_editable())
-        else {
+        let Some(source) = self.document_source.as_ref() else {
             return;
         };
         let ar = &source.kind.ar;
