@@ -23,7 +23,7 @@ impl App {
 
     pub(super) fn renew_credentials_at(&mut self, now: Timestamp) {
         self.restart_pending_watch();
-        if self.credential_renewing
+        if self.credential_attempt.is_some()
             || self.context_switch_target.is_some()
             || !self.cluster.connected
             || self.credential_retry_at.is_some_and(|at| now < at)
@@ -39,9 +39,10 @@ impl App {
         let Some(renew) = self.cluster.credential_renewal() else {
             return;
         };
-        self.credential_renewing = true;
+        self.credential_attempts += 1;
+        let attempt = self.credential_attempts;
+        self.credential_attempt = Some(attempt);
         self.credential_retry_at = Some(now + RETRY_AFTER);
-        let context = self.cluster.context.clone();
         let tx = self.tx.clone();
         tokio::spawn(async move {
             let result = match tokio::task::spawn_blocking(renew).await {
@@ -49,27 +50,22 @@ impl App {
                 Ok(Err(error)) => Err(format!("{error:#}")),
                 Err(error) => Err(error.to_string()),
             };
-            let _ = tx
-                .send(Msg::CredentialsRenewed {
-                    context,
-                    expiry,
-                    result,
-                })
-                .await;
+            let _ = tx.send(Msg::CredentialsRenewed { attempt, result }).await;
         });
     }
 
     pub(super) fn apply_renewed_credentials(
         &mut self,
-        context: String,
-        expiry: Timestamp,
+        attempt: u64,
         result: Result<Box<Client>, String>,
     ) {
-        // A context switch replaced the client this renewal was for.
-        if context != self.cluster.context || self.cluster.credential_expiry() != Some(expiry) {
+        // A context switch replaced the client this renewal was for, even
+        // when it reconnected to the same context with the same expiry.
+        if self.credential_attempt != Some(attempt) {
             return;
         }
-        self.credential_renewing = false;
+        self.credential_attempt = None;
+        let context = self.cluster.context.clone();
         let client = match result {
             Ok(client) => client,
             Err(error) => {
@@ -85,7 +81,10 @@ impl App {
         };
         self.credential_error = None;
         // The plugin handed back the certificate the client already has.
-        if client.valid_until().is_none_or(|renewed| renewed <= expiry) {
+        if client
+            .valid_until()
+            .is_none_or(|renewed| Some(renewed) <= self.cluster.credential_expiry())
+        {
             return;
         }
         crate::log_info!(
@@ -102,9 +101,20 @@ impl App {
         self.restart_pending_watch();
     }
 
+    /// The failed renewal's message, while the certificate it was meant to
+    /// replace has expired. Before then the old certificate still works and
+    /// a watch failure has some other cause.
+    pub(super) fn expired_credential_error(&self) -> Option<String> {
+        let expiry = self.cluster.credential_expiry()?;
+        if Timestamp::now() < expiry {
+            return None;
+        }
+        self.credential_error.clone()
+    }
+
     /// Forget a renewal that belongs to the client a context switch replaced.
     pub(super) fn reset_credential_renewal(&mut self) {
-        self.credential_renewing = false;
+        self.credential_attempt = None;
         self.credential_retry_at = None;
         self.credential_error = None;
     }

@@ -954,7 +954,7 @@ impl App {
     }
 
     fn set_watch_error_flash(&mut self, error: String) {
-        let error = self.credential_error.clone().unwrap_or(error);
+        let error = self.expired_credential_error().unwrap_or(error);
         self.borrow_status(format!("watch failed; retrying: {error}"), true);
         self.watch_error_flash = Some(self.flash.clone());
     }
@@ -1160,6 +1160,7 @@ impl App {
                 self.show_watch_error(error);
             }
             Msg::WatchRecovered { generation } if generation == self.generation => {
+                self.credential_error = None;
                 self.clear_watch_error_flash();
             }
             Msg::Error { generation, error } if generation == self.generation => {
@@ -2057,11 +2058,9 @@ impl App {
                     }
                 }
             }
-            Msg::CredentialsRenewed {
-                context,
-                expiry,
-                result,
-            } => self.apply_renewed_credentials(context, expiry, result),
+            Msg::CredentialsRenewed { attempt, result } => {
+                self.apply_renewed_credentials(attempt, result);
+            }
             _ => {} // stale generation, drop
         }
         if preserve_selection {

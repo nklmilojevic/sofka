@@ -1868,8 +1868,11 @@ pub struct App {
     /// Why the watch must restart once the table is showing: a wake, or a
     /// renewed client.
     resume_pending: Option<&'static str>,
-    /// An exec plugin is issuing the next client certificate.
-    credential_renewing: bool,
+    /// The renewal in flight. Its result applies only while this is still
+    /// set; a context switch clears it.
+    credential_attempt: Option<u64>,
+    /// Renewals started this session, numbering each attempt.
+    credential_attempts: u64,
     /// No renewal attempt before this time.
     credential_retry_at: Option<k8s_openapi::jiff::Timestamp>,
     /// Why the last renewal failed. Watch failures show it instead of the
@@ -2431,7 +2434,8 @@ impl App {
             gen_flag: Arc::new(AtomicU64::new(0)),
             resume_clock: None,
             resume_pending: None,
-            credential_renewing: false,
+            credential_attempt: None,
+            credential_attempts: 0,
             credential_retry_at: None,
             credential_error: None,
             context_switch_target: None,
