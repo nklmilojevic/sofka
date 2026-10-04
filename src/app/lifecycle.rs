@@ -963,6 +963,7 @@ impl App {
         self.watch_errors = self.watch_errors.saturating_add(1);
         self.last_error = Some(error.clone());
         crate::log_warn!("view.error", kind = self.kind_plural, error = error);
+        self.note_watch_failure(&error);
         self.set_watch_error_flash(error);
     }
 

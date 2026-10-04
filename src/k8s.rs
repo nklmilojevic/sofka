@@ -56,6 +56,13 @@ impl ExecClient {
         }
     }
 
+    pub fn token(client: Client) -> Self {
+        Self {
+            client,
+            certificate: None,
+        }
+    }
+
     pub fn has_certificate(&self) -> bool {
         self.certificate.is_some()
     }
@@ -679,7 +686,12 @@ impl Cluster {
 
     /// Whether `renewed` presents the certificate this client already sends.
     pub fn has_certificate_of(&self, renewed: &ExecClient) -> bool {
-        renewed.certificate == self.exec_certificate
+        renewed.certificate.is_some() && renewed.certificate == self.exec_certificate
+    }
+
+    /// Whether the client came from an exec plugin that can issue a new one.
+    pub fn renews_credentials(&self) -> bool {
+        self.credential_source.is_some()
     }
 
     /// Switch to a client built with a renewed exec certificate.

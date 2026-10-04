@@ -293,3 +293,58 @@ async fn a_recovered_watch_forgets_the_failed_renewal() {
     watch_error(&mut app, SEND_REQUEST);
     assert_eq!(app.flash, format!("watch failed; retrying: {SEND_REQUEST}"));
 }
+
+const UNAUTHORIZED: &str = "failed to start watching object: ApiError: Unauthorized: Unauthorized";
+
+#[tokio::test]
+async fn an_unauthenticated_watch_renews_a_certificate_before_its_expiry() {
+    let now = Timestamp::now();
+    let (mut app, _rx) = app_with_exec_certificate_until(fresh());
+    app.renew_credentials_at(now);
+    assert!(app.credential_attempt.is_none());
+
+    watch_error(&mut app, "ApiError: pods is forbidden: Forbidden");
+    app.renew_credentials_at(now);
+    assert!(
+        app.credential_attempt.is_none(),
+        "forbidden is not a credential failure"
+    );
+
+    watch_error(&mut app, UNAUTHORIZED);
+    app.renew_credentials_at(now);
+    assert!(app.credential_attempt.is_some());
+}
+
+#[tokio::test]
+async fn a_token_from_the_plugin_replaces_the_client_and_renews_when_rejected() {
+    let (mut app, _rx) = app_with_exec_certificate();
+    app.renew_credentials_at(expiry());
+    let generation = app.generation;
+    let config = kube::Config::new("https://127.0.0.1:6443".parse().unwrap());
+    let token = kube::Client::try_from(config).unwrap();
+
+    app.handle_msg(Msg::CredentialsRenewed {
+        attempt: app.credential_attempt.unwrap(),
+        result: Ok(Box::new(ExecClient::token(token))),
+    });
+    assert!(app.generation > generation);
+    assert_eq!(app.cluster.credential_expiry(), None);
+
+    let now = Timestamp::now();
+    app.renew_credentials_at(now);
+    assert!(
+        app.credential_attempt.is_none(),
+        "a token has no expiry to renew at"
+    );
+    watch_error(&mut app, UNAUTHORIZED);
+    app.renew_credentials_at(now);
+    assert!(app.credential_attempt.is_some());
+}
+
+#[tokio::test]
+async fn an_unauthenticated_watch_without_an_exec_plugin_renews_nothing() {
+    let (mut app, _rx) = app_with_pod();
+    watch_error(&mut app, UNAUTHORIZED);
+    app.renew_credentials_at(Timestamp::now());
+    assert!(app.credential_attempt.is_none());
+}
