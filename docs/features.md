@@ -504,14 +504,18 @@ include those conditions. Row filters can search the route paths.
   (resolved the way helm-controller composes `releaseName`/`storageNamespace`):
   `⏎` shows a revision's values, `y` the rendered manifest, `d` the NOTES, `r`
   rolls back.
-- **Argo CD controls** (`t`) - a suspend/resume/sync-now menu for ArgoCD
+- **Argo CD controls** (`t`) - a suspend/resume/sync-now/sync-with-prune menu for ArgoCD
   Applications, and a suspend/resume menu for ApplicationSets, built on native
   Kubernetes API patches. Suspend removes `spec.syncPolicy.automated` and
   stashes the original value (including `prune`/`selfHeal`/`allowEmpty`) as a
   base64 annotation so resume restores it exactly; ApplicationSet suspend sets
   `applicationsSync` to `create-only` (no `none` mode exists) and stashes the
   original value the same way. Sync-now patches the top-level `operation`
-  field. No `argocd` binary needed. Works with bulk multiselect.
+  field. Sync-with-prune does the same with `prune: true`, so resources no
+  longer in Git are deleted; it asks first and is gated by `prune`
+  guardrails. A plain sync never prunes, even when `syncPolicy.automated.prune`
+  is set, because that only applies to automated syncs. No `argocd` binary
+  needed. Works with bulk multiselect.
 - **GitOps view** (`:gitops` / `:flux`) - the Flux ownership and reconciliation
   chain for the selection: the owning Kustomization/HelmRelease, its source
   (GitRepository/OCIRepository/HelmRepository) with applied and latest revision,

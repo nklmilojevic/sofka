@@ -2008,8 +2008,9 @@ impl App {
                     }
                     Some("Sync now") => {
                         let targets = self.action_targets();
-                        self.do_argocd_sync(targets);
+                        self.do_argocd_sync(targets, false);
                     }
+                    Some("Sync with prune") => self.request_argocd_sync_prune(),
                     Some("Trigger now") => self.do_trigger_cronjobs(),
                     _ => {} // "Cancel" or nothing selected — do nothing.
                 }
@@ -2188,7 +2189,7 @@ impl App {
     /// Trigger an ArgoCD Application sync by patching the top-level `operation`
     /// field — the same mechanism the ArgoCD API server's `SyncApplication`
     /// endpoint uses. The controller fills in the revision from `spec.source`.
-    pub(super) fn do_argocd_sync(&mut self, targets: Vec<(String, String)>) {
+    pub(super) fn do_argocd_sync(&mut self, targets: Vec<(String, String)>, prune: bool) {
         let Some(kind) = self.kind.clone() else {
             return;
         };
@@ -2196,26 +2197,63 @@ impl App {
             return; // see `do_flux_suspend`
         }
         let label = self.action_label(&targets);
-        self.note_action("sync", label);
-        let progress = if targets.len() == 1 {
-            format!("syncing {}…", targets[0].0)
+        let (verb, suffix) = if prune {
+            ("sync with prune", " with prune")
         } else {
-            format!("syncing {} {}…", targets.len(), self.kind_plural)
+            ("sync", "")
+        };
+        self.note_action(verb, label);
+        let progress = if targets.len() == 1 {
+            format!("syncing {}{suffix}…", targets[0].0)
+        } else {
+            format!("syncing {} {}{suffix}…", targets.len(), self.kind_plural)
         };
         let claim = self.claim_status(progress);
         self.clear_marks();
         let ok_message = if targets.len() == 1 {
-            format!("sync requested: {}", targets[0].0)
+            format!("{verb} requested: {}", targets[0].0)
         } else {
-            format!("sync requested: {} {}", targets.len(), self.kind_plural)
+            format!("{verb} requested: {} {}", targets.len(), self.kind_plural)
         };
         self.spawn_patch_action(
             kind,
             targets,
-            Patch::Merge(argocd_sync_patch()),
+            Patch::Merge(argocd_sync_patch(prune)),
             claim,
             ok_message,
-            |name, _, e| format!("sync {name} failed: {e}"),
+            move |name, _, e| format!("{verb} {name} failed: {e}"),
+        );
+    }
+
+    /// Ask before a pruning sync: it deletes every resource the Application
+    /// manages that is no longer in Git. Gated by `prune` guardrails.
+    pub(super) fn request_argocd_sync_prune(&mut self) {
+        let targets = self.action_targets();
+        if targets.is_empty() {
+            return; // see `do_flux_suspend`
+        }
+        let plural = self.kind_plural.clone();
+        let Some(level) = self.guard("prune", &plural, &targets, ConfirmLevel::Plain) else {
+            return;
+        };
+        let (label, name_hint) = match targets.as_slice() {
+            [(name, ns)] => (
+                format!("Sync {name} in {ns} with prune? Resources no longer in Git are deleted."),
+                name.clone(),
+            ),
+            many => (
+                format!(
+                    "Sync {} {plural} with prune? Resources no longer in Git are deleted.",
+                    many.len()
+                ),
+                many.len().to_string(),
+            ),
+        };
+        self.begin_guarded(
+            ConfirmAction::ArgocdSyncPrune { targets },
+            label,
+            level,
+            name_hint,
         );
     }
 

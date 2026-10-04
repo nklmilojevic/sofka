@@ -145,6 +145,9 @@ impl App {
             ConfirmAction::HelmRollback { ns, name, revision } => {
                 self.do_helm_rollback(ns, name, revision);
             }
+            ConfirmAction::ArgocdSyncPrune { targets } => {
+                self.do_argocd_sync(targets, true);
+            }
             ConfirmAction::HelmUninstall { targets } => {
                 self.do_helm_uninstall(targets);
                 self.clear_marks();

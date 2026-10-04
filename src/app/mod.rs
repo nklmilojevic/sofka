@@ -124,8 +124,11 @@ pub const CRONJOB_MENU_ITEMS: &[&str] = &["Trigger now", "Suspend", "Resume", "C
 /// empty `automated: {}` when the annotation is absent. "Sync now" patches
 /// the top-level `operation` field, which the ArgoCD application controller
 /// picks up — the same mechanism the `argocd app sync` API endpoint uses.
-/// No `argocd` binary.
-pub const ARGOCD_MENU_ITEMS: &[&str] = &["Suspend", "Resume", "Sync now", "Cancel"];
+/// "Sync with prune" sets `prune: true` on that operation, so resources no
+/// longer in Git are deleted, and asks for confirmation first. No `argocd`
+/// binary.
+pub const ARGOCD_MENU_ITEMS: &[&str] =
+    &["Suspend", "Resume", "Sync now", "Sync with prune", "Cancel"];
 
 /// Items in the ArgoCD ApplicationSet action menu (`t`). Suspend/Resume
 /// toggle `spec.syncPolicy.applicationsSync`. There is no `none`/`disabled`
@@ -347,6 +350,9 @@ enum ConfirmAction {
         name: String,
         revision: String,
     },
+    /// Sync one or more ArgoCD Applications with pruning, which deletes
+    /// resources no longer in Git.
+    ArgocdSyncPrune { targets: Vec<(String, String)> },
     /// Uninstall one or more Helm releases (`helm uninstall`), `(name, ns)`
     /// per release — bulk when marked, like [`ConfirmAction::Delete`].
     HelmUninstall { targets: Vec<(String, String)> },

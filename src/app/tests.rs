@@ -7163,6 +7163,54 @@ async fn argocd_menu_sync_now() {
 }
 
 #[tokio::test]
+async fn argocd_menu_sync_with_prune_confirms_first() {
+    let (mut app, _rx) = test_app();
+    app.switch_kind("applications");
+    apply(&mut app, argocd_app("guestbook"));
+
+    app.handle_key(press(KeyCode::Char('t'))).unwrap();
+    let idx = ARGOCD_MENU_ITEMS
+        .iter()
+        .position(|s| *s == "Sync with prune")
+        .unwrap();
+    app.flux_menu_state.select(Some(idx));
+    app.handle_key(press(KeyCode::Enter)).unwrap();
+    assert_eq!(app.mode, Mode::Confirm);
+    assert!(
+        app.confirm_label.contains("with prune"),
+        "{}",
+        app.confirm_label
+    );
+    assert!(!app.flash.contains("syncing"), "{}", app.flash);
+
+    app.handle_key(press(KeyCode::Char('y'))).unwrap();
+    assert_eq!(app.mode, Mode::Table);
+    assert!(
+        app.flash.contains("syncing guestbook with prune"),
+        "{}",
+        app.flash
+    );
+}
+
+#[tokio::test]
+async fn argocd_menu_sync_with_prune_can_be_declined() {
+    let (mut app, _rx) = test_app();
+    app.switch_kind("applications");
+    apply(&mut app, argocd_app("guestbook"));
+
+    app.handle_key(press(KeyCode::Char('t'))).unwrap();
+    let idx = ARGOCD_MENU_ITEMS
+        .iter()
+        .position(|s| *s == "Sync with prune")
+        .unwrap();
+    app.flux_menu_state.select(Some(idx));
+    app.handle_key(press(KeyCode::Enter)).unwrap();
+    app.handle_key(press(KeyCode::Char('n'))).unwrap();
+    assert_eq!(app.mode, Mode::Table);
+    assert!(!app.flash.contains("syncing"), "{}", app.flash);
+}
+
+#[tokio::test]
 async fn argocd_menu_suspend_acts_on_marked_rows() {
     let (mut app, _rx) = test_app();
     app.switch_kind("applications");
@@ -7362,8 +7410,10 @@ fn argocd_appset_resume_without_annotation_defaults_to_sync() {
 
 #[test]
 fn argocd_sync_patch_sets_operation() {
-    let p = argocd_sync_patch();
+    let p = argocd_sync_patch(false);
     assert_eq!(p, json!({"operation": {"sync": {}}}));
+    let p = argocd_sync_patch(true);
+    assert_eq!(p, json!({"operation": {"sync": {"prune": true}}}));
 }
 
 fn argocd_appset(name: &str) -> serde_json::Value {
