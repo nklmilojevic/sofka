@@ -15085,6 +15085,39 @@ async fn user_status_column_default_fills_missing_values() {
 }
 
 #[tokio::test]
+async fn comparison_filter_reads_a_dotted_user_column_with_its_default() {
+    let (mut app, _rx) = test_app();
+    install_views(
+        &mut app,
+        r#"
+        [[views."cert-manager.io/v1/certificates".columns]]
+        name = "STATUS.PHASE"
+        path = "/status/currentStatus/phase"
+        type = "status"
+        default = "Pending"
+        "#,
+    );
+    type_resource_query(&mut app, "certificates");
+    for (name, status) in [
+        (
+            "machine-a",
+            json!({"phase": "Pending", "currentStatus": {"phase": "Running"}}),
+        ),
+        ("machine-b", json!({})),
+    ] {
+        apply(
+            &mut app,
+            json!({"apiVersion": "cert-manager.io/v1", "kind": "Certificate",
+                "metadata": {"name": name, "namespace": "default"},
+                "status": status}),
+        );
+    }
+
+    type_filter(&mut app, "status.phase=pending");
+    assert_eq!(row_names(&app), ["machine-b"]);
+}
+
+#[tokio::test]
 async fn user_view_adds_provider_label_columns_to_curated_nodes() {
     let (mut app, _rx) = test_app();
     install_views(
