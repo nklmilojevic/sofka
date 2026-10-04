@@ -81,6 +81,25 @@ and `~1` for `/` inside a field name. Set only one of `path`, `metric`, or
 `builtin`. Condition columns still require a single condition name, such as
 `path = "Ready"`; they do not accept lists.
 
+### Default values
+
+Set `default` to show a value when every path is missing or `null`, instead of
+`<none>`:
+
+```toml
+[[views."machine.sapcloud.io/v1alpha1/machines".columns]]
+name = "PHASE"
+path = "/status/currentStatus/phase"
+type = "status"
+default = "Pending"
+```
+
+The default is formatted, sorted, filtered, and colored like a real value, so
+a new Machine without a phase reads `Pending` and tints its row like any other
+pending resource. On a `condition` column, it replaces a missing condition.
+Empty strings and other present values are kept. `default` applies only to
+`path` columns; on `metric` and `builtin` columns it is ignored with a warning.
+
 ### Image tags
 
 Use `format = "image-tag"` on a text path column to show the image tag:

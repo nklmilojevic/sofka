@@ -7162,6 +7162,243 @@ async fn argocd_menu_sync_now() {
     assert!(app.flash.contains("syncing guestbook"), "{}", app.flash);
 }
 
+type PatchLog = Arc<std::sync::Mutex<Vec<Value>>>;
+
+/// An ArgoCD Applications view whose client records every PATCH (path and
+/// body) and answers it with the patched Application.
+fn argocd_patch_app(names: &[&str]) -> (App, Receiver<Msg>, PatchLog) {
+    use http_body_util::BodyExt;
+    let (mut app, rx) = test_app();
+    app.switch_kind("applications");
+    for name in names {
+        apply(&mut app, argocd_app(name));
+    }
+    let log = PatchLog::default();
+    let shared = log.clone();
+    app.cluster.client = kube::Client::new(
+        tower::service_fn(move |request: http::Request<kube::client::Body>| {
+            let shared = shared.clone();
+            async move {
+                let method = request.method().to_string();
+                let path = request.uri().path().to_string();
+                let body = request.into_body().collect().await.unwrap().to_bytes();
+                let body: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
+                assert_eq!(method, "PATCH", "unexpected request: {method} {path}");
+                shared
+                    .lock()
+                    .unwrap()
+                    .push(json!({"path": path, "body": body}));
+                let name = path.rsplit('/').next().unwrap();
+                let response = argocd_app(name).to_string();
+                Ok::<_, std::convert::Infallible>(
+                    http::Response::builder()
+                        .status(200)
+                        .header("content-type", "application/json")
+                        .body(kube::client::Body::from(response.into_bytes()))
+                        .unwrap(),
+                )
+            }
+        }),
+        "default",
+    );
+    (app, rx, log)
+}
+
+fn open_argocd_menu_item(app: &mut App, item: &str) {
+    app.handle_key(press(KeyCode::Char('t'))).unwrap();
+    let idx = ARGOCD_MENU_ITEMS.iter().position(|s| *s == item).unwrap();
+    app.flux_menu_state.select(Some(idx));
+    app.handle_key(press(KeyCode::Enter)).unwrap();
+}
+
+#[tokio::test]
+async fn argocd_menu_sync_with_prune_patches_after_confirmation() {
+    let (mut app, mut rx, log) = argocd_patch_app(&["guestbook"]);
+
+    open_argocd_menu_item(&mut app, "Sync with prune");
+    assert_eq!(app.mode, Mode::Confirm);
+    assert!(
+        app.confirm_label.contains("with prune"),
+        "{}",
+        app.confirm_label
+    );
+    assert!(
+        log.lock().unwrap().is_empty(),
+        "nothing sent before confirming"
+    );
+
+    app.handle_key(press(KeyCode::Char('y'))).unwrap();
+    assert_eq!(app.mode, Mode::Table);
+    assert!(
+        app.flash.contains("syncing guestbook with prune"),
+        "{}",
+        app.flash
+    );
+    drain_until(&mut app, &mut rx, |app| {
+        app.flash.contains("sync with prune requested")
+    })
+    .await;
+    assert!(!app.flash_err, "{}", app.flash);
+    let log = log.lock().unwrap();
+    assert_eq!(log.len(), 1);
+    assert!(
+        log[0]["path"]
+            .as_str()
+            .unwrap()
+            .ends_with("/namespaces/argocd/applications/guestbook"),
+        "{}",
+        log[0]["path"]
+    );
+    assert_eq!(
+        log[0]["body"],
+        json!({"operation": {"sync": {"prune": true}}})
+    );
+    assert!(
+        app.journal
+            .lines()
+            .iter()
+            .any(|l| l.contains("sync with prune"))
+    );
+}
+
+#[tokio::test]
+async fn argocd_menu_sync_now_patches_without_prune() {
+    let (mut app, mut rx, log) = argocd_patch_app(&["guestbook"]);
+
+    open_argocd_menu_item(&mut app, "Sync now");
+    assert_eq!(app.mode, Mode::Table, "a plain sync does not confirm");
+    drain_until(&mut app, &mut rx, |app| {
+        app.flash.contains("sync requested")
+    })
+    .await;
+    let log = log.lock().unwrap();
+    assert_eq!(log.len(), 1);
+    assert_eq!(
+        log[0]["body"],
+        json!({"operation": {"sync": {"prune": false}}})
+    );
+}
+
+#[tokio::test]
+async fn argocd_sync_with_prune_patches_every_marked_application() {
+    let (mut app, mut rx, log) = argocd_patch_app(&["guestbook", "frontend", "backend"]);
+    app.marked.insert("argocd/guestbook".into());
+    app.marked.insert("argocd/frontend".into());
+
+    open_argocd_menu_item(&mut app, "Sync with prune");
+    assert_eq!(app.mode, Mode::Confirm);
+    assert!(
+        app.confirm_label.contains("Sync 2 applications with prune"),
+        "{}",
+        app.confirm_label
+    );
+    app.handle_key(press(KeyCode::Char('y'))).unwrap();
+    assert!(app.marked.is_empty());
+    drain_until(&mut app, &mut rx, |app| {
+        app.flash
+            .contains("sync with prune requested: 2 applications")
+    })
+    .await;
+    let log = log.lock().unwrap();
+    let mut paths: Vec<&str> = log
+        .iter()
+        .map(|r| r["path"].as_str().unwrap().rsplit('/').next().unwrap())
+        .collect();
+    paths.sort();
+    assert_eq!(paths, ["frontend", "guestbook"]);
+    assert!(
+        log.iter()
+            .all(|r| r["body"] == json!({"operation": {"sync": {"prune": true}}}))
+    );
+}
+
+#[tokio::test]
+async fn argocd_menu_sync_with_prune_can_be_declined() {
+    let (mut app, _rx, log) = argocd_patch_app(&["guestbook"]);
+
+    open_argocd_menu_item(&mut app, "Sync with prune");
+    app.handle_key(press(KeyCode::Char('n'))).unwrap();
+    assert_eq!(app.mode, Mode::Table);
+    assert!(!app.flash.contains("syncing"), "{}", app.flash);
+    assert!(app.journal.is_empty());
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(log.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn argocd_sync_with_prune_respects_a_deny_guardrail() {
+    let (mut app, _rx, log) = argocd_patch_app(&["guestbook"]);
+    app.guardrails = vec![crate::config::Guardrail {
+        actions: vec!["prune".into()],
+        resources: vec!["applications".into()],
+        deny: true,
+        reason: Some("prune through GitOps".into()),
+        ..Default::default()
+    }];
+
+    open_argocd_menu_item(&mut app, "Sync with prune");
+    assert_eq!(app.mode, Mode::Table);
+    assert!(app.confirm_action.is_none());
+    assert!(
+        app.flash.contains("blocked by guardrail") && app.flash.contains("prune through GitOps"),
+        "{}",
+        app.flash
+    );
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(log.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn argocd_sync_with_prune_respects_a_bulk_guardrail() {
+    let (mut app, _rx, log) = argocd_patch_app(&["guestbook", "frontend"]);
+    app.marked.insert("argocd/guestbook".into());
+    app.marked.insert("argocd/frontend".into());
+    app.guardrails = vec![crate::config::Guardrail {
+        actions: vec!["prune".into()],
+        max_bulk: Some(1),
+        ..Default::default()
+    }];
+
+    open_argocd_menu_item(&mut app, "Sync with prune");
+    assert_eq!(app.mode, Mode::Table);
+    assert!(app.flash.contains("exceeds the max"), "{}", app.flash);
+    assert_eq!(app.marked.len(), 2, "marks survive a refused action");
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(log.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn argocd_sync_with_prune_typed_confirmation() {
+    let (mut app, mut rx, log) = argocd_patch_app(&["guestbook"]);
+    app.guardrails = vec![crate::config::Guardrail {
+        actions: vec!["prune".into()],
+        confirmation: Some("type-resource-name".into()),
+        ..Default::default()
+    }];
+
+    open_argocd_menu_item(&mut app, "Sync with prune");
+    assert_eq!(app.mode, Mode::Prompt, "typed confirmation opens a prompt");
+    app.prompt_input = "wrong".into();
+    app.handle_key(press(KeyCode::Enter)).unwrap();
+    assert!(app.flash.contains("did not match"), "{}", app.flash);
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(log.lock().unwrap().is_empty());
+
+    open_argocd_menu_item(&mut app, "Sync with prune");
+    app.prompt_input = "guestbook".into();
+    app.handle_key(press(KeyCode::Enter)).unwrap();
+    drain_until(&mut app, &mut rx, |app| {
+        app.flash.contains("sync with prune requested")
+    })
+    .await;
+    let log = log.lock().unwrap();
+    assert_eq!(log.len(), 1);
+    assert_eq!(
+        log[0]["body"],
+        json!({"operation": {"sync": {"prune": true}}})
+    );
+}
+
 #[tokio::test]
 async fn argocd_menu_suspend_acts_on_marked_rows() {
     let (mut app, _rx) = test_app();
@@ -7362,8 +7599,39 @@ fn argocd_appset_resume_without_annotation_defaults_to_sync() {
 
 #[test]
 fn argocd_sync_patch_sets_operation() {
-    let p = argocd_sync_patch();
-    assert_eq!(p, json!({"operation": {"sync": {}}}));
+    let p = argocd_sync_patch(false);
+    assert_eq!(p, json!({"operation": {"sync": {"prune": false}}}));
+    let p = argocd_sync_patch(true);
+    assert_eq!(p, json!({"operation": {"sync": {"prune": true}}}));
+}
+
+/// RFC 7386 JSON merge patch, the semantics the API server applies to
+/// `Patch::Merge`.
+fn merge_patch(target: &mut Value, patch: &Value) {
+    let Some(fields) = patch.as_object() else {
+        *target = patch.clone();
+        return;
+    };
+    if !target.is_object() {
+        *target = json!({});
+    }
+    let map = target.as_object_mut().unwrap();
+    for (key, value) in fields {
+        if value.is_null() {
+            map.remove(key);
+        } else {
+            merge_patch(map.entry(key.clone()).or_insert(Value::Null), value);
+        }
+    }
+}
+
+#[test]
+fn argocd_plain_sync_clears_a_pending_prune() {
+    let mut app = argocd_app("guestbook");
+    merge_patch(&mut app, &argocd_sync_patch(true));
+    assert_eq!(app["operation"]["sync"]["prune"], json!(true));
+    merge_patch(&mut app, &argocd_sync_patch(false));
+    assert_eq!(app["operation"]["sync"]["prune"], json!(false));
 }
 
 fn argocd_appset(name: &str) -> serde_json::Value {
@@ -15041,6 +15309,155 @@ async fn user_status_column_colors_crd_words_in_any_case() {
 }
 
 #[tokio::test]
+async fn user_status_column_default_fills_missing_values() {
+    let (mut app, _rx) = test_app();
+    install_views(
+        &mut app,
+        r#"
+        [[views."cert-manager.io/v1/certificates".columns]]
+        name = "PHASE"
+        path = "/status/phase"
+        type = "status"
+        default = "Pending"
+        "#,
+    );
+    type_resource_query(&mut app, "certificates");
+    for (name, status) in [
+        ("machine-a", json!({"phase": "Running"})),
+        ("machine-b", json!({})),
+        ("machine-c", json!({"phase": null})),
+    ] {
+        apply(
+            &mut app,
+            json!({"apiVersion": "cert-manager.io/v1", "kind": "Certificate",
+                "metadata": {"name": name, "namespace": "default"},
+                "status": status}),
+        );
+    }
+
+    for name in ["machine-b", "machine-c"] {
+        assert_eq!(
+            health_row_color(&mut app, name, "Pending"),
+            crate::theme::yellow(),
+            "{name}"
+        );
+        assert_eq!(
+            health_row_color(&mut app, name, name),
+            crate::theme::peach(),
+            "{name}"
+        );
+    }
+
+    type_filter(&mut app, "pending");
+    assert_eq!(row_names(&app), ["machine-b", "machine-c"]);
+}
+
+#[tokio::test]
+async fn user_condition_column_default_fills_a_missing_condition() {
+    let (mut app, _rx) = test_app();
+    install_views(
+        &mut app,
+        r#"
+        [[views."cert-manager.io/v1/certificates".columns]]
+        name = "SYNCED"
+        path = "Synced"
+        type = "condition"
+        default = "False"
+        "#,
+    );
+    type_resource_query(&mut app, "certificates");
+    for (name, conditions) in [
+        ("machine-a", json!([{"type": "Synced", "status": "True"}])),
+        ("machine-b", json!([{"type": "Other", "status": "True"}])),
+    ] {
+        apply(
+            &mut app,
+            json!({"apiVersion": "cert-manager.io/v1", "kind": "Certificate",
+                "metadata": {"name": name, "namespace": "default"},
+                "status": {"conditions": conditions}}),
+        );
+    }
+
+    assert_eq!(
+        health_row_color(&mut app, "machine-b", "False"),
+        crate::theme::red()
+    );
+    assert_eq!(
+        health_row_color(&mut app, "machine-b", "machine-b"),
+        crate::theme::red()
+    );
+
+    type_filter(&mut app, "synced=false");
+    assert_eq!(row_names(&app), ["machine-b"]);
+}
+
+#[tokio::test]
+async fn formatted_quantity_default_displays_and_compares_as_a_value() {
+    let (mut app, _rx) = test_app();
+    install_views(
+        &mut app,
+        r#"
+        [[views."cert-manager.io/v1/certificates".columns]]
+        name = "REQ"
+        path = "/spec/cpu"
+        type = "quantity"
+        format = "cpu"
+        default = "0"
+        "#,
+    );
+    type_resource_query(&mut app, "certificates");
+    for (name, spec) in [
+        ("machine-a", json!({"cpu": "250m"})),
+        ("machine-b", json!({})),
+    ] {
+        apply(
+            &mut app,
+            json!({"apiVersion": "cert-manager.io/v1", "kind": "Certificate",
+                "metadata": {"name": name, "namespace": "default"},
+                "spec": spec}),
+        );
+    }
+
+    health_row_color(&mut app, "machine-b", "0m");
+
+    type_filter(&mut app, "req<100m");
+    assert_eq!(row_names(&app), ["machine-b"]);
+}
+
+#[tokio::test]
+async fn comparison_filter_reads_a_dotted_user_column_with_its_default() {
+    let (mut app, _rx) = test_app();
+    install_views(
+        &mut app,
+        r#"
+        [[views."cert-manager.io/v1/certificates".columns]]
+        name = "STATUS.PHASE"
+        path = "/status/currentStatus/phase"
+        type = "status"
+        default = "Pending"
+        "#,
+    );
+    type_resource_query(&mut app, "certificates");
+    for (name, status) in [
+        (
+            "machine-a",
+            json!({"phase": "Pending", "currentStatus": {"phase": "Running"}}),
+        ),
+        ("machine-b", json!({})),
+    ] {
+        apply(
+            &mut app,
+            json!({"apiVersion": "cert-manager.io/v1", "kind": "Certificate",
+                "metadata": {"name": name, "namespace": "default"},
+                "status": status}),
+        );
+    }
+
+    type_filter(&mut app, "status.phase=pending");
+    assert_eq!(row_names(&app), ["machine-b"]);
+}
+
+#[tokio::test]
 async fn user_view_adds_provider_label_columns_to_curated_nodes() {
     let (mut app, _rx) = test_app();
     install_views(
@@ -15506,6 +15923,7 @@ async fn user_view_wins_over_printer_columns() {
                 align: None,
                 condition_match: crate::views::ConditionMatch::Type,
                 condition_field: None,
+                default: None,
             }],
             ..Default::default()
         })),

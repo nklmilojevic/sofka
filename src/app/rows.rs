@@ -359,28 +359,36 @@ impl App {
         // One match, not a chain of comparisons: these keys borrow straight
         // from the object and never render a cell, and this runs per object
         // per rebuild.
-        match key {
-            "namespace" | "ns" | "metadata.namespace" => {
-                return Some(o.metadata.namespace.as_deref().unwrap_or("").into());
-            }
-            "metadata.name" => return o.metadata.name.as_deref().map(Cow::Borrowed),
-            "spec.nodename" => {
-                return o
-                    .data
-                    .pointer("/spec/nodeName")
-                    .and_then(|v| v.as_str())
-                    .map(Cow::Borrowed);
-            }
-            "status.phase" => {
-                return o
-                    .data
-                    .pointer("/status/phase")
-                    .and_then(|v| v.as_str())
-                    .map(Cow::Borrowed);
-            }
-            _ => {}
+        if matches!(key, "namespace" | "ns") {
+            return Some(o.metadata.namespace.as_deref().unwrap_or("").into());
         }
-        if let Some(i) = self.spec.header_index(key) {
+        // A configured column with a dotted header, such as `STATUS.PHASE`,
+        // wins over the raw field so its paths and default apply.
+        let header = self.spec.header_index(key);
+        if header.is_none() {
+            match key {
+                "metadata.namespace" => {
+                    return Some(o.metadata.namespace.as_deref().unwrap_or("").into());
+                }
+                "metadata.name" => return o.metadata.name.as_deref().map(Cow::Borrowed),
+                "spec.nodename" => {
+                    return o
+                        .data
+                        .pointer("/spec/nodeName")
+                        .and_then(|v| v.as_str())
+                        .map(Cow::Borrowed);
+                }
+                "status.phase" => {
+                    return o
+                        .data
+                        .pointer("/status/phase")
+                        .and_then(|v| v.as_str())
+                        .map(Cow::Borrowed);
+                }
+                _ => {}
+            }
+        }
+        if let Some(i) = header {
             if let Some(value) = self.live_cell(o, i) {
                 return Some(Cow::Owned(value));
             }

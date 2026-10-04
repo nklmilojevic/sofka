@@ -597,6 +597,7 @@ pub fn build_spec(
                 align: None,
                 condition_match: crate::views::ConditionMatch::Type,
                 condition_field: None,
+                default: None,
             }));
         }
     }
@@ -3546,6 +3547,7 @@ mod tests {
             align: None,
             condition_match: crate::views::ConditionMatch::Type,
             condition_field: None,
+            default: None,
         }
     }
 

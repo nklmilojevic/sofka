@@ -360,6 +360,9 @@ Custom columns accept a single `path` string or an ordered list of fallback
 paths. sofka uses the first value that exists and is not `null`. See
 [fallback paths](views.md#fallback-paths) for an example and validation rules.
 
+Path columns accept `default` to show a value instead of `<none>` when every
+path is missing or `null`. See [default values](views.md#default-values).
+
 Custom text path columns accept `format = "image-tag"` to show only the image
 tag. See the [image tag example](views.md#image-tags) for configuration and
 validation rules.

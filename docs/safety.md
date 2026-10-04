@@ -24,7 +24,8 @@ Each rule matches on `contexts`, `namespaces`, `resources`, and `actions` globs
 (block the action), `confirmation` (require confirmation), and `max_bulk`
 (a row limit for one action). The gated `actions` are the destructive verbs sofka
 performs directly: `delete`, `force-delete`, `drain`, `restart`, `shell` (exec),
-`debug`, `node-debug`, `transfer` (a file upload into a pod), `pvc-explore`
+`debug`, `node-debug`, `transfer` (a file upload into a pod), `prune` (an
+Argo CD Application sync with prune, matched against `applications`), `pvc-explore`
 (creating a helper pod to mount an unmounted PVC, and the `:pvc-clean` sweep
 that deletes them - both matched against `persistentvolumeclaims`), and
 `pvc-upload` (a file upload into a volume, matched the same way). The PVC
