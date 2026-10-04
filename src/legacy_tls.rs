@@ -31,11 +31,22 @@ use x509_parser::prelude::*;
 
 type Builder = ClientBuilder<BoxService<Request<Body>, Response<Box<DynBody>>, BoxError>>;
 
+#[cfg(test)]
 pub(crate) fn client_builder(
     config: Config,
     allow_v1: bool,
     no_tls_resumption: bool,
 ) -> Result<Builder> {
+    client_builder_with_certificate(config, allow_v1, no_tls_resumption).map(|(builder, _)| builder)
+}
+
+/// The client builder, plus the DER leaf of the certificate an exec plugin
+/// issued for it, if any.
+pub(crate) fn client_builder_with_certificate(
+    config: Config,
+    allow_v1: bool,
+    no_tls_resumption: bool,
+) -> Result<(Builder, Option<Vec<u8>>)> {
     // Every client goes through `connect`: kube-rs builds its own connector
     // with no way to enable TCP keepalive on it.
     if rustls::crypto::CryptoProvider::get_default().is_none() {
@@ -55,6 +66,7 @@ pub(crate) fn client_builder(
         tls.resumption = rustls::client::Resumption::disabled();
     }
     let mut expiration = None;
+    let mut certificate = None;
     if config.auth_info.exec.is_some() && tls.client_auth_cert_resolver.has_certs() {
         // Kube-rs exposes exec expiry only through its standard client
         // builder, and reports one only for an exec-issued certificate.
@@ -83,8 +95,12 @@ pub(crate) fn client_builder(
             .into();
         let not_after = not_after.try_into()?;
         expiration = Some(expiration.map_or(not_after, |expiry| expiry.min(not_after)));
+        certificate = Some(leaf.to_vec());
     }
-    Ok(connect(config, tls, auth)?.with_valid_until(expiration))
+    Ok((
+        connect(config, tls, auth)?.with_valid_until(expiration),
+        certificate,
+    ))
 }
 
 fn v1_config(config: &Config, allow_v1: bool, original_error: kube::Error) -> Result<ClientConfig> {
@@ -941,10 +957,12 @@ esac
             }))
             .unwrap(),
         );
-            let result = crate::k8s::build_client(config, false, disabled);
+            let result = crate::k8s::build_exec_client(config, false, disabled);
             let count = std::fs::read_to_string(&counter).unwrap();
             std::fs::remove_dir_all(&directory).unwrap();
-            let client = result.unwrap();
+            let built = result.unwrap();
+            assert!(built.has_certificate());
+            let client = built.client;
             // Auth and TLS identity resolve once, then the standard builder
             // resolves them again to report the exec certificate's expiry.
             assert_eq!(count.trim(), "5");
@@ -986,10 +1004,12 @@ printf '%s' '{"apiVersion":"client.authentication.k8s.io/v1","kind":"ExecCredent
             }))
             .unwrap(),
         );
-        let result = crate::k8s::build_client(config, false, false);
+        let result = crate::k8s::build_exec_client(config, false, false);
         let count = std::fs::read_to_string(&counter).unwrap();
         std::fs::remove_dir_all(&directory).unwrap();
-        assert!(result.unwrap().valid_until().is_none());
+        let built = result.unwrap();
+        assert!(built.client.valid_until().is_none());
+        assert!(!built.has_certificate());
         // Once for the auth layer, once for the TLS identity lookup.
         assert_eq!(count.trim(), "2");
     }

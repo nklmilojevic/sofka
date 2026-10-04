@@ -314,7 +314,7 @@ pub enum Msg {
     /// certificate, for renewal `attempt`.
     CredentialsRenewed {
         attempt: u64,
-        result: Result<Box<kube::Client>, String>,
+        result: Result<Box<crate::k8s::ExecClient>, String>,
     },
     /// Result of an off-thread `kubectl config rename-context` (`r` in the
     /// context switcher).

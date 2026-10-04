@@ -5,16 +5,23 @@
 //! client-go, run the plugin again shortly before the declared expiry, swap
 //! in a client built from the new certificate, and restart the watch on it.
 
-use k8s_openapi::jiff::{SignedDuration, Timestamp};
-use kube::Client;
-
 use super::{App, Msg};
+use crate::k8s::ExecClient;
+use k8s_openapi::jiff::{SignedDuration, Timestamp};
 
 /// How long before expiry to renew, leaving room for clock skew.
 const RENEW_BEFORE: SignedDuration = SignedDuration::from_secs(60);
 /// Pause between attempts. A plugin may return its cached certificate until
 /// it expires, or fail until the user logs in again.
 const RETRY_AFTER: SignedDuration = SignedDuration::from_secs(30);
+const EXPIRED: &str =
+    "The client certificate has expired. Log in with your credential provider, then retry.";
+
+/// A request the server or the TLS handshake refused before any API answer:
+/// what an expired client certificate produces.
+fn is_authentication_failure(error: &str) -> bool {
+    error.contains("client error (") || error.to_ascii_lowercase().contains("unauthorized")
+}
 
 impl App {
     pub fn renew_credentials(&mut self) {
@@ -57,7 +64,7 @@ impl App {
     pub(super) fn apply_renewed_credentials(
         &mut self,
         attempt: u64,
-        result: Result<Box<Client>, String>,
+        result: Result<Box<ExecClient>, String>,
     ) {
         // A context switch replaced the client this renewal was for, even
         // when it reconnected to the same context with the same expiry.
@@ -66,8 +73,8 @@ impl App {
         }
         self.credential_attempt = None;
         let context = self.cluster.context.clone();
-        let client = match result {
-            Ok(client) => client,
+        let renewed = match result {
+            Ok(renewed) => renewed,
             Err(error) => {
                 crate::log_warn!(
                     "cluster.credentials.failed",
@@ -79,34 +86,43 @@ impl App {
                 return;
             }
         };
-        self.credential_error = None;
-        // The plugin handed back the certificate the client already has.
-        if client
-            .valid_until()
-            .is_none_or(|renewed| Some(renewed) <= self.cluster.credential_expiry())
-        {
+        let now = Timestamp::now();
+        let expires = *renewed.client.valid_until();
+        if expires.is_some_and(|expires| expires <= now) {
+            // Nothing usable came back: keep explaining why requests fail.
+            crate::log_warn!(
+                "cluster.credentials.expired",
+                context = context,
+                expires = expires.map(|t| t.to_string()).unwrap_or_default()
+            );
+            self.credential_error
+                .get_or_insert_with(|| EXPIRED.to_string());
+            return;
+        }
+        // The plugin handed back the certificate the client already sends,
+        // as a plugin that caches it until expiry does.
+        if self.cluster.has_certificate_of(&renewed) {
             return;
         }
         crate::log_info!(
             "cluster.credentials.renewed",
             context = context,
-            expires = client
-                .valid_until()
-                .map(|t| t.to_string())
-                .unwrap_or_default()
+            expires = expires.map(|t| t.to_string()).unwrap_or_default()
         );
-        self.cluster.client = *client;
+        self.cluster.install_exec_client(*renewed);
+        self.credential_error = None;
         self.credential_retry_at = None;
         self.resume_pending = Some("renewed cluster credentials");
         self.restart_pending_watch();
     }
 
-    /// The failed renewal's message, while the certificate it was meant to
-    /// replace has expired. Before then the old certificate still works and
-    /// a watch failure has some other cause.
-    pub(super) fn expired_credential_error(&self) -> Option<String> {
+    /// The failed renewal's message for a watch `error` the expired
+    /// certificate explains: the TLS handshake or an unauthenticated
+    /// response. Before expiry the old certificate still works, and other
+    /// failures, such as a forbidden resource, keep their own message.
+    pub(super) fn credential_error_for(&self, error: &str) -> Option<String> {
         let expiry = self.cluster.credential_expiry()?;
-        if Timestamp::now() < expiry {
+        if Timestamp::now() < expiry || !is_authentication_failure(error) {
             return None;
         }
         self.credential_error.clone()
