@@ -953,18 +953,20 @@ impl App {
         self.tasks.push(handle);
     }
 
-    fn set_watch_error_flash(&mut self, error: String) {
-        let error = self.credential_error_for(&error).unwrap_or(error);
+    fn set_watch_error_flash(&mut self, error: String, credentials_refused: bool) {
+        let error = self
+            .credential_error_for(&error, credentials_refused)
+            .unwrap_or(error);
         self.borrow_status(format!("watch failed; retrying: {error}"), true);
         self.watch_error_flash = Some(self.flash.clone());
     }
 
-    fn show_watch_error(&mut self, error: String) {
+    fn show_watch_error(&mut self, error: String, credentials_refused: bool) {
         self.watch_errors = self.watch_errors.saturating_add(1);
         self.last_error = Some(error.clone());
         crate::log_warn!("view.error", kind = self.kind_plural, error = error);
-        self.note_watch_failure(&error);
-        self.set_watch_error_flash(error);
+        self.note_watch_failure(credentials_refused);
+        self.set_watch_error_flash(error, credentials_refused);
     }
 
     fn clear_watch_error_flash(&mut self) -> bool {
@@ -1082,10 +1084,17 @@ impl App {
                     self.store.finish_namespace_sync(&namespace);
                     self.clear_rows_cache();
                 }
-                Msg::WatchError { error, .. } => {
+                Msg::WatchError {
+                    error,
+                    credentials_refused,
+                    ..
+                } => {
                     self.namespace_errors
                         .insert(namespace.clone(), error.clone());
-                    self.show_watch_error(format!("{namespace}: {error}; results incomplete"));
+                    self.show_watch_error(
+                        format!("{namespace}: {error}; results incomplete"),
+                        credentials_refused,
+                    );
                 }
                 Msg::WatchRecovered { .. } => {
                     self.namespace_errors.remove(&namespace);
@@ -1095,9 +1104,10 @@ impl App {
                             .iter()
                             .min_by_key(|(namespace, _)| *namespace)
                     {
-                        self.set_watch_error_flash(format!(
-                            "{namespace}: {error}; results incomplete"
-                        ));
+                        self.set_watch_error_flash(
+                            format!("{namespace}: {error}; results incomplete"),
+                            false,
+                        );
                     }
                 }
                 event => self.handle_msg(event),
@@ -1157,8 +1167,12 @@ impl App {
                     self.clear_rows_cache();
                 }
             }
-            Msg::WatchError { generation, error } if generation == self.generation => {
-                self.show_watch_error(error);
+            Msg::WatchError {
+                generation,
+                error,
+                credentials_refused,
+            } if generation == self.generation => {
+                self.show_watch_error(error, credentials_refused);
             }
             Msg::WatchRecovered { generation } if generation == self.generation => {
                 self.note_watch_recovered();

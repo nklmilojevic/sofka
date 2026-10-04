@@ -1873,18 +1873,12 @@ pub struct App {
     credential_attempt: Option<u64>,
     /// Renewals started this session, numbering each attempt.
     credential_attempts: u64,
-    /// The server rejected the exec-issued credentials; renew on the next
+    /// The server refused the exec-issued credentials; renew on the next
     /// tick whatever the certificate's expiry says.
     credential_rejected: bool,
-    /// A request with the exec-issued certificate failed in transport, as one
-    /// refused in the TLS handshake does; renew quietly on the next tick.
-    credential_unreachable: bool,
-    /// A transport failure already installed a new certificate since the
-    /// watch last worked; further transport failures are not its fault.
-    credential_transport_spent: bool,
-    /// The renewal in flight started only from a transport failure, so its
-    /// own failure stays out of the status bar.
-    credential_attempt_quiet: bool,
+    /// The renewal in flight is for an expiring certificate, which a
+    /// recovered watch does not make unnecessary.
+    credential_attempt_for_expiry: bool,
     /// No renewal attempt before this time.
     credential_retry_at: Option<k8s_openapi::jiff::Timestamp>,
     /// Why the last renewal failed. Watch failures show it instead of the
@@ -2449,9 +2443,7 @@ impl App {
             credential_attempt: None,
             credential_attempts: 0,
             credential_rejected: false,
-            credential_unreachable: false,
-            credential_attempt_quiet: false,
-            credential_transport_spent: false,
+            credential_attempt_for_expiry: false,
             credential_retry_at: None,
             credential_error: None,
             context_switch_target: None,

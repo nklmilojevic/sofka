@@ -77,6 +77,7 @@ async fn namespace_patterns_keep_independent_relists_and_equal_names() {
         Msg::WatchError {
             generation,
             error: "forbidden".into(),
+            credentials_refused: false,
         },
     );
     assert!(app.namespace_label().contains("incomplete"));
@@ -103,6 +104,7 @@ async fn namespace_watch_recovery_preserves_other_failures() {
             Msg::WatchError {
                 generation,
                 error: "connection closed".into(),
+                credentials_refused: false,
             },
         );
     }
@@ -155,6 +157,7 @@ async fn namespace_patterns_keep_selection_on_discovery_failure_and_drop_stale_r
         event: Box::new(Msg::WatchError {
             generation,
             error: "stale".into(),
+            credentials_refused: false,
         }),
     });
     assert!(!app.flash.contains("stale"));

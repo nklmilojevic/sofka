@@ -19,12 +19,18 @@ const INSTALLED: &[u8] = b"installed certificate";
 const RENEWED: &[u8] = b"renewed certificate";
 const SEND_REQUEST: &str =
     "failed to start watching object: ServiceError: client error (SendRequest)";
+const LOGIN: &str = "Log in with your credential provider";
 
 fn client_until(valid_until: Timestamp) -> kube::Client {
     let config = kube::Config::new("https://127.0.0.1:6443".parse().unwrap());
     kube::Client::try_from(config)
         .unwrap()
         .with_valid_until(Some(valid_until))
+}
+
+fn token_client() -> kube::Client {
+    let config = kube::Config::new("https://127.0.0.1:6443".parse().unwrap());
+    kube::Client::try_from(config).unwrap()
 }
 
 /// A pod view whose client holds an exec certificate that expires at
@@ -72,21 +78,17 @@ fn renewed(app: &App, valid_until: Timestamp, certificate: &[u8]) -> Msg {
     }
 }
 
-async fn fail_quietly(app: &mut App, rx: &mut Receiver<Msg>, at: Timestamp) {
-    app.renew_credentials_at(at);
-    assert!(app.credential_attempt.is_some());
-    let msg = renewal_result(rx).await;
-    app.handle_msg(msg);
-    assert!(app.credential_attempt.is_none());
-    assert!(
-        !app.flash.contains("credential renewal failed"),
-        "{}",
-        app.flash
-    );
+fn renewed_token(app: &App) -> Msg {
+    Msg::CredentialsRenewed {
+        attempt: app.credential_attempt.expect("a renewal in flight"),
+        result: Ok(Box::new(ExecClient::token(token_client()))),
+    }
 }
 
+/// The plugin runs and fails, as with an expired login.
 async fn fail_renewal(app: &mut App, rx: &mut Receiver<Msg>, at: Timestamp) {
     app.renew_credentials_at(at);
+    assert!(app.credential_attempt.is_some());
     let msg = renewal_result(rx).await;
     app.handle_msg(msg);
     assert!(
@@ -100,6 +102,22 @@ fn watch_error(app: &mut App, error: &str) {
     app.handle_msg(Msg::WatchError {
         generation: app.generation,
         error: error.into(),
+        credentials_refused: false,
+    });
+}
+
+/// A watch error the server's refusal of the credentials caused.
+fn refused(app: &mut App, error: &str) {
+    app.handle_msg(Msg::WatchError {
+        generation: app.generation,
+        error: error.into(),
+        credentials_refused: true,
+    });
+}
+
+fn recovered(app: &mut App) {
+    app.handle_msg(Msg::WatchRecovered {
+        generation: app.generation,
     });
 }
 
@@ -131,6 +149,9 @@ async fn renewal_waits_until_the_certificate_nears_expiry() {
 async fn clients_without_an_exec_certificate_are_never_renewed() {
     let (mut app, _rx) = app_with_pod();
     app.renew_credentials_at(Timestamp::now() + SignedDuration::from_hours(24 * 365 * 100));
+    assert!(app.credential_attempt.is_none());
+    refused(&mut app, "ApiError: Unauthorized");
+    app.renew_credentials_at(Timestamp::now());
     assert!(app.credential_attempt.is_none());
 }
 
@@ -179,7 +200,7 @@ async fn the_same_certificate_again_keeps_the_watch_and_retries_later() {
 }
 
 #[tokio::test]
-async fn a_failed_renewal_explains_authentication_failures_and_retries_later() {
+async fn a_failed_renewal_explains_refused_and_expired_requests_and_retries_later() {
     let (mut app, mut rx) = app_with_exec_certificate();
     fail_renewal(&mut app, &mut rx, expiry()).await;
     assert!(app.flash_err);
@@ -190,28 +211,39 @@ async fn a_failed_renewal_explains_authentication_failures_and_retries_later() {
         app.flash
     );
 
+    // The certificate has expired: a request that got no answer is its doing.
     watch_error(&mut app, SEND_REQUEST);
     assert!(
-        app.flash.contains("Log in with your credential provider"),
+        app.flash
+            .starts_with(&format!("watch failed; retrying: {SEND_REQUEST}; ")),
         "{}",
         app.flash
     );
-    watch_error(&mut app, "ApiError: Unauthorized: Unauthorized");
-    assert!(
-        app.flash.contains("Log in with your credential provider"),
-        "{}",
-        app.flash
-    );
+    assert!(app.flash.contains(LOGIN), "{}", app.flash);
     watch_error(&mut app, "ApiError: pods is forbidden: Forbidden");
     assert_eq!(
         app.flash,
-        "watch failed; retrying: ApiError: pods is forbidden: Forbidden"
+        "watch failed; retrying: ApiError: pods is forbidden: Forbidden; credential renewal \
+         failed: Authentication command failed. Log in with your credential provider, then \
+         retry."
     );
 
     app.renew_credentials_at(expiry() + SignedDuration::from_secs(10));
     assert!(app.credential_attempt.is_none(), "retries wait");
     app.renew_credentials_at(expiry() + SignedDuration::from_secs(30));
     assert!(app.credential_attempt.is_some());
+}
+
+#[tokio::test]
+async fn a_failed_renewal_before_expiry_leaves_unrelated_failures_alone() {
+    let valid_until = Timestamp::now() + SignedDuration::from_secs(30);
+    let (mut app, mut rx) = app_with_exec_certificate_until(valid_until);
+    fail_renewal(&mut app, &mut rx, valid_until).await;
+
+    watch_error(&mut app, SEND_REQUEST);
+    assert_eq!(app.flash, format!("watch failed; retrying: {SEND_REQUEST}"));
+    refused(&mut app, "ApiError: Unauthorized");
+    assert!(app.flash.contains(LOGIN), "{}", app.flash);
 }
 
 #[tokio::test]
@@ -286,66 +318,105 @@ async fn a_renewal_for_a_replaced_client_is_dropped() {
 }
 
 #[tokio::test]
-async fn a_failed_renewal_keeps_the_watch_error_and_adds_the_login_hint() {
-    let valid_until = Timestamp::now() + SignedDuration::from_secs(30);
-    let (mut app, mut rx) = app_with_exec_certificate_until(valid_until);
-    fail_renewal(&mut app, &mut rx, valid_until).await;
-
-    watch_error(&mut app, SEND_REQUEST);
-    assert_eq!(
-        app.flash,
-        format!(
-            "watch failed; retrying: {SEND_REQUEST}; credential renewal failed: \
-             Authentication command failed. Log in with your credential provider, then retry."
-        )
-    );
-}
-
-#[tokio::test]
 async fn a_recovered_watch_forgets_the_failed_renewal() {
     let (mut app, mut rx) = app_with_exec_certificate();
     fail_renewal(&mut app, &mut rx, expiry()).await;
-    app.handle_msg(Msg::WatchRecovered {
-        generation: app.generation,
-    });
+    recovered(&mut app);
 
     watch_error(&mut app, SEND_REQUEST);
     assert_eq!(app.flash, format!("watch failed; retrying: {SEND_REQUEST}"));
 }
 
-const UNAUTHORIZED: &str = "failed to start watching object: ApiError: Unauthorized: Unauthorized";
-
 #[tokio::test]
-async fn an_unauthenticated_watch_renews_a_certificate_before_its_expiry() {
+async fn refused_credentials_renew_a_certificate_before_its_expiry() {
     let now = Timestamp::now();
     let (mut app, _rx) = app_with_exec_certificate_until(fresh());
     app.renew_credentials_at(now);
     assert!(app.credential_attempt.is_none());
 
+    // An outage or a forbidden resource is not the credentials' fault.
+    watch_error(&mut app, SEND_REQUEST);
     watch_error(&mut app, "ApiError: pods is forbidden: Forbidden");
     app.renew_credentials_at(now);
-    assert!(
-        app.credential_attempt.is_none(),
-        "forbidden is not a credential failure"
-    );
+    assert!(app.credential_attempt.is_none());
 
-    watch_error(&mut app, UNAUTHORIZED);
+    // A TLS alert against the certificate, or an Unauthorized response.
+    refused(&mut app, SEND_REQUEST);
     app.renew_credentials_at(now);
     assert!(app.credential_attempt.is_some());
 }
 
 #[tokio::test]
-async fn a_token_from_the_plugin_replaces_the_client_and_renews_when_rejected() {
+async fn refused_credentials_retry_on_the_timer_until_the_watch_recovers() {
+    let now = Timestamp::now();
+    let (mut app, mut rx) = app_with_exec_certificate_until(fresh());
+    refused(&mut app, SEND_REQUEST);
+    fail_renewal(&mut app, &mut rx, now).await;
+
+    // No further watch error is needed: the watch backs off between them.
+    app.renew_credentials_at(now + SignedDuration::from_secs(10));
+    assert!(app.credential_attempt.is_none(), "retries wait");
+    app.renew_credentials_at(now + SignedDuration::from_secs(30));
+    assert!(app.credential_attempt.is_some());
+    let msg = renewal_result(&mut rx).await;
+    app.handle_msg(msg);
+
+    recovered(&mut app);
+    app.renew_credentials_at(now + SignedDuration::from_secs(60));
+    assert!(app.credential_attempt.is_none());
+}
+
+#[tokio::test]
+async fn a_refused_replacement_certificate_is_renewed_again() {
+    let now = Timestamp::now();
+    let (mut app, _rx) = app_with_exec_certificate_until(fresh());
+    refused(&mut app, SEND_REQUEST);
+    app.renew_credentials_at(now);
+    app.handle_msg(renewed(&app, fresh(), RENEWED));
+
+    refused(&mut app, SEND_REQUEST);
+    app.renew_credentials_at(now);
+    assert!(app.credential_attempt.is_some());
+}
+
+#[tokio::test]
+async fn a_recovered_watch_keeps_its_client_when_a_refusal_renewal_lands() {
+    let now = Timestamp::now();
+    let (mut app, _rx) = app_with_exec_certificate_until(fresh());
+    refused(&mut app, SEND_REQUEST);
+    app.renew_credentials_at(now);
+    let msg = renewed(&app, fresh(), RENEWED);
+    recovered(&mut app);
+    let generation = app.generation;
+    let installed = app.cluster.credential_expiry();
+
+    app.handle_msg(msg);
+
+    assert_eq!(app.generation, generation);
+    assert_eq!(app.cluster.credential_expiry(), installed);
+}
+
+#[tokio::test]
+async fn a_recovered_watch_still_takes_a_certificate_renewed_for_expiry() {
+    let valid_until = Timestamp::now() + SignedDuration::from_secs(30);
+    let (mut app, _rx) = app_with_exec_certificate_until(valid_until);
+    app.renew_credentials_at(valid_until);
+    let msg = renewed(&app, fresh(), RENEWED);
+    recovered(&mut app);
+    let generation = app.generation;
+
+    app.handle_msg(msg);
+
+    assert!(app.generation > generation);
+}
+
+#[tokio::test]
+async fn a_token_from_the_plugin_replaces_the_client_and_renews_when_refused() {
     let (mut app, _rx) = app_with_exec_certificate();
     app.renew_credentials_at(expiry());
     let generation = app.generation;
-    let config = kube::Config::new("https://127.0.0.1:6443".parse().unwrap());
-    let token = kube::Client::try_from(config).unwrap();
 
-    app.handle_msg(Msg::CredentialsRenewed {
-        attempt: app.credential_attempt.unwrap(),
-        result: Ok(Box::new(ExecClient::token(token))),
-    });
+    app.handle_msg(renewed_token(&app));
     assert!(app.generation > generation);
     assert_eq!(app.cluster.credential_expiry(), None);
 
@@ -355,115 +426,13 @@ async fn a_token_from_the_plugin_replaces_the_client_and_renews_when_rejected() 
         app.credential_attempt.is_none(),
         "a token has no expiry to renew at"
     );
-    watch_error(&mut app, UNAUTHORIZED);
-    app.renew_credentials_at(now);
-    assert!(app.credential_attempt.is_some());
-}
-
-#[tokio::test]
-async fn an_unauthenticated_watch_without_an_exec_plugin_renews_nothing() {
-    let (mut app, _rx) = app_with_pod();
-    watch_error(&mut app, UNAUTHORIZED);
-    app.renew_credentials_at(Timestamp::now());
-    assert!(app.credential_attempt.is_none());
-}
-
-#[tokio::test]
-async fn a_certificate_refused_in_the_handshake_renews_before_its_expiry() {
-    let now = Timestamp::now();
-    let (mut app, mut rx) = app_with_exec_certificate_until(fresh());
     watch_error(&mut app, SEND_REQUEST);
     app.renew_credentials_at(now);
-    assert!(app.credential_attempt.is_some());
-
-    // The plugin fails too, as it does through an ordinary outage: no
-    // warning of its own, but the watch error carries the login hint.
-    let msg = renewal_result(&mut rx).await;
-    app.handle_msg(msg);
-    assert_eq!(app.flash, format!("watch failed; retrying: {SEND_REQUEST}"));
-    watch_error(&mut app, SEND_REQUEST);
-    assert!(
-        app.flash.contains("Log in with your credential provider"),
-        "{}",
-        app.flash
-    );
-}
-
-#[tokio::test]
-async fn handshake_failures_retry_on_the_timer_after_a_failed_attempt() {
-    let now = Timestamp::now();
-    let (mut app, mut rx) = app_with_exec_certificate_until(fresh());
-    watch_error(&mut app, SEND_REQUEST);
-    fail_quietly(&mut app, &mut rx, now).await;
-
-    app.renew_credentials_at(now + SignedDuration::from_secs(30));
-    assert!(app.credential_attempt.is_some());
-}
-
-#[tokio::test]
-async fn a_recovered_watch_stops_handshake_retries() {
-    let now = Timestamp::now();
-    let (mut app, mut rx) = app_with_exec_certificate_until(fresh());
-    watch_error(&mut app, SEND_REQUEST);
-    fail_quietly(&mut app, &mut rx, now).await;
-    app.handle_msg(Msg::WatchRecovered {
-        generation: app.generation,
-    });
-
-    app.renew_credentials_at(now + SignedDuration::from_secs(30));
-    assert!(app.credential_attempt.is_none());
-}
-
-#[tokio::test]
-async fn an_outage_installs_at_most_one_new_certificate_until_the_watch_recovers() {
-    let now = Timestamp::now();
-    let (mut app, _rx) = app_with_exec_certificate_until(fresh());
-    watch_error(&mut app, SEND_REQUEST);
-    app.renew_credentials_at(now);
-    app.handle_msg(renewed(&app, fresh(), RENEWED));
-    let generation = app.generation;
-
-    watch_error(&mut app, SEND_REQUEST);
-    app.renew_credentials_at(now + SignedDuration::from_secs(60));
     assert!(
         app.credential_attempt.is_none(),
-        "the new certificate was not the problem"
+        "an outage is not a refusal"
     );
-    assert_eq!(app.generation, generation);
-
-    app.handle_msg(Msg::WatchRecovered {
-        generation: app.generation,
-    });
-    watch_error(&mut app, SEND_REQUEST);
-    app.renew_credentials_at(now + SignedDuration::from_secs(60));
+    refused(&mut app, "ApiError: Unauthorized");
+    app.renew_credentials_at(now);
     assert!(app.credential_attempt.is_some());
-}
-
-#[tokio::test]
-async fn a_new_certificate_after_a_handshake_failure_replaces_the_client() {
-    let (mut app, _rx) = app_with_exec_certificate_until(fresh());
-    watch_error(&mut app, SEND_REQUEST);
-    app.renew_credentials_at(Timestamp::now());
-    let generation = app.generation;
-
-    app.handle_msg(renewed(&app, fresh(), RENEWED));
-
-    assert!(app.generation > generation);
-    assert_eq!(app.flash, "renewed cluster credentials");
-}
-
-#[tokio::test]
-async fn transport_failures_of_a_token_client_renew_nothing() {
-    let (mut app, _rx) = app_with_exec_certificate();
-    app.renew_credentials_at(expiry());
-    let config = kube::Config::new("https://127.0.0.1:6443".parse().unwrap());
-    let token = kube::Client::try_from(config).unwrap();
-    app.handle_msg(Msg::CredentialsRenewed {
-        attempt: app.credential_attempt.unwrap(),
-        result: Ok(Box::new(ExecClient::token(token))),
-    });
-
-    watch_error(&mut app, SEND_REQUEST);
-    app.renew_credentials_at(Timestamp::now());
-    assert!(app.credential_attempt.is_none());
 }

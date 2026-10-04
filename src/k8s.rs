@@ -142,6 +142,52 @@ fn exec_auth_message(error: &(dyn std::error::Error + 'static)) -> Option<String
     None
 }
 
+/// Whether the server refused the client's credentials: an Unauthorized
+/// status, or a TLS alert rejecting the client certificate. An outage or a
+/// forbidden resource is something else, and renewing would not help.
+pub(crate) fn credentials_refused(error: &(dyn std::error::Error + 'static)) -> bool {
+    use rustls::AlertDescription as Alert;
+    let mut source = Some(error);
+    while let Some(error) = source {
+        // Both carry the status boxed, so it never shows up on its own in
+        // the source chain.
+        let status = match error.downcast_ref::<kube::Error>() {
+            Some(kube::Error::Api(status)) => Some(status),
+            _ => match error.downcast_ref::<watcher::Error>() {
+                Some(watcher::Error::WatchError(status)) => Some(status),
+                _ => None,
+            },
+        };
+        if status.is_some_and(|status| status.code == 401) {
+            return true;
+        }
+        if let Some(rustls::Error::AlertReceived(alert)) = error.downcast_ref::<rustls::Error>()
+            && matches!(
+                alert,
+                Alert::BadCertificate
+                    | Alert::UnsupportedCertificate
+                    | Alert::CertificateRevoked
+                    | Alert::CertificateExpired
+                    | Alert::CertificateUnknown
+                    | Alert::CertificateRequired
+            )
+        {
+            return true;
+        }
+        // rustls reports through `io::Error`, whose `source` skips the
+        // error it wraps.
+        if let Some(inner) = error
+            .downcast_ref::<std::io::Error>()
+            .and_then(|io| io.get_ref())
+            && credentials_refused(inner)
+        {
+            return true;
+        }
+        source = error.source();
+    }
+    false
+}
+
 /// Times every Kubernetes API request into [`crate::diagnostics`] and, at
 /// `debug`, logs one line per request.
 ///
@@ -1211,6 +1257,7 @@ fn spawn_watch_task(
                     Msg::WatchError {
                         generation,
                         error: e.to_string(),
+                        credentials_refused: credentials_refused(&e),
                     }
                 }
             };
@@ -1497,6 +1544,46 @@ impl Cluster {
 
 #[cfg(test)]
 pub(crate) mod tests {
+    fn status(code: u16) -> kube::Error {
+        kube::Error::Api(Box::new(kube::core::Status {
+            code,
+            ..Default::default()
+        }))
+    }
+
+    fn alert(alert: rustls::AlertDescription) -> std::io::Error {
+        std::io::Error::other(rustls::Error::AlertReceived(alert))
+    }
+
+    #[test]
+    fn credentials_are_refused_by_unauthorized_and_certificate_alerts() {
+        use super::{credentials_refused, watcher};
+        use rustls::AlertDescription as Alert;
+        let refused = |error: &(dyn std::error::Error + 'static)| credentials_refused(error);
+        assert!(refused(&watcher::Error::WatchStartFailed(status(401))));
+        assert!(refused(&watcher::Error::WatchError(Box::new(
+            kube::core::Status {
+                code: 401,
+                ..Default::default()
+            }
+        ))));
+        assert!(!refused(&watcher::Error::WatchStartFailed(status(403))));
+        for certificate in [
+            Alert::BadCertificate,
+            Alert::CertificateExpired,
+            Alert::CertificateRevoked,
+            Alert::CertificateUnknown,
+        ] {
+            assert!(refused(&alert(certificate)), "{certificate:?}");
+        }
+        assert!(!refused(&alert(Alert::HandshakeFailure)));
+        assert!(!refused(&std::io::Error::from(
+            std::io::ErrorKind::ConnectionRefused
+        )));
+        let wrapped = kube::Error::Service(Box::new(alert(Alert::CertificateExpired)));
+        assert!(refused(&watcher::Error::WatchFailed(wrapped)));
+    }
+
     #[test]
     fn missing_current_context_has_selection_instructions() {
         for current_context in [None, Some(String::new())] {

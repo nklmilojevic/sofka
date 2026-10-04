@@ -60,6 +60,9 @@ pub enum Msg {
     WatchError {
         generation: u64,
         error: String,
+        /// The server refused the client's credentials: an Unauthorized
+        /// response, or a TLS alert against its certificate.
+        credentials_refused: bool,
     },
     WatchRecovered {
         generation: u64,
