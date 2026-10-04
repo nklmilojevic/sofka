@@ -4873,7 +4873,7 @@ fn draw_findings(
     scroll.heights = rows.iter().map(Vec::len).collect();
     scroll.visible = visible;
     let selected = state.selected();
-    let skip = scroll.skip_for(selected);
+    let skip = scroll.skip_for(selected, findings);
     let items: Vec<ListItem> = rows
         .into_iter()
         .enumerate()
@@ -4892,13 +4892,15 @@ fn draw_findings(
         })
         .collect();
 
-    render_framed_list(
+    render_framed_list_rows(
         frame,
         show_scrollbars,
         area,
         items,
         Span::styled(title, theme::title()),
         state,
+        &scroll.heights,
+        skip,
     );
 }
 
@@ -5840,6 +5842,35 @@ fn render_framed_list<'a, T>(
     T: Into<Line<'a>>,
 {
     let heights: Vec<_> = items.iter().map(ListItem::height).collect();
+    render_framed_list_rows(
+        frame,
+        show_scrollbars,
+        area,
+        items,
+        title,
+        state,
+        &heights,
+        0,
+    );
+}
+
+/// [`render_framed_list`] with the scrollbar measured from `heights`, the full
+/// row count of each item, plus `skip` rows already scrolled inside the item at
+/// the top. A findings view shortens a tall finding to the rows on screen, so
+/// the items alone would hide how much of it is left.
+#[allow(clippy::too_many_arguments)]
+fn render_framed_list_rows<'a, T>(
+    frame: &mut Frame,
+    show_scrollbars: bool,
+    area: Rect,
+    items: Vec<ListItem<'a>>,
+    title: T,
+    state: &mut ListState,
+    heights: &[usize],
+    skip: usize,
+) where
+    T: Into<Line<'a>>,
+{
     let total: usize = heights.iter().sum();
     let list = List::new(items)
         .highlight_style(theme::selected_row())
@@ -5854,7 +5885,7 @@ fn render_framed_list<'a, T>(
         );
     frame.render_stateful_widget(list, area, state);
     let visible = usize::from(area.height.saturating_sub(2));
-    let position = heights.iter().take(state.offset()).sum();
+    let position = heights.iter().take(state.offset()).sum::<usize>() + skip;
     draw_border_scrollbar(
         frame,
         show_scrollbars,

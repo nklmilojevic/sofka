@@ -506,32 +506,29 @@ pub(super) fn list_step(state: &mut ListState, len: usize, down: bool) {
 /// tall finding lands on its last rows, so stepping back retraces the same rows.
 pub(super) fn findings_step(
     state: &mut ListState,
-    len: usize,
+    findings: &[crate::explain::Finding],
     scroll: &mut FindingsScroll,
     down: bool,
 ) {
     if let Some(i) = state.selected() {
-        let skip = scroll.skip_for(Some(i));
+        let skip = scroll.skip_for(Some(i), findings);
         if down && skip < scroll.max_skip(i) {
-            scroll.item = Some(i);
-            scroll.skip = skip + 1;
+            scroll.set(i, findings, skip + 1);
             return;
         }
         if !down && skip > 0 {
-            scroll.item = Some(i);
-            scroll.skip = skip - 1;
+            scroll.set(i, findings, skip - 1);
             return;
         }
     }
     let before = state.selected();
-    list_step(state, len, down);
-    let after = state.selected();
-    if after != before {
-        scroll.item = after;
-        scroll.skip = match after {
-            Some(j) if !down => scroll.max_skip(j),
-            _ => 0,
-        };
+    list_step(state, findings.len(), down);
+    match state.selected() {
+        Some(j) if state.selected() != before => {
+            let skip = if down { 0 } else { scroll.max_skip(j) };
+            scroll.set(j, findings, skip);
+        }
+        _ => {}
     }
 }
 

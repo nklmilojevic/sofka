@@ -516,8 +516,10 @@ pub struct FindingsScroll {
     pub heights: Vec<usize>,
     /// Rows inside the list's border.
     pub visible: usize,
-    /// The finding `skip` applies to; another selection shows from its top.
-    pub item: Option<usize>,
+    /// The finding `skip` applies to, by position and text: another
+    /// selection, or a refreshed report with different text at the same
+    /// position, shows from its top.
+    pub item: Option<(usize, String)>,
     /// Leading rows of `item` scrolled past.
     pub skip: usize,
 }
@@ -525,11 +527,21 @@ pub struct FindingsScroll {
 impl FindingsScroll {
     /// Rows of the selected finding scrolled past, clamped to what the
     /// current layout allows.
-    pub fn skip_for(&self, selected: Option<usize>) -> usize {
-        match selected {
-            Some(i) if self.item == Some(i) => self.skip.min(self.max_skip(i)),
+    pub fn skip_for(&self, selected: Option<usize>, findings: &[crate::explain::Finding]) -> usize {
+        match (selected, &self.item) {
+            (Some(i), Some((item, text)))
+                if *item == i && findings.get(i).is_some_and(|f| f.text == *text) =>
+            {
+                self.skip.min(self.max_skip(i))
+            }
             _ => 0,
         }
+    }
+
+    /// Point the scroll at row `skip` of finding `i`.
+    fn set(&mut self, i: usize, findings: &[crate::explain::Finding], skip: usize) {
+        self.item = findings.get(i).map(|f| (i, f.text.clone()));
+        self.skip = skip;
     }
 
     fn max_skip(&self, i: usize) -> usize {

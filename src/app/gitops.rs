@@ -201,12 +201,15 @@ impl App {
                     self.restore_selection();
                 }
             }
-            (Some(Action::Down), _) => {
-                findings_step(&mut self.gitops_state, len, &mut self.findings_scroll, true)
-            }
+            (Some(Action::Down), _) => findings_step(
+                &mut self.gitops_state,
+                &self.gitops_items,
+                &mut self.findings_scroll,
+                true,
+            ),
             (Some(Action::Up), _) => findings_step(
                 &mut self.gitops_state,
-                len,
+                &self.gitops_items,
                 &mut self.findings_scroll,
                 false,
             ),

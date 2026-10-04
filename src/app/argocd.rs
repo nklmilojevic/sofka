@@ -270,12 +270,15 @@ impl App {
                     self.restore_selection();
                 }
             }
-            (Some(Action::Down), _) => {
-                findings_step(&mut self.argocd_state, len, &mut self.findings_scroll, true)
-            }
+            (Some(Action::Down), _) => findings_step(
+                &mut self.argocd_state,
+                &self.argocd_items,
+                &mut self.findings_scroll,
+                true,
+            ),
             (Some(Action::Up), _) => findings_step(
                 &mut self.argocd_state,
-                len,
+                &self.argocd_items,
                 &mut self.findings_scroll,
                 false,
             ),

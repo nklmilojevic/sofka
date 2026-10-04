@@ -128,13 +128,13 @@ impl App {
             }
             (Some(Action::Down), _) => findings_step(
                 &mut self.explain_state,
-                len,
+                &self.explain_items,
                 &mut self.findings_scroll,
                 true,
             ),
             (Some(Action::Up), _) => findings_step(
                 &mut self.explain_state,
-                len,
+                &self.explain_items,
                 &mut self.findings_scroll,
                 false,
             ),

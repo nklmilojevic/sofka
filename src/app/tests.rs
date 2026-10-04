@@ -24059,6 +24059,112 @@ async fn j_and_k_scroll_through_a_finding_taller_than_the_list() {
     );
 }
 
+fn tall_finding_deployment(message: &str) -> Value {
+    json!({"apiVersion": "apps/v1", "kind": "Deployment",
+        "metadata": {"name": "web", "namespace": "default", "uid": "workload-uid"},
+        "spec": {"replicas": 1, "selector": {"matchLabels": {"app": "web"}}},
+        "status": {"replicas": 0, "conditions": [{"type": "ReplicaFailure",
+            "status": "True", "reason": "FailedCreate", "message": message}]}})
+}
+
+/// Open explain on a deployment whose condition message is taller than an
+/// 80x24 screen, select that finding, and scroll `rows` rows into it.
+async fn explain_scrolled_into_tall_finding(message: &str, rows: usize) -> (App, Receiver<Msg>) {
+    let root = tall_finding_deployment(message);
+    let (mut app, mut rx, responses, _) = health_report_app("deployments", root.clone());
+    responses.lock().unwrap().insert(
+        "/apis/apps/v1/namespaces/default/deployments/web".into(),
+        (200, root),
+    );
+    app.handle_key(press(KeyCode::Char('X'))).unwrap();
+    receive_health_report(&mut app, &mut rx, false).await;
+    let tall = app
+        .explain_items
+        .iter()
+        .position(|f| f.text.contains(message.trim()))
+        .unwrap();
+    app.handle_key(press(KeyCode::Char('g'))).unwrap();
+    while app.explain_state.selected() != Some(tall) {
+        screen_text(&mut app, 80, 24);
+        app.handle_key(press(KeyCode::Char('j'))).unwrap();
+    }
+    for _ in 0..rows {
+        screen_text(&mut app, 80, 24);
+        app.handle_key(press(KeyCode::Char('j'))).unwrap();
+    }
+    assert_eq!(app.explain_state.selected(), Some(tall));
+    (app, rx)
+}
+
+#[tokio::test]
+async fn the_scrollbar_follows_scrolling_inside_a_tall_finding() {
+    let message = "admission webhook denied the request ".repeat(80);
+    let (mut app, _rx) = explain_scrolled_into_tall_finding(&message, 1).await;
+    let thumb_rows = |app: &mut App| -> Vec<u16> {
+        use ratatui::{Terminal, backend::TestBackend};
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal.draw(|f| crate::ui::draw(f, app)).unwrap();
+        let buffer = terminal.backend().buffer();
+        (0..24)
+            .filter(|&y| {
+                buffer[(79, y)].symbol() == "│" && buffer[(79, y)].fg == crate::theme::text()
+            })
+            .collect()
+    };
+    let near_top = thumb_rows(&mut app);
+    assert!(!near_top.is_empty(), "the hidden rows show a scrollbar");
+    for _ in 0..15 {
+        app.handle_key(press(KeyCode::Char('j'))).unwrap();
+        thumb_rows(&mut app);
+    }
+    let further_down = thumb_rows(&mut app);
+    assert!(
+        further_down[0] > near_top[0],
+        "the thumb moves with the rows"
+    );
+}
+
+#[tokio::test]
+async fn a_new_report_at_the_scrolled_position_shows_its_finding_from_the_top() {
+    let (mut app, _rx) = test_app();
+    app.switch_kind("deployments");
+    apply(&mut app, tall_finding_deployment("short"));
+    app.handle_key(press(KeyCode::Home)).unwrap();
+    let report = |app: &mut App, text: String| {
+        app.handle_msg(Msg::Explain {
+            generation: app.generation,
+            claim: current_claim(app),
+            title: app.explain_title.clone(),
+            request: app.explain_request,
+            source: None,
+            findings: vec![crate::explain::Finding {
+                indent: 0,
+                level: crate::explain::Level::Critical,
+                text,
+                target: None,
+            }],
+        });
+    };
+    let body = "admission webhook denied the request ".repeat(80);
+
+    app.handle_key(press(KeyCode::Char('X'))).unwrap();
+    report(&mut app, format!("OLDHEAD {body}"));
+    screen_text(&mut app, 80, 24);
+    for _ in 0..10 {
+        app.handle_key(press(KeyCode::Char('j'))).unwrap();
+        screen_text(&mut app, 80, 24);
+    }
+    assert!(!screen_text(&mut app, 80, 24).contains("OLDHEAD"));
+
+    app.handle_key(press(KeyCode::Char('r'))).unwrap();
+    report(&mut app, format!("NEWHEAD {body}"));
+    assert_eq!(app.explain_state.selected(), Some(0));
+    assert!(
+        screen_text(&mut app, 80, 24).contains("NEWHEAD"),
+        "a different finding at the same position starts at its first row"
+    );
+}
+
 #[tokio::test]
 async fn w_toggles_wrap_in_the_gitops_and_argocd_views() {
     let (mut app, _rx) = test_app();
