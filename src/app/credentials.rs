@@ -141,19 +141,14 @@ impl App {
     }
 
     /// A watch `error` with the failed renewal's message after it, when the
-    /// credentials explain the failure: the server refused them, or the
-    /// certificate has expired. Other failures, such as an outage or a
-    /// forbidden resource, stay as they are.
+    /// server refused the credentials. Other failures, such as an outage or
+    /// a forbidden resource, stay as they are.
     pub(super) fn credential_error_for(
         &self,
         error: &str,
         credentials_refused: bool,
     ) -> Option<String> {
-        let expired = self
-            .cluster
-            .credential_expiry()
-            .is_some_and(|expiry| Timestamp::now() >= expiry);
-        if !credentials_refused && !expired {
+        if !credentials_refused {
             return None;
         }
         let hint = self.credential_error.as_ref()?;

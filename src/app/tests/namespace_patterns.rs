@@ -545,3 +545,31 @@ async fn waking_reuses_resolved_namespaces_without_moving_the_selection() {
     assert_eq!(app.history.len(), history);
     assert_eq!(app.table_state.selected(), Some(1));
 }
+
+#[tokio::test]
+async fn credentials_refused_in_a_pattern_view_renew_until_every_namespace_recovers() {
+    use k8s_openapi::jiff::Timestamp;
+    let (mut app, _rx) = pattern_app();
+    super::credentials::give_exec_certificate(&mut app, super::credentials::fresh());
+    type_resource_query(&mut app, "pods");
+    type_resource_query(&mut app, "ns *-crons");
+    resolve(&mut app, &["a-crons", "b-crons"]);
+    let generation = app.generation;
+    for ns in ["a-crons", "b-crons"] {
+        watch(
+            &mut app,
+            ns,
+            Msg::WatchError {
+                generation,
+                error: "ApiError: Unauthorized".into(),
+                credentials_refused: true,
+            },
+        );
+    }
+    watch(&mut app, "b-crons", Msg::WatchRecovered { generation });
+    assert!(app.credential_rejected, "a-crons is still refused");
+
+    watch(&mut app, "a-crons", Msg::WatchRecovered { generation });
+    app.renew_credentials_at(Timestamp::now());
+    assert!(app.credential_attempt.is_none());
+}

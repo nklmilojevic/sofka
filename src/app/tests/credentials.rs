@@ -11,7 +11,7 @@ fn expiry() -> Timestamp {
 }
 
 /// The expiry of a freshly issued certificate.
-fn fresh() -> Timestamp {
+pub(super) fn fresh() -> Timestamp {
     Timestamp::now() + SignedDuration::from_hours(2)
 }
 
@@ -41,6 +41,13 @@ fn app_with_exec_certificate() -> (App, Receiver<Msg>) {
 
 fn app_with_exec_certificate_until(valid_until: Timestamp) -> (App, Receiver<Msg>) {
     let (mut app, rx) = app_with_pod();
+    give_exec_certificate(&mut app, valid_until);
+    (app, rx)
+}
+
+/// Connect `app` through an exec plugin whose certificate expires at
+/// `valid_until`, and which now fails as an expired login does.
+pub(super) fn give_exec_certificate(app: &mut App, valid_until: Timestamp) {
     app.cluster.client = client_until(valid_until);
     let mut config = kube::Config::new("https://127.0.0.1:6443".parse().unwrap());
     config.auth_info.exec = Some(
@@ -53,7 +60,6 @@ fn app_with_exec_certificate_until(valid_until: Timestamp) -> (App, Receiver<Msg
         .unwrap(),
     );
     app.cluster.keep_credential_source(config, INSTALLED);
-    (app, rx)
 }
 
 async fn renewal_result(rx: &mut Receiver<Msg>) -> Msg {
@@ -200,7 +206,7 @@ async fn the_same_certificate_again_keeps_the_watch_and_retries_later() {
 }
 
 #[tokio::test]
-async fn a_failed_renewal_explains_refused_and_expired_requests_and_retries_later() {
+async fn a_failed_renewal_explains_refused_requests_and_retries_later() {
     let (mut app, mut rx) = app_with_exec_certificate();
     fail_renewal(&mut app, &mut rx, expiry()).await;
     assert!(app.flash_err);
@@ -211,8 +217,9 @@ async fn a_failed_renewal_explains_refused_and_expired_requests_and_retries_late
         app.flash
     );
 
-    // The certificate has expired: a request that got no answer is its doing.
-    watch_error(&mut app, SEND_REQUEST);
+    // A certificate the server refused explains the failure; a missing
+    // permission or an outage does not, even after expiry.
+    refused(&mut app, SEND_REQUEST);
     assert!(
         app.flash
             .starts_with(&format!("watch failed; retrying: {SEND_REQUEST}; ")),
@@ -223,10 +230,10 @@ async fn a_failed_renewal_explains_refused_and_expired_requests_and_retries_late
     watch_error(&mut app, "ApiError: pods is forbidden: Forbidden");
     assert_eq!(
         app.flash,
-        "watch failed; retrying: ApiError: pods is forbidden: Forbidden; credential renewal \
-         failed: Authentication command failed. Log in with your credential provider, then \
-         retry."
+        "watch failed; retrying: ApiError: pods is forbidden: Forbidden"
     );
+    watch_error(&mut app, SEND_REQUEST);
+    assert_eq!(app.flash, format!("watch failed; retrying: {SEND_REQUEST}"));
 
     app.renew_credentials_at(expiry() + SignedDuration::from_secs(10));
     assert!(app.credential_attempt.is_none(), "retries wait");
@@ -256,7 +263,7 @@ async fn an_expired_certificate_from_the_plugin_keeps_the_login_hint() {
     app.handle_msg(renewed(&app, expiry(), INSTALLED));
 
     assert_eq!(app.generation, generation);
-    watch_error(&mut app, SEND_REQUEST);
+    refused(&mut app, SEND_REQUEST);
     assert!(
         app.flash.contains("Authentication command failed"),
         "{}",
@@ -273,7 +280,7 @@ async fn an_expired_certificate_is_never_installed() {
     app.handle_msg(renewed(&app, expiry(), RENEWED));
 
     assert_eq!(app.generation, generation);
-    watch_error(&mut app, SEND_REQUEST);
+    refused(&mut app, SEND_REQUEST);
     assert!(
         app.flash
             .contains("The client certificate has expired. Log in"),
@@ -323,7 +330,7 @@ async fn a_recovered_watch_forgets_the_failed_renewal() {
     fail_renewal(&mut app, &mut rx, expiry()).await;
     recovered(&mut app);
 
-    watch_error(&mut app, SEND_REQUEST);
+    refused(&mut app, SEND_REQUEST);
     assert_eq!(app.flash, format!("watch failed; retrying: {SEND_REQUEST}"));
 }
 

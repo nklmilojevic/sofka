@@ -1098,6 +1098,10 @@ impl App {
                 }
                 Msg::WatchRecovered { .. } => {
                     self.namespace_errors.remove(&namespace);
+                    // Credentials that work for every namespace again are fine.
+                    if self.namespace_errors.is_empty() {
+                        self.note_watch_recovered();
+                    }
                     if self.clear_watch_error_flash()
                         && let Some((namespace, error)) = self
                             .namespace_errors
