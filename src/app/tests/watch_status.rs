@@ -86,69 +86,175 @@ async fn changing_resources_clears_only_the_old_watch_error() {
 }
 
 #[tokio::test]
-async fn watch_status_recovers_after_start_and_body_failures() {
+async fn watch_status_recovers_after_a_start_failure() {
+    let (client, attempts) = scripted_watch_client(|attempt| match attempt {
+        0 => Answer::Refuse,
+        _ => Answer::Open { bookmark: true },
+    });
+    let (mut app, mut rx) = test_app();
+    app.cluster.client = client;
+    type_resource_query(&mut app, "pods");
+    tokio::time::timeout(Duration::from_secs(5), async {
+        let mut failed = false;
+        loop {
+            let msg = rx.recv().await.unwrap();
+            let recovered = matches!(msg, Msg::WatchRecovered { .. });
+            if matches!(msg, Msg::WatchError { .. }) {
+                failed = true;
+            }
+            app.handle_msg(msg);
+            if recovered && failed {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("watch did not recover");
+    assert!(app.flash.is_empty(), "{}", app.flash);
+    assert!(!app.flash_err);
+    assert_eq!(app.watch_errors, 1);
+    assert_eq!(attempts.load(Ordering::SeqCst), 2);
+    app.handle_key(press(KeyCode::Char('q'))).unwrap();
+}
+
+/// How the scripted API server answers one pods watch request.
+enum Answer {
+    /// The connection fails before any response.
+    Refuse,
+    /// The stream stays open, after the streaming list's end bookmark.
+    Open { bookmark: bool },
+    /// The connection drops mid-stream, after the end bookmark.
+    Cut { bookmark: bool },
+}
+
+/// A pods watch whose `n`th request (from 0) is answered per `script`.
+fn scripted_watch_client(
+    script: fn(usize) -> Answer,
+) -> (kube::Client, Arc<std::sync::atomic::AtomicUsize>) {
     use futures_util::stream;
     use hyper::body::{Bytes, Frame};
     use std::sync::atomic::AtomicUsize;
 
-    for fail_start in [true, false] {
-        let attempts = Arc::new(AtomicUsize::new(0));
-        let seen = Arc::clone(&attempts);
-        let service = tower::service_fn(move |request: http::Request<kube::client::Body>| {
-            let watch = request.uri().path().ends_with("/pods")
-                && request
-                    .uri()
-                    .query()
-                    .is_some_and(|q| q.contains("watch=true"));
-            let attempt = watch.then(|| seen.fetch_add(1, Ordering::SeqCst));
-            async move {
-                let disconnected = || std::io::Error::from(std::io::ErrorKind::ConnectionReset);
-                if fail_start && attempt == Some(0) {
-                    return Err(kube::Error::Service(disconnected().into()));
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let seen = Arc::clone(&attempts);
+    let service = tower::service_fn(move |request: http::Request<kube::client::Body>| {
+        let watch = request.uri().path().ends_with("/pods")
+            && request
+                .uri()
+                .query()
+                .is_some_and(|q| q.contains("watch=true"));
+        let attempt = watch.then(|| seen.fetch_add(1, Ordering::SeqCst));
+        async move {
+            let Some(attempt) = attempt else {
+                let body = stream::iter([Ok::<_, std::io::Error>(Frame::data(
+                    Bytes::from_static(b"{}"),
+                ))]);
+                return Ok::<_, kube::Error>(http::Response::new(http_body_util::StreamBody::new(
+                    body.boxed(),
+                )));
+            };
+            let (bookmark, cut) = match script(attempt) {
+                Answer::Refuse => {
+                    let refused = std::io::Error::from(std::io::ErrorKind::ConnectionReset);
+                    return Err(kube::Error::Service(refused.into()));
                 }
-                let bookmark = concat!(
-                    "{\"type\":\"BOOKMARK\",\"object\":{\"apiVersion\":\"v1\",\"kind\":\"Pod\",",
-                    "\"metadata\":{\"resourceVersion\":\"10\",\"annotations\":",
-                    "{\"k8s.io/initial-events-end\":\"true\"}}}}\n"
-                );
-                let mut frames = Vec::new();
-                if attempt == Some(0) || (fail_start && attempt == Some(1)) {
-                    frames.push(Ok(Frame::data(Bytes::from_static(bookmark.as_bytes()))));
-                }
-                let frames = if !fail_start && attempt == Some(0) {
-                    frames.push(Err(disconnected()));
-                    stream::iter(frames).boxed()
-                } else if watch {
-                    stream::iter(frames).chain(stream::pending()).boxed()
-                } else {
-                    stream::iter([Ok(Frame::data(Bytes::from_static(b"{}")))]).boxed()
-                };
-                Ok(http::Response::new(http_body_util::StreamBody::new(frames)))
+                Answer::Open { bookmark } => (bookmark, false),
+                Answer::Cut { bookmark } => (bookmark, true),
+            };
+            let mut frames = Vec::new();
+            if bookmark {
+                frames.push(Ok(Frame::data(Bytes::from_static(
+                    concat!(
+                        "{\"type\":\"BOOKMARK\",\"object\":{\"apiVersion\":\"v1\",\"kind\":\"Pod\",",
+                        "\"metadata\":{\"resourceVersion\":\"10\",\"annotations\":",
+                        "{\"k8s.io/initial-events-end\":\"true\"}}}}\n"
+                    )
+                    .as_bytes(),
+                ))));
             }
-        });
-        let (mut app, mut rx) = test_app();
-        app.cluster.client = kube::Client::new(service, "default");
-        type_resource_query(&mut app, "pods");
-        tokio::time::timeout(Duration::from_secs(5), async {
-            let mut failed = false;
-            loop {
-                let msg = rx.recv().await.unwrap();
-                let recovered = matches!(msg, Msg::WatchRecovered { .. });
-                if matches!(msg, Msg::WatchError { .. }) {
-                    failed = true;
-                }
-                app.handle_msg(msg);
-                if recovered && failed {
-                    break;
-                }
+            let frames = if cut {
+                frames.push(Err(std::io::Error::from(
+                    std::io::ErrorKind::ConnectionReset,
+                )));
+                stream::iter(frames).boxed()
+            } else {
+                stream::iter(frames).chain(stream::pending()).boxed()
+            };
+            Ok(http::Response::new(http_body_util::StreamBody::new(frames)))
+        }
+    });
+    (kube::Client::new(service, "default"), attempts)
+}
+
+/// A proxy that caps request duration cuts a synced watch mid-stream. The
+/// watch resumes from its resource version, so nothing is missing and there
+/// is nothing to report beyond the reconnect count.
+#[tokio::test]
+async fn a_synced_watch_cut_mid_stream_reconnects_without_an_error() {
+    let (client, attempts) = scripted_watch_client(|attempt| match attempt {
+        0 => Answer::Cut { bookmark: true },
+        _ => Answer::Open { bookmark: false },
+    });
+    let (mut app, mut rx) = test_app();
+    app.cluster.client = client;
+    type_resource_query(&mut app, "pods");
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let msg = rx.recv().await.unwrap();
+            assert!(
+                !matches!(msg, Msg::WatchError { .. }),
+                "unexpected watch error"
+            );
+            app.handle_msg(msg);
+            if app.watch_reconnects == 1 && attempts.load(Ordering::SeqCst) == 2 {
+                break;
             }
-        })
-        .await
-        .expect("watch did not recover");
-        assert!(app.flash.is_empty(), "{}", app.flash);
-        assert!(!app.flash_err);
-        assert_eq!(app.watch_errors, 1);
-        assert_eq!(attempts.load(Ordering::SeqCst), 2);
-        app.handle_key(press(KeyCode::Char('q'))).unwrap();
-    }
+        }
+    })
+    .await
+    .expect("watch did not reconnect");
+    assert!(!app.flash.contains("watch failed"), "{}", app.flash);
+    assert!(!app.flash_err);
+    assert_eq!(app.watch_errors, 0);
+    assert!(app.store.synced);
+    app.handle_key(press(KeyCode::Char('q'))).unwrap();
+}
+
+/// A connection that drops again right after reconnecting is a real problem,
+/// not a request-duration cap, and stays visible.
+#[tokio::test]
+async fn a_watch_cut_again_right_after_reconnecting_reports_the_error() {
+    let (client, _attempts) = scripted_watch_client(|attempt| match attempt {
+        0 => Answer::Cut { bookmark: true },
+        1 => Answer::Cut { bookmark: false },
+        _ => Answer::Open { bookmark: false },
+    });
+    let (mut app, mut rx) = test_app();
+    app.cluster.client = client;
+    type_resource_query(&mut app, "pods");
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let msg = rx.recv().await.unwrap();
+            let failed = matches!(msg, Msg::WatchError { .. });
+            app.handle_msg(msg);
+            if failed {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("the repeated cut was not reported");
+    assert!(
+        app.flash.starts_with("watch failed; retrying: "),
+        "{}",
+        app.flash
+    );
+    assert!(
+        app.flash.contains("Error reading events stream"),
+        "{}",
+        app.flash
+    );
+    assert_eq!(app.watch_reconnects, 1);
+    assert_eq!(app.watch_errors, 1);
+    app.handle_key(press(KeyCode::Char('q'))).unwrap();
 }

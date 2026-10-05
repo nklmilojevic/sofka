@@ -329,6 +329,12 @@ and reads each API group separately.
 Kubernetes watch. Sofka retries with increasing delays. The displayed rows can
 be out of date until the watch recovers.
 
+Some proxies and load balancers end every request after a fixed time, which
+cuts long-running watches mid-stream. When a synced watch loses its connection
+this way, sofka resumes it from its last resource version without showing an
+error, so no change is missed. `:info` counts it as a reconnect. If the
+connection drops again within 30 seconds, sofka shows the error.
+
 The message clears when the watch recovers. A new connection is enough for a
 watch that resumes from its last resource version. A streaming list must finish
 its initial data transfer first. If more than one namespace has failed, the

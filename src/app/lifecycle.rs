@@ -1111,6 +1111,9 @@ impl App {
                 }
                 event => self.handle_msg(event),
             },
+            Msg::WatchReconnected { generation } if generation == self.generation => {
+                self.watch_reconnects = self.watch_reconnects.saturating_add(1);
+            }
             Msg::Reset { generation } if generation == self.generation => {
                 // A reset after the view already synced is the watcher healing
                 // a desync by re-listing — the one place a reconnect is

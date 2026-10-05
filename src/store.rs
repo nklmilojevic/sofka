@@ -78,6 +78,10 @@ pub enum Msg {
     WatchRecovered {
         generation: u64,
     },
+    /// A working watch was cut mid-stream and resumed without a gap.
+    WatchReconnected {
+        generation: u64,
+    },
     LogLines {
         generation: u64,
         lines: Vec<String>,

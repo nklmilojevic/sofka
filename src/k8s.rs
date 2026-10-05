@@ -1186,6 +1186,7 @@ fn spawn_watch_task(
 
         let mut backoff = watcher::DefaultBackoff::default();
         let mut failed = false;
+        let mut last_cut: Option<Instant> = None;
         while let Some(event) = stream.next().await {
             if using_streaming
                 && initializing
@@ -1279,6 +1280,20 @@ fn spawn_watch_task(
                     crate::log_debug!("watch.desync", kind = kind, error = e);
                     continue;
                 }
+                // A proxy or load balancer that caps request duration cuts
+                // long watches mid-stream. The watcher resumes from the last
+                // resource version, so nothing is missed: reconnect without an
+                // error, unless the connection keeps dropping.
+                Err(e)
+                    if !initializing
+                        && !failed
+                        && watch_stream_cut(&e)
+                        && last_cut.is_none_or(|at| at.elapsed() >= QUIET_RECONNECT_INTERVAL) =>
+                {
+                    last_cut = Some(Instant::now());
+                    crate::log_info!("watch.reconnect", kind = kind, error = e);
+                    Msg::WatchReconnected { generation }
+                }
                 Err(e) => {
                     crate::log_warn!("watch.error", kind = kind, error = e);
                     failed = true;
@@ -1301,6 +1316,18 @@ fn spawn_watch_task(
             }
         }
     })
+}
+
+/// How long a watch must stay connected for a cut to count as routine.
+const QUIET_RECONNECT_INTERVAL: Duration = Duration::from_secs(30);
+
+/// Whether an established watch lost its connection while reading events,
+/// as opposed to failing to start or the server reporting an error.
+fn watch_stream_cut(error: &watcher::Error) -> bool {
+    matches!(
+        error,
+        watcher::Error::WatchFailed(kube::Error::ReadEvents(_))
+    )
 }
 
 /// Higher wins when two API groups expose the same bare plural/kind (e.g.
