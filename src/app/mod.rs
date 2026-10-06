@@ -318,6 +318,13 @@ enum ConfirmAction {
     /// Edit a Flux-managed object (`kubectl edit`) after warning that the edit
     /// will be reverted on the next reconcile.
     Edit { argv: Vec<String> },
+    /// Patch the keys changed in the decoded Secret editor.
+    SecretEdit {
+        kind: Kind,
+        name: String,
+        ns: String,
+        patch: Value,
+    },
     /// Shell into a pod, once a guardrail confirmation is satisfied.
     Exec { ns: String, name: String },
     /// Copy a file between a pod and the local filesystem (`kubectl cp`),
@@ -2015,6 +2022,7 @@ pub struct App {
     document_reload_task: Option<JoinHandle<()>>,
     document_edit_task: Option<JoinHandle<()>>,
     document_edit_request: u64,
+    secret_edit: Option<secret_edit::SecretEdit>,
     reload_after_suspend: bool,
     pub(super) refresh_generation: u64,
     document_source: Option<refresh::RefreshSource>,
@@ -2531,6 +2539,7 @@ impl App {
             document_reload_task: None,
             document_edit_task: None,
             document_edit_request: 0,
+            secret_edit: None,
             reload_after_suspend: false,
             refresh_generation: 0,
             document_source: None,
@@ -2792,6 +2801,14 @@ impl App {
             && matches!(self.prompt_kind, Some(PromptKind::GuardConfirm { .. }))
     }
 
+    /// Whether the active prompt is a guardrail confirmation raised from a
+    /// document view (the decoded Secret editor), so the document stays.
+    pub fn prompt_over_document(&self) -> bool {
+        self.confirm_return == Mode::Detail
+            && self.document_source.is_some()
+            && matches!(self.prompt_kind, Some(PromptKind::GuardConfirm { .. }))
+    }
+
     /// Whether the logs view is showing the external log provider (enables
     /// provider-only keys like `T`).
     pub fn provider_logs_active(&self) -> bool {
@@ -2839,6 +2856,7 @@ mod refresh;
 mod resume;
 mod rightsize;
 mod rows;
+mod secret_edit;
 mod snapshot;
 mod timeline;
 mod transfer;

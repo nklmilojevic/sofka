@@ -252,6 +252,7 @@ fn draw_base(frame: &mut Frame, app: &mut App) {
         Mode::DocFilter => app.doc_filter_return,
         Mode::Command => app.palette_return,
         Mode::Confirm if app.confirm_over_document() => Mode::Detail,
+        Mode::Prompt if app.prompt_over_document() => Mode::Detail,
         mode => mode,
     };
     if app.document_fullscreen && matches!(document_mode, Mode::Detail | Mode::Diff | Mode::Events)
@@ -285,6 +286,9 @@ fn draw_base(frame: &mut Frame, app: &mut App) {
         }
         if app.mode == Mode::Confirm {
             draw_confirm(frame, app, chunks[0]);
+        }
+        if app.mode == Mode::Prompt {
+            draw_prompt_popup(frame, app, chunks[0]);
         }
         if needs_prompt {
             draw_prompt(frame, app, chunks[1]);
@@ -389,9 +393,17 @@ fn draw_base(frame: &mut Frame, app: &mut App) {
         Mode::Confirm | Mode::Prompt if app.over_pvc_browser() => {
             draw_pvc_explore(frame, app, chunks[1])
         }
-        // The Flux warning for `e` in a document view keeps the document
-        // underneath, like the view it returns to.
+        // The Flux warning for `e` in a document view, and the decoded Secret
+        // update, keep the document underneath, like the view they return to.
         Mode::Confirm if app.confirm_over_document() => draw_scrollable(
+            frame,
+            show_scrollbars,
+            false,
+            &mut app.detail,
+            chunks[1],
+            theme::sky(),
+        ),
+        Mode::Prompt if app.prompt_over_document() => draw_scrollable(
             frame,
             show_scrollbars,
             false,
@@ -2780,7 +2792,7 @@ fn build_help(app: &App, width: usize) -> (Vec<Line<'static>>, String) {
         } else if action == Action::Fullscreen {
             "toggle fullscreen for text selection (no borders or scrollbars)"
         } else if action == Action::Edit && scope == "detail" {
-            "edit the displayed resource in $EDITOR (YAML and describe)"
+            "edit the displayed resource in $EDITOR (YAML, describe, decoded Secret)"
         } else if action == Action::ManagedFields && scope == "detail" {
             "show or hide managedFields (YAML only; hidden when a document opens)"
         } else if action == Action::AutoRefresh && scope == "detail" {

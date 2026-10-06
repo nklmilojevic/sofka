@@ -1,0 +1,607 @@
+//! `e` in the decoded Secret view: edit the values as plain text.
+//!
+//! The text keys of `data` go to `$EDITOR` as a `stringData` document in a
+//! private temp file. When the editor closes, the result is compared with what
+//! was written, and only the keys that changed are patched back, base64
+//! encoded. The patch carries the `resourceVersion` that was read, so a Secret
+//! that changed in the meantime is refused instead of overwritten.
+
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::{Path, PathBuf};
+
+use base64::Engine;
+use base64::engine::general_purpose::STANDARD as BASE64;
+
+use super::*;
+
+const HEADER: &str = "\
+# Values are plain text and are base64-encoded on save. Only changed keys
+# are patched. Delete a key to remove it. Save the file unchanged to cancel.
+";
+
+/// A decoded Secret open in the editor.
+pub(super) struct SecretEdit {
+    dir: PathBuf,
+    path: PathBuf,
+    kind: Kind,
+    object: DynamicObject,
+    original: BTreeMap<String, String>,
+    binary: BTreeSet<String>,
+    written: String,
+}
+
+impl Drop for SecretEdit {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
+
+/// What an edit changes, by key name. Never holds values.
+#[derive(Debug, Default, PartialEq)]
+pub(super) struct SecretChanges {
+    pub changed: Vec<String>,
+    pub added: Vec<String>,
+    pub removed: Vec<String>,
+}
+
+impl SecretChanges {
+    fn is_empty(&self) -> bool {
+        self.changed.is_empty() && self.added.is_empty() && self.removed.is_empty()
+    }
+
+    fn summary(&self) -> String {
+        [
+            ("change", &self.changed),
+            ("add", &self.added),
+            ("remove", &self.removed),
+        ]
+        .into_iter()
+        .filter(|(_, keys)| !keys.is_empty())
+        .map(|(verb, keys)| format!("{verb} {}", keys.join(", ")))
+        .collect::<Vec<_>>()
+        .join(" · ")
+    }
+}
+
+/// Split a Secret's `data` into values that decode to text, which can be
+/// edited, and the names of those that do not, which are left alone.
+pub(super) fn split_secret_data(
+    obj: &DynamicObject,
+) -> (BTreeMap<String, String>, BTreeSet<String>) {
+    let mut text = BTreeMap::new();
+    let mut binary = BTreeSet::new();
+    let data = obj.data.get("data").and_then(Value::as_object);
+    for (key, value) in data.into_iter().flatten() {
+        let decoded = value
+            .as_str()
+            .and_then(|b64| BASE64.decode(b64).ok())
+            .and_then(|bytes| String::from_utf8(bytes).ok());
+        match decoded {
+            Some(value) => {
+                text.insert(key.clone(), value);
+            }
+            None => {
+                binary.insert(key.clone());
+            }
+        }
+    }
+    (text, binary)
+}
+
+/// The document written to the editor.
+pub(super) fn secret_edit_document(
+    original: &BTreeMap<String, String>,
+    binary: &BTreeSet<String>,
+) -> Result<String, String> {
+    let mut doc = String::from(HEADER);
+    if !binary.is_empty() {
+        let keys = binary.iter().cloned().collect::<Vec<_>>().join(", ");
+        doc.push_str(&format!("# Not text, not shown, left unchanged: {keys}\n"));
+    }
+    doc.push_str(
+        &serde_yaml::to_string(&BTreeMap::from([("stringData", original)]))
+            .map_err(|e| e.to_string())?,
+    );
+    Ok(doc)
+}
+
+/// Whether `key` is a valid Secret data key.
+fn valid_key(key: &str) -> bool {
+    !key.is_empty()
+        && key.len() <= 253
+        && key
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'))
+}
+
+/// Read the edited document back. Every value has to be a YAML string, so a
+/// bare `8080` or `true` is refused rather than silently stringified.
+pub(super) fn parse_secret_edit(text: &str) -> Result<BTreeMap<String, String>, String> {
+    let doc: serde_yaml::Value = serde_yaml::from_str(text).map_err(|e| e.to_string())?;
+    let root = match doc {
+        serde_yaml::Value::Mapping(root) => root,
+        serde_yaml::Value::Null => return Err("the document is empty".into()),
+        _ => return Err("expected a stringData mapping".into()),
+    };
+    let mut values = BTreeMap::new();
+    for (field, entries) in root {
+        if field.as_str() != Some("stringData") {
+            return Err(format!(
+                "unexpected field {}: only stringData can be edited here",
+                serde_yaml::to_string(&field).unwrap_or_default().trim_end()
+            ));
+        }
+        let entries = match entries {
+            serde_yaml::Value::Mapping(entries) => entries,
+            serde_yaml::Value::Null => continue,
+            _ => return Err("stringData must be a mapping of keys to values".into()),
+        };
+        for (key, value) in entries {
+            let Some(key) = key.as_str() else {
+                return Err("every key must be a string".into());
+            };
+            if !valid_key(key) {
+                return Err(format!(
+                    "invalid key '{key}': use letters, digits, '-', '_' or '.'"
+                ));
+            }
+            let Some(value) = value.as_str() else {
+                return Err(format!("the value of '{key}' must be a string; quote it"));
+            };
+            values.insert(key.to_string(), value.to_string());
+        }
+    }
+    Ok(values)
+}
+
+pub(super) fn secret_changes(
+    original: &BTreeMap<String, String>,
+    binary: &BTreeSet<String>,
+    edited: &BTreeMap<String, String>,
+) -> SecretChanges {
+    let mut changes = SecretChanges::default();
+    for (key, value) in edited {
+        match original.get(key) {
+            Some(old) if old == value => {}
+            Some(_) => changes.changed.push(key.clone()),
+            None if binary.contains(key) => changes.changed.push(key.clone()),
+            None => changes.added.push(key.clone()),
+        }
+    }
+    changes.removed = original
+        .keys()
+        .filter(|key| !edited.contains_key(*key))
+        .cloned()
+        .collect();
+    changes
+}
+
+/// A merge patch for exactly the changed keys, pinned to `resource_version`
+/// when there is one.
+pub(super) fn secret_patch(
+    changes: &SecretChanges,
+    edited: &BTreeMap<String, String>,
+    resource_version: &str,
+) -> Value {
+    let mut data = serde_json::Map::new();
+    for key in changes.changed.iter().chain(&changes.added) {
+        data.insert(key.clone(), json!(BASE64.encode(&edited[key])));
+    }
+    for key in &changes.removed {
+        data.insert(key.clone(), Value::Null);
+    }
+    let mut patch = json!({"data": data});
+    if !resource_version.is_empty() {
+        patch["metadata"] = json!({"resourceVersion": resource_version});
+    }
+    patch
+}
+
+/// The command that opens `path` in the user's editor: `KUBE_EDITOR`, then
+/// `EDITOR`, like `kubectl edit`.
+pub(super) fn editor_argv(editor: Option<String>, path: &Path) -> Vec<String> {
+    let path = path.to_string_lossy().into_owned();
+    #[cfg(unix)]
+    {
+        // Through the shell, so `code --wait` and quoted paths work.
+        let editor = editor.unwrap_or_else(|| "vi".into());
+        vec![
+            "sh".into(),
+            "-c".into(),
+            format!("{editor} \"$1\""),
+            "sofka-editor".into(),
+            path,
+        ]
+    }
+    #[cfg(not(unix))]
+    {
+        let editor = editor.unwrap_or_else(|| "notepad".into());
+        let mut argv: Vec<String> = editor.split_whitespace().map(String::from).collect();
+        argv.push(path);
+        argv
+    }
+}
+
+fn configured_editor() -> Option<String> {
+    ["KUBE_EDITOR", "EDITOR"]
+        .into_iter()
+        .filter_map(|name| std::env::var(name).ok())
+        .find(|value| !value.trim().is_empty())
+}
+
+/// Create a directory only this user can read, holding one file with
+/// `contents`.
+fn private_file(name: &str, contents: &str) -> std::io::Result<(PathBuf, PathBuf)> {
+    use std::io::Write as _;
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.subsec_nanos())
+        .unwrap_or_default();
+    let dir = std::env::temp_dir().join(format!(
+        "sofka-secret-{}-{nanos}-{}",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    ));
+    let mut builder = std::fs::DirBuilder::new();
+    #[cfg(unix)]
+    std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
+    builder.create(&dir)?;
+    let path = dir.join(format!("{name}.yaml"));
+    let written = (|| {
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+        let mut file = options.open(&path)?;
+        file.write_all(contents.as_bytes())?;
+        file.sync_all()
+    })();
+    if let Err(e) = written {
+        let _ = std::fs::remove_dir_all(&dir);
+        return Err(e);
+    }
+    Ok((dir, path))
+}
+
+impl App {
+    /// Open the fresh copy of the displayed Secret in the editor.
+    pub(super) fn edit_decoded_secret(&mut self, fresh: DynamicObject) {
+        let Some(kind) = self.document_source.as_ref().map(|s| s.kind.clone()) else {
+            return;
+        };
+        if fresh.data.get("immutable").and_then(Value::as_bool) == Some(true) {
+            self.flash_warn("secret is immutable — it cannot be edited");
+            return;
+        }
+        let name = fresh.metadata.name.clone().unwrap_or_default();
+        let ns = fresh.metadata.namespace.clone().unwrap_or_default();
+        if self
+            .guard(
+                "secret-edit",
+                "secrets",
+                &[(name.clone(), ns)],
+                ConfirmLevel::Plain,
+            )
+            .is_none()
+        {
+            return;
+        }
+        let (original, binary) = split_secret_data(&fresh);
+        let written = match secret_edit_document(&original, &binary) {
+            Ok(doc) => doc,
+            Err(e) => {
+                self.flash_warn(&format!("cannot edit: {e}"));
+                return;
+            }
+        };
+        let (dir, path) = match private_file(&name, &written) {
+            Ok(paths) => paths,
+            Err(e) => {
+                self.flash_warn(&format!("cannot edit: temp file: {e}"));
+                return;
+            }
+        };
+        self.pending = Some(Suspend::Shell(editor_argv(configured_editor(), &path)));
+        self.secret_edit = Some(SecretEdit {
+            dir,
+            path,
+            kind,
+            object: fresh,
+            original,
+            binary,
+            written,
+        });
+    }
+
+    /// The editor closed: read the result, delete the file, and confirm the
+    /// patch. A document that does not parse goes back to the editor with
+    /// the error on top, like `kubectl edit`.
+    pub(super) fn finish_secret_edit(&mut self) {
+        let Some(edit) = self.secret_edit.take() else {
+            return;
+        };
+        if self.command_failure.is_some() {
+            self.flash_warn("editor failed — secret not changed");
+            return;
+        }
+        let text = std::fs::read_to_string(&edit.path);
+        let _ = std::fs::remove_file(&edit.path);
+        let text = match text {
+            Ok(text) => text,
+            Err(e) => {
+                self.flash_warn(&format!("secret not changed: {e}"));
+                return;
+            }
+        };
+        if text == edit.written {
+            self.set_flash("secret not changed");
+            return;
+        }
+        let edited = match parse_secret_edit(&text) {
+            Ok(edited) => edited,
+            Err(error) => {
+                self.reopen_secret_edit(edit, &text, &error);
+                return;
+            }
+        };
+        let changes = secret_changes(&edit.original, &edit.binary, &edited);
+        if changes.is_empty() {
+            self.set_flash("secret not changed");
+            return;
+        }
+        let name = edit.object.metadata.name.clone().unwrap_or_default();
+        let ns = edit.object.metadata.namespace.clone().unwrap_or_default();
+        let rv = edit
+            .object
+            .metadata
+            .resource_version
+            .clone()
+            .unwrap_or_default();
+        let patch = secret_patch(&changes, &edited, &rv);
+        let summary = changes.summary();
+        let Some(level) = self.guard(
+            "secret-edit",
+            "secrets",
+            &[(name.clone(), ns.clone())],
+            ConfirmLevel::Plain,
+        ) else {
+            return;
+        };
+        let where_ns = if ns.is_empty() {
+            String::new()
+        } else {
+            format!(" in {ns}")
+        };
+        let managed = managed_by(&edit.object)
+            .map(|owner| format!("  ⚠ Managed by {owner} — it may overwrite this change."))
+            .unwrap_or_default();
+        let kind = edit.kind.clone();
+        self.begin_guarded(
+            ConfirmAction::SecretEdit {
+                kind,
+                name: name.clone(),
+                ns,
+                patch,
+            },
+            format!("Update secret {name}{where_ns}: {summary}?{managed}"),
+            level,
+            name,
+        );
+        if matches!(self.mode, Mode::Confirm | Mode::Prompt) {
+            self.confirm_return = Mode::Detail;
+        }
+    }
+
+    fn reopen_secret_edit(&mut self, mut edit: SecretEdit, text: &str, error: &str) {
+        let kept: String = text
+            .lines()
+            .skip_while(|line| line.starts_with("# error:"))
+            .map(|line| format!("{line}\n"))
+            .collect();
+        let error = error.replace('\n', " ");
+        let written = format!("# error: {error}\n{kept}");
+        let rewrite = (|| {
+            use std::io::Write as _;
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&edit.path)?;
+            file.write_all(written.as_bytes())
+        })();
+        if let Err(e) = rewrite {
+            self.flash_warn(&format!("secret not changed: {e}"));
+            return;
+        }
+        edit.written = written;
+        self.flash_warn(&format!("secret not changed: {error}"));
+        self.pending = Some(Suspend::Shell(editor_argv(configured_editor(), &edit.path)));
+        self.secret_edit = Some(edit);
+    }
+
+    pub(super) fn apply_secret_edit(&mut self, kind: Kind, name: String, ns: String, patch: Value) {
+        if self.deny_readonly() {
+            return;
+        }
+        let label = if ns.is_empty() {
+            name.clone()
+        } else {
+            format!("{name} in {ns}")
+        };
+        self.note_action("secret-edit", label);
+        let claim = self.claim_status(format!("updating secret {name}…"));
+        let client = self.cluster.client.clone();
+        let tx = self.tx.clone();
+        let generation = self.generation;
+        tokio::spawn(async move {
+            let api: Api<DynamicObject> = if kind.namespaced && !ns.is_empty() {
+                Api::namespaced_with(client, &ns, &kind.ar)
+            } else {
+                Api::all_with(client, &kind.ar)
+            };
+            let result = api
+                .patch(&name, &PatchParams::default(), &Patch::Merge(&patch))
+                .await
+                .map(|_| format!("secret {name} updated"))
+                .map_err(|e| match e {
+                    kube::Error::Api(status) if status.code == 409 => format!(
+                        "secret {name} changed since it was read — not updated; press e to edit it again"
+                    ),
+                    e => format!("secret update failed: {e}"),
+                });
+            let _ = tx
+                .send(Msg::SecretEditApplied {
+                    generation,
+                    claim,
+                    result,
+                })
+                .await;
+        });
+    }
+
+    pub(super) fn secret_edit_applied(
+        &mut self,
+        claim: StatusClaim,
+        result: Result<String, String>,
+    ) {
+        match result {
+            Ok(message) => {
+                self.set_claimed_status(claim, message, false);
+                let decoded = self
+                    .document_source
+                    .as_ref()
+                    .is_some_and(|s| matches!(s.view, refresh::RefreshView::DecodedSecret));
+                if decoded {
+                    let flash = (self.flash.clone(), self.flash_err);
+                    self.reload_document();
+                    (self.flash, self.flash_err) = flash;
+                }
+            }
+            Err(message) => self.set_claimed_status(claim, message, true),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn secret(data: Value) -> DynamicObject {
+        serde_json::from_value(json!({
+            "apiVersion": "v1", "kind": "Secret",
+            "metadata": {"name": "creds", "namespace": "default"},
+            "data": data,
+        }))
+        .unwrap()
+    }
+
+    fn b64(s: &[u8]) -> String {
+        BASE64.encode(s)
+    }
+
+    #[test]
+    fn document_round_trips_every_text_value() {
+        let obj = secret(json!({
+            "plain": b64(b"hunter2"),
+            "number": b64(b"8080"),
+            "flag": b64(b"true"),
+            "empty": b64(b""),
+            "multi": b64(b"line one\nline two\n"),
+            "spaced": b64(b"  padded  "),
+            "binary": b64(&[0xff, 0xfe, 0x00]),
+        }));
+        let (original, binary) = split_secret_data(&obj);
+        assert_eq!(binary, BTreeSet::from(["binary".to_string()]));
+        let doc = secret_edit_document(&original, &binary).unwrap();
+        assert!(doc.contains("left unchanged: binary"), "{doc}");
+        assert_eq!(parse_secret_edit(&doc).unwrap(), original);
+        assert!(secret_changes(&original, &binary, &original).is_empty());
+    }
+
+    #[test]
+    fn changes_name_only_the_keys_that_moved() {
+        let original = BTreeMap::from([
+            ("keep".to_string(), "a".to_string()),
+            ("change".to_string(), "b".to_string()),
+            ("drop".to_string(), "c".to_string()),
+        ]);
+        let binary = BTreeSet::from(["cert".to_string()]);
+        let edited = BTreeMap::from([
+            ("keep".to_string(), "a".to_string()),
+            ("change".to_string(), "B".to_string()),
+            ("new".to_string(), "d".to_string()),
+            ("cert".to_string(), "text now".to_string()),
+        ]);
+        let changes = secret_changes(&original, &binary, &edited);
+        assert_eq!(
+            changes,
+            SecretChanges {
+                changed: vec!["cert".into(), "change".into()],
+                added: vec!["new".into()],
+                removed: vec!["drop".into()],
+            }
+        );
+        assert_eq!(
+            changes.summary(),
+            "change cert, change · add new · remove drop"
+        );
+        let patch = secret_patch(&changes, &edited, "42");
+        assert_eq!(
+            patch,
+            json!({
+                "metadata": {"resourceVersion": "42"},
+                "data": {
+                    "cert": b64(b"text now"),
+                    "change": b64(b"B"),
+                    "new": b64(b"d"),
+                    "drop": null,
+                },
+            })
+        );
+    }
+
+    #[test]
+    fn parse_refuses_values_that_are_not_strings() {
+        let err = parse_secret_edit("stringData:\n  port: 8080\n").unwrap_err();
+        assert!(err.contains("'port' must be a string"), "{err}");
+        let err = parse_secret_edit("stringData:\n  empty:\n").unwrap_err();
+        assert!(err.contains("'empty' must be a string"), "{err}");
+        let err = parse_secret_edit("data:\n  a: b\n").unwrap_err();
+        assert!(err.contains("only stringData"), "{err}");
+        let err = parse_secret_edit("stringData:\n  'bad key': x\n").unwrap_err();
+        assert!(err.contains("invalid key"), "{err}");
+        assert!(parse_secret_edit("stringData: [\n").is_err());
+        assert_eq!(
+            parse_secret_edit("# all gone\nstringData: {}\n").unwrap(),
+            BTreeMap::new()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn editor_runs_through_the_shell_with_the_path_as_an_argument() {
+        let argv = editor_argv(Some("code --wait".into()), Path::new("/tmp/a b/creds.yaml"));
+        assert_eq!(
+            argv,
+            [
+                "sh",
+                "-c",
+                "code --wait \"$1\"",
+                "sofka-editor",
+                "/tmp/a b/creds.yaml"
+            ]
+        );
+        assert_eq!(editor_argv(None, Path::new("/x"))[2], "vi \"$1\"");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn temp_file_is_private_to_the_user() {
+        use std::os::unix::fs::PermissionsExt;
+        let (dir, path) = private_file("creds", "stringData: {}\n").unwrap();
+        let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&dir), 0o700);
+        assert_eq!(mode(&path), 0o600);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+}

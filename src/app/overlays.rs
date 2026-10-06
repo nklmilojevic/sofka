@@ -121,6 +121,12 @@ impl App {
                 self.pending = Some(Suspend::Shell(argv));
                 self.reload_after_suspend = self.confirm_over_document();
             }
+            ConfirmAction::SecretEdit {
+                kind,
+                name,
+                ns,
+                patch,
+            } => self.apply_secret_edit(kind, name, ns, patch),
             ConfirmAction::Exec { ns, name } => {
                 self.exec_into(ns, name, None);
             }
@@ -285,6 +291,8 @@ impl App {
                     Mode::Contexts
                 } else if self.prompt_over_pvc() {
                     Mode::PvcExplore
+                } else if self.prompt_over_document() {
+                    Mode::Detail
                 } else {
                     Mode::Table
                 };
@@ -319,6 +327,8 @@ impl App {
                     Mode::Contexts
                 } else if self.prompt_over_pvc() {
                     Mode::PvcExplore
+                } else if self.prompt_over_document() {
+                    Mode::Detail
                 } else {
                     Mode::Table
                 };

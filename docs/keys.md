@@ -211,9 +211,19 @@ In the YAML and describe views, `e` opens the displayed resource in `$EDITOR`
 (`kubectl edit`), even if the table selection moved while the document was open.
 Read-only mode blocks it, and a Flux-managed resource asks for confirmation
 first. sofka reads the resource before opening the editor and refuses if it was
-replaced under the same name. The document is read again when the editor closes. The decoded Secret,
-diff, and events views do not support `e`. Use `keys.detail.edit` to change the
-key binding.
+replaced under the same name. The document is read again when the editor closes. The diff and
+events views do not support `e`. Use `keys.detail.edit` to change the key
+binding.
+
+In the decoded Secret view, `e` opens the text values as `stringData` in
+`$KUBE_EDITOR` or `$EDITOR` (`vi` when neither is set). The file is private to
+your user and is deleted when the editor closes. Values that are not text are
+not shown and stay unchanged. Delete a key to remove it. Save the file unchanged
+to cancel. If the file does not parse, or a value is not a string, the editor
+opens again with the error on top. sofka then asks for confirmation, naming the
+keys it will change, add, or remove, and patches only those keys. The patch
+fails if the Secret changed after `e` read it. An immutable Secret cannot be
+edited. Read-only mode and the `secret-edit` guardrail apply.
 
 In the YAML view, `m` shows or hides `metadata.managedFields`. Fields are hidden
 when a document opens. Showing them reads the full resource from the API. The

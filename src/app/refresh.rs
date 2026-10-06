@@ -206,13 +206,16 @@ impl App {
         }
     }
 
-    /// Whether `e` can edit the open document: YAML and describe only. The
-    /// decoded Secret would open the encoded data in the editor.
+    /// Whether `e` can edit the open document: YAML, describe, and the
+    /// decoded Secret, which edits the values as text.
     pub fn document_editable(&self) -> bool {
         self.document_source.as_ref().is_some_and(|source| {
             matches!(
                 source.view,
-                RefreshView::Yaml { .. } | RefreshView::Describe(_) | RefreshView::NativeDescribe
+                RefreshView::Yaml { .. }
+                    | RefreshView::Describe(_)
+                    | RefreshView::NativeDescribe
+                    | RefreshView::DecodedSecret
             )
         })
     }

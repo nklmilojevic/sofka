@@ -1742,6 +1742,11 @@ impl App {
                 self.document_edit_task = None;
                 self.edit_document_object(result);
             }
+            Msg::SecretEditApplied {
+                generation,
+                claim,
+                result,
+            } if generation == self.generation => self.secret_edit_applied(claim, result),
             Msg::NativeDescribeReady {
                 generation,
                 claim,

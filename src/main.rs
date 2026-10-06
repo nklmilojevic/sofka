@@ -1050,9 +1050,10 @@ fn dispatch(
 /// every path that can queue one — a keystroke, a mouse click, and a background
 /// message (the PVC browser resolves which pod to exec into asynchronously, so
 /// its shell is requested from a message, not from the keystroke that asked
-/// for it).
+/// for it). A command can queue another as it finishes: the decoded Secret
+/// editor reopens on a document that does not parse.
 fn take_suspend(terminal: &mut ratatui::DefaultTerminal, app: &mut App, captured: bool) {
-    if let Some(command) = app.pending.take() {
+    while let Some(command) = app.pending.take() {
         let (argv, recovery) = match command {
             app::Suspend::Shell(argv) => (argv, None),
             app::Suspend::Recovery { argv, failure } => (argv, Some(failure)),

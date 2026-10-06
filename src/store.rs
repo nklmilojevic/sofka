@@ -246,6 +246,12 @@ pub enum Msg {
         request: u64,
         result: Result<Box<DynamicObject>, String>,
     },
+    /// The patch from the decoded Secret editor finished.
+    SecretEditApplied {
+        generation: u64,
+        claim: StatusClaim,
+        result: Result<String, String>,
+    },
     /// Native describe keeps the fresh object for subsequent refresh/decoded views.
     NativeDescribeReady {
         generation: u64,

@@ -976,6 +976,7 @@ impl App {
     /// long; one launched from inside the browser does not, because the browser
     /// is still using it.
     pub fn after_suspend(&mut self) {
+        self.finish_secret_edit();
         if std::mem::take(&mut self.reload_after_suspend) {
             self.reload_document();
         }

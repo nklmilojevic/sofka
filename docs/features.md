@@ -718,6 +718,11 @@ include those conditions. Row filters can search the route paths.
   displayed resource with `kubectl edit`, so a table row that moved while the
   watch was filling cannot change the target. The document is read again when
   the editor closes.
+- **Edit decoded Secrets** - `e` in the decoded Secret view (`x`) opens the
+  values as plain-text `stringData` in `$EDITOR`. sofka compares the result,
+  base64-encodes it, and patches only the keys you changed, added, or removed,
+  after a confirmation that names them. Values that are not text are left
+  unchanged. See [Document views](keys.md#document-views-yaml-describe-diff-events).
 - **Managed fields in YAML** - `m` shows or hides `metadata.managedFields` in the
   YAML view. Fields are hidden when a document opens. Showing them reads the
   full resource from the API. Automatic refresh keeps the current choice.

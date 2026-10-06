@@ -729,6 +729,10 @@ impl App {
         let Some(source) = self.document_source.as_ref() else {
             return;
         };
+        if matches!(source.view, refresh::RefreshView::DecodedSecret) {
+            self.edit_decoded_secret(*fresh);
+            return;
+        }
         let ar = &source.kind.ar;
         let resource = if ar.group.is_empty() {
             ar.plural.clone()
