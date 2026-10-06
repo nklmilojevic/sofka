@@ -16,6 +16,8 @@ use tokio::time::MissedTickBehavior;
 
 const RECONNECT_MIN: Duration = Duration::from_secs(1);
 const RECONNECT_MAX: Duration = Duration::from_secs(15);
+/// Longest wait between checks on a container that has not started.
+const WAITING_MAX: Duration = Duration::from_secs(5);
 /// A stream that stayed open this long was healthy, whatever ended it.
 const HEALTHY_STREAM: Duration = Duration::from_secs(10);
 /// A connection that slept with the laptop can block forever without these.
@@ -109,7 +111,7 @@ pub(super) fn stream_end(
         .and_then(|s| s.phase.as_deref())
         .unwrap_or_default();
     if matches!(phase, "Succeeded" | "Failed") {
-        return StreamEnd::Finished(phase.to_ascii_lowercase());
+        return StreamEnd::Finished(format!("pod {}", phase.to_ascii_lowercase()));
     }
     let Some(status) = container_status(pod, container) else {
         return StreamEnd::Resume;
@@ -122,7 +124,7 @@ pub(super) fn stream_end(
             .as_ref()
             .and_then(|s| s.terminated.as_ref())
             .and_then(|t| t.finished_at.as_ref())
-            .is_some_and(|finished| finished.0.as_second() >= connected_at.as_second()),
+            .is_some_and(|finished| finished.0 >= connected_at),
     };
     *known_restarts = Some(status.restart_count);
     if restarted {
@@ -169,6 +171,19 @@ pub(super) fn identity(
     None
 }
 
+/// A restart since the last count seen. Records the current count.
+pub(super) fn restarted(
+    pod: Option<&Pod>,
+    container: Option<&str>,
+    known_restarts: &mut Option<i32>,
+) -> Option<StreamEnd> {
+    let count = container_status(pod?, container)?.restart_count;
+    let before = known_restarts.replace(count);
+    before
+        .is_some_and(|before| count > before)
+        .then_some(StreamEnd::Restarted(count))
+}
+
 fn container_status<'a>(pod: &'a Pod, container: Option<&str>) -> Option<&'a ContainerStatus> {
     let name = match container {
         Some(name) => name,
@@ -211,6 +226,8 @@ fn not_started(error: &kube::Error) -> bool {
 
 enum PodRead {
     Found(Option<Box<Pod>>),
+    /// The API refuses the read, so the pod can never be checked.
+    Refused,
     Unknown,
     Woke,
     Closed,
@@ -297,6 +314,7 @@ impl LogStream {
         tokio::select! {
             read = tokio::time::timeout(STATUS_TIMEOUT, self.api.get_opt(&self.pod)) => match read {
                 Ok(Ok(pod)) => PodRead::Found(pod.map(Box::new)),
+                Ok(Err(error)) if refused(&error) => PodRead::Refused,
                 _ => PodRead::Unknown,
             },
             Ok(()) = self.wake.changed() => PodRead::Woke,
@@ -323,12 +341,14 @@ impl LogStream {
         let mut known_restarts = None;
         let mut resume = LogResume::default();
         let mut delay = RECONNECT_MIN;
+        let mut waiting = RECONNECT_MIN;
         let mut reported = false;
 
         loop {
             if self.stale() {
                 return;
             }
+            let container = self.params.container.clone();
             // Log requests go by name. Confirm the name still belongs to the
             // known pod first, so a replacement is never streamed as if it
             // were that pod.
@@ -338,12 +358,26 @@ impl LogStream {
             if follow && known_uid.is_some() {
                 match self.read_pod().await {
                     PodRead::Found(pod) => {
-                        if let Some(end) =
-                            identity(pod.as_deref(), pinned, &mut known_uid, &mut known_restarts)
+                        let pod = pod.as_deref();
+                        let end = identity(pod, pinned, &mut known_uid, &mut known_restarts)
+                            .or_else(|| restarted(pod, container.as_deref(), &mut known_restarts));
+                        if let Some(end) = end
                             && !self.settle(end, &mut resume, &mut delay).await
                         {
                             return;
                         }
+                    }
+                    // Without permission to read pods the check can never
+                    // pass, so the stream goes ahead unchecked.
+                    PodRead::Refused => {}
+                    // A stream tied to one pod must not open on a name that
+                    // may now belong to its replacement.
+                    PodRead::Unknown if pinned => {
+                        if !self.pause(delay).await {
+                            return;
+                        }
+                        delay = (delay * 2).min(RECONNECT_MAX);
+                        continue;
                     }
                     PodRead::Unknown => {}
                     PodRead::Woke => continue,
@@ -363,14 +397,34 @@ impl LogStream {
             let (pumped, delivered) = match opening {
                 Ok(Ok(stream)) => {
                     reported = false;
+                    waiting = RECONNECT_MIN;
                     self.pump(stream, &mut resume).await
                 }
                 // The pod went away between streams; the pod check says how.
                 Ok(Err(kube::Error::Api(e))) if follow && e.code == 404 => (Pumped::Ended, 0),
                 Ok(Err(error)) if follow && not_started(&error) => {
-                    if !self.pause(RECONNECT_MIN).await {
+                    // The pod can fail or go away while a container waits.
+                    match self.read_pod().await {
+                        PodRead::Found(pod) => {
+                            let end = stream_end(
+                                pod.as_deref(),
+                                container.as_deref(),
+                                pinned,
+                                &mut known_uid,
+                                &mut known_restarts,
+                                connected_at,
+                            );
+                            if !self.settle(end, &mut resume, &mut delay).await {
+                                return;
+                            }
+                        }
+                        PodRead::Closed => return,
+                        _ => {}
+                    }
+                    if !self.pause(waiting).await {
                         return;
                     }
+                    waiting = (waiting * 2).min(WAITING_MAX);
                     continue;
                 }
                 failed => {
@@ -397,17 +451,24 @@ impl LogStream {
                 return;
             }
 
-            let (pod, woke) = match self.read_pod().await {
-                PodRead::Found(pod) => (Some(pod), woke),
-                PodRead::Unknown => (None, woke),
-                PodRead::Woke => (None, true),
+            // A wake abandons the read but not the check: a restart that
+            // ended the stream would otherwise go unreported.
+            let mut woke = woke;
+            let read = loop {
+                match self.read_pod().await {
+                    PodRead::Woke => woke = true,
+                    read => break read,
+                }
+            };
+            let pod = match read {
+                PodRead::Found(pod) => Some(pod),
                 PodRead::Closed => return,
+                _ => None,
             };
             if let Some(pod) = pod {
-                let container = self.params.container.as_deref();
                 let end = stream_end(
                     pod.as_deref(),
-                    container,
+                    container.as_deref(),
                     pinned,
                     &mut known_uid,
                     &mut known_restarts,
@@ -813,7 +874,7 @@ mod tests {
         let done = pod(json!({"metadata": {"name": "web"}, "status": {"phase": "Succeeded"}}));
         assert_eq!(
             check(Some(&done), false, &mut None),
-            StreamEnd::Finished("succeeded".into())
+            StreamEnd::Finished("pod succeeded".into())
         );
     }
 

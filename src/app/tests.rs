@@ -11154,6 +11154,9 @@ fn waiting_logs_app(code: u16, reason: &str) -> (App, Receiver<Msg>, Arc<AtomicU
             "status": {"phase": "Pending"}}),
     );
     app.table_state.select(Some(0));
+    let pod = json!({"apiVersion": "v1", "kind": "Pod",
+        "metadata": {"name": "pending", "namespace": "default"},
+        "status": {"phase": "Pending"}});
     let requests = Arc::new(AtomicU64::new(0));
     let seen = requests.clone();
     let message = if code == 400 && reason != "invalid container" {
@@ -11163,12 +11166,15 @@ fn waiting_logs_app(code: u16, reason: &str) -> (App, Receiver<Msg>, Arc<AtomicU
     };
     app.cluster.client = kube::Client::new(
         tower::service_fn(move |request: http::Request<kube::client::Body>| {
-            assert_eq!(
-                request.uri().path(),
-                "/api/v1/namespaces/default/pods/pending/log"
-            );
-            let attempt = seen.fetch_add(1, Ordering::SeqCst);
-            let (status, body) = if attempt < 2 {
+            let path = request.uri().path();
+            // While the container waits, the stream reads the pod as well.
+            let pod_read = path == "/api/v1/namespaces/default/pods/pending";
+            if !pod_read {
+                assert_eq!(path, "/api/v1/namespaces/default/pods/pending/log");
+            }
+            let (status, body) = if pod_read {
+                (200, pod.to_string())
+            } else if seen.fetch_add(1, Ordering::SeqCst) < 2 {
                 (
                     code,
                     json!({"kind": "Status", "apiVersion": "v1",

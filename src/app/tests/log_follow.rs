@@ -144,7 +144,12 @@ async fn followed_logs_resume_after_a_container_restart_without_repeating_lines(
                     )
                 }
             } else {
-                (200, closed_body(pod_json("web", "u1", 1).to_string()))
+                // The check before the first request sees no restarts yet.
+                let restarts = if nth == 0 { 0 } else { 1 };
+                (
+                    200,
+                    closed_body(pod_json("web", "u1", restarts).to_string()),
+                )
             }
         }),
     );
@@ -557,4 +562,66 @@ async fn waking_interrupts_a_pod_check_that_never_answers() {
     })
     .await
     .expect("the wake must abandon the stuck pod check");
+}
+
+#[tokio::test]
+async fn a_marked_pod_is_not_streamed_until_its_identity_is_confirmed() {
+    let (mut app, mut rx) = pod_logs_app();
+    app.handle_key(press(KeyCode::Char(' '))).unwrap();
+    let requests = serve(
+        &mut app,
+        Arc::new(|path, _query, nth| {
+            if path.ends_with("/log") {
+                (200, open_body("2026-10-06T10:00:00Z unmarked\n"))
+            } else if nth == 0 {
+                (
+                    500,
+                    closed_body(
+                        json!({"kind": "Status", "apiVersion": "v1", "status": "Failure",
+                            "message": "etcd timeout", "reason": "InternalError", "code": 500})
+                        .to_string(),
+                    ),
+                )
+            } else {
+                (200, closed_body(pod_json("web", "u2", 0).to_string()))
+            }
+        }),
+    );
+    app.handle_key(press(KeyCode::Char('l'))).unwrap();
+    wait_for(&mut app, &mut rx, "pod replaced").await;
+    assert_eq!(
+        app.filtered_log_text(),
+        "[default/web:app] [sofka] pod replaced; stream ended"
+    );
+    assert!(log_queries(&requests).is_empty());
+}
+
+#[tokio::test]
+async fn a_pod_that_fails_while_its_container_waits_ends_the_stream() {
+    let (mut app, mut rx) = pod_logs_app();
+    serve(
+        &mut app,
+        Arc::new(|path, _query, nth| {
+            if path.ends_with("/log") {
+                (
+                    400,
+                    closed_body(
+                        json!({"kind": "Status", "apiVersion": "v1", "status": "Failure",
+                            "message": "container \"app\" in pod \"web\" is waiting to start: ContainerCreating",
+                            "reason": "BadRequest", "code": 400})
+                        .to_string(),
+                    ),
+                )
+            } else {
+                let mut pod = pod_json("web", "u1", 0);
+                if nth > 0 {
+                    pod["status"]["phase"] = json!("Failed");
+                }
+                (200, closed_body(pod.to_string()))
+            }
+        }),
+    );
+    app.handle_key(press(KeyCode::Char('l'))).unwrap();
+    wait_for(&mut app, &mut rx, "stream ended").await;
+    assert_eq!(app.filtered_log_text(), "[sofka] pod failed; stream ended");
 }
