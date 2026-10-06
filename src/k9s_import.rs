@@ -234,6 +234,9 @@ pub struct Plan {
     /// The user's settings merged with the imported global ones, as a context
     /// override file inherits them.
     pub effective: Option<Value>,
+    /// k9s files that exist but could not be read. Their settings are missing
+    /// from the plan, not removed, so earlier imports of them are kept.
+    pub unreadable: Vec<PathBuf>,
 }
 
 // ---------------------------------------------------------------------------
@@ -422,32 +425,37 @@ pub fn plan(src: &Sources, user: &UserConfig) -> Plan {
         ..Plan::default()
     };
     let skipped = &mut plan.skipped;
+    let mut unreadable = Vec::new();
     let mut doc = Table::new();
 
-    let main: Option<MainFile> = read(&src.config.join("config.yaml"), skipped);
+    let main: Option<MainFile> = read(&src.config.join("config.yaml"), skipped, &mut unreadable);
     let main = main.unwrap_or_default().k9s;
     convert_settings(&main, &mut doc, skipped);
 
-    if let Some(file) = read::<AliasFile>(&src.config.join("aliases.yaml"), skipped) {
+    if let Some(file) =
+        read::<AliasFile>(&src.config.join("aliases.yaml"), skipped, &mut unreadable)
+    {
         convert_aliases(&file.entries(), &mut doc, skipped);
     }
 
-    let mut plugins = read_plugins(&src.config.join("plugins.yaml"), skipped);
+    let mut plugins = read_plugins(&src.config.join("plugins.yaml"), skipped, &mut unreadable);
     let mut plugin_dirs: Vec<PathBuf> = src.data.iter().map(|d| d.join("plugins")).collect();
     plugin_dirs.insert(0, src.config.join("plugins"));
     plugin_dirs.dedup();
     for dir in plugin_dirs {
         for path in yaml_files(&dir) {
-            plugins.extend(read_plugins(&path, skipped));
+            plugins.extend(read_plugins(&path, skipped, &mut unreadable));
         }
     }
     convert_plugins(&plugins, &mut doc, skipped);
 
-    if let Some(file) = read::<HotkeyFile>(&src.config.join("hotkeys.yaml"), skipped) {
+    if let Some(file) =
+        read::<HotkeyFile>(&src.config.join("hotkeys.yaml"), skipped, &mut unreadable)
+    {
         convert_hotkeys(&file.hot_keys, &mut doc, skipped);
     }
 
-    if let Some(file) = read::<ViewFile>(&src.config.join("views.yaml"), skipped) {
+    if let Some(file) = read::<ViewFile>(&src.config.join("views.yaml"), skipped, &mut unreadable) {
         convert_views(&file.views, &mut doc, skipped);
     }
 
@@ -491,20 +499,28 @@ pub fn plan(src: &Sources, user: &UserConfig) -> Plan {
                 skin: global_skin.as_deref(),
                 bookmarks: global_bookmarks.as_ref(),
             };
-            if let Some(out) = convert_context(&ctx, skipped) {
+            if let Some(out) = convert_context(&ctx, skipped, &mut unreadable) {
                 plan.outputs.push(out);
             }
         }
     }
+    plan.unreadable = unreadable;
     plan
 }
 
-fn read<T: for<'de> Deserialize<'de>>(path: &Path, skipped: &mut Vec<String>) -> Option<T> {
+/// Read one k9s file. A file that exists but cannot be read or parsed is
+/// reported and recorded in `unreadable`.
+fn read<T: for<'de> Deserialize<'de>>(
+    path: &Path,
+    skipped: &mut Vec<String>,
+    unreadable: &mut Vec<PathBuf>,
+) -> Option<T> {
     let text = match std::fs::read_to_string(path) {
         Ok(text) => text,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
         Err(e) => {
             skipped.push(format!("{}: {e}", path.display()));
+            unreadable.push(path.to_path_buf());
             return None;
         }
     };
@@ -515,6 +531,7 @@ fn read<T: for<'de> Deserialize<'de>>(path: &Path, skipped: &mut Vec<String>) ->
         Ok(value) => Some(value),
         Err(e) => {
             skipped.push(format!("{}: {e}", path.display()));
+            unreadable.push(path.to_path_buf());
             None
         }
     }
@@ -545,8 +562,12 @@ fn yaml_files(dir: &Path) -> Vec<PathBuf> {
 
 /// Read one k9s plugin file in any of its three shapes: a `plugins:` map, a
 /// bare map of plugins, or a single plugin named after the file.
-fn read_plugins(path: &Path, skipped: &mut Vec<String>) -> Vec<(String, K9sPlugin)> {
-    let Some(value) = read::<serde_yaml::Value>(path, skipped) else {
+fn read_plugins(
+    path: &Path,
+    skipped: &mut Vec<String>,
+    unreadable: &mut Vec<PathBuf>,
+) -> Vec<(String, K9sPlugin)> {
+    let Some(value) = read::<serde_yaml::Value>(path, skipped, unreadable) else {
         return Vec::new();
     };
     let parse = |name: &str, v: serde_yaml::Value, skipped: &mut Vec<String>| {
@@ -1348,10 +1369,14 @@ struct ContextInput<'a> {
     bookmarks: Option<&'a Value>,
 }
 
-fn convert_context(ctx: &ContextInput, skipped: &mut Vec<String>) -> Option<Output> {
+fn convert_context(
+    ctx: &ContextInput,
+    skipped: &mut Vec<String>,
+    unreadable: &mut Vec<PathBuf>,
+) -> Option<Output> {
     let mut doc = Table::new();
     let mut notes = Vec::new();
-    if let Some(file) = read::<ContextFile>(&ctx.dir.join("config.yaml"), &mut notes) {
+    if let Some(file) = read::<ContextFile>(&ctx.dir.join("config.yaml"), &mut notes, unreadable) {
         let k = file.k9s;
         if let Some(ro) = k.read_only
             && ro != ctx.read_only
@@ -1387,18 +1412,18 @@ fn convert_context(ctx: &ContextInput, skipped: &mut Vec<String>) -> Option<Outp
     }
     // Aliases that name a destination and hotkeys both become bookmarks.
     let mut local = Table::new();
-    if let Some(file) = read::<AliasFile>(&ctx.dir.join("aliases.yaml"), &mut notes) {
+    if let Some(file) = read::<AliasFile>(&ctx.dir.join("aliases.yaml"), &mut notes, unreadable) {
         convert_aliases(&file.entries(), &mut local, &mut notes);
     }
     if let Some(aliases) = local.remove("aliases") {
         doc.insert("aliases".into(), aliases);
     }
-    let plugins = read_plugins(&ctx.dir.join("plugins.yaml"), &mut notes);
+    let plugins = read_plugins(&ctx.dir.join("plugins.yaml"), &mut notes, unreadable);
     convert_plugins(&plugins, &mut doc, &mut notes);
     if doc.contains_key("plugins") {
         doc.insert("plugins_merge".into(), "name".into());
     }
-    if let Some(file) = read::<HotkeyFile>(&ctx.dir.join("hotkeys.yaml"), &mut notes) {
+    if let Some(file) = read::<HotkeyFile>(&ctx.dir.join("hotkeys.yaml"), &mut notes, unreadable) {
         convert_hotkeys(&file.hot_keys, &mut local, &mut notes);
     }
     if let Some(Value::Array(own)) = local.remove("bookmarks") {
@@ -1631,10 +1656,18 @@ pub fn apply(plan: &Plan, dir: &Path, dry_run: bool, force: bool) -> Result<Vec<
     }
     // A file an earlier import wrote that this import no longer produces
     // would keep its old settings active.
-    let stale: Vec<&PathBuf> = earlier
+    let mut stale: Vec<&PathBuf> = earlier
         .iter()
         .filter(|p| !writes.iter().any(|(t, _)| t == *p))
         .collect();
+    if !plan.unreadable.is_empty() && !stale.is_empty() {
+        for path in stale.drain(..) {
+            skipped.push(format!(
+                "{} kept: some k9s files could not be read, so the import may be incomplete",
+                path.display()
+            ));
+        }
+    }
 
     // Render and validate everything before writing anything.
     let mut rendered = Vec::new();
@@ -2445,6 +2478,28 @@ resource = "ing"
         let err = apply(&plan, &root, false, false).unwrap_err();
         assert!(err.contains("invalid generated config"), "{err}");
         assert!(!root.join("clusters").exists() && !root.join(DROPIN).exists());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn unreadable_sources_keep_earlier_imports() {
+        let root = scratch("unreadable");
+        let (k9s, sofka) = (root.join("k9s"), root.join("sofka"));
+        k9s_fixture(&k9s);
+        let src = Sources::at(&k9s).unwrap();
+        apply(&plan(&src, &UserConfig::default()), &sofka, false, false).unwrap();
+        let prod = "clusters/arn-aws-eks-eu-west-1-1-cluster-prod/prod-admin/config.yaml";
+
+        put(&k9s, prod, "k9s: [not, a, mapping\n");
+        let plan = plan(&src, &UserConfig::default());
+        assert_eq!(plan.unreadable, [k9s.join(prod)]);
+        let report = apply(&plan, &sofka, false, true).unwrap();
+        assert!(sofka.join(prod).is_file(), "{report:#?}");
+        assert!(report.iter().any(|l| l.contains("could not be read")));
+        let cfg = crate::config::ConfigLoader::from_dir(Some(sofka.clone()))
+            .resolve("prod-admin", "arn:aws:eks:eu-west-1:1:cluster/prod")
+            .config;
+        assert!(cfg.readonly, "the context stays read-only");
         let _ = std::fs::remove_dir_all(&root);
     }
 }
