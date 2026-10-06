@@ -1,7 +1,7 @@
 # How sofka differs from k9s
 
 sofka and [k9s](https://github.com/derailed/k9s) are terminal interfaces for
-Kubernetes. This comparison covers sofka 0.24.9 and k9s 0.51.0.
+Kubernetes. This comparison covers sofka 0.31.0 and k9s 0.51.0.
 Neither the implementation language nor the source code size proves that one
 program is faster. See the [benchmark](benchmark-k9s.md) for measured results
 and test limits.
@@ -34,10 +34,18 @@ workflow or extension.
   sofka sends Kubernetes API requests without a `flux` or `argocd` executable.
   See [features](features.md) for resource and action coverage.
 - **Incident view:** `X` shows rollout state, conditions, pod failure reasons,
-  and recent Warning events. A finding can open the related resource, events,
-  or logs. This view uses rules and cluster data.
+  and recent Warning events. Jobs, CronJobs, PersistentVolumeClaims, and Nodes
+  have their own checks. A finding can open the related resource, events, or
+  logs. This view uses rules and cluster data.
 - **Session timeline:** `T` shows object changes observed by the watch during
   the session. It is not a durable audit log.
+- **Committed node capacity:** the nodes view shows the CPU and memory that
+  pods request as a percentage of allocatable, with limits in wide mode. The
+  scheduler places pods by requests, so these columns show why a pod does not
+  schedule on a node with low usage. They work without Metrics Server.
+- **Decoded Secret edit:** `e` in the decoded Secret view opens the values as
+  plain text in `$EDITOR`. sofka encodes the result and patches only the keys
+  that you changed, after a confirmation that names them.
 - **Status display:** row colors, status badges, and configurable CPU, memory,
   and restart thresholds help identify resources that need attention.
 
@@ -47,9 +55,10 @@ workflow or extension.
 per-context settings into sofka configuration, and lists what it could not
 convert. See [Import from k9s](features.md#import-from-k9s).
 
-k9s also offers plugins, custom views, XRay, Pulses, and Popeye integration.
-Users who depend on these functions must compare their workflows before they
-switch. See the [k9s commands](https://k9scli.io/topics/commands/) and
+sofka has its own Pulse (`:pulse`) and Xray (`:xray`) views, and Popeye is
+available as a package from the official plugin registry. These functions do
+not work the same way as in k9s. Users who depend on them must compare their
+workflows before they switch. See the [k9s commands](https://k9scli.io/topics/commands/) and
 [k9s project documentation](https://github.com/derailed/k9s/blob/v0.51.0/README.md).
 
 ## Performance design

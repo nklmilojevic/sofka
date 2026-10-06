@@ -1,12 +1,12 @@
 # Performance benchmark: sofka and k9s
 
-This test compared sofka 0.24.9 and k9s 0.51.0 on 8 September 2026.
+This test compared sofka 0.31.0 and k9s 0.51.0 on 6 October 2026.
 Both programs used read-only mode.
 The results apply to this computer, cluster, configuration, and test method.
 They do not establish a general performance advantage.
 
 The [test script](../scripts/benchmark-k9s.py) and
-[raw results](benchmarks/2026-09-08.json) are part of this repository.
+[raw results](benchmarks/2026-10-06.json) are part of this repository.
 
 ## Results
 
@@ -16,13 +16,13 @@ ten processes.
 
 | Measurement             | sofka median | k9s median |        sofka range |          k9s range |
 | ----------------------- | -----------: | ---------: | -----------------: | -----------------: |
-| Large pod view          |   1514.08 ms | 3715.73 ms | 1257.58-1823.58 ms | 3697.79-3955.64 ms |
-| Apply pod-name filter   |     66.56 ms |  627.76 ms |     58.17-71.34 ms |   608.23-649.02 ms |
-| Clear filter            |     16.84 ms |   73.81 ms |     16.09-20.91 ms |     70.52-74.61 ms |
-| First StatefulSets view |    109.98 ms |  397.34 ms |   103.98-155.42 ms |   386.92-472.07 ms |
-| Process RSS             |   317.02 MiB | 734.38 MiB |  316.73-318.16 MiB |  675.52-747.91 MiB |
-| Version command         |      5.29 ms |   45.01 ms |       4.01-7.27 ms |     42.15-58.93 ms |
-| Help command            |      5.45 ms |   45.45 ms |       4.39-8.73 ms |    42.49-112.21 ms |
+| Large pod view          |   2818.31 ms | 3848.97 ms | 2157.78-6444.63 ms | 3757.17-6750.60 ms |
+| Apply pod-name filter   |     55.41 ms |  625.51 ms |     40.55-73.08 ms |   602.63-643.27 ms |
+| Clear filter            |     33.38 ms |   75.13 ms |     28.52-41.52 ms |     67.37-78.17 ms |
+| First StatefulSets view |     80.70 ms |  402.56 ms |    73.42-147.23 ms |   393.97-447.53 ms |
+| Process RSS             |   324.41 MiB | 738.23 MiB |  323.41-325.66 MiB |  648.83-751.80 MiB |
+| Version command         |      6.72 ms |   43.26 ms |       5.10-9.25 ms |     38.58-46.23 ms |
+| Help command            |      6.84 ms |   41.51 ms |       5.30-7.68 ms |     38.95-44.85 ms |
 
 sofka had lower medians for these operations in this test. The programs use
 different columns, filter rules, refresh schedules, and API requests. This test
@@ -33,14 +33,14 @@ does not isolate the cost of any one implementation choice.
 | Item                | Value                                      |
 | ------------------- | ------------------------------------------ |
 | Computer            | Apple M3 Max                               |
-| Operating system    | macOS, Darwin 25.6.0, arm64                |
-| Rust                | rustc 1.97.0 (2d8144b78 2026-07-07)        |
+| Operating system    | macOS, Darwin 27.0.0, arm64                |
+| Rust                | rustc 1.98.1 (48a229cea 2026-09-01)        |
 | tmux                | tmux 3.7c                                  |
 | Terminal            | `xterm-256color`, 180 columns by 50 rows   |
-| Pods before / after | 1446 / 1446                                |
-| Pod count threshold | 1373                                       |
-| StatefulSets before | 4                                          |
-| sofka source commit | `ef10167896dc334d3e58dd9f3be3e1479605c7d4` |
+| Pods before / after | 1441 / 1441                                |
+| Pod count threshold | 1368                                       |
+| StatefulSets before | 5                                          |
+| sofka source commit | `ac178b71c11f38d21876e27d96689d4471c46512` |
 
 Build command: `just build-release`. This runs `cargo build --release`.
 `Cargo.lock` did not change. sofka uses thin LTO and removes symbols.
@@ -50,7 +50,7 @@ or package settings.
 
 | File             |       Bytes |    MiB |
 | ---------------- | ----------: | -----: |
-| sofka executable |  19,077,072 |  18.19 |
+| sofka executable |  27,389,952 |  26.12 |
 | k9s executable   | 142,893,680 | 136.27 |
 
 The k9s launcher is a 416-byte shell script. Its size is excluded from
@@ -84,13 +84,13 @@ k9s --context YOUR_CONTEXT --readonly -A -c pods --splashless --logoless
 Python `time.perf_counter()` supplied the times. `tmux capture-pane` supplied
 visible screen text. The script parsed each program's resource title, including
 comma-separated k9s counts. It polled with a 5 ms delay between failed checks.
-A screen capture had a median cost of 5.71 ms in 50 samples.
+A screen capture had a median cost of 6.09 ms in 50 samples.
 The reported times include input commands, process creation where applicable,
 and screen observation delay. Small differences near these costs are not useful
 evidence of a product difference.
 
 **Large pod view:** the timer started before tmux replaced the pane process.
-It stopped at a visible count of at least 1373 and at least 20 pod status rows.
+It stopped at a visible count of at least 1368 and at least 20 pod status rows.
 The threshold was fixed at 95% of the pod count before the test. It does not
 mean that all pods or metrics were loaded. The raw results include the count
 observed at the end of each start.
@@ -111,7 +111,7 @@ to restoration of the pod threshold.
 
 **StatefulSets:** each process opened this resource for the first time after the
 filter test. The timer ran from the initial `:` through `statefulsets` and
-`Enter`, until the resource title showed at least 4 objects.
+`Enter`, until the resource title showed at least 5 objects.
 It includes API response time. It does not require complete metrics.
 
 **Version and help:** each command had one warm-up and 100 measured runs.
@@ -126,20 +126,16 @@ do not treat their p95 values as a reliable tail-latency estimate.
 
 ## Scope and excluded attempts
 
-The final run completed 20 process trials, with 0 recorded errors.
-Setup runs were excluded. An incomplete attempt was also excluded because
-its count parser did not accept commas.
-Both programs were tested again after the parser was corrected.
+The run completed 20 process trials, with 0 recorded errors. No trial was
+excluded. The first trial of each program started slower than the other nine.
 
-After the final twenty TUI trials, cleanup of an already closed tmux server
-failed. All TUI samples were already saved. The cleanup step was corrected, and
-only the command measurements and final pod count were repeated with
-`--finish-commands`. No completed TUI sample was removed. Use the same context
-when this option is needed; the result file does not store context identifiers.
-
-This report replaces the earlier sofka 0.16.3 comparison. The cluster population
-and input timing method changed. Do not use the old and new results to claim
-a performance improvement or regression.
+This report replaces the 8 September 2026 comparison of sofka 0.24.9. That run
+had a sofka startup median of 1514.08 ms on the same cluster. To check whether
+the change came from sofka, sofka 0.24.9 was built again and tested on the same
+day as this run, three pairs at a time in two alternating rounds. Its startup
+median was 2870.5 ms, against 2646.0 ms for sofka 0.31.0 in the same rounds.
+The slower startup came from the test environment, not from sofka. Do not use
+the two reports to claim a performance improvement or regression.
 
 This test did not measure CPU under a fixed event rate, API request counts,
 network bytes, garbage collection pauses, long sessions, or other operating
