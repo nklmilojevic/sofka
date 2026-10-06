@@ -11336,6 +11336,47 @@ async fn palette_refetches_namespaces_created_after_launch() {
 }
 
 #[tokio::test]
+async fn palette_drops_namespace_list_from_an_older_fetch() {
+    let (mut app, _rx) = test_app();
+    app.handle_key(press(KeyCode::Char(':'))).unwrap();
+    app.handle_key(press(KeyCode::Esc)).unwrap();
+    app.handle_key(press(KeyCode::Char(':'))).unwrap();
+    let latest = app.ns_list_request;
+
+    app.handle_msg(Msg::Namespaces {
+        generation: app.generation,
+        request: latest,
+        list: vec!["<all>".into(), "default".into(), "fresh".into()],
+    });
+    app.handle_msg(Msg::Namespaces {
+        generation: app.generation,
+        request: latest - 1,
+        list: vec!["<all>".into(), "default".into()],
+    });
+    assert_eq!(app.ns_list, ["<all>", "default", "fresh"]);
+}
+
+#[tokio::test]
+async fn palette_namespace_refresh_keeps_a_navigated_suggestion() {
+    let (mut app, _rx) = test_app();
+    app.ns_list = vec!["<all>".into(), "alpha".into(), "beta".into()];
+    for c in ":pods ".chars() {
+        app.handle_key(press(KeyCode::Char(c))).unwrap();
+    }
+    app.handle_key(press(KeyCode::Down)).unwrap();
+    let sel = app.cmd_sel;
+    let label = app.cmd_suggestions[sel].label.clone();
+
+    app.handle_msg(Msg::Namespaces {
+        generation: app.generation,
+        request: app.ns_list_request,
+        list: vec!["<all>".into(), "aaa".into(), "alpha".into(), "beta".into()],
+    });
+    assert_eq!(app.cmd_sel, sel);
+    assert_eq!(app.cmd_suggestions[sel].label, label);
+}
+
+#[tokio::test]
 async fn namespace_switcher_selects_current_and_preserves_cursor_on_refresh() {
     let (mut app, _rx) = test_app();
     app.namespace = "prod".into();
@@ -11350,6 +11391,7 @@ async fn namespace_switcher_selects_current_and_preserves_cursor_on_refresh() {
 
     app.handle_msg(Msg::Namespaces {
         generation: app.generation,
+        request: app.ns_list_request,
         list: vec!["<all>".into(), "alpha".into(), "prod".into()],
     });
     assert_eq!(
@@ -11364,6 +11406,7 @@ async fn namespace_switcher_selects_current_and_preserves_cursor_on_refresh() {
     app.handle_key(press(KeyCode::Up)).unwrap();
     app.handle_msg(Msg::Namespaces {
         generation: app.generation,
+        request: app.ns_list_request,
         list: vec!["<all>".into(), "beta".into(), "gamma".into(), "prod".into()],
     });
     assert_eq!(
@@ -11374,6 +11417,7 @@ async fn namespace_switcher_selects_current_and_preserves_cursor_on_refresh() {
     app.handle_key(press(KeyCode::Char('p'))).unwrap();
     app.handle_msg(Msg::Namespaces {
         generation: app.generation,
+        request: app.ns_list_request,
         list: vec!["<all>".into(), "alpha".into(), "prod".into()],
     });
     assert_eq!(
@@ -11773,6 +11817,7 @@ async fn stale_async_picker_results_are_dropped() {
     app.ns_list = vec!["<all>".into()];
     app.handle_msg(Msg::Namespaces {
         generation: stale,
+        request: app.ns_list_request,
         list: vec!["<all>".into(), "stale".into()],
     });
     assert_eq!(app.ns_list, vec!["<all>".to_string()]);
@@ -11848,6 +11893,7 @@ async fn namespace_switcher_follows_its_inputs() {
     let (mut app, _rx) = test_app();
     app.handle_msg(Msg::Namespaces {
         generation: app.generation,
+        request: app.ns_list_request,
         list: vec!["dev".into(), "prod".into(), "test".into()],
     });
 
@@ -11867,6 +11913,7 @@ async fn namespace_switcher_follows_its_inputs() {
     // prompt a rebuild.
     app.handle_msg(Msg::Namespaces {
         generation: app.generation,
+        request: app.ns_list_request,
         list: vec!["dev".into(), "staging".into()],
     });
     assert_eq!(

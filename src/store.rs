@@ -311,6 +311,7 @@ pub enum Msg {
     /// Namespace list for the switcher, fetched off-thread.
     Namespaces {
         generation: u64,
+        request: u64,
         list: Vec<String>,
     },
     /// Kubeconfig context names for the switcher, fetched off-thread.

@@ -1989,7 +1989,11 @@ impl App {
                     self.set_claimed_status(claim, failure, true);
                 }
             }
-            Msg::Namespaces { generation, list } if generation == self.generation => {
+            Msg::Namespaces {
+                generation,
+                request,
+                list,
+            } if generation == self.generation && request == self.ns_list_request => {
                 let names = self.filtered_namespaces();
                 let keep = self.ns_state.selected().unwrap_or(0);
                 let selected = names.get(keep);

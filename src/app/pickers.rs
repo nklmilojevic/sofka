@@ -24,8 +24,11 @@ impl App {
 
     /// Fetch the namespace list off-thread; it arrives as `Msg::Namespaces` and
     /// refreshes `ns_list`, which backs both the switcher popup and `:<kind>
-    /// <ns>` palette completion.
-    pub(super) fn spawn_namespace_fetch(&self) {
+    /// <ns>` palette completion. Only the newest request's answer is kept, so a
+    /// slow earlier fetch can't overwrite a fresher list.
+    pub(super) fn spawn_namespace_fetch(&mut self) {
+        self.ns_list_request += 1;
+        let request = self.ns_list_request;
         let client = self.cluster.client.clone();
         let kind = self.cluster.resolve("namespaces").map(|k| k.ar);
         let tx = self.tx.clone();
@@ -44,6 +47,7 @@ impl App {
                 let _ = tx
                     .send(Msg::Namespaces {
                         generation: genr,
+                        request,
                         list: names,
                     })
                     .await;
