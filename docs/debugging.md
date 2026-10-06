@@ -96,14 +96,17 @@ table are included. With no marks, `l` opens logs for the current row.
 The set of marked pods is fixed when the view opens. Workload and service logs
 watch the selector instead: a pod that a rollout or scale-up creates joins the
 view with a `[sofka] following new pod` line and is shown from its first line.
-Pods that already existed start from the configured tail.
+Pods that already existed start from the configured tail. A pod whose labels
+stop matching the selector leaves the view with a `[sofka]` line. If RBAC
+allows listing pods but not watching them, the pods found at open keep
+streaming and a `[sofka]` line says new pods are not followed.
 
 A followed stream that ends reconnects from its last line without repeating
 it. That covers dropped connections, API server timeouts, and waking the
 machine from sleep. sofka reads the pod when a stream ends and adds a
-`[sofka]` line when the container restarted, the pod was recreated, or the
-stream stops because the pod was deleted or finished. Reconnects back off up to
-15 seconds while a stream returns nothing new. A refused request, such as
+`[sofka]` line when the container restarted, the pod was recreated (read from
+its first line), or the stream stops because the pod was deleted or finished.
+Reconnects back off up to 15 seconds while a stream returns nothing new. A refused request, such as
 missing RBAC, is reported once and not retried.
 Lines with timestamps are sorted by time, even when timestamp text is hidden.
 Press `t` to show or hide timestamps without clearing the buffer or restarting

@@ -428,6 +428,7 @@ pub enum PluginMode {
 struct PodLogTarget {
     ns: String,
     name: String,
+    uid: Option<String>,
     containers: Vec<String>,
 }
 
@@ -440,6 +441,7 @@ enum LogSource {
     Pod {
         ns: String,
         name: String,
+        uid: Option<String>,
         containers: Vec<String>,
     },
     /// All pods matching a label selector (aggregated workload logs).

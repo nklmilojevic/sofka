@@ -3,6 +3,28 @@ use std::sync::Mutex;
 
 type Respond = dyn Fn(&str, &str, usize) -> (u16, TestBody) + Send + Sync;
 
+/// A response body fed by `rx`, ending when its sender is dropped.
+fn channel_body(rx: mpsc::Receiver<String>) -> TestBody {
+    http_body_util::StreamBody::new(
+        futures_util::stream::unfold(rx, |mut rx| async move {
+            let text = rx.recv().await?;
+            Some((
+                Ok(hyper::body::Frame::data(hyper::body::Bytes::from(text))),
+                rx,
+            ))
+        })
+        .boxed(),
+    )
+}
+
+/// The receiver for the first request that takes it, an idle body after.
+fn take_body(slot: &Mutex<Option<mpsc::Receiver<String>>>) -> TestBody {
+    match slot.lock().unwrap().take() {
+        Some(rx) => channel_body(rx),
+        None => open_body(""),
+    }
+}
+
 /// Serve the API from `respond(path, query, nth)`, where `nth` counts earlier
 /// requests to the same path. Returns every `path?query` it saw.
 fn serve(app: &mut App, respond: Arc<Respond>) -> Arc<Mutex<Vec<String>>> {
@@ -23,6 +45,11 @@ fn serve(app: &mut App, respond: Arc<Respond>) -> Arc<Mutex<Vec<String>>> {
             };
             let (status, body) = respond(&path, &query, nth);
             async move {
+                // 0 stands for a request that never answers, as one sent
+                // before the machine slept.
+                if status == 0 {
+                    std::future::pending::<()>().await;
+                }
                 Ok::<_, std::convert::Infallible>(
                     http::Response::builder().status(status).body(body).unwrap(),
                 )
@@ -262,4 +289,173 @@ async fn waking_from_sleep_reconnects_followed_logs() {
         queries[1].get("sinceTime").map(String::as_str),
         Some("2026-10-06T10:00:00Z")
     );
+}
+
+#[tokio::test]
+async fn a_recreated_pod_is_read_from_its_first_line() {
+    let (mut app, mut rx) = pod_logs_app();
+    let requests = serve(
+        &mut app,
+        Arc::new(|path, _query, nth| {
+            if path.ends_with("/log") {
+                if nth == 0 {
+                    (200, closed_body("2026-10-06T10:00:05Z old\n"))
+                } else {
+                    (200, open_body("2026-10-06T10:00:01Z new\n"))
+                }
+            } else {
+                (200, closed_body(pod_json("web", "u2", 0).to_string()))
+            }
+        }),
+    );
+    app.handle_key(press(KeyCode::Char('l'))).unwrap();
+    wait_for(&mut app, &mut rx, "new").await;
+
+    let text = app.filtered_log_text();
+    assert!(text.contains("old"), "{text}");
+    assert!(text.contains("[sofka] pod recreated"), "{text}");
+    let queries = log_queries(&requests);
+    assert_eq!(queries.len(), 2);
+    for key in ["sinceTime", "sinceSeconds", "tailLines"] {
+        assert!(!queries[1].contains_key(key), "{key}: {:?}", queries[1]);
+    }
+}
+
+#[tokio::test]
+async fn a_pod_deleted_between_streams_is_reported_not_refused() {
+    let (mut app, mut rx) = pod_logs_app();
+    serve(
+        &mut app,
+        Arc::new(|path, _query, nth| match (path.ends_with("/log"), nth) {
+            (true, 0) => (200, closed_body("2026-10-06T10:00:00Z bye\n")),
+            (false, 0) => (200, closed_body(pod_json("web", "u1", 0).to_string())),
+            _ => not_found(),
+        }),
+    );
+    app.handle_key(press(KeyCode::Char('l'))).unwrap();
+    wait_for(&mut app, &mut rx, "pod deleted").await;
+    assert_eq!(
+        app.filtered_log_text(),
+        "bye\n[sofka] pod deleted; stream ended"
+    );
+}
+
+#[tokio::test]
+async fn waking_interrupts_a_log_request_that_never_answers() {
+    let (mut app, mut rx) = pod_logs_app();
+    serve(
+        &mut app,
+        Arc::new(|path, _query, nth| match (path.ends_with("/log"), nth) {
+            (true, 0) => (0, open_body("")),
+            (true, _) => (200, open_body("2026-10-06T10:00:00Z after\n")),
+            _ => (200, closed_body(pod_json("web", "u1", 0).to_string())),
+        }),
+    );
+    app.handle_key(press(KeyCode::Char('l'))).unwrap();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    super::resume::tick_after_sleep(&mut app, Duration::from_secs(8 * 60 * 60));
+    // Well inside the 30-second open timeout.
+    wait_for(&mut app, &mut rx, "after").await;
+}
+
+fn selector_logs_app() -> (App, Receiver<Msg>) {
+    let (mut app, rx) = test_app();
+    app.switch_kind("deployments");
+    apply(
+        &mut app,
+        json!({"apiVersion": "apps/v1", "kind": "Deployment",
+            "metadata": {"name": "web", "namespace": "default"},
+            "spec": {"selector": {"matchLabels": {"app": "web"}}}}),
+    );
+    app.table_state.select(Some(0));
+    (app, rx)
+}
+
+fn pod_list(pod: serde_json::Value) -> (u16, TestBody) {
+    let list = json!({"apiVersion": "v1", "kind": "PodList",
+        "metadata": {"resourceVersion": "1"}, "items": [pod]});
+    (200, closed_body(list.to_string()))
+}
+
+#[tokio::test]
+async fn a_pod_that_leaves_the_selector_stops_streaming() {
+    let (mut app, mut rx) = selector_logs_app();
+    let (log_tx, log_rx) = mpsc::channel(8);
+    let (watch_tx, watch_rx) = mpsc::channel(8);
+    let logs = Mutex::new(Some(log_rx));
+    let watch = Mutex::new(Some(watch_rx));
+    serve(
+        &mut app,
+        Arc::new(move |path, query, _nth| {
+            if path.ends_with("/log") {
+                (200, take_body(&logs))
+            } else if query.contains("watch=true") {
+                (200, take_body(&watch))
+            } else {
+                pod_list(pod_json("web-a", "a", 0))
+            }
+        }),
+    );
+    app.handle_key(press(KeyCode::Char('l'))).unwrap();
+    log_tx
+        .send("2026-10-06T10:00:00Z first\n".into())
+        .await
+        .unwrap();
+    wait_for(&mut app, &mut rx, "first").await;
+
+    let mut relabeled = pod_json("web-a", "a", 0);
+    relabeled["metadata"]["labels"] = json!({"app": "debug"});
+    watch_tx
+        .send(format!(
+            "{}\n",
+            json!({"type": "DELETED", "object": relabeled})
+        ))
+        .await
+        .unwrap();
+    wait_for(&mut app, &mut rx, "no longer matches").await;
+
+    let _ = log_tx.send("2026-10-06T10:00:01Z late\n".into()).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    while let Ok(msg) = rx.try_recv() {
+        app.handle_msg(msg);
+    }
+    assert_eq!(
+        app.filtered_log_text(),
+        "[web-a] first\n[web-a] [sofka] pod no longer matches the selector; stream ended"
+    );
+}
+
+#[tokio::test]
+async fn a_refused_pod_watch_keeps_existing_streams_and_stops_asking() {
+    let (mut app, mut rx) = selector_logs_app();
+    let requests = serve(
+        &mut app,
+        Arc::new(|path, query, _nth| {
+            if path.ends_with("/log") {
+                (200, open_body("2026-10-06T10:00:00Z still here\n"))
+            } else if query.contains("watch=true") {
+                (
+                    403,
+                    closed_body(
+                        json!({"kind": "Status", "apiVersion": "v1", "status": "Failure",
+                            "message": "cannot watch pods", "reason": "Forbidden", "code": 403})
+                        .to_string(),
+                    ),
+                )
+            } else {
+                pod_list(pod_json("web-a", "a", 0))
+            }
+        }),
+    );
+    app.handle_key(press(KeyCode::Char('l'))).unwrap();
+    wait_for(&mut app, &mut rx, "pod watch refused").await;
+    wait_for(&mut app, &mut rx, "still here").await;
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    let watches = requests
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|r| r.contains("watch=true"))
+        .count();
+    assert_eq!(watches, 1);
 }

@@ -320,6 +320,7 @@ impl App {
                 .map(|obj| PodLogTarget {
                     ns: obj.metadata.namespace.clone().unwrap_or_default(),
                     name: obj.metadata.name.clone().unwrap_or_default(),
+                    uid: obj.metadata.uid.clone(),
                     containers: container_names(obj),
                 })
                 .collect();
@@ -344,6 +345,7 @@ impl App {
                     LogSource::Pod {
                         ns,
                         name: name.clone(),
+                        uid: obj.metadata.uid.clone(),
                         containers,
                     },
                     format!("{name} — logs"),
@@ -551,16 +553,24 @@ impl App {
                 for PodLogTarget {
                     ns,
                     name,
+                    uid,
                     containers,
                 } in pods
                 {
                     if containers.is_empty() {
                         let prefix = format!("[{ns}/{name}] ");
-                        self.spawn_one_log(ns, name, None, prefix, false);
+                        self.spawn_one_log(ns, name, uid, None, prefix, false);
                     } else {
                         for c in containers {
                             let prefix = format!("[{ns}/{name}:{c}] ");
-                            self.spawn_one_log(ns.clone(), name.clone(), Some(c), prefix, false);
+                            self.spawn_one_log(
+                                ns.clone(),
+                                name.clone(),
+                                uid.clone(),
+                                Some(c),
+                                prefix,
+                                false,
+                            );
                         }
                     }
                 }
@@ -568,11 +578,12 @@ impl App {
             Some(LogSource::Pod {
                 ns,
                 name,
+                uid,
                 containers,
             }) => {
                 if containers.is_empty() {
                     // Unknown container set (e.g. from xray) — stream the default.
-                    self.spawn_one_log(ns, name, None, String::new(), false);
+                    self.spawn_one_log(ns, name, uid, None, String::new(), false);
                 } else {
                     let multi = containers.len() > 1;
                     for c in containers {
@@ -581,7 +592,14 @@ impl App {
                         } else {
                             String::new()
                         };
-                        self.spawn_one_log(ns.clone(), name.clone(), Some(c), prefix, false);
+                        self.spawn_one_log(
+                            ns.clone(),
+                            name.clone(),
+                            uid.clone(),
+                            Some(c),
+                            prefix,
+                            false,
+                        );
                     }
                 }
             }
@@ -591,7 +609,7 @@ impl App {
                 pod,
                 container,
                 previous,
-            }) => self.spawn_one_log(ns, pod, container, String::new(), previous),
+            }) => self.spawn_one_log(ns, pod, None, container, String::new(), previous),
             Some(LogSource::Provider { request }) => self.spawn_provider_logs(request),
             None => {}
         }
@@ -674,6 +692,7 @@ impl App {
         &mut self,
         ns: String,
         pod: String,
+        uid: Option<String>,
         container: Option<String>,
         prefix: String,
         previous: bool,
@@ -693,7 +712,8 @@ impl App {
         let stream = log_follow::LogStream {
             api: Api::namespaced(client, &ns),
             pod,
-            uid: None,
+            uid,
+            pinned: false,
             params: LogParams {
                 follow: !previous,
                 previous,

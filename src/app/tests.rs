@@ -19087,6 +19087,7 @@ async fn logs_time_anchors_restream_kubelet_logs() {
     app.logs.source = Some(LogSource::Pod {
         ns: "default".into(),
         name: "web".into(),
+        uid: None,
         containers: vec![],
     });
 
@@ -19653,6 +19654,7 @@ async fn launching_logs_invalidates_the_previous_buffers_index() {
         LogSource::Pod {
             ns: "default".into(),
             name: "new".into(),
+            uid: None,
             containers: Vec::new(),
         },
         "new".into(),

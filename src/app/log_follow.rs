@@ -199,9 +199,11 @@ enum Pumped {
 pub(super) struct LogStream {
     pub(super) api: Api<Pod>,
     pub(super) pod: String,
-    /// Set for pods a selector found: a replacement with the same name gets
-    /// its own stream.
+    /// The pod instance the stream starts on, when known.
     pub(super) uid: Option<String>,
+    /// Set for pods a selector found: a replacement with the same name gets
+    /// its own stream, so this one ends.
+    pub(super) pinned: bool,
     pub(super) params: LogParams,
     pub(super) prefix: String,
     pub(super) tx: Sender<Msg>,
@@ -232,7 +234,7 @@ impl LogStream {
 
     pub(super) async fn run(mut self) {
         let follow = self.params.follow && !self.params.previous;
-        let pinned = self.uid.is_some();
+        let pinned = self.pinned;
         let mut known_uid = self.uid.clone();
         let mut known_restarts = None;
         let mut resume = LogResume::default();
@@ -245,14 +247,22 @@ impl LogStream {
             }
             let connected_at = Timestamp::now();
             let opened = Instant::now();
-            let opening =
-                tokio::time::timeout(OPEN_TIMEOUT, self.api.log_stream(&self.pod, &self.params))
-                    .await;
+            let opening = tokio::select! {
+                opening = tokio::time::timeout(
+                    OPEN_TIMEOUT,
+                    self.api.log_stream(&self.pod, &self.params),
+                ) => opening,
+                // A request sent before the machine slept may never answer.
+                Ok(()) = self.wake.changed() => continue,
+                _ = self.tx.closed() => return,
+            };
             let (pumped, delivered) = match opening {
                 Ok(Ok(stream)) => {
                     reported = false;
                     self.pump(stream, &mut resume).await
                 }
+                // The pod went away between streams; the pod check says how.
+                Ok(Err(kube::Error::Api(e))) if follow && e.code == 404 => (Pumped::Ended, 0),
                 Ok(Err(error)) if follow && not_started(&error) => {
                     if !self.pause(RECONNECT_MIN).await {
                         return;
@@ -317,6 +327,11 @@ impl LogStream {
                         if !self.send("[sofka] pod recreated".into()).await {
                             return;
                         }
+                        // The new instance has its own log, read from the start.
+                        resume = LogResume::default();
+                        self.params.tail_lines = None;
+                        self.params.since_seconds = None;
+                        self.params.since_time = None;
                         delay = RECONNECT_MIN;
                     }
                     StreamEnd::Resume => {}
@@ -406,6 +421,24 @@ fn pod_key(pod: &Pod) -> String {
     })
 }
 
+struct Followed {
+    name: String,
+    handles: Vec<tokio::task::AbortHandle>,
+}
+
+/// A watch refusal that retrying will not change. 410 is not one: the
+/// watcher answers it by listing again.
+fn watch_refused(error: &watcher::Error) -> bool {
+    let code = match error {
+        watcher::Error::InitialListFailed(kube::Error::Api(status))
+        | watcher::Error::WatchStartFailed(kube::Error::Api(status))
+        | watcher::Error::WatchFailed(kube::Error::Api(status)) => status.code,
+        watcher::Error::WatchError(status) => status.code,
+        _ => return false,
+    };
+    (400..500).contains(&code) && !matches!(code, 410 | 429)
+}
+
 /// Logs for every pod a label selector matches, now and later.
 pub(super) struct SelectorLogs {
     pub(super) client: Client,
@@ -439,10 +472,13 @@ impl SelectorLogs {
         let config = watcher::Config::default().labels(&self.labels);
         let mut events = watcher(api.clone(), config.clone()).boxed();
         let mut backoff = watcher::DefaultBackoff::default();
-        let mut followed: HashSet<String> = HashSet::new();
+        // The streams of each followed pod, so a pod that leaves the
+        // selector stops adding lines.
+        let mut followed: HashMap<String, Followed> = HashMap::new();
         let mut listed: HashSet<String> = HashSet::new();
         let mut synced = false;
         let mut reported = false;
+        let mut refused = false;
         let mut streams = tokio::task::JoinSet::new();
 
         loop {
@@ -471,7 +507,7 @@ impl SelectorLogs {
                         Ok(watcher::Event::InitApply(pod) | watcher::Event::Apply(pod)) => {
                             let key = pod_key(&pod);
                             listed.insert(key.clone());
-                            if !followed.insert(key) {
+                            if followed.contains_key(&key) {
                                 continue;
                             }
                             if synced {
@@ -480,13 +516,32 @@ impl SelectorLogs {
                                     return;
                                 }
                             }
-                            self.follow(&mut streams, &pod, !synced);
+                            let handles = self.follow(&mut streams, &pod, !synced);
+                            let name = pod.metadata.name.clone().unwrap_or_default();
+                            followed.insert(key, Followed { name, handles });
                         }
                         Ok(watcher::Event::Delete(pod)) => {
-                            followed.remove(&pod_key(&pod));
+                            let Some(gone) = followed.remove(&pod_key(&pod)) else { continue };
+                            // A deleted pod's streams end by themselves after
+                            // its last lines. A pod that only changed labels
+                            // keeps running and has to be cut off here.
+                            if pod.metadata.deletion_timestamp.is_none() && !self.unfollow(gone).await {
+                                return;
+                            }
                         }
                         Ok(watcher::Event::InitDone) => {
-                            followed.retain(|uid| listed.contains(uid));
+                            let left: Vec<String> = followed
+                                .keys()
+                                .filter(|key| !listed.contains(*key))
+                                .cloned()
+                                .collect();
+                            for key in left {
+                                if let Some(gone) = followed.remove(&key)
+                                    && !self.unfollow(gone).await
+                                {
+                                    return;
+                                }
+                            }
                             if !synced && followed.is_empty() {
                                 let line = "(no matching pods; new pods will be followed)";
                                 if !self.send(line.into()).await {
@@ -501,6 +556,19 @@ impl SelectorLogs {
                             {
                                 self.send(format!("[error] {error}")).await;
                                 return;
+                            }
+                            // Keep the pods already followed, but stop asking
+                            // for a watch RBAC will not allow.
+                            if watch_refused(&error) {
+                                refused = true;
+                                events = futures_util::stream::pending().boxed();
+                                let line = format!(
+                                    "[sofka] pod watch refused, new pods are not followed: {error}"
+                                );
+                                if !self.send(line).await {
+                                    return;
+                                }
+                                continue;
                             }
                             if !reported && synced {
                                 reported = true;
@@ -519,7 +587,7 @@ impl SelectorLogs {
                     }
                 }
                 Some(_) = streams.join_next(), if !streams.is_empty() => {}
-                Ok(()) = self.wake.changed() => {
+                Ok(()) = self.wake.changed(), if !refused => {
                     events = watcher(api.clone(), config.clone()).boxed();
                 }
                 _ = self.tx.closed() => return,
@@ -527,7 +595,28 @@ impl SelectorLogs {
         }
     }
 
-    fn follow(&self, streams: &mut tokio::task::JoinSet<()>, pod: &Pod, existing: bool) {
+    /// Stop a pod's streams that are still running. False once stale.
+    async fn unfollow(&self, gone: Followed) -> bool {
+        let running = gone.handles.iter().any(|h| !h.is_finished());
+        for handle in &gone.handles {
+            handle.abort();
+        }
+        if !running {
+            return true;
+        }
+        let name = gone.name;
+        self.send(format!(
+            "[{name}] [sofka] pod no longer matches the selector; stream ended"
+        ))
+        .await
+    }
+
+    fn follow(
+        &self,
+        streams: &mut tokio::task::JoinSet<()>,
+        pod: &Pod,
+        existing: bool,
+    ) -> Vec<tokio::task::AbortHandle> {
         let name = pod.metadata.name.clone().unwrap_or_default();
         let ns = pod
             .metadata
@@ -540,6 +629,7 @@ impl SelectorLogs {
             .map(|s| s.containers.iter().map(|c| c.name.clone()).collect())
             .unwrap_or_default();
         let multi = containers.len() > 1;
+        let mut handles = Vec::with_capacity(containers.len());
         for container in containers {
             let prefix = if multi {
                 format!("[{name}:{container}] ")
@@ -555,6 +645,7 @@ impl SelectorLogs {
                 api: Api::namespaced(self.client.clone(), &ns),
                 pod: name.clone(),
                 uid: pod.metadata.uid.clone(),
+                pinned: true,
                 params: LogParams {
                     follow: true,
                     container: Some(container),
@@ -569,8 +660,9 @@ impl SelectorLogs {
                 flag: self.flag.clone(),
                 wake: self.wake.clone(),
             };
-            streams.spawn(stream.run());
+            handles.push(streams.spawn(stream.run()));
         }
+        handles
     }
 }
 

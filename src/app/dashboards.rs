@@ -263,6 +263,7 @@ impl App {
                             LogSource::Pod {
                                 ns: item.ns,
                                 name: item.name.clone(),
+                                uid: None,
                                 containers: vec![],
                             },
                             format!("{} — logs", item.name),

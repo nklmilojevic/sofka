@@ -219,6 +219,7 @@ impl App {
                 LogSource::Pod {
                     ns: t.namespace.unwrap_or_default(),
                     name: t.name.clone(),
+                    uid: None,
                     containers: vec![],
                 },
                 format!("{} — logs", t.name),
