@@ -24883,7 +24883,9 @@ fn explain_selected_with_pure_evidence(app: &mut App) {
         plural: &app.kind_plural,
         obj: source,
         pods: &[],
+        pods_listed: true,
         related: &[],
+        related_listed: true,
         storage_classes: None,
         events: &[],
         events_v1: false,
@@ -25324,26 +25326,41 @@ fn health_report_app_with(
         tower::service_fn(move |request: http::Request<kube::client::Body>| {
             assert_eq!(request.method(), http::Method::GET);
             let path = request.uri().path().to_owned();
+            let query = request.uri().query().unwrap_or_default().to_owned();
             seen.lock().unwrap().push(path.clone());
-            let (code, response) = replies.lock().unwrap().get(&path).cloned().unwrap_or_else(
-                || {
-                    if path.ends_with("/namespaces") {
-                        (200, json!({"apiVersion":"v1","kind":"NamespaceList","metadata":{},"items":[]}))
-                    } else if path.ends_with("/events") {
-                        (
-                            200,
-                            json!({"apiVersion":"v1","kind":"EventList","metadata":{},"items":[]}),
-                        )
-                    } else if path.ends_with("/pods") {
-                        (
-                            200,
-                            json!({"apiVersion":"v1","kind":"PodList","metadata":{},"items":[]}),
-                        )
-                    } else {
-                        panic!("unexpected report GET {path}")
-                    }
-                },
-            );
+            // A `path?query` key answers only requests whose query contains
+            // that part, ahead of a plain `path` key.
+            let reply = {
+                let replies = replies.lock().unwrap();
+                replies
+                    .iter()
+                    .find(|(key, _)| {
+                        key.split_once('?')
+                            .is_some_and(|(p, q)| p == path && query.contains(q))
+                    })
+                    .map(|(_, reply)| reply.clone())
+                    .or_else(|| replies.get(&path).cloned())
+            };
+            let (code, response) = reply.unwrap_or_else(|| {
+                if path.ends_with("/namespaces") {
+                    (
+                        200,
+                        json!({"apiVersion":"v1","kind":"NamespaceList","metadata":{},"items":[]}),
+                    )
+                } else if path.ends_with("/events") {
+                    (
+                        200,
+                        json!({"apiVersion":"v1","kind":"EventList","metadata":{},"items":[]}),
+                    )
+                } else if path.ends_with("/pods") {
+                    (
+                        200,
+                        json!({"apiVersion":"v1","kind":"PodList","metadata":{},"items":[]}),
+                    )
+                } else {
+                    panic!("unexpected report GET {path}")
+                }
+            });
             async move {
                 Ok::<_, std::convert::Infallible>(
                     http::Response::builder()
@@ -38482,18 +38499,25 @@ async fn explain_on_a_node_lists_its_unhealthy_pods() {
         "metadata": {"name": "worker", "uid": "node-uid"},
         "spec": {"unschedulable": true},
         "status": {"conditions": [{"type": "Ready", "status": "True"}]}});
+    let pod = |name: &str, node: &str| {
+        json!({"metadata": {"name": name, "namespace": "apps"}, "spec": {"nodeName": node},
+            "status": {"phase": "Running", "containerStatuses": [{"name": "app",
+                "ready": false, "restartCount": 4,
+                "state": {"waiting": {"reason": "CrashLoopBackOff"}}}]}})
+    };
+    let list = |pod: serde_json::Value| json!({"apiVersion": "v1", "kind": "PodList", "metadata": {}, "items": [pod]});
     let app = explain_with(
         "nodes",
         node,
         "/api/v1/nodes/worker",
-        vec![(
-            "/api/v1/pods",
-            json!({"apiVersion": "v1", "kind": "PodList", "metadata": {},
-                "items": [{"metadata": {"name": "crashy", "namespace": "apps"},
-                    "status": {"phase": "Running", "containerStatuses": [{"name": "app",
-                        "ready": false, "restartCount": 4,
-                        "state": {"waiting": {"reason": "CrashLoopBackOff"}}}]}}]}),
-        )],
+        vec![
+            // Only a query scoped to this node gets this node's pods.
+            (
+                "/api/v1/pods?fieldSelector=spec.nodeName%3Dworker",
+                list(pod("crashy", "worker")),
+            ),
+            ("/api/v1/pods", list(pod("elsewhere", "other"))),
+        ],
     )
     .await;
     let texts = explain_texts(&app);
@@ -38504,5 +38528,80 @@ async fn explain_on_a_node_lists_its_unhealthy_pods() {
             .any(|t| t == "cordoned: new pods are not scheduled here")
     );
     assert!(texts.iter().any(|t| t.starts_with("Pod/crashy")));
-    assert!(texts.iter().any(|t| t.contains("CrashLoopBackOff")));
+    assert!(!texts.iter().any(|t| t.contains("elsewhere")));
+}
+
+#[tokio::test]
+async fn explain_on_a_job_ignores_pods_it_does_not_own() {
+    let job = json!({"apiVersion": "batch/v1", "kind": "Job",
+        "metadata": {"name": "migrate", "namespace": "default", "uid": "job-uid"},
+        "spec": {"manualSelector": true, "selector": {"matchLabels": {"app": "db"}}},
+        "status": {"active": 1}});
+    let pod = |name: &str, owner: &str| {
+        json!({"metadata": {"name": name, "namespace": "default",
+                "ownerReferences": [{"apiVersion": "batch/v1", "kind": "Job",
+                    "name": "x", "uid": owner}]},
+            "status": {"phase": "Running", "containerStatuses": [{"name": "app",
+                "ready": false, "restartCount": 0,
+                "state": {"waiting": {"reason": "ImagePullBackOff"}}}]}})
+    };
+    let app = explain_with(
+        "jobs",
+        job,
+        "/apis/batch/v1/namespaces/default/jobs/migrate",
+        vec![(
+            "/api/v1/namespaces/default/pods",
+            json!({"apiVersion": "v1", "kind": "PodList", "metadata": {},
+                "items": [pod("migrate-a", "job-uid"), pod("db-0", "sts-uid")]}),
+        )],
+    )
+    .await;
+    let texts = explain_texts(&app);
+    assert!(texts.iter().any(|t| t.starts_with("Pod/migrate-a")));
+    assert!(!texts.iter().any(|t| t.contains("db-0")));
+}
+
+#[test]
+fn events_without_a_uid_match_the_namespace_too() {
+    let pod = obj(json!({"metadata": {"name": "web", "namespace": "apps"}}));
+    let node = obj(json!({"metadata": {"name": "worker"}}));
+    let event = |ns: &str| {
+        obj(json!({"metadata": {"name": format!("e-{ns}")},
+            "involvedObject": {"kind": "Pod", "name": "web", "namespace": ns}}))
+    };
+    let all = [event("apps"), event("other")];
+    let kept = super::explain::filter_events(&all, &node, &[pod], false);
+    assert_eq!(kept.len(), 1);
+    assert_eq!(kept[0].metadata.name.as_deref(), Some("e-apps"));
+}
+
+#[tokio::test]
+async fn enter_on_a_cronjob_run_opens_that_job() {
+    let cron = json!({"apiVersion": "batch/v1", "kind": "CronJob",
+        "metadata": {"name": "report", "namespace": "default", "uid": "cron-uid"},
+        "spec": {"schedule": "@hourly"}});
+    let mut app = explain_with(
+        "cronjobs",
+        cron,
+        "/apis/batch/v1/namespaces/default/cronjobs/report",
+        vec![(
+            "/apis/batch/v1/namespaces/default/jobs",
+            json!({"apiVersion": "batch/v1", "kind": "JobList", "metadata": {},
+                "items": [{"metadata": {"name": "report-1", "namespace": "default",
+                    "creationTimestamp": "2026-10-06T10:00:00Z",
+                    "ownerReferences": [{"apiVersion": "batch/v1", "kind": "CronJob",
+                        "name": "report", "uid": "cron-uid"}]}}]}),
+        )],
+    )
+    .await;
+    let line = app
+        .explain_items
+        .iter()
+        .position(|f| f.text.starts_with("Job/report-1"))
+        .unwrap();
+    app.explain_state.select(Some(line));
+    app.handle_key(press(KeyCode::Enter)).unwrap();
+    assert_eq!(app.mode, Mode::Table);
+    assert_eq!(app.kind_plural, "jobs");
+    assert_eq!(app.fields.as_deref(), Some("metadata.name=report-1"));
 }

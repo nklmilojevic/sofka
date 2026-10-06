@@ -13,10 +13,11 @@ logs, `r` gathers again. A finding you can drill into has a trailing `→`.
 Some kinds get their own analysis:
 
 - **Job**: the Failed or Complete condition and its reason, progress, failures
-  against `backoffLimit`, and failed pods.
+  against `backoffLimit` (container restarts count under
+  `restartPolicy: OnFailure`), and failed pods.
 - **CronJob**: suspension, schedule, last scheduled and successful runs, runs
-  skipped by `concurrencyPolicy: Forbid`, its five newest Jobs, and the pods of
-  the latest one.
+  skipped by `concurrencyPolicy: Forbid`, its five newest Jobs (`⏎` opens one),
+  and the pods of the latest one.
 - **PersistentVolumeClaim**: why it is not bound (a missing class, no default
   class, `WaitForFirstConsumer` with no pod, an unprovisioned volume), pending
   resizes, a ReadWriteOnce claim used on several nodes, and the pods that mount
@@ -25,7 +26,8 @@ Some kinds get their own analysis:
   ten unhealthy pods on the node.
 
 Reading StorageClasses needs cluster-scope `list`. Without it, a Pending claim's
-class is reported as unknown, never as missing.
+class is reported as unknown, never as missing. Likewise, Jobs or pods that
+could not be listed are reported as unknown, not as absent.
 
 For Nodes, memory, disk, and PID pressure are warnings when their conditions
 are `True`. `NetworkUnavailable=True` is also a warning. These conditions do

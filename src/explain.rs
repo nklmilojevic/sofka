@@ -78,8 +78,13 @@ pub struct Evidence<'a> {
     pub obj: &'a DynamicObject,
     /// Pods related to the object (a workload's children, or the pod itself).
     pub pods: &'a [DynamicObject],
+    /// Whether `pods` was listed. A failed list is not evidence that no pod
+    /// exists.
+    pub pods_listed: bool,
     /// Other objects the analysis reads: the Jobs a CronJob owns.
     pub related: &'a [DynamicObject],
+    /// Whether `related` was listed.
+    pub related_listed: bool,
     /// The cluster's StorageClasses, for a PVC. `None` when they could not be
     /// listed, so a missing class is not mistaken for a deleted one.
     pub storage_classes: Option<&'a [DynamicObject]>,
@@ -346,6 +351,19 @@ fn explain_job(ev: &Evidence, name: &str, out: &mut Vec<Finding>) {
     let succeeded = ptr_i64(d, "/status/succeeded").unwrap_or(0);
     let failed = ptr_i64(d, "/status/failed").unwrap_or(0);
     let backoff_limit = ptr_i64(d, "/spec/backoffLimit").unwrap_or(6);
+    // Under OnFailure a failing container restarts in place, so the pod
+    // never fails and `status.failed` stays put. The restarts are what count
+    // against backoffLimit.
+    let restarts: i64 = if ptr_str(d, "/spec/template/spec/restartPolicy") == Some("OnFailure") {
+        ev.pods
+            .iter()
+            .flat_map(container_statuses)
+            .filter_map(|cs| cs.get("restartCount").and_then(Value::as_i64))
+            .sum()
+    } else {
+        0
+    };
+    let retries = failed + restarts;
     let (level, state) = job_state(ev.obj);
     let done = matches!(level, Level::Good | Level::Critical);
 
@@ -353,10 +371,10 @@ fn explain_job(ev: &Evidence, name: &str, out: &mut Vec<Finding>) {
         (Level::Critical, _) => format!("Job/{name} failed"),
         (Level::Good, _) => format!("Job/{name} completed"),
         (Level::Warn, _) => format!("Job/{name} is suspended"),
-        _ if failed > 0 => format!("Job/{name} is retrying after failures"),
+        _ if retries > 0 => format!("Job/{name} is retrying after failures"),
         _ => format!("Job/{name} is running"),
     };
-    let head_level = if level == Level::Info && failed > 0 {
+    let head_level = if level == Level::Info && retries > 0 {
         Level::Warn
     } else {
         level
@@ -376,15 +394,20 @@ fn explain_job(ev: &Evidence, name: &str, out: &mut Vec<Finding>) {
         Level::Info,
         format!("{target} · active {active} · failed {failed}"),
     ));
-    if failed > 0 && !done {
+    if retries > 0 && !done {
+        let restarted = if restarts > 0 {
+            format!(", {restarts} of them container restarts under restartPolicy OnFailure")
+        } else {
+            String::new()
+        };
         out.push(Finding::new(
             1,
-            if failed >= backoff_limit {
+            if retries >= backoff_limit {
                 Level::Critical
             } else {
                 Level::Warn
             },
-            format!("{failed} of {backoff_limit} allowed failures used (backoffLimit)"),
+            format!("{retries} of {backoff_limit} allowed failures used (backoffLimit){restarted}"),
         ));
     }
 
@@ -401,6 +424,11 @@ fn explain_cronjob(ev: &Evidence, name: &str, out: &mut Vec<Finding>) {
 
     let (level, headline) = if suspended {
         (Level::Warn, format!("CronJob/{name} is suspended"))
+    } else if !ev.related_listed {
+        (
+            Level::Warn,
+            format!("CronJob/{name}: its Jobs could not be listed, so its runs are unknown"),
+        )
     } else {
         match &latest {
             Some((_, (Level::Critical, _))) => (
@@ -516,8 +544,12 @@ fn explain_pvc(ev: &Evidence, name: &str, out: &mut Vec<Finding>) {
                 ),
             ));
             let requested = ptr_str(d, "/spec/resources/requests/storage");
+            // A volume larger than requested is fine; only a request the
+            // volume has not grown to yet is a pending resize.
+            let bytes = |q: &str| crate::views::parse_quantity(q);
             if let Some(requested) = requested
-                && requested != capacity
+                && let (Some(want), Some(have)) = (bytes(requested), bytes(capacity))
+                && want > have
             {
                 out.push(Finding::new(
                     1,
@@ -572,9 +604,11 @@ fn explain_pvc(ev: &Evidence, name: &str, out: &mut Vec<Finding>) {
     let only_one_node = modes.contains(&"ReadWriteOnce")
         && !modes.contains(&"ReadWriteMany")
         && !modes.contains(&"ReadOnlyMany");
+    // Finished pods keep naming the claim but no longer hold the volume.
     let mut nodes: Vec<&str> = ev
         .pods
         .iter()
+        .filter(|p| !pod_finished(p))
         .filter_map(|p| ptr_str(&p.data, "/spec/nodeName"))
         .collect();
     nodes.sort_unstable();
@@ -685,20 +719,26 @@ fn explain_pvc_binding(ev: &Evidence, volume: Option<&str>, out: &mut Vec<Findin
     };
     let provisioner = ptr_str(&class.data, "/provisioner").unwrap_or("?");
     let mode = ptr_str(&class.data, "/volumeBindingMode").unwrap_or("Immediate");
-    if mode == "WaitForFirstConsumer" {
-        if ev.pods.is_empty() {
-            out.push(Finding::new(
-                1,
-                Level::Warn,
-                "binding waits for a pod that uses the claim (WaitForFirstConsumer), and no pod does",
-            ));
+    let selected_node = ev
+        .obj
+        .metadata
+        .annotations
+        .as_ref()
+        .and_then(|a| a.get("volume.kubernetes.io/selected-node"));
+    let scheduled = selected_node.is_some()
+        || ev
+            .pods
+            .iter()
+            .any(|p| ptr_str(&p.data, "/spec/nodeName").is_some());
+    if mode == "WaitForFirstConsumer" && !scheduled {
+        let text = if !ev.pods_listed {
+            "binding waits for a pod that uses the claim (WaitForFirstConsumer); pods could not be listed to check for one"
+        } else if ev.pods.is_empty() {
+            "binding waits for a pod that uses the claim (WaitForFirstConsumer), and no pod does"
         } else {
-            out.push(Finding::new(
-                1,
-                Level::Warn,
-                "binding waits for the pod that uses it to be scheduled (WaitForFirstConsumer)",
-            ));
-        }
+            "binding waits for the pod that uses it to be scheduled (WaitForFirstConsumer)"
+        };
+        out.push(Finding::new(1, Level::Warn, text));
     } else {
         out.push(Finding::new(
             1,
@@ -706,13 +746,7 @@ fn explain_pvc_binding(ev: &Evidence, volume: Option<&str>, out: &mut Vec<Findin
             format!("{provisioner} has not provisioned a volume yet; see the events below"),
         ));
     }
-    if let Some(node) = ev
-        .obj
-        .metadata
-        .annotations
-        .as_ref()
-        .and_then(|a| a.get("volume.kubernetes.io/selected-node"))
-    {
+    if let Some(node) = selected_node {
         out.push(Finding::new(
             1,
             Level::Info,
@@ -734,7 +768,7 @@ fn explain_node(ev: &Evidence, name: &str, out: &mut Vec<Finding>) {
                 .map(|t| format!(" since {}", short_datetime(t)))
                 .unwrap_or_default();
             let (level, verb) = match cstr(c, "status") {
-                "True" => (Level::Good, "is Ready".to_string()),
+                "True" => (Level::Good, format!("is Ready{since}")),
                 "False" => (Level::Critical, format!("is NotReady{since}")),
                 _ => (
                     Level::Warn,
@@ -810,18 +844,10 @@ fn explain_node(ev: &Evidence, name: &str, out: &mut Vec<Finding>) {
         out.push(Finding::new(1, level, text));
     }
 
-    let running = ev
-        .pods
-        .iter()
-        .filter(|p| {
-            !matches!(
-                ptr_str(&p.data, "/status/phase"),
-                Some("Succeeded" | "Failed")
-            )
-        })
-        .count();
-    if let Some(allocatable) =
-        ptr_str(d, "/status/allocatable/pods").and_then(|p| p.parse::<usize>().ok())
+    let running = ev.pods.iter().filter(|p| !pod_finished(p)).count();
+    if let Some(allocatable) = ptr_str(d, "/status/allocatable/pods")
+        .and_then(|p| p.parse::<usize>().ok())
+        .filter(|_| ev.pods_listed)
     {
         out.push(Finding::new(0, Level::Heading, "Capacity"));
         out.push(Finding::new(
@@ -949,6 +975,13 @@ fn pod_status(pod: &DynamicObject) -> String {
     ptr_str(&pod.data, "/status/phase")
         .unwrap_or("Unknown")
         .to_string()
+}
+
+fn pod_finished(pod: &DynamicObject) -> bool {
+    matches!(
+        ptr_str(&pod.data, "/status/phase"),
+        Some("Succeeded" | "Failed")
+    )
 }
 
 fn pod_ready_counts(pod: &DynamicObject) -> (usize, usize) {
@@ -1187,7 +1220,9 @@ mod tests {
             plural,
             obj: o,
             pods,
+            pods_listed: true,
             related: &[],
+            related_listed: true,
             storage_classes: None,
             events,
             events_v1: false,
@@ -1698,5 +1733,131 @@ mod tests {
         let f = explain(&ev("Node", "nodes", &node, &pods, &[]));
         assert_eq!(f.iter().filter(|x| x.text.starts_with("Pod/")).count(), 10);
         assert!(has(&f, Level::Info, "… and 2 more"));
+    }
+
+    #[test]
+    fn on_failure_restarts_count_against_the_backoff_limit() {
+        let job = obj(json!({"metadata": {"name": "sync"},
+            "spec": {"backoffLimit": 6, "template": {"spec": {"restartPolicy": "OnFailure"}}},
+            "status": {"active": 1}}));
+        let pod = obj(json!({"metadata": {"name": "sync-x"},
+            "status": {"phase": "Running", "containerStatuses": [{"name": "app", "ready": false,
+                "restartCount": 3, "state": {"waiting": {"reason": "CrashLoopBackOff"}}}]}}));
+        let f = explain(&ev("Job", "jobs", &job, std::slice::from_ref(&pod), &[]));
+        assert_eq!(f[0].text, "Job/sync is retrying after failures");
+        assert!(has(
+            &f,
+            Level::Warn,
+            "3 of 6 allowed failures used (backoffLimit), 3 of them container restarts"
+        ));
+    }
+
+    #[test]
+    fn unlisted_evidence_is_unknown_not_empty() {
+        let cron = obj(json!({"metadata": {"name": "report"}, "spec": {"schedule": "@daily"}}));
+        let mut e = ev("CronJob", "cronjobs", &cron, &[], &[]);
+        e.related_listed = false;
+        let f = explain(&e);
+        assert!(f[0].text.contains("its Jobs could not be listed"));
+        assert!(!f.iter().any(|x| x.text.contains("no runs on record")));
+
+        let classes = [storage_class("local", "WaitForFirstConsumer", false)];
+        let pvc = pending_pvc(Some("local"));
+        let mut e = ev(
+            "PersistentVolumeClaim",
+            "persistentvolumeclaims",
+            &pvc,
+            &[],
+            &[],
+        );
+        e.storage_classes = Some(&classes);
+        e.pods_listed = false;
+        let f = explain(&e);
+        assert!(has(
+            &f,
+            Level::Warn,
+            "pods could not be listed to check for one"
+        ));
+        assert!(!f.iter().any(|x| x.text.contains("and no pod does")));
+
+        let node = obj(json!({"metadata": {"name": "worker"},
+            "status": {"allocatable": {"pods": "110"},
+                "conditions": [{"type": "Ready", "status": "True"}]}}));
+        let mut e = ev("Node", "nodes", &node, &[], &[]);
+        e.pods_listed = false;
+        assert!(!explain(&e).iter().any(|x| x.text.contains("pods")));
+    }
+
+    #[test]
+    fn a_scheduled_consumer_moves_the_blame_to_provisioning() {
+        let classes = [storage_class("local", "WaitForFirstConsumer", false)];
+        let pod = obj(
+            json!({"metadata": {"name": "db-0"}, "spec": {"nodeName": "node-1"},
+            "status": {"phase": "Pending"}}),
+        );
+        let f = explain_pvc_with(
+            &pending_pvc(Some("local")),
+            std::slice::from_ref(&pod),
+            Some(&classes),
+        );
+        assert!(has(
+            &f,
+            Level::Warn,
+            "ebs.csi.aws.com has not provisioned a volume yet"
+        ));
+        assert!(!f.iter().any(|x| x.text.contains("to be scheduled")));
+
+        let mut pvc = pending_pvc(Some("local"));
+        pvc.metadata.annotations = Some(
+            [(
+                "volume.kubernetes.io/selected-node".to_string(),
+                "node-2".to_string(),
+            )]
+            .into(),
+        );
+        let f = explain_pvc_with(&pvc, &[], Some(&classes));
+        assert!(has(&f, Level::Warn, "has not provisioned a volume yet"));
+        assert!(has(&f, Level::Info, "the scheduler picked node node-2"));
+    }
+
+    #[test]
+    fn resize_and_attachment_checks_ignore_equal_sizes_and_finished_pods() {
+        let bound = |requested: &str, capacity: &str| {
+            obj(json!({"metadata": {"name": "data"},
+                "spec": {"accessModes": ["ReadWriteOnce"], "volumeName": "pv-1",
+                    "resources": {"requests": {"storage": requested}}},
+                "status": {"phase": "Bound", "capacity": {"storage": capacity}}}))
+        };
+        for (requested, capacity) in [("1024Mi", "1Gi"), ("1Gi", "2Gi")] {
+            let f = explain_pvc_with(&bound(requested, capacity), &[], None);
+            assert!(
+                !f.iter().any(|x| x.text.contains("capacity is still")),
+                "{requested} {capacity}"
+            );
+        }
+        let pod = |name: &str, node: &str, phase: &str| {
+            obj(
+                json!({"metadata": {"name": name}, "spec": {"nodeName": node},
+                "status": {"phase": phase}}),
+            )
+        };
+        let pods = [
+            pod("old", "node-1", "Succeeded"),
+            pod("new", "node-2", "Running"),
+        ];
+        let f = explain_pvc_with(&bound("1Gi", "1Gi"), &pods, None);
+        assert!(
+            !f.iter()
+                .any(|x| x.text.contains("only one node can attach it"))
+        );
+    }
+
+    #[test]
+    fn a_ready_node_says_since_when() {
+        let node = obj(json!({"metadata": {"name": "worker"},
+            "status": {"conditions": [{"type": "Ready", "status": "True",
+                "lastTransitionTime": "2026-10-01T08:00:00Z"}]}}));
+        let f = explain(&ev("Node", "nodes", &node, &[], &[]));
+        assert_eq!(f[0].text, "Node/worker is Ready since 2026-10-01 08:00:00");
     }
 }
