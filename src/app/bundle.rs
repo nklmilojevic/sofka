@@ -1,6 +1,6 @@
 use super::*;
 
-use super::explain::{filter_events, list_selected};
+use super::explain::gather_evidence;
 use crate::bundle::{Doc, redact_to_yaml};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -68,13 +68,6 @@ impl App {
             .and_then(|o| self.cluster.resolve(&o.kind.to_lowercase()))
             .map(|k| (k.ar, k.namespaced));
 
-        let selector = match plural.as_str() {
-            "deployments" | "statefulsets" | "daemonsets" | "replicasets" => {
-                label_selector(&obj, "matchLabels")
-            }
-            _ => None,
-        };
-
         let client = self.cluster.client.clone();
         let tx = self.tx.clone();
         let genr = self.generation;
@@ -85,31 +78,16 @@ impl App {
 
             // ---- gather -----------------------------------------------------
             let mut warn = None;
-            let pods: Vec<DynamicObject> = if plural == "pods" {
-                vec![obj.clone()]
-            } else if let (Some((ar, nsd)), Some(sel)) = (&pods_kind, &selector) {
-                list_selected(&client, ar, *nsd, &ns, sel, &mut warn).await
-            } else {
-                Vec::new()
-            };
-
-            let (events, events_v1) = match &events_kind {
-                Some((ar, nsd)) => {
-                    let v1 = ar.group == "events.k8s.io";
-                    let all = list_or_warn(&client, ar, *nsd, &ns, &mut warn).await;
-                    (filter_events(&all, &obj, &pods, v1), v1)
-                }
-                None => (Vec::new(), false),
-            };
-
-            let evidence = crate::explain::Evidence {
-                kind: &kind_name,
-                plural: &plural,
-                obj: &obj,
-                pods: &pods,
-                events: &events,
-                events_v1,
-            };
+            let gathered = gather_evidence(
+                &client,
+                &plural,
+                &obj,
+                pods_kind.as_ref().map(|(ar, nsd)| (ar, *nsd)),
+                events_kind.as_ref().map(|(ar, nsd)| (ar, *nsd)),
+                &mut warn,
+            )
+            .await;
+            let evidence = gathered.evidence(&kind_name, &plural, &obj);
             let mut findings = crate::explain::explain(&evidence);
             prepend_warn_finding(&mut findings, warn);
 
@@ -134,7 +112,7 @@ impl App {
             // Bounded logs for the first container of up to `max_pods` pods.
             let mut log_blocks: Vec<(String, Vec<String>)> = Vec::new();
             if log_lines > 0 {
-                for pod in pods.iter().take(max_pods) {
+                for pod in gathered.pods.iter().take(max_pods) {
                     let pname = pod.metadata.name.clone().unwrap_or_default();
                     let pns = pod.metadata.namespace.clone().unwrap_or(ns.clone());
                     let container = first_container(pod);
@@ -200,8 +178,8 @@ impl App {
                     Some((ok, oname, _)) => format!("owner ({ok}/{oname})"),
                     None => "owner: none".into(),
                 },
-                format!("{} related pod(s)", pods.len()),
-                format!("{} event(s)", events.len()),
+                format!("{} related pod(s)", gathered.pods.len()),
+                format!("{} event(s)", gathered.events.len()),
                 format!("{} explanation finding(s)", findings.len()),
                 format!("{} timeline entry(ies)", timeline.len()),
                 format!(
@@ -238,7 +216,10 @@ impl App {
             doc.code("yaml", &obj_yaml);
 
             doc.heading("Events");
-            doc.code("text", &format_event_lines(&events, events_v1));
+            doc.code(
+                "text",
+                &format_event_lines(&gathered.events, gathered.events_v1),
+            );
 
             doc.heading("Timeline (session-local)");
             doc.code("text", &timeline);

@@ -78,6 +78,11 @@ pub struct Evidence<'a> {
     pub obj: &'a DynamicObject,
     /// Pods related to the object (a workload's children, or the pod itself).
     pub pods: &'a [DynamicObject],
+    /// Other objects the analysis reads: the Jobs a CronJob owns.
+    pub related: &'a [DynamicObject],
+    /// The cluster's StorageClasses, for a PVC. `None` when they could not be
+    /// listed, so a missing class is not mistaken for a deleted one.
+    pub storage_classes: Option<&'a [DynamicObject]>,
     /// Recent events regarding the object and its pods.
     pub events: &'a [DynamicObject],
     /// Whether events came from the `events.k8s.io` schema (`note`/`series`).
@@ -93,6 +98,10 @@ pub fn explain(ev: &Evidence) -> Vec<Finding> {
             explain_workload(ev, &name, &mut out)
         }
         "pods" => explain_pod(ev, &name, &mut out),
+        "jobs" => explain_job(ev, &name, &mut out),
+        "cronjobs" => explain_cronjob(ev, &name, &mut out),
+        "persistentvolumeclaims" => explain_pvc(ev, &name, &mut out),
+        "nodes" => explain_node(ev, &name, &mut out),
         _ => explain_generic(ev, &name, &mut out),
     }
     append_events(ev, &mut out);
@@ -204,30 +213,59 @@ fn explain_workload(ev: &Evidence, name: &str, out: &mut Vec<Finding>) {
     }
 
     // Blocking pods: the children that aren't ready, worst first.
-    let mut blockers: Vec<&DynamicObject> = ev.pods.iter().filter(|p| !pod_is_ready(p)).collect();
-    blockers.sort_by_key(|p| p.metadata.name.clone().unwrap_or_default());
-    if !blockers.is_empty() {
-        out.push(Finding::new(0, Level::Heading, "Blocking objects"));
-        for pod in blockers {
-            let pname = pod.metadata.name.clone().unwrap_or_default();
-            let (rdy, total) = pod_ready_counts(pod);
-            let status = pod_status(pod);
-            let mut f = Finding::new(
-                1,
-                pod_level(&status),
-                format!("Pod/{pname}  {rdy}/{total}  {status}"),
-            );
-            f = f.with_target(Target {
-                plural: "pods".into(),
-                namespace: pod.metadata.namespace.clone(),
-                name: pname,
-            });
-            out.push(f);
-            for detail in pod_problems(pod) {
-                out.push(Finding::new(2, detail.0, detail.1));
-            }
+    push_unready_pods("Blocking objects", ev.pods, None, out);
+}
+
+/// List the pods that are not ready, with their problems, under `heading`.
+/// `cap` bounds the list for views that can hold hundreds of pods.
+fn push_unready_pods(
+    heading: &str,
+    pods: &[DynamicObject],
+    cap: Option<usize>,
+    out: &mut Vec<Finding>,
+) {
+    let mut blockers: Vec<&DynamicObject> = pods.iter().filter(|p| !pod_is_ready(p)).collect();
+    blockers.sort_by_key(|p| {
+        (
+            p.metadata.namespace.clone().unwrap_or_default(),
+            p.metadata.name.clone().unwrap_or_default(),
+        )
+    });
+    if blockers.is_empty() {
+        return;
+    }
+    out.push(Finding::new(0, Level::Heading, heading));
+    let shown = cap.unwrap_or(usize::MAX);
+    for pod in blockers.iter().take(shown) {
+        out.push(pod_line(pod));
+        for detail in pod_problems(pod) {
+            out.push(Finding::new(2, detail.0, detail.1));
         }
     }
+    if blockers.len() > shown {
+        out.push(Finding::new(
+            1,
+            Level::Info,
+            format!("… and {} more", blockers.len() - shown),
+        ));
+    }
+}
+
+/// `Pod/name  ready/total  status`, pointing at the pod.
+fn pod_line(pod: &DynamicObject) -> Finding {
+    let pname = pod.metadata.name.clone().unwrap_or_default();
+    let (rdy, total) = pod_ready_counts(pod);
+    let status = pod_status(pod);
+    Finding::new(
+        1,
+        pod_level(&status),
+        format!("Pod/{pname}  {rdy}/{total}  {status}"),
+    )
+    .with_target(Target {
+        plural: "pods".into(),
+        namespace: pod.metadata.namespace.clone(),
+        name: pname,
+    })
 }
 
 fn rollout_level(ready: i64, desired: i64) -> Level {
@@ -276,6 +314,538 @@ fn explain_pod(ev: &Evidence, name: &str, out: &mut Vec<Finding>) {
         out.push(Finding::new(0, Level::Heading, "Placement"));
         out.push(Finding::new(1, Level::Info, format!("node {node}")));
     }
+}
+
+// ----- jobs and cronjobs ---------------------------------------------------
+
+/// How a Job ended or stands: its level and a short description.
+fn job_state(job: &DynamicObject) -> (Level, String) {
+    let is_true = |ty: &str| condition(job, ty).filter(|c| cstr(c, "status") == "True");
+    if let Some(c) = is_true("Failed").or_else(|| is_true("FailureTarget")) {
+        return (
+            Level::Critical,
+            format!(
+                "failed: {}",
+                join_reason(cstr(c, "reason"), cstr(c, "message"))
+            ),
+        );
+    }
+    if is_true("Complete").is_some() || is_true("SuccessCriteriaMet").is_some() {
+        return (Level::Good, "succeeded".into());
+    }
+    let suspended = job.data.pointer("/spec/suspend").and_then(Value::as_bool) == Some(true);
+    if suspended || is_true("Suspended").is_some() {
+        return (Level::Warn, "suspended".into());
+    }
+    (Level::Info, "running".into())
+}
+
+fn explain_job(ev: &Evidence, name: &str, out: &mut Vec<Finding>) {
+    let d = &ev.obj.data;
+    let active = ptr_i64(d, "/status/active").unwrap_or(0);
+    let succeeded = ptr_i64(d, "/status/succeeded").unwrap_or(0);
+    let failed = ptr_i64(d, "/status/failed").unwrap_or(0);
+    let backoff_limit = ptr_i64(d, "/spec/backoffLimit").unwrap_or(6);
+    let (level, state) = job_state(ev.obj);
+    let done = matches!(level, Level::Good | Level::Critical);
+
+    let headline = match (level, state.as_str()) {
+        (Level::Critical, _) => format!("Job/{name} failed"),
+        (Level::Good, _) => format!("Job/{name} completed"),
+        (Level::Warn, _) => format!("Job/{name} is suspended"),
+        _ if failed > 0 => format!("Job/{name} is retrying after failures"),
+        _ => format!("Job/{name} is running"),
+    };
+    let head_level = if level == Level::Info && failed > 0 {
+        Level::Warn
+    } else {
+        level
+    };
+    out.push(Finding::new(0, head_level, headline));
+    if let Some(reason) = state.strip_prefix("failed: ") {
+        out.push(Finding::new(1, Level::Critical, reason));
+    }
+
+    out.push(Finding::new(0, Level::Heading, "Progress"));
+    let target = match ptr_i64(d, "/spec/completions") {
+        Some(c) => format!("succeeded {succeeded}/{c}"),
+        None => format!("succeeded {succeeded}"),
+    };
+    out.push(Finding::new(
+        1,
+        Level::Info,
+        format!("{target} · active {active} · failed {failed}"),
+    ));
+    if failed > 0 && !done {
+        out.push(Finding::new(
+            1,
+            if failed >= backoff_limit {
+                Level::Critical
+            } else {
+                Level::Warn
+            },
+            format!("{failed} of {backoff_limit} allowed failures used (backoffLimit)"),
+        ));
+    }
+
+    push_unready_pods("Failed or unready pods", ev.pods, None, out);
+}
+
+fn explain_cronjob(ev: &Evidence, name: &str, out: &mut Vec<Finding>) {
+    let d = &ev.obj.data;
+    let suspended = d.pointer("/spec/suspend").and_then(Value::as_bool) == Some(true);
+    let mut jobs: Vec<&DynamicObject> = ev.related.iter().collect();
+    // Newest first.
+    jobs.sort_by_key(|j| std::cmp::Reverse(j.metadata.creation_timestamp.as_ref().map(|t| t.0)));
+    let latest = jobs.first().map(|j| (*j, job_state(j)));
+
+    let (level, headline) = if suspended {
+        (Level::Warn, format!("CronJob/{name} is suspended"))
+    } else {
+        match &latest {
+            Some((_, (Level::Critical, _))) => (
+                Level::Critical,
+                format!("CronJob/{name}: the last run failed"),
+            ),
+            Some((_, (Level::Good, _))) => (
+                Level::Good,
+                format!("CronJob/{name} is healthy (the last run succeeded)"),
+            ),
+            Some(_) => (Level::Info, format!("CronJob/{name} has a run in progress")),
+            None => (Level::Info, format!("CronJob/{name} has no runs on record")),
+        }
+    };
+    out.push(Finding::new(0, level, headline));
+
+    out.push(Finding::new(0, Level::Heading, "Schedule"));
+    let schedule = ptr_str(d, "/spec/schedule").unwrap_or("?");
+    let zone = ptr_str(d, "/spec/timeZone")
+        .map(|z| format!(" ({z})"))
+        .unwrap_or_default();
+    out.push(Finding::new(
+        1,
+        Level::Info,
+        format!("schedule {schedule}{zone}"),
+    ));
+    let last_scheduled = ptr_str(d, "/status/lastScheduleTime");
+    let last_success = ptr_str(d, "/status/lastSuccessfulTime");
+    if let Some(t) = last_scheduled {
+        out.push(Finding::new(
+            1,
+            Level::Info,
+            format!("last scheduled {}", short_datetime(t)),
+        ));
+    }
+    match last_success {
+        Some(t) => out.push(Finding::new(
+            1,
+            Level::Info,
+            format!("last success {}", short_datetime(t)),
+        )),
+        None if last_scheduled.is_some() => {
+            out.push(Finding::new(1, Level::Warn, "no successful run on record"))
+        }
+        None => {}
+    }
+    let active = d
+        .pointer("/status/active")
+        .and_then(Value::as_array)
+        .map_or(0, Vec::len);
+    if active > 0 && ptr_str(d, "/spec/concurrencyPolicy") == Some("Forbid") {
+        out.push(Finding::new(
+            1,
+            Level::Warn,
+            "concurrencyPolicy Forbid: new runs are skipped while a job is active",
+        ));
+    }
+
+    if !jobs.is_empty() {
+        out.push(Finding::new(0, Level::Heading, "Recent jobs"));
+        for job in jobs.iter().take(5) {
+            let jname = job.metadata.name.clone().unwrap_or_default();
+            let (level, state) = job_state(job);
+            let created = job
+                .metadata
+                .creation_timestamp
+                .as_ref()
+                .map(|t| short_datetime(&t.0.to_string()))
+                .unwrap_or_default();
+            out.push(
+                Finding::new(1, level, format!("Job/{jname}  {created}  {state}")).with_target(
+                    Target {
+                        plural: "jobs".into(),
+                        namespace: job.metadata.namespace.clone(),
+                        name: jname,
+                    },
+                ),
+            );
+        }
+    }
+    if let Some((job, _)) = latest {
+        let jname = job.metadata.name.as_deref().unwrap_or_default();
+        push_unready_pods(&format!("Pods of Job/{jname}"), ev.pods, None, out);
+    }
+}
+
+// ----- persistent volume claims --------------------------------------------
+
+fn explain_pvc(ev: &Evidence, name: &str, out: &mut Vec<Finding>) {
+    let pvc = ev.obj;
+    let d = &pvc.data;
+    let phase = ptr_str(d, "/status/phase").unwrap_or("Pending");
+    let volume = ptr_str(d, "/spec/volumeName").filter(|v| !v.is_empty());
+    let modes: Vec<&str> = d
+        .pointer("/spec/accessModes")
+        .and_then(Value::as_array)
+        .map(|a| a.iter().filter_map(Value::as_str).collect())
+        .unwrap_or_default();
+    let label = format!("PersistentVolumeClaim/{name}");
+
+    match phase {
+        "Bound" => {
+            out.push(Finding::new(0, Level::Good, format!("{label} is bound")));
+            let capacity = ptr_str(d, "/status/capacity/storage").unwrap_or("?");
+            let class = ptr_str(d, "/spec/storageClassName").unwrap_or("-");
+            out.push(Finding::new(
+                1,
+                Level::Info,
+                format!(
+                    "volume {} · {capacity} · {} · class {class}",
+                    volume.unwrap_or("?"),
+                    modes.join(",")
+                ),
+            ));
+            let requested = ptr_str(d, "/spec/resources/requests/storage");
+            if let Some(requested) = requested
+                && requested != capacity
+            {
+                out.push(Finding::new(
+                    1,
+                    Level::Warn,
+                    format!("requested {requested}, capacity is still {capacity}"),
+                ));
+            }
+        }
+        "Lost" => {
+            out.push(Finding::new(0, Level::Critical, format!("{label} is Lost")));
+            out.push(Finding::new(
+                1,
+                Level::Critical,
+                format!(
+                    "its PersistentVolume {} no longer exists; the data is not reachable",
+                    volume.unwrap_or("?")
+                ),
+            ));
+        }
+        _ => {
+            out.push(Finding::new(
+                0,
+                Level::Critical,
+                format!("{label} is Pending"),
+            ));
+            out.push(Finding::new(0, Level::Heading, "Binding"));
+            explain_pvc_binding(ev, volume, out);
+        }
+    }
+
+    // Resize and modification conditions report trouble when True.
+    for cond in conditions(pvc) {
+        if cstr(cond, "status") == "True" {
+            let ty = cstr(cond, "type");
+            let detail = join_reason(cstr(cond, "reason"), cstr(cond, "message"));
+            out.push(Finding::new(1, Level::Warn, format!("{ty}: {detail}")));
+        }
+    }
+
+    if pvc.metadata.deletion_timestamp.is_some() && !ev.pods.is_empty() {
+        out.push(Finding::new(
+            1,
+            Level::Warn,
+            "being deleted, but held by pvc-protection until no pod uses it",
+        ));
+    }
+
+    if ev.pods.is_empty() {
+        return;
+    }
+    out.push(Finding::new(0, Level::Heading, "Used by"));
+    let only_one_node = modes.contains(&"ReadWriteOnce")
+        && !modes.contains(&"ReadWriteMany")
+        && !modes.contains(&"ReadOnlyMany");
+    let mut nodes: Vec<&str> = ev
+        .pods
+        .iter()
+        .filter_map(|p| ptr_str(&p.data, "/spec/nodeName"))
+        .collect();
+    nodes.sort_unstable();
+    nodes.dedup();
+    if only_one_node && nodes.len() > 1 {
+        out.push(Finding::new(
+            1,
+            Level::Critical,
+            format!(
+                "ReadWriteOnce claim is used by pods on {} nodes ({}); only one node can attach it",
+                nodes.len(),
+                nodes.join(", ")
+            ),
+        ));
+    }
+    for pod in ev.pods {
+        let mut line = pod_line(pod);
+        if pod_is_ready(pod) {
+            line.level = Level::Info;
+        }
+        out.push(line);
+        if !pod_is_ready(pod) {
+            for detail in pod_problems(pod) {
+                out.push(Finding::new(2, detail.0, detail.1));
+            }
+        }
+    }
+}
+
+/// Why a Pending claim has no volume yet.
+fn explain_pvc_binding(ev: &Evidence, volume: Option<&str>, out: &mut Vec<Finding>) {
+    let d = &ev.obj.data;
+    if let Some(v) = volume {
+        out.push(Finding::new(
+            1,
+            Level::Warn,
+            format!("waiting to bind to PersistentVolume {v}"),
+        ));
+        return;
+    }
+    let class = match ptr_str(d, "/spec/storageClassName") {
+        Some("") => {
+            out.push(Finding::new(
+                1,
+                Level::Warn,
+                "storageClassName is empty, so only a matching pre-created PersistentVolume can bind it",
+            ));
+            return;
+        }
+        Some(name) => {
+            let found = ev.storage_classes.map(|all| {
+                all.iter()
+                    .find(|sc| sc.metadata.name.as_deref() == Some(name))
+            });
+            match found {
+                Some(None) => {
+                    out.push(Finding::new(
+                        1,
+                        Level::Critical,
+                        format!("StorageClass {name} does not exist"),
+                    ));
+                    return;
+                }
+                Some(Some(sc)) => Some(sc),
+                None => None,
+            }
+        }
+        None => {
+            let default = ev.storage_classes.map(|all| {
+                all.iter().find(|sc| {
+                    sc.metadata
+                        .annotations
+                        .as_ref()
+                        .and_then(|a| a.get("storageclass.kubernetes.io/is-default-class"))
+                        .is_some_and(|v| v == "true")
+                })
+            });
+            match default {
+                Some(None) => {
+                    out.push(Finding::new(
+                        1,
+                        Level::Critical,
+                        "no storageClassName is set and the cluster has no default StorageClass",
+                    ));
+                    return;
+                }
+                Some(Some(sc)) => {
+                    let name = sc.metadata.name.as_deref().unwrap_or_default();
+                    out.push(Finding::new(
+                        1,
+                        Level::Info,
+                        format!("uses the default StorageClass {name}"),
+                    ));
+                    Some(sc)
+                }
+                None => None,
+            }
+        }
+    };
+
+    let Some(class) = class else {
+        out.push(Finding::new(
+            1,
+            Level::Warn,
+            "no volume provisioned yet (StorageClasses could not be read; see the events below)",
+        ));
+        return;
+    };
+    let provisioner = ptr_str(&class.data, "/provisioner").unwrap_or("?");
+    let mode = ptr_str(&class.data, "/volumeBindingMode").unwrap_or("Immediate");
+    if mode == "WaitForFirstConsumer" {
+        if ev.pods.is_empty() {
+            out.push(Finding::new(
+                1,
+                Level::Warn,
+                "binding waits for a pod that uses the claim (WaitForFirstConsumer), and no pod does",
+            ));
+        } else {
+            out.push(Finding::new(
+                1,
+                Level::Warn,
+                "binding waits for the pod that uses it to be scheduled (WaitForFirstConsumer)",
+            ));
+        }
+    } else {
+        out.push(Finding::new(
+            1,
+            Level::Warn,
+            format!("{provisioner} has not provisioned a volume yet; see the events below"),
+        ));
+    }
+    if let Some(node) = ev
+        .obj
+        .metadata
+        .annotations
+        .as_ref()
+        .and_then(|a| a.get("volume.kubernetes.io/selected-node"))
+    {
+        out.push(Finding::new(
+            1,
+            Level::Info,
+            format!("the scheduler picked node {node} for the volume"),
+        ));
+    }
+}
+
+// ----- nodes ---------------------------------------------------------------
+
+fn explain_node(ev: &Evidence, name: &str, out: &mut Vec<Finding>) {
+    let node = ev.obj;
+    let d = &node.data;
+    match condition(node, "Ready") {
+        Some(c) => {
+            let since = c
+                .get("lastTransitionTime")
+                .and_then(Value::as_str)
+                .map(|t| format!(" since {}", short_datetime(t)))
+                .unwrap_or_default();
+            let (level, verb) = match cstr(c, "status") {
+                "True" => (Level::Good, "is Ready".to_string()),
+                "False" => (Level::Critical, format!("is NotReady{since}")),
+                _ => (
+                    Level::Warn,
+                    format!("readiness is Unknown{since} (the kubelet stopped reporting)"),
+                ),
+            };
+            out.push(Finding::new(0, level, format!("Node/{name} {verb}")));
+            if level != Level::Good {
+                let detail = join_reason(cstr(c, "reason"), cstr(c, "message"));
+                out.push(Finding::new(1, level, detail));
+            }
+        }
+        None => out.push(Finding::new(
+            0,
+            Level::Warn,
+            format!("Node/{name} reports no Ready condition"),
+        )),
+    }
+
+    // Pressure conditions report a problem when True, others when False.
+    // Unknown is a warning either way.
+    for cond in conditions(node) {
+        let ty = cstr(cond, "type");
+        if ty == "Ready" {
+            continue;
+        }
+        let status = cstr(cond, "status");
+        let pressure = matches!(
+            ty,
+            "MemoryPressure" | "DiskPressure" | "PIDPressure" | "NetworkUnavailable"
+        );
+        if status == "Unknown" || status == if pressure { "True" } else { "False" } {
+            let detail = join_reason(cstr(cond, "reason"), cstr(cond, "message"));
+            out.push(Finding::new(1, Level::Warn, format!("{ty}: {detail}")));
+        }
+    }
+
+    let cordoned = d.pointer("/spec/unschedulable").and_then(Value::as_bool) == Some(true);
+    let taints: Vec<&Value> = d
+        .pointer("/spec/taints")
+        .and_then(Value::as_array)
+        .map(|a| a.iter().collect())
+        .unwrap_or_default();
+    if cordoned || !taints.is_empty() {
+        out.push(Finding::new(0, Level::Heading, "Scheduling"));
+    }
+    if cordoned {
+        out.push(Finding::new(
+            1,
+            Level::Warn,
+            "cordoned: new pods are not scheduled here",
+        ));
+    }
+    for taint in taints {
+        let key = cstr(taint, "key");
+        // The cordon taint repeats the line above.
+        if cordoned && key == "node.kubernetes.io/unschedulable" {
+            continue;
+        }
+        let value = cstr(taint, "value");
+        let effect = cstr(taint, "effect");
+        let text = if value.is_empty() {
+            format!("taint {key}:{effect}")
+        } else {
+            format!("taint {key}={value}:{effect}")
+        };
+        // Taints the node controller sets mirror a problem with the node.
+        let level = if key.starts_with("node.kubernetes.io/") && effect != "PreferNoSchedule" {
+            Level::Warn
+        } else {
+            Level::Info
+        };
+        out.push(Finding::new(1, level, text));
+    }
+
+    let running = ev
+        .pods
+        .iter()
+        .filter(|p| {
+            !matches!(
+                ptr_str(&p.data, "/status/phase"),
+                Some("Succeeded" | "Failed")
+            )
+        })
+        .count();
+    if let Some(allocatable) =
+        ptr_str(d, "/status/allocatable/pods").and_then(|p| p.parse::<usize>().ok())
+    {
+        out.push(Finding::new(0, Level::Heading, "Capacity"));
+        out.push(Finding::new(
+            1,
+            if running >= allocatable {
+                Level::Critical
+            } else {
+                Level::Info
+            },
+            if running >= allocatable {
+                format!("pod capacity is full ({running}/{allocatable} pods)")
+            } else {
+                format!("{running}/{allocatable} pods")
+            },
+        ));
+    }
+
+    let unhealthy: Vec<DynamicObject> = ev
+        .pods
+        .iter()
+        .filter(|p| ptr_str(&p.data, "/status/phase") != Some("Succeeded"))
+        .cloned()
+        .collect();
+    push_unready_pods("Unhealthy pods on this node", &unhealthy, Some(10), out);
 }
 
 // ----- generic condition-based objects -------------------------------------
@@ -579,6 +1149,13 @@ fn event_time(e: &DynamicObject, events_v1: bool) -> String {
         .unwrap_or_default()
 }
 
+/// `2026-10-06 10:00:05` from an RFC 3339 time.
+fn short_datetime(raw: &str) -> String {
+    let trimmed = raw.trim_end_matches('Z');
+    let trimmed = trimmed.split('.').next().unwrap_or(trimmed);
+    trimmed.replacen('T', " ", 1)
+}
+
 fn compact_time(raw: &str) -> String {
     let trimmed = raw.trim_end_matches('Z');
     match trimmed.split_once('T') {
@@ -610,6 +1187,8 @@ mod tests {
             plural,
             obj: o,
             pods,
+            related: &[],
+            storage_classes: None,
             events,
             events_v1: false,
         }
@@ -858,5 +1437,266 @@ mod tests {
                     == format!("desired 3 · ready 3 · available {}", available.unwrap_or(0)))
             );
         }
+    }
+
+    fn has(f: &[Finding], level: Level, text: &str) -> bool {
+        f.iter().any(|x| x.level == level && x.text.contains(text))
+    }
+
+    #[test]
+    fn failed_job_reports_its_reason_and_failed_pods() {
+        let job = obj(json!({"apiVersion": "batch/v1", "kind": "Job",
+            "metadata": {"name": "migrate"},
+            "spec": {"completions": 1, "backoffLimit": 2},
+            "status": {"failed": 3, "conditions": [{"type": "Failed", "status": "True",
+                "reason": "BackoffLimitExceeded", "message": "Job has reached the specified backoff limit"}]}}));
+        let pod = obj(json!({"metadata": {"name": "migrate-x"},
+            "status": {"phase": "Failed", "containerStatuses": [{"name": "app", "ready": false,
+                "restartCount": 0, "state": {"terminated": {"reason": "Error", "exitCode": 2}}}]}}));
+        let f = explain(&ev("Job", "jobs", &job, std::slice::from_ref(&pod), &[]));
+        assert_eq!(f[0].level, Level::Critical);
+        assert_eq!(f[0].text, "Job/migrate failed");
+        assert!(has(
+            &f,
+            Level::Critical,
+            "BackoffLimitExceeded: Job has reached"
+        ));
+        assert!(has(&f, Level::Info, "succeeded 0/1 · active 0 · failed 3"));
+        assert!(has(&f, Level::Critical, "app: terminated Error (exit 2)"));
+        assert!(!f.iter().any(|x| x.text.contains("allowed failures")));
+    }
+
+    #[test]
+    fn running_job_with_failures_counts_against_its_backoff_limit() {
+        let job = obj(json!({"metadata": {"name": "sync"},
+            "spec": {"backoffLimit": 4}, "status": {"active": 1, "failed": 2}}));
+        let f = explain(&ev("Job", "jobs", &job, &[], &[]));
+        assert_eq!(f[0].level, Level::Warn);
+        assert_eq!(f[0].text, "Job/sync is retrying after failures");
+        assert!(has(&f, Level::Warn, "2 of 4 allowed failures used"));
+
+        let done = obj(json!({"metadata": {"name": "sync"},
+            "status": {"succeeded": 1, "conditions": [{"type": "Complete", "status": "True"}]}}));
+        assert_eq!(
+            explain(&ev("Job", "jobs", &done, &[], &[]))[0].level,
+            Level::Good
+        );
+    }
+
+    #[test]
+    fn cronjob_reports_its_last_run_schedule_and_blocked_runs() {
+        let cron = obj(json!({"apiVersion": "batch/v1", "kind": "CronJob",
+            "metadata": {"name": "report"},
+            "spec": {"schedule": "*/5 * * * *", "concurrencyPolicy": "Forbid"},
+            "status": {"active": [{"name": "report-3"}],
+                "lastScheduleTime": "2026-10-06T10:00:00Z"}}));
+        let job = |name: &str, created: &str, status: Value| {
+            obj(json!({"metadata": {"name": name, "creationTimestamp": created}, "status": status}))
+        };
+        let jobs = [
+            job(
+                "report-1",
+                "2026-10-06T09:50:00Z",
+                json!({"conditions": [{"type": "Complete", "status": "True"}]}),
+            ),
+            job(
+                "report-2",
+                "2026-10-06T09:55:00Z",
+                json!({"conditions": [{"type": "Failed", "status": "True", "reason": "DeadlineExceeded"}]}),
+            ),
+        ];
+        let mut e = ev("CronJob", "cronjobs", &cron, &[], &[]);
+        e.related = &jobs;
+        let f = explain(&e);
+        assert_eq!(f[0].level, Level::Critical);
+        assert!(f[0].text.contains("the last run failed"));
+        assert!(has(&f, Level::Info, "schedule */5 * * * *"));
+        assert!(has(&f, Level::Info, "last scheduled 2026-10-06 10:00:00"));
+        assert!(has(&f, Level::Warn, "no successful run on record"));
+        assert!(has(&f, Level::Warn, "concurrencyPolicy Forbid"));
+        let recent: Vec<&Finding> = f.iter().filter(|x| x.text.starts_with("Job/")).collect();
+        assert!(recent[0].text.starts_with("Job/report-2"), "newest first");
+        assert_eq!(recent[0].target.as_ref().unwrap().plural, "jobs");
+
+        let suspended = obj(json!({"metadata": {"name": "report"},
+            "spec": {"schedule": "@daily", "suspend": true}}));
+        let f = explain(&ev("CronJob", "cronjobs", &suspended, &[], &[]));
+        assert_eq!(f[0].level, Level::Warn);
+        assert!(f[0].text.contains("suspended"));
+    }
+
+    fn pending_pvc(class: Option<&str>) -> DynamicObject {
+        let mut pvc = json!({"metadata": {"name": "data"},
+            "spec": {"accessModes": ["ReadWriteOnce"],
+                "resources": {"requests": {"storage": "1Gi"}}},
+            "status": {"phase": "Pending"}});
+        if let Some(class) = class {
+            pvc["spec"]["storageClassName"] = json!(class);
+        }
+        obj(pvc)
+    }
+
+    fn storage_class(name: &str, mode: &str, default: bool) -> DynamicObject {
+        let mut sc = json!({"metadata": {"name": name}, "provisioner": "ebs.csi.aws.com",
+            "volumeBindingMode": mode});
+        if default {
+            sc["metadata"]["annotations"] =
+                json!({"storageclass.kubernetes.io/is-default-class": "true"});
+        }
+        obj(sc)
+    }
+
+    fn explain_pvc_with(
+        pvc: &DynamicObject,
+        pods: &[DynamicObject],
+        classes: Option<&[DynamicObject]>,
+    ) -> Vec<Finding> {
+        let mut e = ev(
+            "PersistentVolumeClaim",
+            "persistentvolumeclaims",
+            pvc,
+            pods,
+            &[],
+        );
+        e.storage_classes = classes;
+        explain(&e)
+    }
+
+    #[test]
+    fn pending_pvc_names_the_missing_storage_class() {
+        let classes = [storage_class("gp3", "Immediate", true)];
+        let f = explain_pvc_with(&pending_pvc(Some("fast")), &[], Some(&classes));
+        assert_eq!(f[0].level, Level::Critical);
+        assert!(has(&f, Level::Critical, "StorageClass fast does not exist"));
+
+        let f = explain_pvc_with(&pending_pvc(None), &[], Some(&[]));
+        assert!(has(
+            &f,
+            Level::Critical,
+            "the cluster has no default StorageClass"
+        ));
+
+        let f = explain_pvc_with(&pending_pvc(None), &[], Some(&classes));
+        assert!(has(&f, Level::Info, "uses the default StorageClass gp3"));
+        assert!(has(
+            &f,
+            Level::Warn,
+            "ebs.csi.aws.com has not provisioned a volume yet"
+        ));
+
+        // Unreadable classes are unknown, never reported missing.
+        let f = explain_pvc_with(&pending_pvc(Some("fast")), &[], None);
+        assert!(!f.iter().any(|x| x.text.contains("does not exist")));
+        assert!(has(&f, Level::Warn, "StorageClasses could not be read"));
+    }
+
+    #[test]
+    fn wait_for_first_consumer_without_a_pod_is_explained() {
+        let classes = [storage_class("local", "WaitForFirstConsumer", false)];
+        let f = explain_pvc_with(&pending_pvc(Some("local")), &[], Some(&classes));
+        assert!(has(
+            &f,
+            Level::Warn,
+            "WaitForFirstConsumer), and no pod does"
+        ));
+
+        let pod = obj(json!({"metadata": {"name": "db-0"},
+            "status": {"phase": "Pending", "conditions": [{"type": "PodScheduled",
+                "status": "False", "reason": "Unschedulable", "message": "0/3 nodes are available"}]}}));
+        let f = explain_pvc_with(
+            &pending_pvc(Some("local")),
+            std::slice::from_ref(&pod),
+            Some(&classes),
+        );
+        assert!(has(&f, Level::Warn, "pod that uses it to be scheduled"));
+        assert!(has(
+            &f,
+            Level::Critical,
+            "not scheduled: Unschedulable: 0/3 nodes"
+        ));
+    }
+
+    #[test]
+    fn bound_rwo_claim_used_on_two_nodes_is_flagged() {
+        let pvc = obj(json!({"metadata": {"name": "data"},
+            "spec": {"accessModes": ["ReadWriteOnce"], "volumeName": "pv-1",
+                "storageClassName": "gp3", "resources": {"requests": {"storage": "2Gi"}}},
+            "status": {"phase": "Bound", "capacity": {"storage": "1Gi"}}}));
+        let pod = |name: &str, node: &str| {
+            obj(
+                json!({"metadata": {"name": name}, "spec": {"nodeName": node},
+                "status": {"phase": "Running", "conditions": [{"type": "Ready", "status": "True"}]}}),
+            )
+        };
+        let pods = [pod("a", "node-1"), pod("b", "node-2")];
+        let f = explain_pvc_with(&pvc, &pods, None);
+        assert_eq!(f[0].level, Level::Good);
+        assert!(has(
+            &f,
+            Level::Info,
+            "volume pv-1 · 1Gi · ReadWriteOnce · class gp3"
+        ));
+        assert!(has(&f, Level::Warn, "requested 2Gi, capacity is still 1Gi"));
+        assert!(has(
+            &f,
+            Level::Critical,
+            "used by pods on 2 nodes (node-1, node-2)"
+        ));
+        assert!(
+            f.iter()
+                .any(|x| x.text.starts_with("Pod/a") && x.target.is_some())
+        );
+    }
+
+    #[test]
+    fn node_reports_cordon_taints_capacity_and_unhealthy_pods() {
+        let node = obj(json!({"metadata": {"name": "worker"},
+            "spec": {"unschedulable": true, "taints": [
+                {"key": "node.kubernetes.io/unschedulable", "effect": "NoSchedule"},
+                {"key": "node.kubernetes.io/disk-pressure", "effect": "NoSchedule"},
+                {"key": "gpu", "value": "true", "effect": "NoSchedule"}]},
+            "status": {"allocatable": {"pods": "2"}, "conditions": [
+                {"type": "Ready", "status": "False", "reason": "KubeletNotReady",
+                 "lastTransitionTime": "2026-10-06T09:00:00Z"}]}}));
+        let pod = |name: &str, ready: &str| {
+            obj(json!({"metadata": {"name": name, "namespace": "default"},
+                "status": {"phase": "Running", "conditions": [{"type": "Ready", "status": ready}]}}))
+        };
+        let pods = [pod("ok", "True"), pod("stuck", "False")];
+        let f = explain(&ev("Node", "nodes", &node, &pods, &[]));
+        assert_eq!(
+            f[0].text,
+            "Node/worker is NotReady since 2026-10-06 09:00:00"
+        );
+        assert_eq!(f[0].level, Level::Critical);
+        assert!(has(&f, Level::Warn, "cordoned"));
+        assert!(
+            !f.iter()
+                .any(|x| x.text.contains("node.kubernetes.io/unschedulable"))
+        );
+        assert!(has(
+            &f,
+            Level::Warn,
+            "taint node.kubernetes.io/disk-pressure:NoSchedule"
+        ));
+        assert!(has(&f, Level::Info, "taint gpu=true:NoSchedule"));
+        assert!(has(&f, Level::Critical, "pod capacity is full (2/2 pods)"));
+        assert!(f.iter().any(|x| x.text.starts_with("Pod/stuck")));
+        assert!(!f.iter().any(|x| x.text.starts_with("Pod/ok")));
+    }
+
+    #[test]
+    fn unhealthy_pods_on_a_node_are_capped() {
+        let node = obj(json!({"metadata": {"name": "worker"},
+            "status": {"conditions": [{"type": "Ready", "status": "True"}]}}));
+        let pods: Vec<DynamicObject> = (0..12)
+            .map(|i| {
+                obj(json!({"metadata": {"name": format!("p{i:02}")},
+                "status": {"phase": "Pending"}}))
+            })
+            .collect();
+        let f = explain(&ev("Node", "nodes", &node, &pods, &[]));
+        assert_eq!(f.iter().filter(|x| x.text.starts_with("Pod/")).count(), 10);
+        assert!(has(&f, Level::Info, "… and 2 more"));
     }
 }

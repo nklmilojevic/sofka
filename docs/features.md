@@ -422,7 +422,9 @@ include those conditions. Row filters can search the route paths.
   explanation of why the selection is unhealthy: rollout state, degraded
   conditions, blocking pods and their container failure reasons
   (ImagePullBackOff, CrashLoopBackOff, OOMKilled, unschedulable, failed probes),
-  and recent Warning events. No AI, no external service. `⏎`, `E`, or `l` jumps
+  and recent Warning events. Jobs, CronJobs, PersistentVolumeClaims, and Nodes
+  get their own checks (see [Explain unhealthy](debugging.md#explain-unhealthy-x)).
+  No AI, no external service. `⏎`, `E`, or `l` jumps
   from a finding to the pod, its events, or its logs. After opening evidence,
   `esc` returns to Explain before another `esc` returns to the table.
   Opening the view or pressing `r` reads the selected resource from the API

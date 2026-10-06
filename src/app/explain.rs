@@ -240,18 +240,175 @@ pub(super) async fn list_selected(
     selector: &str,
     warn: &mut Option<String>,
 ) -> Vec<DynamicObject> {
+    let params = ListParams::default().labels(selector);
+    list_with(client, ar, namespaced, ns, &params)
+        .await
+        .unwrap_or_else(|e| {
+            warn.get_or_insert(e);
+            Vec::new()
+        })
+}
+
+async fn list_with(
+    client: &Client,
+    ar: &ApiResource,
+    namespaced: bool,
+    ns: &str,
+    params: &ListParams,
+) -> Result<Vec<DynamicObject>, String> {
     let api: Api<DynamicObject> = if namespaced && !ns.is_empty() {
         Api::namespaced_with(client.clone(), ns, ar)
     } else {
         Api::all_with(client.clone(), ar)
     };
-    match api.list(&ListParams::default().labels(selector)).await {
-        Ok(l) => l.items,
-        Err(e) => {
-            warn.get_or_insert(format!("listing {}: {e}", ar.plural));
-            Vec::new()
+    api.list(params)
+        .await
+        .map(|l| l.items)
+        .map_err(|e| format!("listing {}: {e}", ar.plural))
+}
+
+/// What [`crate::explain`] reads besides the object itself.
+pub(super) struct Gathered {
+    pub(super) pods: Vec<DynamicObject>,
+    pub(super) related: Vec<DynamicObject>,
+    pub(super) storage_classes: Option<Vec<DynamicObject>>,
+    pub(super) events: Vec<DynamicObject>,
+    pub(super) events_v1: bool,
+}
+
+impl Gathered {
+    pub(super) fn evidence<'a>(
+        &'a self,
+        kind: &'a str,
+        plural: &'a str,
+        obj: &'a DynamicObject,
+    ) -> crate::explain::Evidence<'a> {
+        crate::explain::Evidence {
+            kind,
+            plural,
+            obj,
+            pods: &self.pods,
+            related: &self.related,
+            storage_classes: self.storage_classes.as_deref(),
+            events: &self.events,
+            events_v1: self.events_v1,
         }
     }
+}
+
+/// Collect the evidence for one object: the pods it owns, runs, or serves,
+/// the Jobs of a CronJob, the StorageClasses a claim may use, and the events
+/// regarding all of them. Failures degrade to a warning in `warn`.
+pub(super) async fn gather_evidence(
+    client: &Client,
+    plural: &str,
+    obj: &DynamicObject,
+    pods_kind: Option<(&ApiResource, bool)>,
+    events_kind: Option<(&ApiResource, bool)>,
+    warn: &mut Option<String>,
+) -> Gathered {
+    let ns = obj.metadata.namespace.as_deref().unwrap_or_default();
+    let name = obj.metadata.name.as_deref().unwrap_or_default();
+    let mut related = Vec::new();
+    let mut storage_classes = None;
+    let pods = match (plural, pods_kind) {
+        ("pods", _) => vec![obj.clone()],
+        (
+            "deployments" | "statefulsets" | "daemonsets" | "replicasets" | "jobs",
+            Some((ar, nsd)),
+        ) => match label_selector(obj, "matchLabels") {
+            Some(selector) => list_selected(client, ar, nsd, ns, &selector, warn).await,
+            None => Vec::new(),
+        },
+        ("nodes", Some((ar, nsd))) => {
+            let params = ListParams::default().fields(&format!("spec.nodeName={name}"));
+            list_with(client, ar, nsd, "", &params)
+                .await
+                .unwrap_or_else(|e| {
+                    warn.get_or_insert(e);
+                    Vec::new()
+                })
+        }
+        ("persistentvolumeclaims", Some((ar, nsd))) => {
+            // Many users may not list cluster-scoped StorageClasses. The
+            // analysis then says the class is unknown rather than missing.
+            let classes = ApiResource::erase::<k8s_openapi::api::storage::v1::StorageClass>(&());
+            storage_classes = list_with(client, &classes, false, "", &ListParams::default())
+                .await
+                .ok();
+            list_with(client, ar, nsd, ns, &ListParams::default())
+                .await
+                .unwrap_or_else(|e| {
+                    warn.get_or_insert(e);
+                    Vec::new()
+                })
+                .into_iter()
+                .filter(|pod| mounts_claim(pod, name))
+                .collect()
+        }
+        ("cronjobs", pods_kind) => {
+            let jobs = ApiResource::erase::<k8s_openapi::api::batch::v1::Job>(&());
+            let uid = obj.metadata.uid.as_deref();
+            related = list_with(client, &jobs, true, ns, &ListParams::default())
+                .await
+                .unwrap_or_else(|e| {
+                    warn.get_or_insert(e);
+                    Vec::new()
+                })
+                .into_iter()
+                .filter(|job| {
+                    job.metadata
+                        .owner_references
+                        .iter()
+                        .flatten()
+                        .any(|o| Some(o.uid.as_str()) == uid)
+                })
+                .collect();
+            let latest = related
+                .iter()
+                .max_by_key(|j| j.metadata.creation_timestamp.as_ref().map(|t| t.0));
+            match (
+                pods_kind,
+                latest.and_then(|j| label_selector(j, "matchLabels")),
+            ) {
+                (Some((ar, nsd)), Some(selector)) => {
+                    list_selected(client, ar, nsd, ns, &selector, warn).await
+                }
+                _ => Vec::new(),
+            }
+        }
+        _ => Vec::new(),
+    };
+    let (events, events_v1) = match events_kind {
+        Some((ar, nsd)) => {
+            let v1 = ar.group == "events.k8s.io";
+            let all = list_or_warn(client, ar, nsd, ns, warn).await;
+            let regarding: Vec<DynamicObject> = pods.iter().chain(&related).cloned().collect();
+            (filter_events(&all, obj, &regarding, v1), v1)
+        }
+        None => (Vec::new(), false),
+    };
+    Gathered {
+        pods,
+        related,
+        storage_classes,
+        events,
+        events_v1,
+    }
+}
+
+/// Whether `pod` mounts the PersistentVolumeClaim `claim`.
+fn mounts_claim(pod: &DynamicObject, claim: &str) -> bool {
+    pod.data
+        .pointer("/spec/volumes")
+        .and_then(Value::as_array)
+        .is_some_and(|volumes| {
+            volumes.iter().any(|v| {
+                v.pointer("/persistentVolumeClaim/claimName")
+                    .and_then(Value::as_str)
+                    == Some(claim)
+            })
+        })
 }
 
 /// Keep only events that regard the object or one of its pods, matching by UID
@@ -297,45 +454,17 @@ pub(super) async fn gather_explain(
     events_kind: Option<&Kind>,
 ) -> Result<(DynamicObject, Vec<crate::explain::Finding>, Option<String>), String> {
     let obj = source.read().await?;
-    let client = &source.client;
-    let ns = obj.metadata.namespace.as_deref().unwrap_or_default();
     let plural = source.kind.ar.plural.as_str();
-    let selector = match plural {
-        "deployments" | "statefulsets" | "daemonsets" | "replicasets" => {
-            label_selector(&obj, "matchLabels")
-        }
-        _ => None,
-    };
     let mut warning = None;
-    let pods = if plural == "pods" {
-        vec![obj.clone()]
-    } else if let (Some(kind), Some(selector)) = (pods_kind, selector.as_ref()) {
-        list_selected(
-            client,
-            &kind.ar,
-            kind.namespaced,
-            ns,
-            selector,
-            &mut warning,
-        )
-        .await
-    } else {
-        Vec::new()
-    };
-    let (events, events_v1) = if let Some(kind) = events_kind {
-        let v1 = kind.ar.group == "events.k8s.io";
-        let all = list_or_warn(client, &kind.ar, kind.namespaced, ns, &mut warning).await;
-        (filter_events(&all, &obj, &pods, v1), v1)
-    } else {
-        (Vec::new(), false)
-    };
-    let findings = crate::explain::explain(&crate::explain::Evidence {
-        kind: &source.kind.ar.kind,
+    let gathered = gather_evidence(
+        &source.client,
         plural,
-        obj: &obj,
-        pods: &pods,
-        events: &events,
-        events_v1,
-    });
+        &obj,
+        pods_kind.map(|k| (&k.ar, k.namespaced)),
+        events_kind.map(|k| (&k.ar, k.namespaced)),
+        &mut warning,
+    )
+    .await;
+    let findings = crate::explain::explain(&gathered.evidence(&source.kind.ar.kind, plural, &obj));
     Ok((obj, findings, warning))
 }

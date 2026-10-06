@@ -24883,6 +24883,8 @@ fn explain_selected_with_pure_evidence(app: &mut App) {
         plural: &app.kind_plural,
         obj: source,
         pods: &[],
+        related: &[],
+        storage_classes: None,
         events: &[],
         events_v1: false,
     });
@@ -38366,4 +38368,141 @@ async fn httproute_paths_render_and_filter_through_keys() {
     let cache = app.table_cell_cache();
     let (cells, _) = cache.get(&row_key(rows[0])).unwrap();
     assert_eq!(cells[2], "Prefix /api, Exact /health, Prefix /billing");
+}
+
+async fn explain_with(
+    plural: &str,
+    resource: serde_json::Value,
+    read_path: &str,
+    replies: Vec<(&str, serde_json::Value)>,
+) -> App {
+    let (mut app, rx) = test_app();
+    app.cluster
+        .register_kind("", "PersistentVolumeClaim", "persistentvolumeclaims", true);
+    let (mut app, mut rx, responses, _) = health_report_app_with(app, rx, plural, resource.clone());
+    {
+        let mut responses = responses.lock().unwrap();
+        responses.insert(read_path.into(), (200, resource));
+        for (path, body) in replies {
+            responses.insert(path.into(), (200, body));
+        }
+    }
+    app.handle_key(press(KeyCode::Char('X'))).unwrap();
+    receive_health_report(&mut app, &mut rx, false).await;
+    app
+}
+
+fn explain_texts(app: &App) -> Vec<String> {
+    app.explain_items.iter().map(|f| f.text.clone()).collect()
+}
+
+#[tokio::test]
+async fn explain_on_a_pending_claim_reads_its_class_and_the_pods_that_use_it() {
+    let pvc = json!({"apiVersion": "v1", "kind": "PersistentVolumeClaim",
+        "metadata": {"name": "data", "namespace": "default", "uid": "pvc-uid"},
+        "spec": {"storageClassName": "local", "accessModes": ["ReadWriteOnce"]},
+        "status": {"phase": "Pending"}});
+    let pod = |name: &str, claim: &str| {
+        json!({"apiVersion": "v1", "kind": "Pod",
+            "metadata": {"name": name, "namespace": "default"},
+            "spec": {"volumes": [{"name": "v", "persistentVolumeClaim": {"claimName": claim}}]},
+            "status": {"phase": "Pending", "conditions": [{"type": "PodScheduled",
+                "status": "False", "reason": "Unschedulable"}]}})
+    };
+    let app = explain_with(
+        "persistentvolumeclaims",
+        pvc,
+        "/api/v1/namespaces/default/persistentvolumeclaims/data",
+        vec![
+            (
+                "/apis/storage.k8s.io/v1/storageclasses",
+                json!({"apiVersion": "storage.k8s.io/v1", "kind": "StorageClassList",
+                    "metadata": {}, "items": [{"metadata": {"name": "local"},
+                    "provisioner": "rancher.io/local-path",
+                    "volumeBindingMode": "WaitForFirstConsumer"}]}),
+            ),
+            (
+                "/api/v1/namespaces/default/pods",
+                json!({"apiVersion": "v1", "kind": "PodList", "metadata": {},
+                    "items": [pod("db-0", "data"), pod("other", "logs")]}),
+            ),
+        ],
+    )
+    .await;
+    let texts = explain_texts(&app);
+    assert_eq!(texts[0], "PersistentVolumeClaim/data is Pending");
+    assert!(
+        texts
+            .iter()
+            .any(|t| t.contains("pod that uses it to be scheduled"))
+    );
+    assert!(texts.iter().any(|t| t.starts_with("Pod/db-0")));
+    assert!(!texts.iter().any(|t| t.starts_with("Pod/other")));
+}
+
+#[tokio::test]
+async fn explain_on_a_cronjob_reads_the_jobs_it_owns() {
+    let cron = json!({"apiVersion": "batch/v1", "kind": "CronJob",
+        "metadata": {"name": "report", "namespace": "default", "uid": "cron-uid"},
+        "spec": {"schedule": "@hourly"}});
+    let job = |name: &str, owner: &str, created: &str| {
+        json!({"apiVersion": "batch/v1", "kind": "Job",
+            "metadata": {"name": name, "namespace": "default", "creationTimestamp": created,
+                "ownerReferences": [{"apiVersion": "batch/v1", "kind": "CronJob",
+                    "name": "x", "uid": owner}]},
+            "spec": {"selector": {"matchLabels": {"job-name": name}}},
+            "status": {"conditions": [{"type": "Failed", "status": "True",
+                "reason": "BackoffLimitExceeded"}]}})
+    };
+    let app = explain_with(
+        "cronjobs",
+        cron,
+        "/apis/batch/v1/namespaces/default/cronjobs/report",
+        vec![(
+            "/apis/batch/v1/namespaces/default/jobs",
+            json!({"apiVersion": "batch/v1", "kind": "JobList", "metadata": {},
+                "items": [job("report-1", "cron-uid", "2026-10-06T10:00:00Z"),
+                          job("unrelated", "other-uid", "2026-10-06T11:00:00Z")]}),
+        )],
+    )
+    .await;
+    let texts = explain_texts(&app);
+    assert_eq!(texts[0], "CronJob/report: the last run failed");
+    assert!(
+        texts
+            .iter()
+            .any(|t| t.starts_with("Job/report-1") && t.contains("BackoffLimitExceeded"))
+    );
+    assert!(!texts.iter().any(|t| t.contains("unrelated")));
+}
+
+#[tokio::test]
+async fn explain_on_a_node_lists_its_unhealthy_pods() {
+    let node = json!({"apiVersion": "v1", "kind": "Node",
+        "metadata": {"name": "worker", "uid": "node-uid"},
+        "spec": {"unschedulable": true},
+        "status": {"conditions": [{"type": "Ready", "status": "True"}]}});
+    let app = explain_with(
+        "nodes",
+        node,
+        "/api/v1/nodes/worker",
+        vec![(
+            "/api/v1/pods",
+            json!({"apiVersion": "v1", "kind": "PodList", "metadata": {},
+                "items": [{"metadata": {"name": "crashy", "namespace": "apps"},
+                    "status": {"phase": "Running", "containerStatuses": [{"name": "app",
+                        "ready": false, "restartCount": 4,
+                        "state": {"waiting": {"reason": "CrashLoopBackOff"}}}]}}]}),
+        )],
+    )
+    .await;
+    let texts = explain_texts(&app);
+    assert_eq!(texts[0], "Node/worker is Ready");
+    assert!(
+        texts
+            .iter()
+            .any(|t| t == "cordoned: new pods are not scheduled here")
+    );
+    assert!(texts.iter().any(|t| t.starts_with("Pod/crashy")));
+    assert!(texts.iter().any(|t| t.contains("CrashLoopBackOff")));
 }
