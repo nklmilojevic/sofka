@@ -624,7 +624,7 @@ pub fn missing_listing_tools(error: &str) -> bool {
 /// sessions never collide, and two independent expiries — the shell's `sleep`
 /// and `activeDeadlineSeconds` — so the pod goes away even if sofka is killed
 /// before it can delete it.
-pub fn helper_pod(claim: &str, image: &str, ttl_secs: u64) -> Value {
+pub fn helper_pod(claim: &str, image: &str, ttl_secs: u64, resources: Value) -> Value {
     json!({
         "apiVersion": "v1",
         "kind": "Pod",
@@ -649,13 +649,7 @@ pub fn helper_pod(claim: &str, image: &str, ttl_secs: u64) -> Value {
                 "image": image,
                 "command": ["sh", "-c", format!("sleep {ttl_secs}")],
                 "volumeMounts": [{ "name": "pvc", "mountPath": HELPER_MOUNT }],
-                // Limits equal to requests: a namespace LimitRange would
-                // otherwise default the limit and can reject the pod for
-                // exceeding its maxLimitRequestRatio.
-                "resources": {
-                    "requests": { "cpu": "50m", "memory": "64Mi" },
-                    "limits": { "cpu": "50m", "memory": "64Mi" },
-                },
+                "resources": resources,
                 "securityContext": {
                     "allowPrivilegeEscalation": false,
                     "capabilities": { "drop": ["ALL"] },
@@ -1934,7 +1928,7 @@ mod tests {
 
     #[test]
     fn the_helper_pod_carries_every_piece_of_evidence_the_sweep_requires() {
-        let spec = helper_pod("data", "busybox:1.37", 900);
+        let spec = helper_pod("data", "busybox:1.37", 900, json!({}));
         for (k, v) in HELPER_LABELS {
             assert_eq!(spec["metadata"]["labels"][k], v);
         }
@@ -2003,7 +1997,7 @@ mod tests {
 
     #[test]
     fn helper_pod_mounts_the_claim_and_expires_twice() {
-        let spec = helper_pod("data", "busybox:1.37", 900);
+        let spec = helper_pod("data", "busybox:1.37", 900, json!({}));
         assert_eq!(spec["spec"]["activeDeadlineSeconds"], 900);
         assert_eq!(spec["spec"]["containers"][0]["command"][2], "sleep 900");
         assert_eq!(
@@ -2018,13 +2012,33 @@ mod tests {
     }
 
     #[test]
-    fn helper_pod_limits_match_requests_so_a_limit_range_ratio_admits_it() {
-        let spec = helper_pod("data", "busybox:1.37", 900);
+    fn helper_pod_sets_explicit_limits_within_a_common_limit_range_ratio() {
+        let cfg = crate::config::PvcExploreConfig::default();
+        let spec = helper_pod("data", &cfg.image, 900, cfg.resources());
         let resources = &spec["spec"]["containers"][0]["resources"];
         for key in ["cpu", "memory"] {
-            assert!(resources["limits"][key].is_string(), "{resources}");
-            assert_eq!(resources["limits"][key], resources["requests"][key]);
+            let q = |section: &str| {
+                crate::views::parse_quantity(resources[section][key].as_str().unwrap()).unwrap()
+            };
+            let ratio = q("limits") / q("requests");
+            assert!((1.0..=10.0).contains(&ratio), "{key}: {resources}");
         }
+    }
+
+    #[test]
+    fn helper_pod_takes_configured_resources_and_skips_empty_ones() {
+        let cfg = crate::config::PvcExploreConfig {
+            cpu_request: "1".into(),
+            cpu_limit: "".into(),
+            memory_request: "128Mi".into(),
+            memory_limit: "nonsense".into(),
+            ..Default::default()
+        };
+        let spec = helper_pod("data", &cfg.image, 900, cfg.resources());
+        assert_eq!(
+            spec["spec"]["containers"][0]["resources"],
+            json!({"requests": {"cpu": "1", "memory": "128Mi"}})
+        );
     }
 
     /// Run a generated script under a real `sh` with `du` shimmed.
@@ -2460,7 +2474,7 @@ mod recovery_tests {
         assert_eq!(options.node.as_deref(), Some("worker-a"));
         assert_eq!(options.sub_path, "tenant");
         assert!(options.read_only);
-        let mut manifest = helper_pod("data", "busybox:1.37", 900);
+        let mut manifest = helper_pod("data", "busybox:1.37", 900, json!({}));
         apply_helper_options(&mut manifest, &options);
         assert_eq!(manifest.pointer("/spec/affinity/nodeAffinity/requiredDuringSchedulingIgnoredDuringExecution/nodeSelectorTerms/0/matchFields/0/values/0"), Some(&json!("worker-a")));
         assert_eq!(

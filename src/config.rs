@@ -522,6 +522,10 @@ pub const PVC_DEFAULT_TTL_SECS: u64 = 1_800;
 /// [pvc_explore]
 /// image = "busybox:1.37"   # helper-pod image; needs a shell and `ls`
 /// ttl = "30m"              # helper pod self-destructs after this
+/// cpu_request = "100m"
+/// cpu_limit = "500m"
+/// memory_request = "64Mi"
+/// memory_limit = "256Mi"
 /// ```
 ///
 /// The image needs `sh`, `ls`, and — for transfers, which go through
@@ -536,6 +540,14 @@ pub struct PvcExploreConfig {
     /// `activeDeadlineSeconds`, so it expires even if sofka never gets to
     /// delete it. Validated by [`pvc_explore_warnings`].
     pub ttl: String,
+    /// Helper container resources as Kubernetes quantities. An empty value is
+    /// left off the pod. Limits are set explicitly because a namespace
+    /// LimitRange would otherwise default them and may reject the pod for
+    /// exceeding its `maxLimitRequestRatio`.
+    pub cpu_request: String,
+    pub cpu_limit: String,
+    pub memory_request: String,
+    pub memory_limit: String,
 }
 
 impl Default for PvcExploreConfig {
@@ -543,13 +555,64 @@ impl Default for PvcExploreConfig {
         Self {
             image: "busybox:1.37".into(),
             ttl: "30m".into(),
+            cpu_request: "100m".into(),
+            cpu_limit: "500m".into(),
+            memory_request: "64Mi".into(),
+            memory_limit: "256Mi".into(),
         }
     }
 }
 
-/// Validate `[pvc_explore]`: an empty image or an unparseable/absurd TTL.
+impl PvcExploreConfig {
+    fn quantities(&self) -> [(&'static str, &'static str, &'static str, &str); 4] {
+        [
+            ("cpu_request", "requests", "cpu", &self.cpu_request),
+            ("cpu_limit", "limits", "cpu", &self.cpu_limit),
+            ("memory_request", "requests", "memory", &self.memory_request),
+            ("memory_limit", "limits", "memory", &self.memory_limit),
+        ]
+    }
+
+    /// The helper container's `resources`, skipping empty and unparseable
+    /// quantities (the latter are reported by [`pvc_explore_warnings`]).
+    pub fn resources(&self) -> serde_json::Value {
+        let mut out = serde_json::json!({});
+        for (_, section, key, value) in self.quantities() {
+            let value = value.trim();
+            if crate::views::parse_quantity(value).is_some() {
+                out[section][key] = serde_json::json!(value);
+            }
+        }
+        out
+    }
+}
+
+/// Validate `[pvc_explore]`: an empty image, an unparseable/absurd TTL, or a
+/// resource quantity that is unparseable or has a request above its limit.
 pub fn pvc_explore_warnings(cfg: &PvcExploreConfig) -> Vec<String> {
     let mut out = Vec::new();
+    for (field, _, _, value) in cfg.quantities() {
+        let value = value.trim();
+        if !value.is_empty() && crate::views::parse_quantity(value).is_none() {
+            out.push(format!(
+                "pvc_explore: {field} {value:?} is not a quantity; leaving it unset"
+            ));
+        }
+    }
+    for (key, request, limit) in [
+        ("cpu", &cfg.cpu_request, &cfg.cpu_limit),
+        ("memory", &cfg.memory_request, &cfg.memory_limit),
+    ] {
+        let parse = |v: &str| crate::views::parse_quantity(v.trim());
+        if let (Some(r), Some(l)) = (parse(request), parse(limit))
+            && r > l
+        {
+            out.push(format!(
+                "pvc_explore: {key}_request {request:?} is above {key}_limit {limit:?}; \
+                 the API server will reject the helper pod"
+            ));
+        }
+    }
     if cfg.image.trim().is_empty() {
         out.push("pvc_explore: image is empty — helper pods cannot be created".into());
     }
@@ -2710,5 +2773,26 @@ bookmarks = []
         );
         assert_eq!(dir(None, Some("")), None);
         assert_eq!(dir(Some(""), None), None);
+    }
+
+    #[test]
+    fn pvc_explore_warns_about_bad_quantities_and_inverted_ranges() {
+        assert!(pvc_explore_warnings(&PvcExploreConfig::default()).is_empty());
+        let cfg = PvcExploreConfig {
+            cpu_request: "2".into(),
+            cpu_limit: "500m".into(),
+            memory_limit: "lots".into(),
+            ..Default::default()
+        };
+        let warnings = pvc_explore_warnings(&cfg);
+        assert_eq!(warnings.len(), 2, "{warnings:?}");
+        assert!(
+            warnings[0].contains("memory_limit \"lots\""),
+            "{warnings:?}"
+        );
+        assert!(
+            warnings[1].contains("cpu_request \"2\" is above"),
+            "{warnings:?}"
+        );
     }
 }

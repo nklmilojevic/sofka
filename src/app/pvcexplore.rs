@@ -451,7 +451,8 @@ impl App {
         self.pvc.run += 1;
         let run = self.pvc.run;
         let ttl = self.pvc_ttl_secs();
-        let mut manifest = pvc::helper_pod(&claim, &self.pvc_cfg.image, ttl);
+        let mut manifest =
+            pvc::helper_pod(&claim, &self.pvc_cfg.image, ttl, self.pvc_cfg.resources());
         let original = self.pvc.recovery.as_ref().map(|r| r.original.clone());
         self.note_action("pvc-explore helper pod", format!("{claim} in {ns}"));
         let status = self.claim_status(format!("starting a helper pod for {claim}…"));
