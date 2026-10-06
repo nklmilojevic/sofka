@@ -352,18 +352,25 @@ fn explain_job(ev: &Evidence, name: &str, out: &mut Vec<Finding>) {
     let failed = ptr_i64(d, "/status/failed").unwrap_or(0);
     let backoff_limit = ptr_i64(d, "/spec/backoffLimit").unwrap_or(6);
     // Under OnFailure a failing container restarts in place, so the pod
-    // never fails and `status.failed` stays put. The restarts are what count
-    // against backoffLimit.
+    // stays active and `status.failed` stays put. The Job controller checks
+    // the restarts of active pods against backoffLimit separately from the
+    // failed pods, so the Job fails when either count reaches it.
     let restarts: i64 = if ptr_str(d, "/spec/template/spec/restartPolicy") == Some("OnFailure") {
         ev.pods
             .iter()
-            .flat_map(container_statuses)
+            .filter(|p| !pod_finished(p))
+            .flat_map(|p| {
+                ["/status/containerStatuses", "/status/initContainerStatuses"]
+                    .into_iter()
+                    .filter_map(|path| p.data.pointer(path).and_then(Value::as_array))
+                    .flatten()
+            })
             .filter_map(|cs| cs.get("restartCount").and_then(Value::as_i64))
             .sum()
     } else {
         0
     };
-    let retries = failed + restarts;
+    let retries = failed.max(restarts);
     let (level, state) = job_state(ev.obj);
     let done = matches!(level, Level::Good | Level::Critical);
 
@@ -396,7 +403,9 @@ fn explain_job(ev: &Evidence, name: &str, out: &mut Vec<Finding>) {
     ));
     if retries > 0 && !done {
         let restarted = if restarts > 0 {
-            format!(", {restarts} of them container restarts under restartPolicy OnFailure")
+            format!(
+                ": {failed} failed pods, {restarts} container restarts in active pods (restartPolicy OnFailure)"
+            )
         } else {
             String::new()
         };
@@ -1748,7 +1757,30 @@ mod tests {
         assert!(has(
             &f,
             Level::Warn,
-            "3 of 6 allowed failures used (backoffLimit), 3 of them container restarts"
+            "3 of 6 allowed failures used (backoffLimit): 0 failed pods, 3 container restarts"
+        ));
+
+        // Failed pods and restarts are separate limits, and a failed pod's
+        // restarts are already in `status.failed`.
+        let job = obj(json!({"metadata": {"name": "sync"},
+            "spec": {"backoffLimit": 4, "template": {"spec": {"restartPolicy": "OnFailure"}}},
+            "status": {"active": 1, "failed": 2}}));
+        let restarted = |name: &str, phase: &str, init: i64, main: i64| {
+            obj(
+                json!({"metadata": {"name": name}, "status": {"phase": phase,
+                "initContainerStatuses": [{"name": "setup", "restartCount": init}],
+                "containerStatuses": [{"name": "app", "ready": false, "restartCount": main}]}}),
+            )
+        };
+        let pods = [
+            restarted("gone", "Failed", 0, 5),
+            restarted("live", "Running", 1, 2),
+        ];
+        let f = explain(&ev("Job", "jobs", &job, &pods, &[]));
+        assert!(has(
+            &f,
+            Level::Warn,
+            "3 of 4 allowed failures used (backoffLimit): 2 failed pods, 3 container restarts"
         ));
     }
 
