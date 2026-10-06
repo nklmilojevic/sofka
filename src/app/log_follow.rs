@@ -68,10 +68,6 @@ impl LogResume {
         self.skip = self.at_last;
     }
 
-    pub(super) fn last(&self) -> Option<Timestamp> {
-        self.last
-    }
-
     pub(super) fn since(&self) -> Option<Timestamp> {
         Timestamp::from_second(self.last?.as_second()).ok()
     }
@@ -84,8 +80,8 @@ pub(super) enum StreamEnd {
     Replaced,
     Finished(String),
     Restarted(i32),
-    /// A new pod took the name. Carries its creation time.
-    Recreated(Option<Timestamp>),
+    /// A new pod took the name.
+    Recreated,
     Resume,
 }
 
@@ -100,22 +96,12 @@ pub(super) fn stream_end(
     known_restarts: &mut Option<i32>,
     connected_at: Timestamp,
 ) -> StreamEnd {
+    if let Some(end) = identity(pod, pinned, known_uid, known_restarts) {
+        return end;
+    }
     let Some(pod) = pod else {
         return StreamEnd::Gone;
     };
-    let uid = pod.metadata.uid.clone();
-    if known_uid.is_some() && uid.is_some() && *known_uid != uid {
-        if pinned {
-            return StreamEnd::Replaced;
-        }
-        *known_uid = uid;
-        *known_restarts = None;
-        let created = pod.metadata.creation_timestamp.as_ref().map(|t| t.0);
-        return StreamEnd::Recreated(created);
-    }
-    if known_uid.is_none() {
-        *known_uid = uid;
-    }
 
     let phase = pod
         .status
@@ -155,6 +141,32 @@ pub(super) fn stream_end(
         return StreamEnd::Finished("container exited".into());
     }
     StreamEnd::Resume
+}
+
+/// Whether `pod` is still the instance the stream reads. Learns the UID the
+/// first time it sees one.
+pub(super) fn identity(
+    pod: Option<&Pod>,
+    pinned: bool,
+    known_uid: &mut Option<String>,
+    known_restarts: &mut Option<i32>,
+) -> Option<StreamEnd> {
+    let Some(pod) = pod else {
+        return Some(StreamEnd::Gone);
+    };
+    let uid = pod.metadata.uid.clone();
+    if known_uid.is_some() && uid.is_some() && *known_uid != uid {
+        if pinned {
+            return Some(StreamEnd::Replaced);
+        }
+        *known_uid = uid;
+        *known_restarts = None;
+        return Some(StreamEnd::Recreated);
+    }
+    if known_uid.is_none() {
+        *known_uid = uid;
+    }
+    None
 }
 
 fn container_status<'a>(pod: &'a Pod, container: Option<&str>) -> Option<&'a ContainerStatus> {
@@ -235,6 +247,43 @@ impl LogStream {
         send_log_batch(&self.tx, self.generation, &mut lines).await
     }
 
+    /// Report what the pod check found and prepare the next request. False
+    /// when the stream ends.
+    async fn settle(
+        &mut self,
+        end: StreamEnd,
+        resume: &mut LogResume,
+        delay: &mut Duration,
+    ) -> bool {
+        let notice = match &end {
+            StreamEnd::Resume => return true,
+            StreamEnd::Gone => "pod deleted; stream ended".to_string(),
+            StreamEnd::Replaced => "pod replaced; stream ended".to_string(),
+            StreamEnd::Finished(how) => format!("{how}; stream ended"),
+            StreamEnd::Restarted(restarts) => {
+                format!("container restarted (restarts: {restarts})")
+            }
+            StreamEnd::Recreated => "pod recreated".to_string(),
+        };
+        if !self.send(format!("[sofka] {notice}")).await {
+            return false;
+        }
+        match end {
+            StreamEnd::Restarted(_) => *delay = RECONNECT_MIN,
+            // Every request is preceded by an identity check, so nothing from
+            // the new pod has been shown. Read it from its start.
+            StreamEnd::Recreated => {
+                *resume = LogResume::default();
+                self.params.tail_lines = None;
+                self.params.since_seconds = None;
+                self.params.since_time = None;
+                *delay = RECONNECT_MIN;
+            }
+            _ => return false,
+        }
+        true
+    }
+
     /// Wait out `delay`, or less if the machine wakes. False once stale.
     async fn pause(&mut self, delay: Duration) -> bool {
         tokio::select! {
@@ -259,6 +308,19 @@ impl LogStream {
         loop {
             if self.stale() {
                 return;
+            }
+            // Log requests go by name. Confirm the name still belongs to the
+            // known pod first, so a replacement is never streamed as if it
+            // were that pod.
+            if follow && known_uid.is_some() {
+                let pod = tokio::time::timeout(STATUS_TIMEOUT, self.api.get_opt(&self.pod)).await;
+                if let Ok(Ok(pod)) = pod
+                    && let Some(end) =
+                        identity(pod.as_ref(), pinned, &mut known_uid, &mut known_restarts)
+                    && !self.settle(end, &mut resume, &mut delay).await
+                {
+                    return;
+                }
             }
             let connected_at = Timestamp::now();
             let opened = Instant::now();
@@ -311,57 +373,16 @@ impl LogStream {
             let pod = tokio::time::timeout(STATUS_TIMEOUT, self.api.get_opt(&self.pod)).await;
             if let Ok(Ok(pod)) = pod {
                 let container = self.params.container.as_deref();
-                match stream_end(
+                let end = stream_end(
                     pod.as_ref(),
                     container,
                     pinned,
                     &mut known_uid,
                     &mut known_restarts,
                     connected_at,
-                ) {
-                    StreamEnd::Gone => {
-                        self.send("[sofka] pod deleted; stream ended".into()).await;
-                        return;
-                    }
-                    StreamEnd::Replaced => {
-                        self.send("[sofka] pod replaced; stream ended".into()).await;
-                        return;
-                    }
-                    StreamEnd::Finished(how) => {
-                        self.send(format!("[sofka] {how}; stream ended")).await;
-                        return;
-                    }
-                    StreamEnd::Restarted(restarts) => {
-                        if !self
-                            .send(format!(
-                                "[sofka] container restarted (restarts: {restarts})"
-                            ))
-                            .await
-                        {
-                            return;
-                        }
-                        delay = RECONNECT_MIN;
-                    }
-                    StreamEnd::Recreated(created) => {
-                        if !self.send("[sofka] pod recreated".into()).await {
-                            return;
-                        }
-                        // Read the new pod from its start, unless the lines
-                        // shown already came from it: a replacement that
-                        // landed before the first request answered that one.
-                        let seen = matches!(
-                            (resume.last(), created),
-                            (Some(last), Some(created)) if last >= created
-                        );
-                        if !seen {
-                            resume = LogResume::default();
-                            self.params.tail_lines = None;
-                            self.params.since_seconds = None;
-                            self.params.since_time = None;
-                        }
-                        delay = RECONNECT_MIN;
-                    }
-                    StreamEnd::Resume => {}
+                );
+                if !self.settle(end, &mut resume, &mut delay).await {
+                    return;
                 }
             }
 
@@ -753,10 +774,7 @@ mod tests {
             StreamEnd::Replaced
         );
         let mut uid = Some("1".into());
-        assert_eq!(
-            check(Some(&running), false, &mut uid),
-            StreamEnd::Recreated(None)
-        );
+        assert_eq!(check(Some(&running), false, &mut uid), StreamEnd::Recreated);
         assert_eq!(uid.as_deref(), Some("2"));
         assert_eq!(check(Some(&running), false, &mut uid), StreamEnd::Resume);
 

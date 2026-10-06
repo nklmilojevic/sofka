@@ -83,6 +83,13 @@ fn pod_logs_app() -> (App, Receiver<Msg>) {
     (app, rx)
 }
 
+/// The pod a selector test reads by name, if `path` is one.
+fn named_pod(path: &str) -> Option<(u16, TestBody)> {
+    let name = path.strip_prefix("/api/v1/namespaces/default/pods/")?;
+    let uid = name.strip_prefix("web-")?;
+    Some((200, closed_body(pod_json(name, uid, 0).to_string())))
+}
+
 fn not_found() -> (u16, TestBody) {
     (
         404,
@@ -164,9 +171,11 @@ async fn followed_logs_stop_when_the_pod_is_deleted() {
     let (mut app, mut rx) = pod_logs_app();
     let requests = serve(
         &mut app,
-        Arc::new(|path, _query, _nth| {
+        Arc::new(|path, _query, nth| {
             if path.ends_with("/log") {
                 (200, closed_body("2026-10-06T10:00:00Z bye\n"))
+            } else if nth == 0 {
+                (200, closed_body(pod_json("web", "u1", 0).to_string()))
             } else {
                 not_found()
             }
@@ -188,7 +197,10 @@ async fn refused_follow_streams_report_once_and_stop() {
     let (mut app, mut rx) = pod_logs_app();
     let requests = serve(
         &mut app,
-        Arc::new(|_path, _query, _nth| {
+        Arc::new(|path, _query, _nth| {
+            if !path.ends_with("/log") {
+                return (200, closed_body(pod_json("web", "u1", 0).to_string()));
+            }
             (
                 403,
                 closed_body(
@@ -202,7 +214,7 @@ async fn refused_follow_streams_report_once_and_stop() {
     app.handle_key(press(KeyCode::Char('l'))).unwrap();
     wait_for(&mut app, &mut rx, "access denied").await;
     tokio::time::sleep(Duration::from_millis(1500)).await;
-    assert_eq!(requests.lock().unwrap().len(), 1);
+    assert_eq!(log_queries(&requests).len(), 1);
 }
 
 #[tokio::test]
@@ -223,6 +235,8 @@ async fn workload_logs_follow_pods_a_rollout_creates() {
                 (200, open_body("2026-10-06T10:00:00Z from a\n"))
             } else if path.ends_with("/web-b/log") {
                 (200, open_body("2026-10-06T10:00:05Z from b\n"))
+            } else if let Some(pod) = named_pod(path) {
+                pod
             } else if query.contains("watch=true") {
                 let added = json!({"type": "ADDED", "object": pod_json("web-b", "b", 0)});
                 (200, open_body(format!("{added}\n")))
@@ -303,6 +317,8 @@ async fn a_recreated_pod_is_read_from_its_first_line() {
                 } else {
                     (200, open_body("2026-10-06T10:00:01Z new\n"))
                 }
+            } else if nth == 0 {
+                (200, closed_body(pod_json("web", "u1", 0).to_string()))
             } else {
                 (200, closed_body(pod_json("web", "u2", 0).to_string()))
             }
@@ -389,6 +405,8 @@ async fn a_pod_that_leaves_the_selector_stops_streaming() {
         Arc::new(move |path, query, _nth| {
             if path.ends_with("/log") {
                 (200, take_body(&logs))
+            } else if let Some(pod) = named_pod(path) {
+                pod
             } else if query.contains("watch=true") {
                 (200, take_body(&watch))
             } else {
@@ -433,6 +451,8 @@ async fn a_refused_pod_watch_keeps_existing_streams_and_stops_asking() {
         Arc::new(|path, query, _nth| {
             if path.ends_with("/log") {
                 (200, open_body("2026-10-06T10:00:00Z still here\n"))
+            } else if let Some(pod) = named_pod(path) {
+                pod
             } else if query.contains("watch=true") {
                 (
                     403,
@@ -461,14 +481,14 @@ async fn a_refused_pod_watch_keeps_existing_streams_and_stops_asking() {
 }
 
 #[tokio::test]
-async fn a_marked_pod_that_is_replaced_stops_streaming() {
+async fn a_marked_pod_replaced_before_its_stream_opens_is_never_streamed() {
     let (mut app, mut rx) = pod_logs_app();
     app.handle_key(press(KeyCode::Char(' '))).unwrap();
     let requests = serve(
         &mut app,
         Arc::new(|path, _query, _nth| {
             if path.ends_with("/log") {
-                (200, closed_body("2026-10-06T10:00:00Z marked\n"))
+                (200, open_body("2026-10-06T10:00:00Z unmarked\n"))
             } else {
                 (200, closed_body(pod_json("web", "u2", 0).to_string()))
             }
@@ -479,44 +499,38 @@ async fn a_marked_pod_that_is_replaced_stops_streaming() {
 
     assert_eq!(
         app.filtered_log_text(),
-        "[default/web:app] marked\n[default/web:app] [sofka] pod replaced; stream ended"
+        "[default/web:app] [sofka] pod replaced; stream ended"
     );
-    tokio::time::sleep(Duration::from_millis(1500)).await;
-    assert_eq!(log_queries(&requests).len(), 1);
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(log_queries(&requests).is_empty());
 }
 
 #[tokio::test]
-async fn a_replacement_read_by_the_first_request_is_not_shown_twice() {
+async fn a_pod_replaced_before_its_stream_opens_is_read_once_from_its_start() {
     let (mut app, mut rx) = pod_logs_app();
     let requests = serve(
         &mut app,
-        Arc::new(|path, _query, nth| {
+        Arc::new(|path, _query, _nth| {
             if path.ends_with("/log") {
-                if nth == 0 {
-                    (200, closed_body("2026-10-06T10:00:05Z first\n"))
-                } else {
-                    (
-                        200,
-                        open_body("2026-10-06T10:00:05Z first\n2026-10-06T10:00:06Z second\n"),
-                    )
-                }
+                (200, open_body("2026-10-06T10:00:05Z first\n"))
             } else {
-                let mut replacement = pod_json("web", "u2", 0);
-                replacement["metadata"]["creationTimestamp"] = json!("2026-10-06T10:00:00Z");
-                (200, closed_body(replacement.to_string()))
+                (200, closed_body(pod_json("web", "u2", 0).to_string()))
             }
         }),
     );
     app.handle_key(press(KeyCode::Char('l'))).unwrap();
-    wait_for(&mut app, &mut rx, "second").await;
+    wait_for(&mut app, &mut rx, "first").await;
 
-    assert_eq!(
-        app.filtered_log_text(),
-        "first\n[sofka] pod recreated\nsecond"
-    );
+    // The notice has no timestamp of its own, so its place among the lines
+    // depends on the clock; only membership is fixed.
+    let text = app.filtered_log_text();
+    let lines: Vec<&str> = text.lines().collect();
+    assert_eq!(lines.len(), 2, "{text}");
+    assert!(lines.contains(&"[sofka] pod recreated"), "{text}");
+    assert!(lines.contains(&"first"), "{text}");
     let queries = log_queries(&requests);
-    assert_eq!(
-        queries[1].get("sinceTime").map(String::as_str),
-        Some("2026-10-06T10:00:05Z")
-    );
+    assert_eq!(queries.len(), 1);
+    for key in ["sinceTime", "sinceSeconds", "tailLines"] {
+        assert!(!queries[0].contains_key(key), "{key}: {:?}", queries[0]);
+    }
 }

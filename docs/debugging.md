@@ -95,9 +95,9 @@ table are included. With no marks, `l` opens logs for the current row.
 
 The set of marked pods is fixed when the view opens. If a new pod with the same
 name replaces a marked pod, its stream ends with a `[sofka]` line instead of
-following the new pod. Workload and service logs
-watch the selector instead: a pod that a rollout or scale-up creates joins the
-view with a `[sofka] following new pod` line and is shown from its first line.
+following the new pod. Workload and service logs watch the selector instead: a
+pod that a rollout or scale-up creates joins the view with a
+`[sofka] following new pod` line and is shown from its first line.
 Pods that already existed start from the configured tail. A pod whose labels
 stop matching the selector leaves the view with a `[sofka]` line. If RBAC
 allows listing pods but not watching them, the pods found at open keep
