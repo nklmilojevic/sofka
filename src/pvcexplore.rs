@@ -649,7 +649,13 @@ pub fn helper_pod(claim: &str, image: &str, ttl_secs: u64) -> Value {
                 "image": image,
                 "command": ["sh", "-c", format!("sleep {ttl_secs}")],
                 "volumeMounts": [{ "name": "pvc", "mountPath": HELPER_MOUNT }],
-                "resources": { "requests": { "cpu": "10m", "memory": "16Mi" } },
+                // Limits equal to requests: a namespace LimitRange would
+                // otherwise default the limit and can reject the pod for
+                // exceeding its maxLimitRequestRatio.
+                "resources": {
+                    "requests": { "cpu": "50m", "memory": "64Mi" },
+                    "limits": { "cpu": "50m", "memory": "64Mi" },
+                },
                 "securityContext": {
                     "allowPrivilegeEscalation": false,
                     "capabilities": { "drop": ["ALL"] },
@@ -2009,6 +2015,16 @@ mod tests {
             HELPER_MOUNT
         );
         assert_eq!(spec["metadata"]["generateName"], HELPER_PREFIX);
+    }
+
+    #[test]
+    fn helper_pod_limits_match_requests_so_a_limit_range_ratio_admits_it() {
+        let spec = helper_pod("data", "busybox:1.37", 900);
+        let resources = &spec["spec"]["containers"][0]["resources"];
+        for key in ["cpu", "memory"] {
+            assert!(resources["limits"][key].is_string(), "{resources}");
+            assert_eq!(resources["limits"][key], resources["requests"][key]);
+        }
     }
 
     /// Run a generated script under a real `sh` with `du` shimmed.
