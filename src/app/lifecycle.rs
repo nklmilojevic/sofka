@@ -1993,7 +1993,8 @@ impl App {
                 generation,
                 request,
                 list,
-            } if generation == self.generation && request == self.ns_list_request => {
+            } if generation == self.generation && request >= self.ns_list_applied => {
+                self.ns_list_applied = request;
                 let names = self.filtered_namespaces();
                 let keep = self.ns_state.selected().unwrap_or(0);
                 let selected = names.get(keep);

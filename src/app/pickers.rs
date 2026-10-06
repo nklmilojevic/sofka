@@ -24,8 +24,9 @@ impl App {
 
     /// Fetch the namespace list off-thread; it arrives as `Msg::Namespaces` and
     /// refreshes `ns_list`, which backs both the switcher popup and `:<kind>
-    /// <ns>` palette completion. Only the newest request's answer is kept, so a
-    /// slow earlier fetch can't overwrite a fresher list.
+    /// <ns>` palette completion. An answer older than the last applied one is
+    /// dropped, so a slow earlier fetch can't overwrite a fresher list, but it
+    /// still lands when a later fetch fails.
     pub(super) fn spawn_namespace_fetch(&mut self) {
         self.ns_list_request += 1;
         let request = self.ns_list_request;

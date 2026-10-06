@@ -11357,6 +11357,21 @@ async fn palette_drops_namespace_list_from_an_older_fetch() {
 }
 
 #[tokio::test]
+async fn palette_keeps_an_older_namespace_list_when_the_newer_fetch_fails() {
+    let (mut app, _rx) = test_app();
+    app.handle_key(press(KeyCode::Char(':'))).unwrap();
+    app.handle_key(press(KeyCode::Esc)).unwrap();
+    app.handle_key(press(KeyCode::Char(':'))).unwrap();
+
+    app.handle_msg(Msg::Namespaces {
+        generation: app.generation,
+        request: app.ns_list_request - 1,
+        list: vec!["<all>".into(), "default".into(), "fresh".into()],
+    });
+    assert_eq!(app.ns_list, ["<all>", "default", "fresh"]);
+}
+
+#[tokio::test]
 async fn palette_namespace_refresh_keeps_a_navigated_suggestion() {
     let (mut app, _rx) = test_app();
     app.ns_list = vec!["<all>".into(), "alpha".into(), "beta".into()];
