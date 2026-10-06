@@ -296,7 +296,16 @@ pub(super) async fn gather_evidence(
     let ns = obj.metadata.namespace.as_deref().unwrap_or_default();
     let name = obj.metadata.name.as_deref().unwrap_or_default();
     let mut related = Ok(Vec::new());
-    let mut storage_classes = None;
+    // Many users may not list cluster-scoped StorageClasses. The analysis
+    // then says the class is unknown rather than missing.
+    let storage_classes = if plural == "persistentvolumeclaims" {
+        let classes = ApiResource::erase::<k8s_openapi::api::storage::v1::StorageClass>(&());
+        list_with(client, &classes, false, "", &ListParams::default())
+            .await
+            .ok()
+    } else {
+        None
+    };
     let labels = |selector: &str| ListParams::default().labels(selector);
     let pods: Result<Vec<DynamicObject>, String> = match (plural, pods_kind) {
         ("pods", _) => Ok(vec![obj.clone()]),
@@ -319,12 +328,6 @@ pub(super) async fn gather_evidence(
             list_with(client, ar, nsd, "", &params).await
         }
         ("persistentvolumeclaims", Some((ar, nsd))) => {
-            // Many users may not list cluster-scoped StorageClasses. The
-            // analysis then says the class is unknown rather than missing.
-            let classes = ApiResource::erase::<k8s_openapi::api::storage::v1::StorageClass>(&());
-            storage_classes = list_with(client, &classes, false, "", &ListParams::default())
-                .await
-                .ok();
             list_with(client, ar, nsd, ns, &ListParams::default())
                 .await
                 .map(|pods| pods.into_iter().filter(|p| mounts_claim(p, name)).collect())
@@ -357,7 +360,12 @@ pub(super) async fn gather_evidence(
             (Vec::new(), false)
         }
     };
-    let (pods, pods_listed) = unwrap(pods);
+    let (pods, mut pods_listed) = unwrap(pods);
+    // Without a pods kind in discovery nothing was listed, so the empty set
+    // says nothing about which pods exist.
+    if pods_kind.is_none() && plural != "pods" {
+        pods_listed = false;
+    }
     let (related, related_listed) = unwrap(related);
     let (events, events_v1) = match events_kind {
         Some((ar, nsd)) => {

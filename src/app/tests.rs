@@ -38605,3 +38605,41 @@ async fn enter_on_a_cronjob_run_opens_that_job() {
     assert_eq!(app.kind_plural, "jobs");
     assert_eq!(app.fields.as_deref(), Some("metadata.name=report-1"));
 }
+
+#[tokio::test]
+async fn explain_without_a_pods_kind_does_not_claim_a_claim_is_unused() {
+    let (mut app, rx) = test_app();
+    app.cluster
+        .register_kind("", "PersistentVolumeClaim", "persistentvolumeclaims", true);
+    app.cluster.unregister_kind("", "Pod");
+    let pvc = json!({"apiVersion": "v1", "kind": "PersistentVolumeClaim",
+        "metadata": {"name": "data", "namespace": "default", "uid": "pvc-uid"},
+        "spec": {"storageClassName": "local"}, "status": {"phase": "Pending"}});
+    let (mut app, mut rx, responses, _) =
+        health_report_app_with(app, rx, "persistentvolumeclaims", pvc.clone());
+    {
+        let mut responses = responses.lock().unwrap();
+        responses.insert(
+            "/api/v1/namespaces/default/persistentvolumeclaims/data".into(),
+            (200, pvc),
+        );
+        responses.insert(
+            "/apis/storage.k8s.io/v1/storageclasses".into(),
+            (
+                200,
+                json!({"apiVersion": "storage.k8s.io/v1", "kind": "StorageClassList",
+                    "metadata": {}, "items": [{"metadata": {"name": "local"},
+                    "provisioner": "rancher.io/local-path",
+                    "volumeBindingMode": "WaitForFirstConsumer"}]}),
+            ),
+        );
+    }
+    app.handle_key(press(KeyCode::Char('X'))).unwrap();
+    receive_health_report(&mut app, &mut rx, false).await;
+    let texts = explain_texts(&app);
+    assert!(
+        texts.iter().any(|t| t.contains("pods could not be listed")),
+        "{texts:?}"
+    );
+    assert!(!texts.iter().any(|t| t.contains("and no pod does")));
+}
