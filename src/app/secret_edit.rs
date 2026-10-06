@@ -504,10 +504,15 @@ impl App {
             format!(" in {ns}")
         };
         let managed = managed_by(&edit.object)
-            .map(|owner| format!("  ⚠ Managed by {owner} — it may overwrite this change."))
-            .unwrap_or_default();
+            .map(|owner| format!("⚠ Managed by {owner} — it may overwrite this change."));
         let kind = edit.kind.clone();
-        let label = format!("Update secret {name}{where_ns}: {summary}?{managed}");
+        let update = format!("Update secret {name}{where_ns}: {summary}?");
+        // A long key list scrolls, so the warning goes where the dialog
+        // opens: first in the y/n confirmation, which opens at the top.
+        let label = match &managed {
+            Some(warning) => format!("{warning}\n\n{update}"),
+            None => update.clone(),
+        };
         self.begin_guarded(
             ConfirmAction::SecretEdit {
                 kind,
@@ -515,19 +520,21 @@ impl App {
                 ns,
                 patch,
             },
-            label.clone(),
+            label,
             level,
             name,
         );
         if matches!(self.mode, Mode::Confirm | Mode::Prompt) {
             self.confirm_return = Mode::Detail;
         }
-        // A typed guardrail prompt only says what to type; the keys and the
-        // managed warning go above it, every key by name. It opens scrolled
-        // to the bottom, as it does while typing, so what to type and the
-        // input are in view however many keys there are.
+        // A typed guardrail prompt only says what to type. Every key goes
+        // above that, and the warning right above what to type. The prompt
+        // opens scrolled to the bottom, as it does while typing, so the
+        // warning, what to type, and the input are in view however many keys
+        // there are.
         if self.mode == Mode::Prompt {
-            self.prompt_label = format!("{label}\n\n{}", self.prompt_label);
+            let warning = managed.map(|w| format!("{w}\n\n")).unwrap_or_default();
+            self.prompt_label = format!("{update}\n\n{warning}{}", self.prompt_label);
             self.popup_scroll = usize::MAX;
         }
     }

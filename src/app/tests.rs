@@ -13560,6 +13560,48 @@ async fn typed_secret_edit_prompt_keeps_the_input_in_view_with_many_keys() {
     assert!(screen.contains("apply"), "{screen}");
 }
 
+/// Many long key names on a Flux-managed copy of the decoded Secret.
+fn many_keys_on_a_managed_secret(app: &mut App) {
+    let source = app.document_source.as_mut().unwrap();
+    source.object.metadata.labels = Some(
+        [
+            ("kustomize.toolkit.fluxcd.io/name", "apps"),
+            ("kustomize.toolkit.fluxcd.io/namespace", "flux-system"),
+        ]
+        .into_iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect(),
+    );
+    let path = open_secret_editor(app);
+    let mut doc = String::from("stringData:\n  token: hunter2\n  cert: |\n    a\n    b\n");
+    for i in 0..60 {
+        doc.push_str(&format!("  a-rather-long-key-name-number-{i}: v\n"));
+    }
+    close_secret_editor(app, &path, &doc);
+}
+
+#[tokio::test]
+async fn managed_warning_is_in_view_on_a_long_secret_confirmation() {
+    let (mut app, _rx) = decoded_secret_app();
+    many_keys_on_a_managed_secret(&mut app);
+    assert_eq!(app.mode, Mode::Confirm);
+    let screen = screen_text(&mut app, 80, 24);
+    assert!(screen.contains("Managed by Flux"), "{screen}");
+
+    app.handle_key(press(KeyCode::Esc)).unwrap();
+    app.guardrails = vec![crate::config::Guardrail {
+        actions: vec!["secret-edit".into()],
+        confirmation: Some("type-resource-name".into()),
+        ..Default::default()
+    }];
+    many_keys_on_a_managed_secret(&mut app);
+    assert_eq!(app.mode, Mode::Prompt);
+    let screen = screen_text(&mut app, 80, 24);
+    assert!(screen.contains("Managed by Flux"), "{screen}");
+    assert!(screen.contains("type 'creds' to confirm"), "{screen}");
+    assert!(screen.contains('█'), "{screen}");
+}
+
 #[tokio::test]
 async fn decoded_secret_edit_refuses_an_immutable_secret() {
     let (mut app, _rx) = decoded_secret_app();
