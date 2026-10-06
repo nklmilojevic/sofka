@@ -625,3 +625,58 @@ async fn a_pod_that_fails_while_its_container_waits_ends_the_stream() {
     wait_for(&mut app, &mut rx, "stream ended").await;
     assert_eq!(app.filtered_log_text(), "[sofka] pod failed; stream ended");
 }
+
+fn forbidden() -> (u16, TestBody) {
+    (
+        403,
+        closed_body(
+            json!({"kind": "Status", "apiVersion": "v1", "status": "Failure",
+                "message": "forbidden", "reason": "Forbidden", "code": 403})
+            .to_string(),
+        ),
+    )
+}
+
+#[tokio::test]
+async fn a_marked_pod_is_confirmed_by_listing_when_get_is_refused() {
+    let (mut app, mut rx) = pod_logs_app();
+    app.handle_key(press(KeyCode::Char(' '))).unwrap();
+    let requests = serve(
+        &mut app,
+        Arc::new(|path, query, _nth| {
+            if path.ends_with("/log") {
+                (200, open_body("2026-10-06T10:00:00Z unmarked\n"))
+            } else if path.ends_with("/pods/web") {
+                forbidden()
+            } else {
+                assert!(
+                    query.contains("fieldSelector=metadata.name%3Dweb"),
+                    "{query}"
+                );
+                pod_list(pod_json("web", "u2", 0))
+            }
+        }),
+    );
+    app.handle_key(press(KeyCode::Char('l'))).unwrap();
+    wait_for(&mut app, &mut rx, "pod replaced").await;
+    assert!(log_queries(&requests).is_empty());
+}
+
+#[tokio::test]
+async fn a_marked_pod_that_cannot_be_read_is_not_streamed() {
+    let (mut app, mut rx) = pod_logs_app();
+    app.handle_key(press(KeyCode::Char(' '))).unwrap();
+    let requests = serve(
+        &mut app,
+        Arc::new(|path, _query, _nth| {
+            if path.ends_with("/log") {
+                (200, open_body("2026-10-06T10:00:00Z unchecked\n"))
+            } else {
+                forbidden()
+            }
+        }),
+    );
+    app.handle_key(press(KeyCode::Char('l'))).unwrap();
+    wait_for(&mut app, &mut rx, "cannot read the pod").await;
+    assert!(log_queries(&requests).is_empty());
+}

@@ -312,13 +312,27 @@ impl LogStream {
     /// before the machine slept may never answer.
     async fn read_pod(&mut self) -> PodRead {
         tokio::select! {
-            read = tokio::time::timeout(STATUS_TIMEOUT, self.api.get_opt(&self.pod)) => match read {
-                Ok(Ok(pod)) => PodRead::Found(pod.map(Box::new)),
-                Ok(Err(error)) if refused(&error) => PodRead::Refused,
-                _ => PodRead::Unknown,
-            },
+            read = tokio::time::timeout(STATUS_TIMEOUT, Self::fetch_pod(&self.api, &self.pod)) => {
+                read.unwrap_or(PodRead::Unknown)
+            }
             Ok(()) = self.wake.changed() => PodRead::Woke,
             _ = self.tx.closed() => PodRead::Closed,
+        }
+    }
+
+    /// Get the pod, or list it by name where RBAC grants `list` but not
+    /// `get`: the table and the selector watch only need `list`.
+    async fn fetch_pod(api: &Api<Pod>, name: &str) -> PodRead {
+        match api.get_opt(name).await {
+            Ok(pod) => return PodRead::Found(pod.map(Box::new)),
+            Err(error) if !refused(&error) => return PodRead::Unknown,
+            Err(_) => {}
+        }
+        let params = ListParams::default().fields(&format!("metadata.name={name}"));
+        match api.list(&params).await {
+            Ok(list) => PodRead::Found(list.items.into_iter().next().map(Box::new)),
+            Err(error) if refused(&error) => PodRead::Refused,
+            Err(_) => PodRead::Unknown,
         }
     }
 
@@ -368,7 +382,13 @@ impl LogStream {
                         }
                     }
                     // Without permission to read pods the check can never
-                    // pass, so the stream goes ahead unchecked.
+                    // pass. A stream tied to one pod cannot tell it from a
+                    // replacement, so it stops; any other goes ahead.
+                    PodRead::Refused if pinned => {
+                        self.send("[sofka] cannot read the pod to confirm it; stream ended".into())
+                            .await;
+                        return;
+                    }
                     PodRead::Refused => {}
                     // A stream tied to one pod must not open on a name that
                     // may now belong to its replacement.
