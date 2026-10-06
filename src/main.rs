@@ -128,6 +128,8 @@ enum Command {
     Info(InfoArgs),
     /// Find, install, update, list, and remove reviewed plugin packages.
     Plugin(sofka::plugin_cli::PluginArgs),
+    /// Convert another tool's configuration into sofka config files.
+    Import(sofka::k9s_import::ImportArgs),
 }
 
 #[derive(clap::Args, Debug, Clone, Default)]
@@ -249,6 +251,9 @@ async fn run_main(args: Args) -> Result<()> {
             println!("{line}");
         }
         return Ok(());
+    }
+    if let Some(Command::Import(import)) = &args.command {
+        return sofka::k9s_import::run(import).map_err(anyhow::Error::msg);
     }
     if let Some(Command::Plugin(plugin)) = &args.command {
         return sofka::plugin_cli::run(plugin)
@@ -745,7 +750,7 @@ fn ring_notification(text: &str, cfg: &config::NotifyConfig) {
 fn info_request(args: &Args) -> Option<InfoArgs> {
     match &args.command {
         Some(Command::Info(info)) => Some(info.clone()),
-        Some(Command::Plugin(_) | Command::Completion { .. }) => None,
+        Some(Command::Plugin(_) | Command::Import(_) | Command::Completion { .. }) => None,
         None if args.info => Some(InfoArgs { offline: true }),
         None => None,
     }

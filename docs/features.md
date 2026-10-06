@@ -10,6 +10,67 @@ local paths, and plugin IDs and versions. Cluster queries use earlier CLI option
 and have a time limit. Generation does not need a cluster connection.
 See [shell setup instructions](shell-completion.md).
 
+## Import from k9s
+
+`sofka import k9s` converts a k9s setup into sofka configuration. It reads the
+k9s directory the way k9s does: `$K9S_CONFIG_DIR`, then `$XDG_CONFIG_HOME/k9s`,
+then the platform default (`~/.config/k9s` on Linux,
+`~/Library/Application Support/k9s` on macOS, `%LOCALAPPDATA%\k9s` on Windows).
+Use `--from DIR` to read another directory. `--dry-run` prints the files
+without writing them.
+
+| k9s                             | sofka                                    |
+| ------------------------------- | ---------------------------------------- |
+| `aliases.yaml`                  | `aliases`, or bookmarks for destinations |
+| `plugins.yaml`, `plugins/`      | `plugins`, merged by name                |
+| `hotkeys.yaml`                  | `bookmarks` with the same keys           |
+| `views.yaml`                    | `views` with `replace = true`            |
+| `config.yaml`                   | top-level settings, `logs`, `thresholds` |
+| `clusters/<cluster>/<context>/` | the matching `clusters/` override file   |
+
+From `config.yaml`, the import reads `readOnly`, `defaultView`, `ui.skin`,
+`ui.enableMouse`, `ui.headless`, `ui.defaultsToFullScreen`, `logger`, and the
+CPU and memory `thresholds`. An alias such as `web: pods default app=web`
+names a destination, so it becomes a bookmark.
+
+Global settings go to `conf.d/00-k9s.yaml`. Each k9s context with a read-only
+flag, skin, locked favorite namespaces, aliases, plugins, or hotkeys gets an
+override file. Contexts that only hold k9s state, such as the last namespace,
+get none. k9s rewrites unlocked favorites with recently used namespaces, so
+they are imported only with `lockFavorites: true`.
+k9s settings that still have their k9s default values are not imported.
+
+The import does not change your own files:
+
+- A setting your base sofka config already sets keeps your value, and the
+  report lists it. Your bookmarks stay next to the imported ones.
+- A file the importer did not write is never replaced. A context that already
+  has a sofka override file is reported instead.
+- Running the import again requires `--force`, which replaces only the files an
+  earlier import wrote.
+
+Plugin placeholders are rewritten to sofka names: `$RESOURCE_NAME` becomes
+`$RESOURCE`, `$RESOURCE_GROUP` becomes `$GROUP`, `$RESOURCE_VERSION` becomes
+`$VERSION`, and `${NAME}` or `$name` becomes `$NAME`. A plugin marked
+`dangerous` in k9s is hidden in read-only mode, so it imports as
+`mutating = true`; other plugins import as `mutating = false`. k9s
+`Shift-1` to `Shift-0` keys become the US-layout characters `!` to `)`.
+
+The report lists everything that was not imported, with the reason. These
+cannot be translated:
+
+- Plugins that read table cells (`$COL-<NAME>`), use inverted placeholders
+  (`$!NAME`), use `pipes`, or run only in the containers view (`$POD`).
+- Plugin inputs used inside a longer string. sofka passes an input as a whole
+  argument (`${input.NAME}`).
+- View columns whose JSONPath uses filters, wildcards, or slices.
+- k9s skins without a matching sofka skin, `shellPod`, `imageScans`, and
+  `portForwardAddress`.
+
+The importer checks the result with sofka's own config validation. It reports
+plugin and hotkey keys that a sofka built-in key takes first; rebind the
+built-in under [`[keys]`](keybindings.md) or change the imported key.
+
 ## Node drain options
 
 Press `D` on a node to set options for the current node or marked nodes. The form

@@ -989,6 +989,56 @@ pub(crate) fn parse_chords(
     out
 }
 
+/// Warnings for plugin, bookmark, and workspace keys that a built-in table
+/// action takes first.
+pub fn hidden_bindings(
+    keymap: &Keymap,
+    plugins: &[crate::config::Plugin],
+    bookmarks: &[crate::config::Bookmark],
+    workspaces: &[crate::config::Workspace],
+) -> Vec<String> {
+    let mut warnings = Vec::new();
+    for (kind, name, binding, resources) in plugins
+        .iter()
+        .map(|p| {
+            (
+                "plugin",
+                p.name.as_str(),
+                Some(p.key.as_str()),
+                p.scopes.as_slice(),
+            )
+        })
+        .chain(
+            bookmarks
+                .iter()
+                .map(|b| ("bookmark", b.name.as_str(), b.key.as_deref(), &[][..])),
+        )
+        .chain(
+            workspaces
+                .iter()
+                .map(|w| ("workspace", w.name.as_str(), w.key.as_deref(), &[][..])),
+        )
+    {
+        if let Some(binding) = binding
+            && let Ok(chord) = KeyChord::parse(binding)
+        {
+            for (scope, action, chords) in keymap.entries() {
+                if scope == "table"
+                    && action != Action::Faults
+                    && action.kinds().is_none_or(|kinds| {
+                        resources.is_empty()
+                            || resources.iter().any(|s| kinds.contains(&s.as_str()))
+                    })
+                    && chords.iter().any(|other| overlaps(&chord, other))
+                {
+                    warnings.push(format!("{kind} {name:?}: {} is hidden by keys.table.{} when that action is available", chord.label(), action.name()));
+                }
+            }
+        }
+    }
+    warnings
+}
+
 pub(crate) fn overlaps(a: &KeyChord, b: &KeyChord) -> bool {
     let event = |c: &KeyChord| {
         let mut modifiers = KeyModifiers::NONE;

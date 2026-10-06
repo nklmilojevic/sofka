@@ -320,47 +320,12 @@ impl App {
                 }
             })
             .collect();
-        for (kind, name, binding, resources) in self
-            .plugins
-            .iter()
-            .map(|p| {
-                (
-                    "plugin",
-                    p.name.as_str(),
-                    Some(p.key.as_str()),
-                    p.scopes.as_slice(),
-                )
-            })
-            .chain(
-                self.bookmarks
-                    .iter()
-                    .map(|b| ("bookmark", b.name.as_str(), b.key.as_deref(), &[][..])),
-            )
-            .chain(
-                self.workspaces
-                    .iter()
-                    .map(|w| ("workspace", w.name.as_str(), w.key.as_deref(), &[][..])),
-            )
-        {
-            if let Some(binding) = binding
-                && let Ok(chord) = crate::keys::KeyChord::parse(binding)
-            {
-                for (scope, action, chords) in self.keymap.entries() {
-                    if scope == "table"
-                        && action != Action::Faults
-                        && action.kinds().is_none_or(|kinds| {
-                            resources.is_empty()
-                                || resources.iter().any(|s| kinds.contains(&s.as_str()))
-                        })
-                        && chords
-                            .iter()
-                            .any(|other| crate::keymap::overlaps(&chord, other))
-                    {
-                        warnings.push(format!("{kind} {name:?}: {} is hidden by keys.table.{} when that action is available", chord.label(), action.name()));
-                    }
-                }
-            }
-        }
+        warnings.extend(crate::keymap::hidden_bindings(
+            &self.keymap,
+            &self.plugins,
+            &self.bookmarks,
+            &self.workspaces,
+        ));
         warnings
     }
 

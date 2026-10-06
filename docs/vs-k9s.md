@@ -41,6 +41,12 @@ workflow or extension.
 - **Status display:** row colors, status badges, and configurable CPU, memory,
   and restart thresholds help identify resources that need attention.
 
+## Moving from k9s
+
+`sofka import k9s` converts k9s aliases, plugins, hotkeys, views, skins, and
+per-context settings into sofka configuration, and lists what it could not
+convert. See [Import from k9s](features.md#import-from-k9s).
+
 k9s also offers plugins, custom views, XRay, Pulses, and Popeye integration.
 Users who depend on these functions must compare their workflows before they
 switch. See the [k9s commands](https://k9scli.io/topics/commands/) and

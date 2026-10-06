@@ -28,6 +28,7 @@ pub mod gitops;
 pub mod helm;
 pub mod journal;
 pub mod k8s;
+pub mod k9s_import;
 pub mod keymap;
 pub mod keys;
 mod legacy_tls;
