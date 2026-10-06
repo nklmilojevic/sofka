@@ -49,7 +49,8 @@ The import does not change your own files:
   has a sofka override file is reported instead.
 - Running the import again requires `--force`, also with `--dry-run`. It
   replaces the files an earlier import wrote and removes those the new import
-  no longer produces. If a k9s file cannot be read, nothing is removed.
+  no longer produces. If a k9s file cannot be read, a re-import stops
+  without changing anything.
 - Every file is validated before any file is written. If sofka would reject
   one, nothing is written.
 

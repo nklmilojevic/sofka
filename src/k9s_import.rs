@@ -1627,6 +1627,20 @@ pub fn apply(plan: &Plan, dir: &Path, dry_run: bool, force: bool) -> Result<Vec<
             path.display()
         ));
     }
+    // With a k9s file unread, every output may lack its settings: replacing
+    // or removing an earlier import could drop a read-only flag or the
+    // bookmarks a context inherits. A first import has nothing to lose.
+    if !earlier.is_empty() && !plan.unreadable.is_empty() {
+        let files: Vec<String> = plan
+            .unreadable
+            .iter()
+            .map(|p| p.display().to_string())
+            .collect();
+        return Err(format!(
+            "cannot read {}; fix or remove it and rerun, nothing was changed",
+            files.join(", ")
+        ));
+    }
     let mut skipped = plan.skipped.clone();
     let mut writes = Vec::new();
     for out in &plan.outputs {
@@ -1656,18 +1670,10 @@ pub fn apply(plan: &Plan, dir: &Path, dry_run: bool, force: bool) -> Result<Vec<
     }
     // A file an earlier import wrote that this import no longer produces
     // would keep its old settings active.
-    let mut stale: Vec<&PathBuf> = earlier
+    let stale: Vec<&PathBuf> = earlier
         .iter()
         .filter(|p| !writes.iter().any(|(t, _)| t == *p))
         .collect();
-    if !plan.unreadable.is_empty() && !stale.is_empty() {
-        for path in stale.drain(..) {
-            skipped.push(format!(
-                "{} kept: some k9s files could not be read, so the import may be incomplete",
-                path.display()
-            ));
-        }
-    }
 
     // Render and validate everything before writing anything.
     let mut rendered = Vec::new();
@@ -2482,24 +2488,50 @@ resource = "ing"
     }
 
     #[test]
-    fn unreadable_sources_keep_earlier_imports() {
+    fn unreadable_sources_stop_a_reimport() {
         let root = scratch("unreadable");
         let (k9s, sofka) = (root.join("k9s"), root.join("sofka"));
         k9s_fixture(&k9s);
+        let ctx = "clusters/arn-aws-eks-eu-west-1-1-cluster-prod/prod-admin";
+        put(
+            &k9s,
+            &format!("{ctx}/hotkeys.yaml"),
+            "hotKeys:\n  ing:\n    shortCut: Shift-2\n    command: ing\n",
+        );
         let src = Sources::at(&k9s).unwrap();
         apply(&plan(&src, &UserConfig::default()), &sofka, false, false).unwrap();
-        let prod = "clusters/arn-aws-eks-eu-west-1-1-cluster-prod/prod-admin/config.yaml";
+        let before = |p: &str| std::fs::read_to_string(sofka.join(p)).unwrap();
+        let (dropin, prod) = (before(DROPIN), before(&format!("{ctx}/config.yaml")));
 
-        put(&k9s, prod, "k9s: [not, a, mapping\n");
+        // The context config breaks while its hotkeys still convert, and the
+        // global hotkeys break while other global settings still convert.
+        put(
+            &k9s,
+            &format!("{ctx}/config.yaml"),
+            "k9s: [not, a, mapping\n",
+        );
+        put(&k9s, "hotkeys.yaml", "hotKeys: [\n");
         let plan = plan(&src, &UserConfig::default());
-        assert_eq!(plan.unreadable, [k9s.join(prod)]);
-        let report = apply(&plan, &sofka, false, true).unwrap();
-        assert!(sofka.join(prod).is_file(), "{report:#?}");
-        assert!(report.iter().any(|l| l.contains("could not be read")));
+        assert_eq!(plan.unreadable.len(), 2, "{:?}", plan.unreadable);
+        assert!(
+            plan.outputs
+                .iter()
+                .any(|o| o.path.ends_with("prod-admin/config.yaml"))
+        );
+        for dry_run in [true, false] {
+            let err = apply(&plan, &sofka, dry_run, true).unwrap_err();
+            assert!(err.contains("nothing was changed"), "{err}");
+        }
+        assert_eq!(before(DROPIN), dropin);
+        assert_eq!(before(&format!("{ctx}/config.yaml")), prod);
         let cfg = crate::config::ConfigLoader::from_dir(Some(sofka.clone()))
             .resolve("prod-admin", "arn:aws:eks:eu-west-1:1:cluster/prod")
             .config;
         assert!(cfg.readonly, "the context stays read-only");
+        assert!(
+            cfg.bookmarks.iter().any(|b| b.name == "deploys"),
+            "global bookmarks survive"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 }
