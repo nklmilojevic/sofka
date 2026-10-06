@@ -58,7 +58,8 @@ pub fn run(args: &ImportArgs) -> Result<(), String> {
         .dir()
         .ok_or("cannot determine the sofka config directory: set XDG_CONFIG_HOME or HOME")?
         .to_path_buf();
-    let plan = plan(&sources, loader.base_value());
+    let user = UserConfig::read(&loader);
+    let plan = plan(&sources, &user);
     for line in apply(&plan, &dir, *dry_run, *force)? {
         println!("{line}");
     }
@@ -113,9 +114,7 @@ impl Sources {
         };
         let home = crate::config::home_dir().map(PathBuf::from);
         let (config, data) = candidates(platform, |name| std::env::var_os(name), home);
-        let found = config.iter().find(|dir| {
-            CONFIG_FILES.iter().any(|f| dir.join(f).is_file()) || dir.join("clusters").is_dir()
-        });
+        let found = config.iter().find(|dir| holds_k9s_config(dir));
         let Some(found) = found else {
             let searched: Vec<String> = config.iter().map(|d| d.display().to_string()).collect();
             return Err(format!(
@@ -129,6 +128,46 @@ impl Sources {
             config: found.clone(),
             data: dirs,
         })
+    }
+}
+
+fn holds_k9s_config(dir: &Path) -> bool {
+    CONFIG_FILES.iter().any(|f| dir.join(f).is_file())
+        || dir.join("clusters").is_dir()
+        || dir.join("plugins").is_dir()
+}
+
+/// The user's own sofka settings around the import, as sofka merges them:
+/// `before` is what the drop-in is merged over (the base config and drop-ins
+/// that sort earlier), `after` the drop-ins merged after it.
+#[derive(Debug, Default)]
+pub struct UserConfig {
+    pub before: Option<Value>,
+    pub after: Vec<Value>,
+}
+
+impl UserConfig {
+    fn read(loader: &crate::config::ConfigLoader) -> Self {
+        let dropin = Path::new(DROPIN).file_name();
+        let mut before = loader.base_value().cloned().into_iter().collect::<Vec<_>>();
+        let mut after = Vec::new();
+        for path in loader.dropin_paths() {
+            if generated(&path) {
+                continue;
+            }
+            let Ok(Some(layer)) = crate::config::read_layer(&path) else {
+                continue;
+            };
+            if path.file_name() < dropin {
+                before.push(layer);
+            } else {
+                after.push(layer);
+            }
+        }
+        Self {
+            before: (!before.is_empty()).then(|| crate::config::merge_layers(before)),
+            after,
+        }
     }
 }
 
@@ -192,6 +231,9 @@ pub struct Plan {
     pub skipped: Vec<String>,
     /// Imported settings dropped because the base sofka config already sets them.
     pub kept: Vec<String>,
+    /// The user's settings merged with the imported global ones, as a context
+    /// override file inherits them.
+    pub effective: Option<Value>,
 }
 
 // ---------------------------------------------------------------------------
@@ -373,8 +415,8 @@ const K9S_BAND: Band = Band {
 // ---------------------------------------------------------------------------
 
 /// Read the k9s files under `src` and build the sofka files to write.
-/// `base` is the user's parsed base sofka config, whose settings win.
-pub fn plan(src: &Sources, base: Option<&Value>) -> Plan {
+/// Settings the user's sofka config already sets win.
+pub fn plan(src: &Sources, user: &UserConfig) -> Plan {
     let mut plan = Plan {
         source: src.config.clone(),
         ..Plan::default()
@@ -409,14 +451,22 @@ pub fn plan(src: &Sources, base: Option<&Value>) -> Plan {
         convert_views(&file.views, &mut doc, skipped);
     }
 
-    if let Some(base) = base.and_then(Value::as_table) {
+    if let Some(base) = user.before.as_ref().and_then(Value::as_table) {
         keep_base(&mut doc, base, &mut plan.kept, skipped);
     }
     if doc.contains_key("plugins") {
         doc.insert("plugins_merge".into(), "name".into());
     }
 
-    let global_bookmarks = doc.get("bookmarks").cloned();
+    let effective = crate::config::merge_layers(
+        user.before
+            .iter()
+            .cloned()
+            .chain([Value::Table(doc.clone())])
+            .chain(user.after.iter().cloned()),
+    );
+    let global_bookmarks = effective.get("bookmarks").cloned();
+    plan.effective = Some(effective);
     let global_skin = main.ui.skin.clone().filter(|s| !s.is_empty());
     if !doc.is_empty() {
         plan.outputs.push(Output {
@@ -529,22 +579,23 @@ fn read_plugins(path: &Path, skipped: &mut Vec<String>) -> Vec<(String, K9sPlugi
         .collect()
 }
 
-fn context_dirs(clusters: &Path) -> Vec<(String, String, PathBuf)> {
-    let mut found = Vec::new();
-    let dirs = |dir: &Path| -> Vec<PathBuf> {
-        let Ok(entries) = std::fs::read_dir(dir) else {
-            return Vec::new();
-        };
-        let mut v: Vec<PathBuf> = entries
-            .filter_map(|e| e.ok().map(|e| e.path()))
-            .filter(|p| p.is_dir())
-            .collect();
-        v.sort();
-        v
+fn subdirs(dir: &Path) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
     };
-    for cluster in dirs(clusters) {
-        for context in dirs(&cluster) {
-            let name = |p: &Path| p.file_name().map(|s| s.to_string_lossy().into_owned());
+    let mut dirs: Vec<PathBuf> = entries
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| p.is_dir())
+        .collect();
+    dirs.sort();
+    dirs
+}
+
+fn context_dirs(clusters: &Path) -> Vec<(String, String, PathBuf)> {
+    let name = |p: &Path| p.file_name().map(|s| s.to_string_lossy().into_owned());
+    let mut found = Vec::new();
+    for cluster in subdirs(clusters) {
+        for context in subdirs(&cluster) {
             if let (Some(c), Some(x)) = (name(&cluster), name(&context)) {
                 found.push((c, x, context));
             }
@@ -614,10 +665,14 @@ fn convert_settings(k: &Settings, doc: &mut Table, skipped: &mut Vec<String>) {
     let chosen = if cpu != K9S_BAND { cpu } else { memory };
     if chosen != K9S_BAND {
         if cpu != memory {
-            skipped.push(
-                "thresholds: sofka has one utilization band for CPU and memory; used the CPU values"
-                    .into(),
-            );
+            let (used, other) = if cpu != K9S_BAND {
+                ("CPU", "memory")
+            } else {
+                ("memory", "CPU")
+            };
+            skipped.push(format!(
+                "thresholds: sofka has one utilization band for CPU and memory; used the {used} values, not the {other} values"
+            ));
         }
         let mut band = Table::new();
         if let Some(warn) = chosen.warn {
@@ -981,10 +1036,16 @@ fn convert_plugin(name: &str, p: &K9sPlugin) -> Result<(Table, Vec<String>), Str
                     spec.insert("default".into(), d.into());
                 }
                 None if !input.required => {
-                    spec.insert(
-                        "default".into(),
-                        if kind == "boolean" { "false" } else { "" }.into(),
-                    );
+                    // An optional input still needs a value sofka accepts:
+                    // a dropdown's first option, or an empty string.
+                    let default = match (kind, input.options.first()) {
+                        ("boolean", _) => "false".to_string(),
+                        _ if input.kind == "dropdown" => {
+                            input.options.first().cloned().unwrap_or_default()
+                        }
+                        _ => String::new(),
+                    };
+                    spec.insert("default".into(), default.into());
                 }
                 None => {}
             }
@@ -1324,8 +1385,13 @@ fn convert_context(ctx: &ContextInput, skipped: &mut Vec<String>) -> Option<Outp
             doc.insert("favorite_namespaces".into(), Value::Array(favorites));
         }
     }
+    // Aliases that name a destination and hotkeys both become bookmarks.
+    let mut local = Table::new();
     if let Some(file) = read::<AliasFile>(&ctx.dir.join("aliases.yaml"), &mut notes) {
-        convert_aliases(&file.entries(), &mut doc, &mut notes);
+        convert_aliases(&file.entries(), &mut local, &mut notes);
+    }
+    if let Some(aliases) = local.remove("aliases") {
+        doc.insert("aliases".into(), aliases);
     }
     let plugins = read_plugins(&ctx.dir.join("plugins.yaml"), &mut notes);
     convert_plugins(&plugins, &mut doc, &mut notes);
@@ -1333,18 +1399,17 @@ fn convert_context(ctx: &ContextInput, skipped: &mut Vec<String>) -> Option<Outp
         doc.insert("plugins_merge".into(), "name".into());
     }
     if let Some(file) = read::<HotkeyFile>(&ctx.dir.join("hotkeys.yaml"), &mut notes) {
-        let mut local = Table::new();
         convert_hotkeys(&file.hot_keys, &mut local, &mut notes);
-        if let Some(Value::Array(own)) = local.remove("bookmarks") {
-            // A bookmarks list in an override replaces the inherited one; k9s
-            // adds context hotkeys to the global ones, so carry both.
-            let mut all = match ctx.bookmarks {
-                Some(Value::Array(global)) => global.clone(),
-                _ => Vec::new(),
-            };
-            all.extend(own);
-            doc.insert("bookmarks".into(), Value::Array(all));
-        }
+    }
+    if let Some(Value::Array(own)) = local.remove("bookmarks") {
+        // A bookmarks list in an override replaces the inherited one; k9s
+        // adds context hotkeys to the global ones, so carry both.
+        let mut all = match ctx.bookmarks {
+            Some(Value::Array(inherited)) => inherited.clone(),
+            _ => Vec::new(),
+        };
+        all.extend(own);
+        doc.insert("bookmarks".into(), Value::Array(all));
     }
     let label = format!("context {:?} on cluster {:?}", ctx.context, ctx.cluster);
     skipped.extend(notes.into_iter().map(|n| format!("{label}: {n}")));
@@ -1462,14 +1527,16 @@ pub fn render(out: &Output, source: &Path) -> String {
 
 /// Run the generated text through sofka's own config validation, so a
 /// translation sofka would reject or warn about is reported now.
-fn check(text: &str) -> Vec<String> {
-    let cfg = match crate::config::parse_yaml(text) {
-        Ok(cfg) => cfg,
-        Err(e) => return vec![format!("invalid generated config: {e}")],
-    };
+fn check(text: &str, effective: Option<&Value>) -> Result<Vec<String>, String> {
+    let cfg =
+        crate::config::parse_yaml(text).map_err(|e| format!("invalid generated config: {e}"))?;
     let mut warnings = crate::config::plugin_warnings(&cfg.plugins);
     warnings.extend(crate::config::bookmark_warnings(&cfg.bookmarks));
-    if let Ok(keymap) = crate::keymap::Keymap::compile(&cfg.keys) {
+    // Keys come from the config the file is merged into, so the user's own
+    // rebindings decide which imported keys a built-in action takes first.
+    let merged: Option<crate::config::Config> = effective.and_then(|v| v.clone().try_into().ok());
+    let keys = merged.as_ref().map_or(&cfg.keys, |m| &m.keys);
+    if let Ok(keymap) = crate::keymap::Keymap::compile(keys) {
         warnings.extend(crate::keymap::hidden_bindings(
             &keymap,
             &cfg.plugins,
@@ -1478,7 +1545,7 @@ fn check(text: &str) -> Vec<String> {
         ));
     }
     warnings.extend(crate::views::compile(&cfg.views).1);
-    warnings
+    Ok(warnings)
 }
 
 fn summary(doc: &Table) -> String {
@@ -1528,6 +1595,13 @@ pub fn apply(plan: &Plan, dir: &Path, dry_run: bool, force: bool) -> Result<Vec<
         "Reading k9s configuration from {}",
         plan.source.display()
     )];
+    let earlier = generated_files(dir);
+    if !force && let Some(path) = earlier.first() {
+        return Err(format!(
+            "{} was written by an earlier import; rerun with --force to replace it",
+            path.display()
+        ));
+    }
     let mut skipped = plan.skipped.clone();
     let mut writes = Vec::new();
     for out in &plan.outputs {
@@ -1545,47 +1619,73 @@ pub fn apply(plan: &Plan, dir: &Path, dry_run: bool, force: bool) -> Result<Vec<
             ));
             continue;
         }
-        if target.exists() {
-            if !generated(&target) {
-                skipped.push(format!(
-                    "{}: {} exists and was not written by the importer; left unchanged",
-                    out.label,
-                    target.display()
-                ));
-                continue;
-            }
-            if !force && !dry_run {
-                return Err(format!(
-                    "{} was written by an earlier import; rerun with --force to replace it",
-                    target.display()
-                ));
-            }
+        if target.exists() && !generated(&target) {
+            skipped.push(format!(
+                "{}: {} exists and was not written by the importer; left unchanged",
+                out.label,
+                target.display()
+            ));
+            continue;
         }
         writes.push((target, out));
     }
+    // A file an earlier import wrote that this import no longer produces
+    // would keep its old settings active.
+    let stale: Vec<&PathBuf> = earlier
+        .iter()
+        .filter(|p| !writes.iter().any(|(t, _)| t == *p))
+        .collect();
 
-    if writes.is_empty() {
-        report.push("Nothing to import.".into());
-    }
-    let verb = if dry_run { "Would write" } else { "Wrote" };
+    // Render and validate everything before writing anything.
+    let mut rendered = Vec::new();
     let mut problems = Vec::new();
     for (target, out) in &writes {
         let text = render(out, &plan.source);
+        let effective = if out.path == Path::new(DROPIN) {
+            plan.effective.clone()
+        } else {
+            plan.effective
+                .clone()
+                .map(|e| crate::config::merge_layers([e, Value::Table(out.doc.clone())]))
+        };
+        let warnings = check(&text, effective.as_ref())
+            .map_err(|e| format!("{}: {e}; nothing was written", out.path.display()))?;
         problems.extend(
-            check(&text)
+            warnings
                 .into_iter()
                 .map(|w| format!("{}: {w}", out.path.display())),
         );
+        rendered.push((target, out, text));
+    }
+
+    if writes.is_empty() && stale.is_empty() {
+        report.push("Nothing to import.".into());
+    }
+    let (write, remove) = if dry_run {
+        ("Would write", "Would remove")
+    } else {
+        ("Wrote", "Removed")
+    };
+    for (target, out, text) in &rendered {
         if dry_run {
             report.push(format!("--- {}", target.display()));
             report.extend(text.lines().map(String::from));
         } else {
-            crate::atomicfile::write(target, &text)?;
+            crate::atomicfile::write(target, text)?;
         }
         report.push(format!(
-            "{verb} {} ({})",
+            "{write} {} ({})",
             target.display(),
             summary(&out.doc)
+        ));
+    }
+    for path in stale {
+        if !dry_run {
+            std::fs::remove_file(path).map_err(|e| format!("{}: {e}", path.display()))?;
+        }
+        report.push(format!(
+            "{remove} {} (an earlier import wrote it; nothing replaces it now)",
+            path.display()
         ));
     }
     if !plan.kept.is_empty() {
@@ -1604,6 +1704,19 @@ pub fn apply(plan: &Plan, dir: &Path, dry_run: bool, force: bool) -> Result<Vec<
         report.push("Start sofka and run :config to review the merged configuration.".into());
     }
     Ok(report)
+}
+
+/// Files an earlier import wrote: the drop-in and context overrides that
+/// still carry the importer's marker.
+fn generated_files(dir: &Path) -> Vec<PathBuf> {
+    let mut found = vec![dir.join(DROPIN)];
+    for cluster in subdirs(&dir.join("clusters")) {
+        for context in subdirs(&cluster) {
+            found.push(context.join("config.yaml"));
+        }
+    }
+    found.retain(|p| generated(p));
+    found
 }
 
 #[cfg(test)]
@@ -1771,6 +1884,7 @@ args: [logs, $NAME, --tail, $INPUT_TAIL, --container, "${INPUT_CONTAINER}"]
 inputs:
   - {name: TAIL, type: number, required: true, default: 100}
   - {name: CONTAINER, type: dropdown, options: [app, sidecar]}
+  - {name: VERBOSE, type: bool}
 "#,
         );
         let (out, _) = convert_plugin("tail", &p).unwrap();
@@ -2068,7 +2182,7 @@ resource = "ing"
 
         let src = Sources::at(&k9s).unwrap();
         let loader = crate::config::ConfigLoader::from_dir(Some(sofka.clone()));
-        let plan = plan(&src, loader.base_value());
+        let plan = plan(&src, &UserConfig::read(&loader));
         let report = apply(&plan, &sofka, false, false).unwrap();
         let problems: Vec<_> = report
             .iter()
@@ -2123,11 +2237,16 @@ resource = "ing"
         let (k9s, sofka) = (root.join("k9s"), root.join("sofka"));
         k9s_fixture(&k9s);
         let src = Sources::at(&k9s).unwrap();
-        let plan = plan(&src, None);
+        let plan = plan(&src, &UserConfig::default());
         apply(&plan, &sofka, false, false).unwrap();
 
         let err = apply(&plan, &sofka, false, false).unwrap_err();
         assert!(err.contains("--force"), "{err}");
+        let err = apply(&plan, &sofka, true, false).unwrap_err();
+        assert!(
+            err.contains("--force"),
+            "a dry run previews what the same flags allow"
+        );
         apply(&plan, &sofka, false, true).unwrap();
 
         let dropin = sofka.join(DROPIN);
@@ -2156,11 +2275,176 @@ resource = "ing"
         let root = scratch("dry");
         let (k9s, sofka) = (root.join("k9s"), root.join("sofka"));
         k9s_fixture(&k9s);
-        let plan = plan(&Sources::at(&k9s).unwrap(), None);
+        let plan = plan(&Sources::at(&k9s).unwrap(), &UserConfig::default());
         let report = apply(&plan, &sofka, true, false).unwrap();
         assert!(!sofka.exists());
         assert!(report.iter().any(|l| l == MARKER));
         assert!(report.iter().any(|l| l.starts_with("Would write")));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn imported_input_defaults_pass_sofka_validation() {
+        let p = plugin(
+            "shortCut: t\nscopes: [pods]\ncommand: echo\nargs: [$INPUT_C, $INPUT_V, $INPUT_S]\ninputs:\n  - {name: C, type: dropdown, options: [app, sidecar]}\n  - {name: V, type: bool}\n  - {name: S, type: string}\n",
+        );
+        let (out, _) = convert_plugin("t", &p).unwrap();
+        for (name, spec) in out["inputs"].as_table().unwrap() {
+            let input: crate::plugins::Input = spec.clone().try_into().unwrap();
+            let default = input.default.clone().unwrap();
+            assert_eq!(input.validate(&default), Ok(()), "{name}: {default:?}");
+        }
+        assert_eq!(out["inputs"]["C"]["default"].as_str(), Some("app"));
+    }
+
+    #[test]
+    fn threshold_note_names_the_band_it_used() {
+        for (yaml, used) in [
+            (
+                "k9s:\n  thresholds:\n    cpu: {critical: 95, warn: 80}\n",
+                "used the CPU values, not the memory values",
+            ),
+            (
+                "k9s:\n  thresholds:\n    memory: {critical: 95, warn: 80}\n",
+                "used the memory values, not the CPU values",
+            ),
+        ] {
+            let main: MainFile = serde_yaml::from_str(yaml).unwrap();
+            let (mut doc, mut skipped) = (Table::new(), Vec::new());
+            convert_settings(&main.k9s, &mut doc, &mut skipped);
+            assert_eq!(
+                doc["thresholds"]["utilization"]["warn"].as_integer(),
+                Some(80)
+            );
+            assert!(skipped[0].contains(used), "{skipped:?}");
+        }
+    }
+
+    #[test]
+    fn a_plugins_directory_alone_is_a_k9s_config() {
+        let root = scratch("plugins-only");
+        assert!(!holds_k9s_config(&root));
+        put(
+            &root,
+            "plugins/dive.yaml",
+            "shortCut: d\nscopes: [po]\ncommand: dive\n",
+        );
+        assert!(holds_k9s_config(&root));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn earlier_user_drop_ins_and_key_rebindings_win() {
+        let root = scratch("dropins");
+        let (k9s, sofka) = (root.join("k9s"), root.join("sofka"));
+        k9s_fixture(&k9s);
+        put(&sofka, "conf.d/00-a-team.yaml", "skin:\n  name: nord\n");
+        put(
+            &sofka,
+            "config.toml",
+            "[keys.table]\nprovider_logs = \"alt-l\"\n",
+        );
+        let loader = crate::config::ConfigLoader::from_dir(Some(sofka.clone()));
+        let plan = plan(&Sources::at(&k9s).unwrap(), &UserConfig::read(&loader));
+        assert!(
+            plan.kept.contains(&"skin.name".to_string()),
+            "{:?}",
+            plan.kept
+        );
+        let report = apply(&plan, &sofka, false, false).unwrap();
+        assert!(
+            !report.iter().any(|l| l.contains("is hidden by")),
+            "the user moved provider_logs off L: {report:#?}"
+        );
+        let cfg = crate::config::ConfigLoader::from_dir(Some(sofka.clone()))
+            .resolve("", "")
+            .config;
+        assert_eq!(cfg.skin.name.as_deref(), Some("nord"));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn context_hotkeys_keep_inherited_bookmarks() {
+        let root = scratch("ctx-hotkeys");
+        let (k9s, sofka) = (root.join("k9s"), root.join("sofka"));
+        put(
+            &k9s,
+            "clusters/kind/kind-dev/hotkeys.yaml",
+            "hotKeys:\n  ing:\n    shortCut: Shift-2\n    command: ing\n",
+        );
+        put(
+            &k9s,
+            "clusters/kind/kind-dev/aliases.yaml",
+            "aliases:\n  web: pods default app=web\n",
+        );
+        put(
+            &sofka,
+            "config.toml",
+            "[[bookmarks]]\nname = \"Mine\"\nresource = \"pods\"\n",
+        );
+        let loader = crate::config::ConfigLoader::from_dir(Some(sofka.clone()));
+        let plan = plan(&Sources::at(&k9s).unwrap(), &UserConfig::read(&loader));
+        apply(&plan, &sofka, false, false).unwrap();
+        let cfg = crate::config::ConfigLoader::from_dir(Some(sofka.clone()))
+            .resolve("kind-dev", "kind")
+            .config;
+        let names: Vec<_> = cfg.bookmarks.iter().map(|b| b.name.as_str()).collect();
+        assert_eq!(names, ["Mine", "web", "ing"]);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn forced_reimport_removes_files_nothing_replaces() {
+        let root = scratch("stale");
+        let (k9s, sofka) = (root.join("k9s"), root.join("sofka"));
+        k9s_fixture(&k9s);
+        let src = Sources::at(&k9s).unwrap();
+        apply(&plan(&src, &UserConfig::default()), &sofka, false, false).unwrap();
+        let prod = "clusters/arn-aws-eks-eu-west-1-1-cluster-prod/prod-admin/config.yaml";
+        assert!(sofka.join(prod).is_file());
+
+        put(
+            &k9s,
+            "clusters/arn-aws-eks-eu-west-1-1-cluster-prod/prod-admin/config.yaml",
+            "k9s:\n  readOnly: false\n",
+        );
+        let plan = plan(&src, &UserConfig::default());
+        let report = apply(&plan, &sofka, true, true).unwrap();
+        assert!(report.iter().any(|l| l.starts_with("Would remove")));
+        assert!(sofka.join(prod).is_file(), "a dry run removes nothing");
+        apply(&plan, &sofka, false, true).unwrap();
+        assert!(!sofka.join(prod).exists());
+        let cfg = crate::config::ConfigLoader::from_dir(Some(sofka.clone()))
+            .resolve("prod-admin", "arn:aws:eks:eu-west-1:1:cluster/prod")
+            .config;
+        assert!(!cfg.readonly);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn invalid_generated_config_writes_nothing() {
+        let root = scratch("invalid");
+        let mut bad = Table::new();
+        bad.insert("readonly".into(), "yes".into());
+        let plan = Plan {
+            source: root.join("k9s"),
+            outputs: vec![
+                Output {
+                    path: PathBuf::from("clusters/a/b/config.yaml"),
+                    doc: Table::from_iter([("mouse".to_string(), Value::from(true))]),
+                    label: "fine".into(),
+                },
+                Output {
+                    path: PathBuf::from(DROPIN),
+                    doc: bad,
+                    label: "broken".into(),
+                },
+            ],
+            ..Plan::default()
+        };
+        let err = apply(&plan, &root, false, false).unwrap_err();
+        assert!(err.contains("invalid generated config"), "{err}");
+        assert!(!root.join("clusters").exists() && !root.join(DROPIN).exists());
         let _ = std::fs::remove_dir_all(&root);
     }
 }

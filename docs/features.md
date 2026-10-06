@@ -42,12 +42,16 @@ k9s settings that still have their k9s default values are not imported.
 
 The import does not change your own files:
 
-- A setting your base sofka config already sets keeps your value, and the
-  report lists it. Your bookmarks stay next to the imported ones.
+- A setting your base config, or a drop-in that sorts before `00-k9s.yaml`,
+  already sets keeps your value, and the report lists it. Your bookmarks stay
+  next to the imported ones, including in contexts with their own hotkeys.
 - A file the importer did not write is never replaced. A context that already
   has a sofka override file is reported instead.
-- Running the import again requires `--force`, which replaces only the files an
-  earlier import wrote.
+- Running the import again requires `--force`, also with `--dry-run`. It
+  replaces the files an earlier import wrote and removes those the new import
+  no longer produces.
+- Every file is validated before any file is written. If sofka would reject
+  one, nothing is written.
 
 Plugin placeholders are rewritten to sofka names: `$RESOURCE_NAME` becomes
 `$RESOURCE`, `$RESOURCE_GROUP` becomes `$GROUP`, `$RESOURCE_VERSION` becomes
@@ -68,8 +72,9 @@ cannot be translated:
   `portForwardAddress`.
 
 The importer checks the result with sofka's own config validation. It reports
-plugin and hotkey keys that a sofka built-in key takes first; rebind the
-built-in under [`[keys]`](keybindings.md) or change the imported key.
+plugin and hotkey keys that a sofka built-in key takes first, with your own
+`[keys]` bindings applied. Rebind the built-in under [`[keys]`](keybindings.md)
+or change the imported key.
 
 ## Node drain options
 

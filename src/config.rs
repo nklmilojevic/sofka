@@ -1843,6 +1843,24 @@ fn validate_file(path: &Path, text: &str) -> Result<toml::Value, String> {
     Ok(value)
 }
 
+/// Read one drop-in file as a config layer; `None` when it does not exist.
+pub fn read_layer(path: &Path) -> Result<Option<toml::Value>, String> {
+    read_dropin(path)
+}
+
+/// Merge config layers in order, with the same rules as drop-in files.
+/// A layer that does not merge is skipped.
+pub fn merge_layers(layers: impl IntoIterator<Item = toml::Value>) -> toml::Value {
+    let mut merged = toml::Value::Table(toml::Table::new());
+    for layer in layers {
+        let mut next = merged.clone();
+        if merge_config(&mut next, layer).is_ok() {
+            merged = next;
+        }
+    }
+    merged
+}
+
 /// Parse and type-check YAML config text as a config file would be read.
 pub fn parse_yaml(text: &str) -> Result<Config, String> {
     let value = document::parse(Path::new("config.yaml"), text)?;
