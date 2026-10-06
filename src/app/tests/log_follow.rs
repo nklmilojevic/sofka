@@ -534,3 +534,27 @@ async fn a_pod_replaced_before_its_stream_opens_is_read_once_from_its_start() {
         assert!(!queries[0].contains_key(key), "{key}: {:?}", queries[0]);
     }
 }
+
+#[tokio::test]
+async fn waking_interrupts_a_pod_check_that_never_answers() {
+    let (mut app, mut rx) = pod_logs_app();
+    serve(
+        &mut app,
+        Arc::new(|path, _query, nth| match (path.ends_with("/log"), nth) {
+            (false, 0) => (0, open_body("")),
+            (false, _) => (200, closed_body(pod_json("web", "u1", 0).to_string())),
+            (true, _) => (200, open_body("2026-10-06T10:00:00Z back\n")),
+        }),
+    );
+    app.handle_key(press(KeyCode::Char('l'))).unwrap();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    super::resume::tick_after_sleep(&mut app, Duration::from_secs(8 * 60 * 60));
+    // Well inside the 10-second pod check timeout.
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !app.filtered_log_text().contains("back") {
+            app.handle_msg(rx.recv().await.unwrap());
+        }
+    })
+    .await
+    .expect("the wake must abandon the stuck pod check");
+}

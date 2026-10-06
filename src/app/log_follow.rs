@@ -209,6 +209,13 @@ fn not_started(error: &kube::Error) -> bool {
             || e.message.contains("does not have a host assigned")))
 }
 
+enum PodRead {
+    Found(Option<Box<Pod>>),
+    Unknown,
+    Woke,
+    Closed,
+}
+
 enum Pumped {
     Ended,
     Woke,
@@ -284,6 +291,19 @@ impl LogStream {
         true
     }
 
+    /// The pod as the API sees it now. A wake abandons the request: one sent
+    /// before the machine slept may never answer.
+    async fn read_pod(&mut self) -> PodRead {
+        tokio::select! {
+            read = tokio::time::timeout(STATUS_TIMEOUT, self.api.get_opt(&self.pod)) => match read {
+                Ok(Ok(pod)) => PodRead::Found(pod.map(Box::new)),
+                _ => PodRead::Unknown,
+            },
+            Ok(()) = self.wake.changed() => PodRead::Woke,
+            _ = self.tx.closed() => PodRead::Closed,
+        }
+    }
+
     /// Wait out `delay`, or less if the machine wakes. False once stale.
     async fn pause(&mut self, delay: Duration) -> bool {
         tokio::select! {
@@ -312,17 +332,24 @@ impl LogStream {
             // Log requests go by name. Confirm the name still belongs to the
             // known pod first, so a replacement is never streamed as if it
             // were that pod.
+            // Taken before the check, so a restart during it still counts as
+            // one during this stream.
+            let connected_at = Timestamp::now();
             if follow && known_uid.is_some() {
-                let pod = tokio::time::timeout(STATUS_TIMEOUT, self.api.get_opt(&self.pod)).await;
-                if let Ok(Ok(pod)) = pod
-                    && let Some(end) =
-                        identity(pod.as_ref(), pinned, &mut known_uid, &mut known_restarts)
-                    && !self.settle(end, &mut resume, &mut delay).await
-                {
-                    return;
+                match self.read_pod().await {
+                    PodRead::Found(pod) => {
+                        if let Some(end) =
+                            identity(pod.as_deref(), pinned, &mut known_uid, &mut known_restarts)
+                            && !self.settle(end, &mut resume, &mut delay).await
+                        {
+                            return;
+                        }
+                    }
+                    PodRead::Unknown => {}
+                    PodRead::Woke => continue,
+                    PodRead::Closed => return,
                 }
             }
-            let connected_at = Timestamp::now();
             let opened = Instant::now();
             let opening = tokio::select! {
                 opening = tokio::time::timeout(
@@ -370,11 +397,16 @@ impl LogStream {
                 return;
             }
 
-            let pod = tokio::time::timeout(STATUS_TIMEOUT, self.api.get_opt(&self.pod)).await;
-            if let Ok(Ok(pod)) = pod {
+            let (pod, woke) = match self.read_pod().await {
+                PodRead::Found(pod) => (Some(pod), woke),
+                PodRead::Unknown => (None, woke),
+                PodRead::Woke => (None, true),
+                PodRead::Closed => return,
+            };
+            if let Some(pod) = pod {
                 let container = self.params.container.as_deref();
                 let end = stream_end(
-                    pod.as_ref(),
+                    pod.as_deref(),
                     container,
                     pinned,
                     &mut known_uid,
