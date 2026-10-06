@@ -11,6 +11,7 @@ mod credentials;
 mod flux;
 mod kubeconfig;
 mod label_filter;
+mod log_follow;
 mod namespace_patterns;
 mod node_roles;
 mod oidc;
@@ -10512,6 +10513,34 @@ fn marked_logs_app() -> (App, Receiver<Msg>) {
     (app, rx)
 }
 
+type TestBody = http_body_util::StreamBody<
+    futures_util::stream::BoxStream<
+        'static,
+        Result<hyper::body::Frame<hyper::body::Bytes>, std::convert::Infallible>,
+    >,
+>;
+
+/// A response body that ends after `text`.
+fn closed_body(text: impl Into<String>) -> TestBody {
+    let frame = Ok(hyper::body::Frame::data(hyper::body::Bytes::from(
+        text.into(),
+    )));
+    http_body_util::StreamBody::new(futures_util::stream::iter([frame]).boxed())
+}
+
+/// A response body that stays open after `text`, as a followed container's
+/// logs and a pod watch do.
+fn open_body(text: impl Into<String>) -> TestBody {
+    let frame = Ok(hyper::body::Frame::data(hyper::body::Bytes::from(
+        text.into(),
+    )));
+    http_body_util::StreamBody::new(
+        futures_util::stream::iter([frame])
+            .chain(futures_util::stream::pending())
+            .boxed(),
+    )
+}
+
 fn select_log_pod(app: &mut App, ns: &str) {
     let index = app
         .rows()
@@ -10541,12 +10570,14 @@ async fn marked_pod_logs_stream_all_containers_and_identify_errors() {
             } else {
                 (200, "2026-09-10T10:00:00Z ready\n".to_owned())
             };
+            let body = if status == 200 {
+                open_body(body)
+            } else {
+                closed_body(body)
+            };
             async move {
                 Ok::<_, std::convert::Infallible>(
-                    http::Response::builder()
-                        .status(status)
-                        .body(http_body_util::Full::new(hyper::body::Bytes::from(body)))
-                        .unwrap(),
+                    http::Response::builder().status(status).body(body).unwrap(),
                 )
             }
         }),
@@ -10611,25 +10642,30 @@ async fn log_timestamp_requests_cover_pods_selectors_and_previous_containers() {
         let seen = requests.clone();
         app.cluster.client = kube::Client::new(
             tower::service_fn(move |request: http::Request<kube::client::Body>| {
+                let query = request.uri().query().unwrap_or_default();
                 let body = if request.uri().path().ends_with("/log") {
-                    let query = request.uri().query().unwrap();
                     assert!(query.contains("timestamps=true"));
                     seen.fetch_add(1, Ordering::SeqCst);
-                    if query.contains("container=sidecar") {
-                        "2026-09-10T10:00:00Z first\n".to_owned()
+                    let line = if query.contains("container=sidecar") {
+                        "2026-09-10T10:00:00Z first\n"
                     } else {
-                        "2026-09-10T10:00:01Z second\n".to_owned()
+                        "2026-09-10T10:00:01Z second\n"
+                    };
+                    if query.contains("follow=true") {
+                        open_body(line)
+                    } else {
+                        closed_body(line)
                     }
+                } else if query.contains("watch=true") {
+                    open_body("")
                 } else {
-                    json!({"apiVersion": "v1", "kind": "PodList",
-                        "metadata": {}, "items": [pod]})
-                    .to_string()
+                    closed_body(
+                        json!({"apiVersion": "v1", "kind": "PodList",
+                            "metadata": {"resourceVersion": "1"}, "items": [pod]})
+                        .to_string(),
+                    )
                 };
-                async move {
-                    Ok::<_, std::convert::Infallible>(http::Response::new(
-                        http_body_util::Full::new(hyper::body::Bytes::from(body)),
-                    ))
-                }
+                async move { Ok::<_, std::convert::Infallible>(http::Response::new(body)) }
             }),
             "default",
         );
@@ -28596,11 +28632,7 @@ async fn marked_pod_custom_lookback_keeps_each_stream_tail_limit() {
             assert!(request.uri().path().ends_with("/log"));
             tx.try_send(request.uri().query().unwrap_or_default().to_owned())
                 .unwrap();
-            async move {
-                Ok::<_, std::convert::Infallible>(http::Response::new(http_body_util::Full::new(
-                    hyper::body::Bytes::from("line\n"),
-                )))
-            }
+            async move { Ok::<_, std::convert::Infallible>(http::Response::new(open_body("line\n"))) }
         }),
         "default",
     );
@@ -28644,20 +28676,27 @@ async fn log_lookback_keys_keep_tail_limits_in_api_requests() {
             app.cluster.client = kube::Client::new(
                 tower::service_fn(move |request: http::Request<kube::client::Body>| {
                     assert_eq!(request.method(), http::Method::GET);
+                    let query = request.uri().query().unwrap_or_default().to_owned();
                     let response = if request.uri().path().ends_with("/log") {
-                        tx.try_send(request.uri().query().unwrap_or_default().to_owned())
-                            .unwrap();
-                        "line\n".to_owned()
+                        let follow = query.contains("follow=true");
+                        tx.try_send(query).unwrap();
+                        if follow {
+                            open_body("line\n")
+                        } else {
+                            closed_body("line\n")
+                        }
                     } else {
                         assert_eq!(request.uri().path(), "/api/v1/namespaces/default/pods");
-                        json!({"apiVersion":"v1","kind":"PodList","metadata":{},"items":[pod]})
-                            .to_string()
+                        if query.contains("watch=true") {
+                            open_body("")
+                        } else {
+                            closed_body(
+                                json!({"apiVersion":"v1","kind":"PodList","metadata":{"resourceVersion":"1"},"items":[pod]})
+                                    .to_string(),
+                            )
+                        }
                     };
-                    async move {
-                        Ok::<_, std::convert::Infallible>(http::Response::new(
-                            http_body_util::Full::new(hyper::body::Bytes::from(response)),
-                        ))
-                    }
+                    async move { Ok::<_, std::convert::Infallible>(http::Response::new(response)) }
                 }),
                 "default",
             );

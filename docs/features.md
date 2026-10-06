@@ -665,7 +665,9 @@ include those conditions. Row filters can search the route paths.
   for the current kubelet log view. Lines with timestamps are sorted by time.
   Press `t` to show or hide timestamps without changing log order or restarting
   streams. If a container is waiting to start, sofka
-  retries until its logs are available. sofka parses ANSI color from the source app
+  retries until its logs are available. Followed streams reconnect from their
+  last line after a container restart, dropped connection, or sleep, and
+  workload and service logs add pods as a rollout creates them. sofka parses ANSI color from the source app
   and maps it onto the active skin instead of printing literal escapes. See
   [Log controls](debugging.md#log-controls).
 - **Log severity filter** (`Ctrl+Z` in logs) shows detected warning and error

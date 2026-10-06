@@ -2381,6 +2381,8 @@ pub struct App {
     log_gen: u64,
     log_flag: Arc<AtomicU64>,
     log_tasks: Vec<JoinHandle<()>>,
+    /// Bumped when the machine wakes, so followed log streams reconnect.
+    log_wake: tokio::sync::watch::Sender<u64>,
     event_gen: u64,
     event_task: Option<JoinHandle<()>>,
 
@@ -2702,6 +2704,7 @@ impl App {
             log_gen: 0,
             log_flag: Arc::new(AtomicU64::new(0)),
             log_tasks: Vec::new(),
+            log_wake: tokio::sync::watch::channel(0).0,
             event_gen: 0,
             event_task: None,
             pending: None,
@@ -2811,6 +2814,7 @@ mod helpers;
 mod input;
 mod journal;
 mod lifecycle;
+mod log_follow;
 mod logs;
 mod metrics_history;
 mod mouse;

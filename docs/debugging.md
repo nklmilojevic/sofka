@@ -93,8 +93,18 @@ logs. This includes pods from different namespaces. Each line has a
 `[namespace/pod:container]` prefix. Only marked pods still present in the filtered
 table are included. With no marks, `l` opens logs for the current row.
 
-The pod set is fixed when the view opens, including when timestamps or time
-anchors change, or streaming resumes. New pods are not added automatically.
+The set of marked pods is fixed when the view opens. Workload and service logs
+watch the selector instead: a pod that a rollout or scale-up creates joins the
+view with a `[sofka] following new pod` line and is shown from its first line.
+Pods that already existed start from the configured tail.
+
+A followed stream that ends reconnects from its last line without repeating
+it. That covers dropped connections, API server timeouts, and waking the
+machine from sleep. sofka reads the pod when a stream ends and adds a
+`[sofka]` line when the container restarted, the pod was recreated, or the
+stream stops because the pod was deleted or finished. Reconnects back off up to
+15 seconds while a stream returns nothing new. A refused request, such as
+missing RBAC, is reported once and not retried.
 Lines with timestamps are sorted by time, even when timestamp text is hidden.
 Press `t` to show or hide timestamps without clearing the buffer or restarting
 the streams. A paused view keeps the same log line or marker in view, within

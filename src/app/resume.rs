@@ -72,6 +72,8 @@ impl App {
             if slept >= SLEEP_GAP {
                 crate::log_info!("app.resume", slept_secs = slept.as_secs());
                 self.resume_pending = Some("reconnected after sleep");
+                self.log_wake
+                    .send_modify(|wakes| *wakes = wakes.wrapping_add(1));
             }
         }
         self.restart_pending_watch();
