@@ -68,27 +68,9 @@ impl SecretChanges {
         self.changed.is_empty() && self.added.is_empty() && self.removed.is_empty()
     }
 
-    /// The keys by name, or by count when the names would not fit on a
-    /// dialog or prompt.
+    /// Every key by name: the confirmation is where the operator checks
+    /// what the patch touches, so nothing is abbreviated.
     fn summary(&self) -> String {
-        const MAX: usize = 80;
-        let names = self.named_summary();
-        if names.chars().count() <= MAX {
-            return names;
-        }
-        [
-            ("change", self.changed.len()),
-            ("add", self.added.len()),
-            ("remove", self.removed.len()),
-        ]
-        .into_iter()
-        .filter(|(_, n)| *n > 0)
-        .map(|(verb, n)| format!("{verb} {n} {}", if n == 1 { "key" } else { "keys" }))
-        .collect::<Vec<_>>()
-        .join(" · ")
-    }
-
-    fn named_summary(&self) -> String {
         [
             ("change", &self.changed),
             ("add", &self.added),
@@ -321,11 +303,16 @@ fn private_file(contents: &str) -> std::io::Result<(PathBuf, std::fs::File, Path
     std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
     builder.create(&dir)?;
     let created = (|| {
+        // Lock under another name and only then rename it into place: a
+        // sweep must never find `owner.lock` before it is held, or it could
+        // take the lock first and delete this edit.
+        let staging = dir.join(format!("{LOCK_FILE}.new"));
         let lock = std::fs::OpenOptions::new()
             .write(true)
             .create_new(true)
-            .open(dir.join(LOCK_FILE))?;
+            .open(&staging)?;
         lock.try_lock_exclusive()?;
+        std::fs::rename(&staging, dir.join(LOCK_FILE))?;
         let path = dir.join("secret.yaml");
         create_private(&path, contents)?;
         Ok((lock, path))
@@ -536,9 +523,12 @@ impl App {
             self.confirm_return = Mode::Detail;
         }
         // A typed guardrail prompt only says what to type; the keys and the
-        // managed warning have to be on it too.
+        // managed warning go above it, every key by name. It opens scrolled
+        // to the bottom, as it does while typing, so what to type and the
+        // input are in view however many keys there are.
         if self.mode == Mode::Prompt {
-            self.prompt_label = format!("{label}  {}", self.prompt_label);
+            self.prompt_label = format!("{label}\n\n{}", self.prompt_label);
+            self.popup_scroll = usize::MAX;
         }
     }
 
@@ -801,12 +791,24 @@ mod tests {
     }
 
     #[test]
-    fn long_summaries_fall_back_to_counts() {
+    fn long_summaries_name_every_key() {
         let changes = SecretChanges {
             changed: (0..20).map(|i| format!("key-number-{i}")).collect(),
             added: vec!["new".into()],
             removed: vec![],
         };
-        assert_eq!(changes.summary(), "change 20 keys · add 1 key");
+        let summary = changes.summary();
+        assert!(summary.contains("key-number-0, "), "{summary}");
+        assert!(summary.contains("key-number-19 · add new"), "{summary}");
+    }
+
+    #[test]
+    fn a_new_edit_is_locked_before_its_lock_file_appears() {
+        let (dir, lock, _path) = private_file("stringData: {}\n").unwrap();
+        assert!(!dir.join(format!("{LOCK_FILE}.new")).exists());
+        assert!(!abandoned(&dir), "the owner holds the lock");
+        drop(lock);
+        assert!(abandoned(&dir));
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }

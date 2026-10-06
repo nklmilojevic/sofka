@@ -13521,17 +13521,43 @@ async fn decoded_secret_edit_respects_read_only_and_guardrails() {
     assert!(app.prompt_over_document());
     assert!(
         app.prompt_label
-            .starts_with("Update secret creds in default: change token · remove cert?")
-            && app.prompt_label.contains("type 'creds'"),
+            .starts_with("Update secret creds in default: change token · remove cert?\n\n")
+            && app.prompt_label.ends_with("type 'creds' to confirm:"),
         "{}",
         app.prompt_label
     );
+    assert_eq!(app.popup_scroll, usize::MAX, "opens on the input");
     for c in "creds".chars() {
         app.handle_key(press(KeyCode::Char(c))).unwrap();
     }
     app.handle_key(press(KeyCode::Enter)).unwrap();
     assert_eq!(app.mode, Mode::Detail);
     assert_eq!(app.journal.len(), 1);
+}
+
+#[tokio::test]
+async fn typed_secret_edit_prompt_keeps_the_input_in_view_with_many_keys() {
+    let (mut app, _rx) = decoded_secret_app();
+    app.guardrails = vec![crate::config::Guardrail {
+        actions: vec!["secret-edit".into()],
+        confirmation: Some("type-resource-name".into()),
+        ..Default::default()
+    }];
+    let path = open_secret_editor(&mut app);
+    let mut doc = String::from("stringData:\n  token: hunter2\n  cert: |\n    a\n    b\n");
+    for i in 0..60 {
+        doc.push_str(&format!("  a-rather-long-key-name-number-{i}: v\n"));
+    }
+    close_secret_editor(&mut app, &path, &doc);
+    assert_eq!(app.mode, Mode::Prompt);
+    assert!(
+        app.prompt_label
+            .contains("a-rather-long-key-name-number-59")
+    );
+    let screen = screen_text(&mut app, 80, 24);
+    assert!(screen.contains("type 'creds' to confirm"), "{screen}");
+    assert!(screen.contains('█'), "{screen}");
+    assert!(screen.contains("apply"), "{screen}");
 }
 
 #[tokio::test]
