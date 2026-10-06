@@ -391,7 +391,10 @@ include those conditions. Row filters can search the route paths.
   on unusual values. Nodes also get **%CPU and %MEM of allocatable**
   (`status.allocatable` - the pool the scheduler hands out), colored by the
   `utilization` thresholds and sortable, so "which node is full" is one glance
-  and one `S`. The container picker shows per-container CPU and memory, usage as
+  and one `S`. **%CPU/R and %MEM/R** show how much of allocatable the pods on
+  each node request, with limits in wide mode and opt-in columns for extended
+  resources such as GPUs. They come from the pods API and work without
+  metrics-server. See [Views](views.md#built-in-and-metric-columns). The container picker shows per-container CPU and memory, usage as
   a percent of request and of limit (`-` marks an unset one), and the pod QoS
   class. Memory quantities use Kubernetes units, including decimal `k`, `P`,
   and `E`, and binary `Pi` and `Ei`, in metrics and filters. Fractional bytes

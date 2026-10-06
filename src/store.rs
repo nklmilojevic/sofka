@@ -90,11 +90,12 @@ pub enum Msg {
         /// Per-container usage keyed by `namespace/pod/container`.
         containers: HashMap<String, (i64, i64)>,
     },
-    /// Pod count per node from the pods poll on the nodes view, keyed by node
-    /// name. Counts non-terminated pods, mirroring `kubectl describe node`.
+    /// Pod count and committed requests and limits per node from the pods
+    /// poll on the nodes view, keyed by node name. Counts non-terminated pods,
+    /// mirroring `kubectl describe node`.
     NodePods {
         generation: u64,
-        counts: HashMap<String, usize>,
+        loads: HashMap<String, crate::columns::NodeLoad>,
     },
     /// CRD `additionalPrinterColumns` fallback for an API resource,
     /// fetched off-thread (`None` = CRD had nothing usable for the version).

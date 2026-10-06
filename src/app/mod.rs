@@ -2273,10 +2273,10 @@ pub struct App {
     pub container_metrics: HashMap<String, (i64, i64)>,
     pub(crate) container_history: metrics_history::ContainerHistory,
     pub(crate) node_history: metrics_history::NodeHistory,
-    /// Latest pod count per node (nodes view PODS column). `None` until the
-    /// first successful pods list, so "no data yet" renders as "-" instead of
-    /// a misleading 0.
-    pub node_pods: Option<HashMap<String, usize>>,
+    /// Latest pod count and committed requests and limits per node. `None`
+    /// until the first successful pods list, so "no data yet" renders as "-"
+    /// instead of a misleading 0.
+    pub node_loads: Option<HashMap<String, crate::columns::NodeLoad>>,
 
     pub pulse: Pulse,
     pub xray_items: Vec<XrayItem>,
@@ -2654,7 +2654,7 @@ impl App {
             container_metrics: HashMap::new(),
             container_history: metrics_history::ContainerHistory::default(),
             node_history: metrics_history::NodeHistory::default(),
-            node_pods: None,
+            node_loads: None,
             pulse: Pulse::default(),
             xray_items: Vec::new(),
             xray_state: ListState::default(),

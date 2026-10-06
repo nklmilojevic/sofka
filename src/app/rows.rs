@@ -1016,7 +1016,7 @@ impl App {
         if !metric.supported(group, &self.kind_plural) {
             return None;
         }
-        metric.value(obj, self.metrics_for(obj), self.node_pods_for(obj))
+        metric.value(obj, self.metrics_for(obj), self.node_load_for(obj))
     }
 
     pub(crate) fn live_cell(&self, obj: &DynamicObject, idx: usize) -> Option<String> {
@@ -1027,14 +1027,17 @@ impl App {
         Some(metric.format(self.metric_value(obj, metric)))
     }
 
-    /// Latest pod count for a node from the pods poll; `None` before the
-    /// first successful list (renders "-", distinct from a genuinely empty
-    /// node).
-    pub fn node_pods_for(&self, o: &DynamicObject) -> Option<usize> {
+    /// Latest load for a node from the pods poll; `None` before the first
+    /// successful list (renders "-", distinct from a genuinely empty node).
+    pub fn node_load_for(&self, o: &DynamicObject) -> Option<&crate::columns::NodeLoad> {
         let name = o.metadata.name.as_deref().unwrap_or_default();
-        self.node_pods
+        self.node_loads
             .as_ref()
-            .map(|m| m.get(name).copied().unwrap_or(0))
+            .map(|m| m.get(name).unwrap_or(&crate::columns::NO_LOAD))
+    }
+
+    pub fn node_pods_for(&self, o: &DynamicObject) -> Option<usize> {
+        self.node_load_for(o).map(|l| l.pods)
     }
 
     /// The PODS cell for a node as displayed.

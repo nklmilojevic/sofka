@@ -218,6 +218,29 @@ Available metric sources:
 | `node-pods`                                             | Nodes       | Pod count                                      |
 | `node-cpu-utilization`, `node-memory-utilization`       | Nodes       | Usage as a percentage of allocatable resources |
 | `node-cpu-trend`, `node-memory-trend`                   | Nodes       | Usage history over the last five minutes       |
+| `node-cpu-request`, `node-memory-request`               | Nodes       | Requests as a percentage of allocatable        |
+| `node-cpu-limit`, `node-memory-limit`                   | Nodes       | Limits as a percentage of allocatable          |
+| `node-request:<resource>`, `node-limit:<resource>`      | Nodes       | Any resource, such as `nvidia.com/gpu`         |
+
+The nodes view shows `%CPU/R` and `%MEM/R` by default, and `%CPU/L` and
+`%MEM/L` in wide mode. They sum the pods bound to each node that have not
+succeeded or failed, as `kubectl describe node` does, and answer why a pod
+stays Pending on a node with low usage. A pod counts the way the scheduler
+counts it: app containers and native sidecars, raised to the largest init
+container step, plus overhead. Containers without a limit add nothing to the
+limit total, so limits can exceed 100%. These columns read the pods API and
+work without Metrics Server.
+
+Extended resources need a column per resource. The cell is `-` on nodes that
+do not advertise the resource:
+
+```toml
+[views."v1/nodes"]
+columns = [
+  { name = "GPU/R", metric = "node-request:nvidia.com/gpu" },
+  { name = "GPU/L", metric = "node-limit:nvidia.com/gpu", wide = true },
+]
+```
 
 Trend sources are not in the default node columns. Add them to a view:
 

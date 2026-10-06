@@ -6,7 +6,8 @@
 
 #[path = "columns_metrics.rs"]
 mod metrics;
-pub use metrics::MetricColumn;
+pub(crate) use metrics::NO_LOAD;
+pub use metrics::{MetricColumn, NodeLoad, NodeLoads};
 
 use std::borrow::Cow;
 use std::cell::OnceCell;
@@ -581,6 +582,10 @@ pub fn build_spec(
             defaults.extend([
                 ("%CPU", MetricColumn::NodeCpuUtilization),
                 ("%MEM", MetricColumn::NodeMemoryUtilization),
+                ("%CPU/R", MetricColumn::NodeRequest("cpu")),
+                ("%MEM/R", MetricColumn::NodeRequest("memory")),
+                ("%CPU/L", MetricColumn::NodeLimit("cpu")),
+                ("%MEM/L", MetricColumn::NodeLimit("memory")),
             ]);
         }
         for (header, metric) in defaults {
@@ -592,7 +597,7 @@ pub fn build_spec(
                 pointer: String::new(),
                 fallback_pointers: Vec::new(),
                 kind: crate::views::ColumnKind::Metric(metric),
-                wide: false,
+                wide: matches!(metric, MetricColumn::NodeLimit(_)),
                 width: None,
                 align: None,
                 condition_match: crate::views::ConditionMatch::Type,

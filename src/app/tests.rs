@@ -1,4 +1,5 @@
 use super::*;
+use crate::columns::NodeLoad;
 use crate::store::row_key;
 use k8s_openapi::jiff::Timestamp;
 use serde_json::json;
@@ -285,6 +286,10 @@ async fn mock_pods_failing_api() -> (String, Arc<std::sync::Mutex<Vec<Instant>>>
     (format!("http://{addr}"), attempts)
 }
 
+fn pod_counts(loads: &HashMap<String, NodeLoad>) -> std::collections::HashMap<String, usize> {
+    loads.iter().map(|(n, l)| (n.clone(), l.pods)).collect()
+}
+
 /// Wait for a `Msg::NodePods` carrying exactly `want`. Publications are
 /// coalesced to one a second, so intermediate states can be skipped — the test
 /// drives one change at a time and waits for each to land.
@@ -293,8 +298,8 @@ async fn await_counts(rx: &mut Receiver<Msg>, want: &[(&str, usize)]) {
         want.iter().map(|(n, c)| ((*n).to_string(), *c)).collect();
     let seen = tokio::time::timeout(std::time::Duration::from_secs(10), async {
         loop {
-            if let Msg::NodePods { counts, .. } = rx.recv().await.expect("channel closed")
-                && counts == want
+            if let Msg::NodePods { loads, .. } = rx.recv().await.expect("channel closed")
+                && pod_counts(&loads) == want
             {
                 return;
             }
@@ -433,7 +438,8 @@ async fn node_pods_survives_a_forbidden_watch_without_hammering_the_api() {
     let counts = tokio::time::timeout(std::time::Duration::from_secs(5), async {
         loop {
             let msg = rx.recv().await.expect("channel closed");
-            if let Msg::NodePods { counts, .. } = msg
+            if let Msg::NodePods { loads, .. } = msg
+                && let counts = pod_counts(&loads)
                 && !counts.contains_key("node-a")
                 && counts.get("node-b") == Some(&2)
             {
@@ -9769,7 +9775,7 @@ async fn nodes_view_pods_column_counts_and_sorts() {
 
     app.handle_msg(Msg::NodePods {
         generation: app.generation,
-        counts: HashMap::from([("node-b".to_string(), 7)]),
+        loads: HashMap::from([("node-b".to_string(), NodeLoad::with_pods(7))]),
     });
     // node-a has no entry → genuinely zero pods once data exists.
     let (_, rows) = app.snapshot_table();
@@ -9791,6 +9797,115 @@ async fn nodes_view_pods_column_counts_and_sorts() {
         .map(|o| o.metadata.name.clone().unwrap())
         .collect();
     assert_eq!(names, ["node-b", "node-a"]);
+}
+
+#[tokio::test]
+async fn nodes_view_committed_capacity_renders_sorts_and_filters() {
+    let (mut app, _rx) = test_app();
+    install_views(
+        &mut app,
+        r#"
+        [views."v1/nodes"]
+        columns = [{ name = "GPU/R", metric = "node-request:nvidia.com/gpu" }]
+        "#,
+    );
+    app.switch_kind("nodes");
+    let node = |name: &str, allocatable: serde_json::Value| {
+        json!({"apiVersion": "v1", "kind": "Node",
+               "metadata": {"name": name, "resourceVersion": "1"},
+               "status": {"allocatable": allocatable}})
+    };
+    apply(
+        &mut app,
+        node(
+            "gpu",
+            json!({"cpu": "4", "memory": "8Gi", "nvidia.com/gpu": "4"}),
+        ),
+    );
+    apply(
+        &mut app,
+        node("small", json!({"cpu": "2", "memory": "4Gi"})),
+    );
+    let cell = |app: &App, name: &str, header: &str| {
+        let (headers, rows) = app.snapshot_table();
+        let col = headers.iter().position(|h| h == header).unwrap();
+        rows.iter().find(|r| r[0] == name).unwrap()[col].clone()
+    };
+    assert_eq!(cell(&app, "gpu", "%CPU/R"), "-");
+
+    let pod = |name: &str, node: &str, resources: serde_json::Value| {
+        obj(json!({"apiVersion": "v1", "kind": "Pod",
+                   "metadata": {"name": name, "namespace": "default"},
+                   "spec": {"nodeName": node, "containers": [{"name": "c", "resources": resources}]}}))
+    };
+    let mut loads = crate::columns::NodeLoads::default();
+    for (name, node, resources) in [
+        (
+            "train",
+            "gpu",
+            json!({"requests": {"cpu": "1", "memory": "2Gi", "nvidia.com/gpu": "2"},
+                   "limits": {"cpu": "3", "nvidia.com/gpu": "2"}}),
+        ),
+        ("web", "small", json!({"requests": {"cpu": "1500m"}})),
+    ] {
+        let pod = pod(name, node, resources);
+        loads.apply(row_key(&pod), &pod);
+    }
+    app.handle_msg(Msg::NodePods {
+        generation: app.generation,
+        loads: loads.snapshot(),
+    });
+
+    assert_eq!(cell(&app, "gpu", "%CPU/R"), "25%");
+    assert_eq!(cell(&app, "gpu", "%MEM/R"), "25%");
+    assert_eq!(cell(&app, "gpu", "GPU/R"), "50%");
+    assert_eq!(cell(&app, "small", "%CPU/R"), "75%");
+    assert_eq!(cell(&app, "small", "%MEM/R"), "0%");
+    assert_eq!(cell(&app, "small", "GPU/R"), "-");
+    assert!(!app.display_headers().iter().any(|h| h == "%CPU/L"));
+
+    app.handle_key(press(KeyCode::Char('w'))).unwrap();
+    assert_eq!(cell(&app, "gpu", "%CPU/L"), "75%");
+    assert_eq!(cell(&app, "small", "%CPU/L"), "0%");
+
+    app.handle_key(press(KeyCode::Char('S'))).unwrap();
+    for c in "%CPU/R".chars() {
+        app.handle_key(press(KeyCode::Char(c))).unwrap();
+    }
+    app.handle_key(press(KeyCode::Enter)).unwrap();
+    assert_eq!(row_names(&app), ["gpu", "small"]);
+    app.handle_key(press(KeyCode::Char('I'))).unwrap();
+    assert_eq!(row_names(&app), ["small", "gpu"]);
+
+    type_filter(&mut app, "gpu/r>=50");
+    assert_eq!(row_names(&app), ["gpu"]);
+}
+
+#[test]
+fn node_loads_follow_pod_moves_resizes_and_deletes() {
+    let pod = |node: &str, cpu: &str| {
+        obj(json!({"apiVersion": "v1", "kind": "Pod",
+                   "metadata": {"name": "p", "namespace": "default"},
+                   "spec": {"nodeName": node,
+                            "containers": [{"resources": {"requests": {"cpu": cpu}}}]}}))
+    };
+    let mut loads = crate::columns::NodeLoads::default();
+    let cpu = |loads: &crate::columns::NodeLoads, node: &str| {
+        loads
+            .snapshot()
+            .get(node)
+            .map(|l| (l.pods, l.requests.get("cpu").copied()))
+    };
+    assert!(loads.apply("p".into(), &pod("a", "500m")));
+    assert!(!loads.apply("p".into(), &pod("a", "500m")));
+    assert_eq!(cpu(&loads, "a"), Some((1, Some(500))));
+    assert!(loads.apply("p".into(), &pod("a", "1")));
+    assert_eq!(cpu(&loads, "a"), Some((1, Some(1000))));
+    assert!(loads.apply("p".into(), &pod("b", "1")));
+    assert_eq!(cpu(&loads, "a"), None);
+    assert_eq!(cpu(&loads, "b"), Some((1, Some(1000))));
+    assert!(loads.remove("p"));
+    assert!(loads.snapshot().is_empty());
 }
 
 #[tokio::test]
@@ -9818,7 +9933,10 @@ async fn node_pods_update_invalidates_pods_sorted_rows() {
     // A fresh count snapshot must resort without any other invalidation.
     app.handle_msg(Msg::NodePods {
         generation: app.generation,
-        counts: HashMap::from([("node-a".to_string(), 2), ("node-b".to_string(), 9)]),
+        loads: HashMap::from([
+            ("node-a".to_string(), NodeLoad::with_pods(2)),
+            ("node-b".to_string(), NodeLoad::with_pods(9)),
+        ]),
     });
     let names: Vec<String> = app
         .rows()
@@ -15969,7 +16087,7 @@ async fn user_view_adds_provider_label_columns_to_curated_nodes() {
         app.display_headers().to_vec(),
         [
             "NAME", "STATUS", "ROLES", "TAINTS", "VERSION", "NODEPOOL", "ZONE", "INSTANCE", "TYPE",
-            "AGE", "PODS", "CPU", "MEM", "%CPU", "%MEM"
+            "AGE", "PODS", "CPU", "MEM", "%CPU", "%MEM", "%CPU/R", "%MEM/R"
         ]
     );
 
@@ -31005,7 +31123,7 @@ async fn configured_node_metrics_filter_and_refresh_by_source() {
     assert!(row_names(&app).is_empty());
     app.handle_msg(Msg::NodePods {
         generation: app.generation,
-        counts: HashMap::from([("node".into(), 3)]),
+        loads: HashMap::from([("node".into(), NodeLoad::with_pods(3))]),
     });
     assert_eq!(row_names(&app), ["node"]);
     let (headers, rows) = app.snapshot_table();
@@ -31013,7 +31131,7 @@ async fn configured_node_metrics_filter_and_refresh_by_source() {
     assert_eq!(rows[0], ["node", "3", "50%", "1.0Gi"]);
     app.handle_msg(Msg::NodePods {
         generation: app.generation,
-        counts: HashMap::new(),
+        loads: HashMap::new(),
     });
     assert!(row_names(&app).is_empty());
 }

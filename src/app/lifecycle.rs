@@ -416,7 +416,7 @@ impl App {
         self.watch_key = Some(key);
         self.metrics.clear();
         self.container_metrics.clear();
-        self.node_pods = None;
+        self.node_loads = None;
         self.clear_marks();
         self.range_selection = None;
         self.clear_rows_cache();
@@ -756,8 +756,8 @@ impl App {
         self.tasks.push(handle);
     }
 
-    /// Watch the pods API for the nodes view: pod count per node (the PODS
-    /// column). Counts non-terminated pods — Succeeded/Failed pods hold no
+    /// Watch the pods API for the nodes view: pod count and committed
+    /// requests and limits per node. Counts non-terminated pods — Succeeded/Failed pods hold no
     /// node resources — mirroring `kubectl describe node`. Replaces a full
     /// cluster-wide pod re-list every 10s with one watch, kept incrementally
     /// up to date and coalesced to at most one `Msg::NodePods` per second.
@@ -795,10 +795,9 @@ impl App {
             // somewhere: see `established` below.
             let mut stream = watcher(api.clone(), cfg).boxed();
             let mut backoff = watcher::DefaultBackoff::default();
-            // Node per pod, kept incrementally so per-node counts never need
-            // a full rescan of the cluster's pods.
-            let mut pod_nodes: HashMap<String, String> = HashMap::new();
-            let mut counts: HashMap<String, usize> = HashMap::new();
+            // Kept incrementally so per-node totals never need a full rescan
+            // of the cluster's pods.
+            let mut loads = crate::columns::NodeLoads::default();
             let mut dirty = false;
             // The initial list arrives as a stream of `InitApply`s, so the
             // counts are incomplete until `InitDone`. Publishing mid-init
@@ -815,14 +814,6 @@ impl App {
                         if flag.load(Ordering::SeqCst) != genr {
                             break;
                         }
-                        let retire = |node: &str, counts: &mut HashMap<String, usize>| {
-                            if let Some(c) = counts.get_mut(node) {
-                                *c = c.saturating_sub(1);
-                                if *c == 0 {
-                                    counts.remove(node);
-                                }
-                            }
-                        };
                         // Progress, as opposed to another doomed list attempt.
                         // `Init` and the `InitApply`s behind it are replayed on
                         // every attempt, so resetting on those is exactly the
@@ -838,35 +829,13 @@ impl App {
                         }
                         match event {
                             Ok(watcher::Event::Apply(obj)) | Ok(watcher::Event::InitApply(obj)) => {
-                                let key = row_key(&obj);
-                                let new_node = obj
-                                    .data
-                                    .pointer("/spec/nodeName")
-                                    .and_then(serde_json::Value::as_str)
-                                    .map(str::to_string);
-                                let old_node = match &new_node {
-                                    Some(n) => pod_nodes.insert(key, n.clone()),
-                                    None => pod_nodes.remove(&key),
-                                };
-                                if old_node != new_node {
-                                    if let Some(old) = &old_node {
-                                        retire(old, &mut counts);
-                                    }
-                                    if let Some(new) = &new_node {
-                                        *counts.entry(new.clone()).or_insert(0) += 1;
-                                    }
-                                    dirty = true;
-                                }
+                                dirty |= loads.apply(row_key(&obj), &obj);
                             }
                             Ok(watcher::Event::Delete(obj)) => {
-                                if let Some(old) = pod_nodes.remove(&row_key(&obj)) {
-                                    retire(&old, &mut counts);
-                                    dirty = true;
-                                }
+                                dirty |= loads.remove(&row_key(&obj));
                             }
                             Ok(watcher::Event::Init) => {
-                                pod_nodes.clear();
-                                counts.clear();
+                                loads.clear();
                                 synced = false;
                             }
                             Ok(watcher::Event::InitDone) => {
@@ -902,7 +871,7 @@ impl App {
                             if tx
                                 .send(Msg::NodePods {
                                     generation: genr,
-                                    counts: counts.clone(),
+                                    loads: loads.snapshot(),
                                 })
                                 .await
                                 .is_err()
@@ -926,20 +895,14 @@ impl App {
                     break;
                 }
                 if let Ok(list) = api.list(&params).await {
-                    let mut counts: HashMap<String, usize> = HashMap::new();
+                    let mut loads = crate::columns::NodeLoads::default();
                     for item in list {
-                        if let Some(node) = item
-                            .data
-                            .pointer("/spec/nodeName")
-                            .and_then(serde_json::Value::as_str)
-                        {
-                            *counts.entry(node.to_string()).or_insert(0) += 1;
-                        }
+                        loads.apply(row_key(&item), &item);
                     }
                     if tx
                         .send(Msg::NodePods {
                             generation: genr,
-                            counts,
+                            loads: loads.snapshot(),
                         })
                         .await
                         .is_err()
@@ -1272,18 +1235,16 @@ impl App {
                     self.invalidate_rows();
                 }
             }
-            Msg::NodePods { generation, counts } if generation == self.generation => {
-                let sort_uses_pods = self
+            Msg::NodePods { generation, loads } if generation == self.generation => {
+                let sort_uses_load = self
                     .sort_column
                     .and_then(|i| self.display_headers().get(i).cloned())
-                    .is_some_and(|h| {
-                        self.spec.metric(&h) == Some(crate::columns::MetricColumn::NodePods)
-                    });
-                self.node_pods = Some(counts);
-                if sort_uses_pods
-                    || self.parsed_filter().uses_metrics(&|key| {
-                        self.spec.metric(key) == Some(crate::columns::MetricColumn::NodePods)
-                    })
+                    .is_some_and(|h| self.spec.metric(&h).is_some_and(|m| m.node_load()));
+                self.node_loads = Some(loads);
+                if sort_uses_load
+                    || self
+                        .parsed_filter()
+                        .uses_metrics(&|key| self.spec.metric(key).is_some_and(|m| m.node_load()))
                 {
                     self.invalidate_rows();
                 }
