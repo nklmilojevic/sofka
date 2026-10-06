@@ -146,14 +146,8 @@ impl MetricColumn {
             Self::Cpu => usage.map(|v| v.0),
             Self::Memory => usage.map(|v| v.1),
             Self::NodePods => load.map(|v| v.pods as i64),
-            Self::NodeRequest(resource) => usage_pct(
-                load?.requests.get(resource).copied().unwrap_or(0),
-                allocatable(obj, resource),
-            ),
-            Self::NodeLimit(resource) => usage_pct(
-                load?.limits.get(resource).copied().unwrap_or(0),
-                allocatable(obj, resource),
-            ),
+            Self::NodeRequest(resource) => committed_pct(&load?.requests, obj, resource),
+            Self::NodeLimit(resource) => committed_pct(&load?.limits, obj, resource),
             Self::NodeCpuUtilization | Self::NodeCpuTrend => {
                 usage_pct(usage?.0, crate::columns::node_allocatable(obj).0)
             }
@@ -193,13 +187,14 @@ fn intern(name: &str) -> &'static str {
 
 /// Any resource quantity in thousandths of its unit. Requests and allocatable
 /// share the scale, so only their ratio matters.
-fn quantity_milli(s: &str) -> Option<i64> {
+/// `i128` keeps petabyte-scale memory from saturating once scaled and summed.
+fn quantity_milli(s: &str) -> Option<i128> {
     crate::views::parse_quantity(s)
         .filter(|n| n.is_finite() && *n >= 0.0)
-        .map(|n| (n * 1000.0).round() as i64)
+        .map(|n| (n * 1000.0).round() as i128)
 }
 
-fn allocatable(obj: &DynamicObject, resource: &str) -> Option<i64> {
+fn allocatable(obj: &DynamicObject, resource: &str) -> Option<i128> {
     obj.data
         .pointer("/status/allocatable")?
         .get(resource)?
@@ -208,13 +203,23 @@ fn allocatable(obj: &DynamicObject, resource: &str) -> Option<i64> {
         .filter(|v| *v > 0)
 }
 
+fn committed_pct(
+    totals: &BTreeMap<String, i128>,
+    obj: &DynamicObject,
+    resource: &str,
+) -> Option<i64> {
+    let used = totals.get(resource).copied().unwrap_or(0);
+    let base = allocatable(obj, resource)?;
+    Some((used as f64 / base as f64 * 100.0).round() as i64)
+}
+
 /// What the pods bound to one node commit: the pod count and the summed
 /// requests and limits per resource, in [`quantity_milli`] units.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct NodeLoad {
     pub pods: usize,
-    pub requests: BTreeMap<String, i64>,
-    pub limits: BTreeMap<String, i64>,
+    pub requests: BTreeMap<String, i128>,
+    pub limits: BTreeMap<String, i128>,
 }
 
 pub(crate) static NO_LOAD: NodeLoad = NodeLoad {
@@ -235,8 +240,8 @@ impl NodeLoad {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct PodLoad {
     node: String,
-    requests: BTreeMap<String, i64>,
-    limits: BTreeMap<String, i64>,
+    requests: BTreeMap<String, i128>,
+    limits: BTreeMap<String, i128>,
 }
 
 impl PodLoad {
@@ -298,11 +303,14 @@ impl NodeLoads {
     fn add(&mut self, pod: &PodLoad) {
         let node = self.nodes.entry(pod.node.clone()).or_default();
         node.pods += 1;
-        for (name, v) in &pod.requests {
-            *node.requests.entry(name.clone()).or_insert(0) += v;
-        }
-        for (name, v) in &pod.limits {
-            *node.limits.entry(name.clone()).or_insert(0) += v;
+        for (totals, pod) in [
+            (&mut node.requests, &pod.requests),
+            (&mut node.limits, &pod.limits),
+        ] {
+            for (name, v) in pod {
+                let total = totals.entry(name.clone()).or_insert(0);
+                *total = total.saturating_add(*v);
+            }
         }
     }
 
@@ -315,7 +323,7 @@ impl NodeLoads {
             self.nodes.remove(&pod.node);
             return;
         }
-        let sub = |totals: &mut BTreeMap<String, i64>, pod: &BTreeMap<String, i64>| {
+        let sub = |totals: &mut BTreeMap<String, i128>, pod: &BTreeMap<String, i128>| {
             for (name, v) in pod {
                 if let Some(total) = totals.get_mut(name) {
                     *total -= v;
@@ -333,14 +341,15 @@ impl NodeLoads {
 /// A pod's requests or limits as the scheduler and `kubectl describe node`
 /// count them: app containers and native sidecars summed, raised to the
 /// largest init container step, plus overhead. Pod-level declarations win.
-fn pod_effective(pod: &DynamicObject, section: &str) -> BTreeMap<String, i64> {
+fn pod_effective(pod: &DynamicObject, section: &str) -> BTreeMap<String, i128> {
     let read = |resources: Option<&Value>| quantities(resources.and_then(|r| r.get(section)));
-    let add = |into: &mut BTreeMap<String, i64>, from: &BTreeMap<String, i64>| {
+    let add = |into: &mut BTreeMap<String, i128>, from: &BTreeMap<String, i128>| {
         for (k, v) in from {
-            *into.entry(k.clone()).or_insert(0) += v;
+            let slot = into.entry(k.clone()).or_insert(0);
+            *slot = slot.saturating_add(*v);
         }
     };
-    let max = |into: &mut BTreeMap<String, i64>, from: &BTreeMap<String, i64>| {
+    let max = |into: &mut BTreeMap<String, i128>, from: &BTreeMap<String, i128>| {
         for (k, v) in from {
             let slot = into.entry(k.clone()).or_insert(0);
             *slot = (*slot).max(*v);
@@ -377,13 +386,14 @@ fn pod_effective(pod: &DynamicObject, section: &str) -> BTreeMap<String, i64> {
     }
     for (k, v) in quantities(pod.data.pointer("/spec/overhead")) {
         if section == "requests" || total.contains_key(&k) {
-            *total.entry(k).or_insert(0) += v;
+            let slot = total.entry(k).or_insert(0);
+            *slot = slot.saturating_add(v);
         }
     }
     total
 }
 
-fn quantities(list: Option<&Value>) -> BTreeMap<String, i64> {
+fn quantities(list: Option<&Value>) -> BTreeMap<String, i128> {
     list.and_then(Value::as_object)
         .into_iter()
         .flatten()
@@ -469,6 +479,35 @@ mod tests {
         let requests = pod_effective(&p, "requests");
         assert_eq!(requests.get("cpu"), Some(&4000));
         assert_eq!(requests.get("nvidia.com/gpu"), Some(&1000));
+    }
+
+    #[test]
+    fn node_percentages_hold_for_petabyte_memory() {
+        let node = serde_json::from_value::<DynamicObject>(json!({
+            "apiVersion": "v1", "kind": "Node", "metadata": {"name": "n"},
+            "status": {"allocatable": {"memory": "32Pi"}}
+        }))
+        .unwrap();
+        let mut loads = NodeLoads::default();
+        for name in ["a", "b"] {
+            let pod = serde_json::from_value::<DynamicObject>(json!({
+                "apiVersion": "v1", "kind": "Pod", "metadata": {"name": name},
+                "spec": {"nodeName": "n", "containers": [{"resources": {
+                    "requests": {"memory": "8Pi"}, "limits": {"memory": "12Pi"}
+                }}]}
+            }))
+            .unwrap();
+            loads.apply(name.into(), &pod);
+        }
+        let load = loads.snapshot().remove("n").unwrap();
+        assert_eq!(
+            MetricColumn::NodeRequest("memory").value(&node, None, Some(&load)),
+            Some(50)
+        );
+        assert_eq!(
+            MetricColumn::NodeLimit("memory").value(&node, None, Some(&load)),
+            Some(75)
+        );
     }
 
     #[test]
