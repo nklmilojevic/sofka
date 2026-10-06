@@ -885,14 +885,16 @@ lifetime, and resources are configurable:
 image = "busybox:1.37"   # helper-pod image
 ttl = "30m"              # how long it lives before deleting itself
 cpu_request = "100m"
-cpu_limit = "500m"
-memory_request = "64Mi"
-memory_limit = "256Mi"
+cpu_limit = "100m"
+memory_request = "128Mi"
+memory_limit = "128Mi"
 ```
 
-The helper sets its limits explicitly, so a namespace LimitRange cannot fill in
-a default limit that breaks its `maxLimitRequestRatio`. If your namespace policy
-needs other values, change them here. An empty value leaves that field unset.
+The helper sets its limits explicitly and equal to its requests, so a namespace
+LimitRange cannot fill in a default limit that breaks its
+`maxLimitRequestRatio`. Raise the limits for faster listings of large
+directories, or change any value your namespace policy requires. An empty value
+leaves that field unset.
 
 Only a `Bound` filesystem claim can be browsed: an unbound one has no volume
 behind it, and a `volumeMode: Block` one has no filesystem. A listing is a

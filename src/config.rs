@@ -523,9 +523,9 @@ pub const PVC_DEFAULT_TTL_SECS: u64 = 1_800;
 /// image = "busybox:1.37"   # helper-pod image; needs a shell and `ls`
 /// ttl = "30m"              # helper pod self-destructs after this
 /// cpu_request = "100m"
-/// cpu_limit = "500m"
-/// memory_request = "64Mi"
-/// memory_limit = "256Mi"
+/// cpu_limit = "100m"
+/// memory_request = "128Mi"
+/// memory_limit = "128Mi"
 /// ```
 ///
 /// The image needs `sh`, `ls`, and — for transfers, which go through
@@ -541,9 +541,9 @@ pub struct PvcExploreConfig {
     /// delete it. Validated by [`pvc_explore_warnings`].
     pub ttl: String,
     /// Helper container resources as Kubernetes quantities. An empty value is
-    /// left off the pod. Limits are set explicitly because a namespace
-    /// LimitRange would otherwise default them and may reject the pod for
-    /// exceeding its `maxLimitRequestRatio`.
+    /// left off the pod. Limits are set explicitly, and equal to the requests
+    /// by default, because a namespace LimitRange would otherwise default them
+    /// and may reject the pod for exceeding its `maxLimitRequestRatio`.
     pub cpu_request: String,
     pub cpu_limit: String,
     pub memory_request: String,
@@ -556,9 +556,9 @@ impl Default for PvcExploreConfig {
             image: "busybox:1.37".into(),
             ttl: "30m".into(),
             cpu_request: "100m".into(),
-            cpu_limit: "500m".into(),
-            memory_request: "64Mi".into(),
-            memory_limit: "256Mi".into(),
+            cpu_limit: "100m".into(),
+            memory_request: "128Mi".into(),
+            memory_limit: "128Mi".into(),
         }
     }
 }
@@ -573,18 +573,33 @@ impl PvcExploreConfig {
         ]
     }
 
-    /// The helper container's `resources`, skipping empty and unparseable
+    /// The helper container's `resources`, skipping empty and invalid
     /// quantities (the latter are reported by [`pvc_explore_warnings`]).
     pub fn resources(&self) -> serde_json::Value {
         let mut out = serde_json::json!({});
         for (_, section, key, value) in self.quantities() {
             let value = value.trim();
-            if crate::views::parse_quantity(value).is_some() {
+            if resource_quantity(value).is_some() {
                 out[section][key] = serde_json::json!(value);
             }
         }
         out
     }
+}
+
+/// A positive Kubernetes resource quantity in the API's own syntax (`100m`,
+/// `64Mi`, `1.5`, `2e3`), as a number. `views::parse_quantity` is looser — it
+/// takes signs, `NaN`, and a space before the suffix, all of which the API
+/// server rejects.
+fn resource_quantity(s: &str) -> Option<f64> {
+    static SYNTAX: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+        regex::Regex::new(r"^(\d+(\.\d*)?|\.\d+)([KMGTPE]i|[numkMGTPE]|[eE][+-]?\d+)?$").unwrap()
+    });
+    SYNTAX
+        .is_match(s)
+        .then(|| crate::views::parse_quantity(s))
+        .flatten()
+        .filter(|n| n.is_finite() && *n > 0.0)
 }
 
 /// Validate `[pvc_explore]`: an empty image, an unparseable/absurd TTL, or a
@@ -593,9 +608,9 @@ pub fn pvc_explore_warnings(cfg: &PvcExploreConfig) -> Vec<String> {
     let mut out = Vec::new();
     for (field, _, _, value) in cfg.quantities() {
         let value = value.trim();
-        if !value.is_empty() && crate::views::parse_quantity(value).is_none() {
+        if !value.is_empty() && resource_quantity(value).is_none() {
             out.push(format!(
-                "pvc_explore: {field} {value:?} is not a quantity; leaving it unset"
+                "pvc_explore: {field} {value:?} is not a positive quantity; leaving it unset"
             ));
         }
     }
@@ -603,7 +618,7 @@ pub fn pvc_explore_warnings(cfg: &PvcExploreConfig) -> Vec<String> {
         ("cpu", &cfg.cpu_request, &cfg.cpu_limit),
         ("memory", &cfg.memory_request, &cfg.memory_limit),
     ] {
-        let parse = |v: &str| crate::views::parse_quantity(v.trim());
+        let parse = |v: &str| resource_quantity(v.trim());
         if let (Some(r), Some(l)) = (parse(request), parse(limit))
             && r > l
         {
@@ -2794,5 +2809,31 @@ bookmarks = []
             warnings[1].contains("cpu_request \"2\" is above"),
             "{warnings:?}"
         );
+    }
+
+    #[test]
+    fn pvc_explore_resources_take_only_kubernetes_quantity_syntax() {
+        for good in [
+            "100m", "64Mi", "1", "1.5", ".5", "2e3", "1E-2", "1Gi", "500k",
+        ] {
+            assert!(resource_quantity(good).is_some(), "{good}");
+        }
+        for bad in [
+            "-1", "0", "NaN", "inf", "1 Mi", "1mi", "+1", "1.2.3", "Mi", "1e",
+        ] {
+            assert!(resource_quantity(bad).is_none(), "{bad}");
+            let cfg = PvcExploreConfig {
+                memory_limit: bad.into(),
+                ..Default::default()
+            };
+            assert!(cfg.resources()["limits"].get("memory").is_none(), "{bad}");
+            let warnings = pvc_explore_warnings(&cfg);
+            assert!(
+                warnings
+                    .iter()
+                    .any(|w| w.contains("not a positive quantity")),
+                "{bad}: {warnings:?}"
+            );
+        }
     }
 }

@@ -2012,16 +2012,13 @@ mod tests {
     }
 
     #[test]
-    fn helper_pod_sets_explicit_limits_within_a_common_limit_range_ratio() {
+    fn helper_pod_limits_match_requests_so_any_limit_range_ratio_admits_it() {
         let cfg = crate::config::PvcExploreConfig::default();
         let spec = helper_pod("data", &cfg.image, 900, cfg.resources());
         let resources = &spec["spec"]["containers"][0]["resources"];
         for key in ["cpu", "memory"] {
-            let q = |section: &str| {
-                crate::views::parse_quantity(resources[section][key].as_str().unwrap()).unwrap()
-            };
-            let ratio = q("limits") / q("requests");
-            assert!((1.0..=10.0).contains(&ratio), "{key}: {resources}");
+            assert!(resources["limits"][key].is_string(), "{resources}");
+            assert_eq!(resources["limits"][key], resources["requests"][key]);
         }
     }
 
