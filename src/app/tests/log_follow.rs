@@ -237,9 +237,9 @@ async fn workload_logs_follow_pods_a_rollout_creates() {
         &mut app,
         Arc::new(|path, query, _nth| {
             if path.ends_with("/web-a/log") {
-                (200, open_body("2026-10-06T10:00:00Z from a\n"))
+                (200, open_body("2099-01-01T10:00:00Z from a\n"))
             } else if path.ends_with("/web-b/log") {
-                (200, open_body("2026-10-06T10:00:05Z from b\n"))
+                (200, open_body("2099-01-01T10:00:05Z from b\n"))
             } else if let Some(pod) = named_pod(path) {
                 pod
             } else if query.contains("watch=true") {
@@ -257,7 +257,9 @@ async fn workload_logs_follow_pods_a_rollout_creates() {
     app.handle_key(press(KeyCode::Char('l'))).unwrap();
     wait_for(&mut app, &mut rx, "from b").await;
 
-    // The new pod can arrive before or after the first pod's lines.
+    // The new pod can arrive before or after the first pod's lines. Lines
+    // are dated in the future: a notice that arrives before any line sorts
+    // at the current time.
     let text = app.filtered_log_text();
     let lines: Vec<&str> = text.lines().collect();
     assert_eq!(lines.len(), 3, "{text}");
