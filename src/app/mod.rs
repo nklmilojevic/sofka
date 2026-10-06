@@ -2865,6 +2865,7 @@ mod workspaces;
 use helpers::*;
 pub use notify::notification_sequence;
 pub use pickers::DEFAULT_SORT_LABEL;
+pub use secret_edit::sweep_abandoned as sweep_abandoned_secret_edits;
 
 #[cfg(test)]
 mod tests;

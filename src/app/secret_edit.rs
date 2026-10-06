@@ -5,6 +5,9 @@
 //! was written, and only the keys that changed are patched back, base64
 //! encoded. The patch carries the `resourceVersion` that was read, so a Secret
 //! that changed in the meantime is refused instead of overwritten.
+//!
+//! The file holds plaintext values, so it is deleted as soon as the editor
+//! closes, and [`sweep_abandoned`] removes what a crashed sofka left behind.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -13,6 +16,12 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
 
 use super::*;
+
+/// Every edit directory starts with this, followed by the owning process id.
+const DIR_PREFIX: &str = "sofka-secret-";
+
+/// An edit directory older than this is abandoned whoever owns it.
+const ABANDONED_AFTER: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
 
 const HEADER: &str = "\
 # Values are plain text and are base64-encoded on save. Only changed keys
@@ -90,10 +99,11 @@ pub(super) fn split_secret_data(
 
 /// The document written to the editor.
 pub(super) fn secret_edit_document(
+    title: &str,
     original: &BTreeMap<String, String>,
     binary: &BTreeSet<String>,
 ) -> Result<String, String> {
-    let mut doc = String::from(HEADER);
+    let mut doc = format!("# Secret {title}\n{HEADER}");
     if !binary.is_empty() {
         let keys = binary.iter().cloned().collect::<Vec<_>>().join(", ");
         doc.push_str(&format!("# Not text, not shown, left unchanged: {keys}\n"));
@@ -124,6 +134,7 @@ pub(super) fn parse_secret_edit(text: &str) -> Result<BTreeMap<String, String>, 
         _ => return Err("expected a stringData mapping".into()),
     };
     let mut values = BTreeMap::new();
+    let mut seen = false;
     for (field, entries) in root {
         if field.as_str() != Some("stringData") {
             return Err(format!(
@@ -131,10 +142,18 @@ pub(super) fn parse_secret_edit(text: &str) -> Result<BTreeMap<String, String>, 
                 serde_yaml::to_string(&field).unwrap_or_default().trim_end()
             ));
         }
+        seen = true;
         let entries = match entries {
             serde_yaml::Value::Mapping(entries) => entries,
-            serde_yaml::Value::Null => continue,
-            _ => return Err("stringData must be a mapping of keys to values".into()),
+            // An empty `stringData:` reads as null. Taking that as "remove
+            // every key" would make a cleared block delete the Secret's data;
+            // removing everything needs an explicit `{}`.
+            _ => {
+                return Err(
+                    "stringData must be a mapping of keys to values; use {} to remove every key"
+                        .into(),
+                );
+            }
         };
         for (key, value) in entries {
             let Some(key) = key.as_str() else {
@@ -151,12 +170,24 @@ pub(super) fn parse_secret_edit(text: &str) -> Result<BTreeMap<String, String>, 
             values.insert(key.to_string(), value.to_string());
         }
     }
+    if !seen {
+        return Err("expected a stringData mapping".into());
+    }
     Ok(values)
+}
+
+/// Keys of `edited` that name a value left out of the document because it
+/// is not text. Writing one would replace those bytes with text.
+fn binary_overwrites(binary: &BTreeSet<String>, edited: &BTreeMap<String, String>) -> Vec<String> {
+    edited
+        .keys()
+        .filter(|key| binary.contains(*key))
+        .cloned()
+        .collect()
 }
 
 pub(super) fn secret_changes(
     original: &BTreeMap<String, String>,
-    binary: &BTreeSet<String>,
     edited: &BTreeMap<String, String>,
 ) -> SecretChanges {
     let mut changes = SecretChanges::default();
@@ -164,7 +195,6 @@ pub(super) fn secret_changes(
         match original.get(key) {
             Some(old) if old == value => {}
             Some(_) => changes.changed.push(key.clone()),
-            None if binary.contains(key) => changes.changed.push(key.clone()),
             None => changes.added.push(key.clone()),
         }
     }
@@ -229,17 +259,30 @@ fn configured_editor() -> Option<String> {
         .find(|value| !value.trim().is_empty())
 }
 
-/// Create a directory only this user can read, holding one file with
-/// `contents`.
-fn private_file(name: &str, contents: &str) -> std::io::Result<(PathBuf, PathBuf)> {
+/// Create `path` readable only by this user and write `contents` to it. It
+/// must not exist yet.
+fn create_private(path: &Path, contents: &str) -> std::io::Result<()> {
     use std::io::Write as _;
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    let mut file = options.open(path)?;
+    file.write_all(contents.as_bytes())?;
+    file.sync_all()
+}
+
+/// Create a directory only this user can read, holding one file with
+/// `contents`. The file name is fixed: a Secret name can be longer than a
+/// file name may be, or reserved on Windows (`con`).
+fn private_file(contents: &str) -> std::io::Result<(PathBuf, PathBuf)> {
     static NEXT: AtomicU64 = AtomicU64::new(0);
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.subsec_nanos())
         .unwrap_or_default();
     let dir = std::env::temp_dir().join(format!(
-        "sofka-secret-{}-{nanos}-{}",
+        "{DIR_PREFIX}{}-{nanos}-{}",
         std::process::id(),
         NEXT.fetch_add(1, Ordering::Relaxed)
     ));
@@ -247,21 +290,68 @@ fn private_file(name: &str, contents: &str) -> std::io::Result<(PathBuf, PathBuf
     #[cfg(unix)]
     std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
     builder.create(&dir)?;
-    let path = dir.join(format!("{name}.yaml"));
-    let written = (|| {
-        let mut options = std::fs::OpenOptions::new();
-        options.write(true).create_new(true);
-        #[cfg(unix)]
-        std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
-        let mut file = options.open(&path)?;
-        file.write_all(contents.as_bytes())?;
-        file.sync_all()
-    })();
-    if let Err(e) = written {
+    let path = dir.join("secret.yaml");
+    if let Err(e) = create_private(&path, contents) {
         let _ = std::fs::remove_dir_all(&dir);
         return Err(e);
     }
     Ok((dir, path))
+}
+
+/// Whether the process that created an edit directory is gone. Only a
+/// definite "no such process" counts; anything else keeps the directory.
+#[cfg(unix)]
+fn process_gone(pid: u32) -> bool {
+    let Ok(pid) = libc::pid_t::try_from(pid) else {
+        return false;
+    };
+    // SAFETY: signal 0 sends nothing; it only checks that the process exists.
+    let alive = unsafe { libc::kill(pid, 0) } == 0;
+    !alive && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+}
+
+#[cfg(not(unix))]
+fn process_gone(_pid: u32) -> bool {
+    false
+}
+
+/// Remove edit directories in `root` left by a sofka that crashed or was
+/// killed with the editor open: their process is gone, or they are older than
+/// [`ABANDONED_AFTER`]. Another user's directories cannot be removed and are
+/// skipped.
+pub(super) fn sweep_abandoned_in(root: &Path) {
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return;
+    };
+    let me = std::process::id();
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(rest) = name.to_str().and_then(|n| n.strip_prefix(DIR_PREFIX)) else {
+            continue;
+        };
+        let Some(pid) = rest.split('-').next().and_then(|p| p.parse::<u32>().ok()) else {
+            continue;
+        };
+        let Ok(meta) = entry.metadata() else {
+            continue;
+        };
+        if !meta.is_dir() {
+            continue;
+        }
+        let stale = meta
+            .modified()
+            .ok()
+            .and_then(|t| t.elapsed().ok())
+            .is_some_and(|age| age > ABANDONED_AFTER);
+        if stale || (pid != me && process_gone(pid)) {
+            let _ = std::fs::remove_dir_all(entry.path());
+        }
+    }
+}
+
+/// [`sweep_abandoned_in`] over the system temp directory.
+pub fn sweep_abandoned() {
+    sweep_abandoned_in(&std::env::temp_dir());
 }
 
 impl App {
@@ -280,7 +370,7 @@ impl App {
             .guard(
                 "secret-edit",
                 "secrets",
-                &[(name.clone(), ns)],
+                &[(name.clone(), ns.clone())],
                 ConfirmLevel::Plain,
             )
             .is_none()
@@ -288,14 +378,19 @@ impl App {
             return;
         }
         let (original, binary) = split_secret_data(&fresh);
-        let written = match secret_edit_document(&original, &binary) {
+        let title = if ns.is_empty() {
+            name.clone()
+        } else {
+            format!("{name} in {ns}")
+        };
+        let written = match secret_edit_document(&title, &original, &binary) {
             Ok(doc) => doc,
             Err(e) => {
                 self.flash_warn(&format!("cannot edit: {e}"));
                 return;
             }
         };
-        let (dir, path) = match private_file(&name, &written) {
+        let (dir, path) = match private_file(&written) {
             Ok(paths) => paths,
             Err(e) => {
                 self.flash_warn(&format!("cannot edit: temp file: {e}"));
@@ -325,12 +420,20 @@ impl App {
             self.flash_warn("editor failed — secret not changed");
             return;
         }
-        let text = std::fs::read_to_string(&edit.path);
+        let bytes = std::fs::read(&edit.path);
         let _ = std::fs::remove_file(&edit.path);
-        let text = match text {
-            Ok(text) => text,
+        let bytes = match bytes {
+            Ok(bytes) => bytes,
             Err(e) => {
                 self.flash_warn(&format!("secret not changed: {e}"));
+                return;
+            }
+        };
+        let text = match String::from_utf8(bytes) {
+            Ok(text) => text,
+            Err(e) => {
+                let text = String::from_utf8_lossy(e.as_bytes()).into_owned();
+                self.reopen_secret_edit(edit, &text, "the file is not valid UTF-8");
                 return;
             }
         };
@@ -345,7 +448,16 @@ impl App {
                 return;
             }
         };
-        let changes = secret_changes(&edit.original, &edit.binary, &edited);
+        let overwrites = binary_overwrites(&edit.binary, &edited);
+        if !overwrites.is_empty() {
+            let error = format!(
+                "{} not text and cannot be edited here; remove it from stringData",
+                overwrites.join(", ")
+            );
+            self.reopen_secret_edit(edit, &text, &error);
+            return;
+        }
+        let changes = secret_changes(&edit.original, &edited);
         if changes.is_empty() {
             self.set_flash("secret not changed");
             return;
@@ -377,6 +489,7 @@ impl App {
             .map(|owner| format!("  ⚠ Managed by {owner} — it may overwrite this change."))
             .unwrap_or_default();
         let kind = edit.kind.clone();
+        let label = format!("Update secret {name}{where_ns}: {summary}?{managed}");
         self.begin_guarded(
             ConfirmAction::SecretEdit {
                 kind,
@@ -384,12 +497,17 @@ impl App {
                 ns,
                 patch,
             },
-            format!("Update secret {name}{where_ns}: {summary}?{managed}"),
+            label.clone(),
             level,
             name,
         );
         if matches!(self.mode, Mode::Confirm | Mode::Prompt) {
             self.confirm_return = Mode::Detail;
+        }
+        // A typed guardrail prompt only says what to type; the keys and the
+        // managed warning have to be on it too.
+        if self.mode == Mode::Prompt {
+            self.prompt_label = format!("{label}  {}", self.prompt_label);
         }
     }
 
@@ -401,15 +519,7 @@ impl App {
             .collect();
         let error = error.replace('\n', " ");
         let written = format!("# error: {error}\n{kept}");
-        let rewrite = (|| {
-            use std::io::Write as _;
-            let mut file = std::fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&edit.path)?;
-            file.write_all(written.as_bytes())
-        })();
-        if let Err(e) = rewrite {
+        if let Err(e) = create_private(&edit.path, &written) {
             self.flash_warn(&format!("secret not changed: {e}"));
             return;
         }
@@ -512,10 +622,11 @@ mod tests {
         }));
         let (original, binary) = split_secret_data(&obj);
         assert_eq!(binary, BTreeSet::from(["binary".to_string()]));
-        let doc = secret_edit_document(&original, &binary).unwrap();
+        let doc = secret_edit_document("creds in default", &original, &binary).unwrap();
+        assert!(doc.starts_with("# Secret creds in default\n"), "{doc}");
         assert!(doc.contains("left unchanged: binary"), "{doc}");
         assert_eq!(parse_secret_edit(&doc).unwrap(), original);
-        assert!(secret_changes(&original, &binary, &original).is_empty());
+        assert!(secret_changes(&original, &original).is_empty());
     }
 
     #[test]
@@ -525,35 +636,36 @@ mod tests {
             ("change".to_string(), "b".to_string()),
             ("drop".to_string(), "c".to_string()),
         ]);
-        let binary = BTreeSet::from(["cert".to_string()]);
         let edited = BTreeMap::from([
             ("keep".to_string(), "a".to_string()),
             ("change".to_string(), "B".to_string()),
             ("new".to_string(), "d".to_string()),
-            ("cert".to_string(), "text now".to_string()),
+            ("other".to_string(), "e".to_string()),
         ]);
-        let changes = secret_changes(&original, &binary, &edited);
+        let changes = secret_changes(&original, &edited);
         assert_eq!(
             changes,
             SecretChanges {
-                changed: vec!["cert".into(), "change".into()],
-                added: vec!["new".into()],
+                changed: vec!["change".into()],
+                added: vec!["new".into(), "other".into()],
                 removed: vec!["drop".into()],
             }
         );
         assert_eq!(
             changes.summary(),
-            "change cert, change · add new · remove drop"
+            "change change · add new, other · remove drop"
         );
+        let binary = BTreeSet::from(["cert".to_string(), "other".to_string()]);
+        assert_eq!(binary_overwrites(&binary, &edited), ["other"]);
         let patch = secret_patch(&changes, &edited, "42");
         assert_eq!(
             patch,
             json!({
                 "metadata": {"resourceVersion": "42"},
                 "data": {
-                    "cert": b64(b"text now"),
                     "change": b64(b"B"),
                     "new": b64(b"d"),
+                    "other": b64(b"e"),
                     "drop": null,
                 },
             })
@@ -564,6 +676,11 @@ mod tests {
     fn parse_refuses_values_that_are_not_strings() {
         let err = parse_secret_edit("stringData:\n  port: 8080\n").unwrap_err();
         assert!(err.contains("'port' must be a string"), "{err}");
+        let err = parse_secret_edit("stringData:\n").unwrap_err();
+        assert!(err.contains("use {} to remove every key"), "{err}");
+        assert!(parse_secret_edit("stringData: null\n").is_err());
+        assert!(parse_secret_edit("# nothing\n").is_err());
+        assert!(parse_secret_edit("{}\n").is_err());
         let err = parse_secret_edit("stringData:\n  empty:\n").unwrap_err();
         assert!(err.contains("'empty' must be a string"), "{err}");
         let err = parse_secret_edit("data:\n  a: b\n").unwrap_err();
@@ -598,10 +715,38 @@ mod tests {
     #[test]
     fn temp_file_is_private_to_the_user() {
         use std::os::unix::fs::PermissionsExt;
-        let (dir, path) = private_file("creds", "stringData: {}\n").unwrap();
+        let (dir, path) = private_file("stringData: {}\n").unwrap();
         let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode(&dir), 0o700);
         assert_eq!(mode(&path), 0o600);
+        assert_eq!(path.file_name().unwrap(), "secret.yaml");
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn sweep_removes_edits_whose_process_is_gone() {
+        let root = std::env::temp_dir().join(format!(
+            "sofka-sweep-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&root).unwrap();
+        // A pid above the kernel's limit can never be running.
+        let gone = root.join(format!("{DIR_PREFIX}2147483646-1-0"));
+        let live = root.join(format!("{DIR_PREFIX}{}-1-0", std::process::id()));
+        let other = root.join("unrelated");
+        for dir in [&gone, &live, &other] {
+            std::fs::create_dir(dir).unwrap();
+        }
+        std::fs::write(gone.join("secret.yaml"), "stringData: {}\n").unwrap();
+        sweep_abandoned_in(&root);
+        assert!(!gone.exists());
+        assert!(live.exists());
+        assert!(other.exists());
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

@@ -389,6 +389,8 @@ async fn run_main(args: Args) -> Result<()> {
     theme::init(theme::resolve_skin(Some(&initial_skin), &cfg.skin.colors));
     theme::set_background(cfg.skin.background);
 
+    // Decoded Secret values a crashed session left in the temp directory.
+    std::thread::spawn(app::sweep_abandoned_secret_edits);
     let (tx, mut rx) = mpsc::channel(EVENT_CHANNEL_CAP);
     let panic_tx = tx.clone();
     let mut app = App::new(cluster, tx);

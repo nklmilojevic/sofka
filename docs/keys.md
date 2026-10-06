@@ -217,13 +217,15 @@ binding.
 
 In the decoded Secret view, `e` opens the text values as `stringData` in
 `$KUBE_EDITOR` or `$EDITOR` (`vi` when neither is set). The file is private to
-your user and is deleted when the editor closes. Values that are not text are
-not shown and stay unchanged. Delete a key to remove it. Save the file unchanged
-to cancel. If the file does not parse, or a value is not a string, the editor
-opens again with the error on top. sofka then asks for confirmation, naming the
-keys it will change, add, or remove, and patches only those keys. The patch
-fails if the Secret changed after `e` read it. An immutable Secret cannot be
-edited. Read-only mode and the `secret-edit` guardrail apply.
+your user and is deleted when the editor closes. If sofka exits without
+deleting it, the next start removes it. Values that are not text are not shown
+and cannot be overwritten from the editor. Delete a key to remove it, or write
+`stringData: {}` to remove every text key. Save the file unchanged to cancel.
+If the file does not parse, or a value is not a string, the editor opens again
+with the error on top. sofka then asks for confirmation, naming the keys it
+will change, add, or remove, and patches only those keys. The patch fails if
+the Secret changed after `e` read it. An immutable Secret cannot be edited.
+Read-only mode and the `secret-edit` guardrail apply.
 
 In the YAML view, `m` shows or hides `metadata.managedFields`. Fields are hidden
 when a document opens. Showing them reads the full resource from the API. The

@@ -13412,11 +13412,70 @@ async fn decoded_secret_edit_reopens_a_document_that_does_not_parse() {
     let text = std::fs::read_to_string(&path).unwrap();
     assert!(text.starts_with("# error:"), "{text}");
     assert!(text.contains("port: 8080"), "{text}");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600, "the retry file stays private");
+    }
 
     // Saving the error document unchanged gives up.
     close_secret_editor(&mut app, &path, "");
     assert!(app.pending.is_none());
     assert_eq!(app.flash, "secret not changed");
+    assert!(!path.exists());
+}
+
+#[tokio::test]
+async fn decoded_secret_edit_will_not_overwrite_a_value_that_is_not_text() {
+    let (mut app, _rx) = decoded_secret_app();
+    let path = open_secret_editor(&mut app);
+    close_secret_editor(
+        &mut app,
+        &path,
+        "stringData:\n  token: hunter2\n  der: text\n",
+    );
+    assert!(app.confirm_action.is_none());
+    assert!(matches!(app.pending.take(), Some(Suspend::Shell(_))));
+    let text = std::fs::read_to_string(&path).unwrap();
+    assert!(text.starts_with("# error: der not text"), "{text}");
+    close_secret_editor(&mut app, &path, "");
+    assert!(app.confirm_action.is_none());
+    assert!(!path.exists());
+}
+
+#[tokio::test]
+async fn decoded_secret_edit_refuses_an_emptied_string_data_block() {
+    let (mut app, _rx) = decoded_secret_app();
+    let path = open_secret_editor(&mut app);
+    close_secret_editor(&mut app, &path, "stringData:\n");
+    assert!(app.confirm_action.is_none());
+    assert!(matches!(app.pending.take(), Some(Suspend::Shell(_))));
+    let text = std::fs::read_to_string(&path).unwrap();
+    assert!(text.contains("use {} to remove every key"), "{text}");
+
+    // An explicit {} is how every key goes.
+    close_secret_editor(&mut app, &path, "stringData: {}\n");
+    assert_eq!(
+        app.confirm_label,
+        "Update secret creds in default: remove cert, token?"
+    );
+}
+
+#[tokio::test]
+async fn decoded_secret_edit_reopens_a_file_that_is_not_utf8() {
+    let (mut app, _rx) = decoded_secret_app();
+    let path = open_secret_editor(&mut app);
+    std::fs::write(&path, b"stringData:\n  token: \xff\n").unwrap();
+    close_secret_editor(&mut app, &path, "");
+    assert!(matches!(app.pending.take(), Some(Suspend::Shell(_))));
+    let text = std::fs::read_to_string(&path).unwrap();
+    assert!(
+        text.starts_with("# error: the file is not valid UTF-8"),
+        "{text}"
+    );
+    assert!(text.contains("token:"), "{text}");
+    close_secret_editor(&mut app, &path, "");
     assert!(!path.exists());
 }
 
@@ -13460,6 +13519,13 @@ async fn decoded_secret_edit_respects_read_only_and_guardrails() {
     close_secret_editor(&mut app, &path, "stringData:\n  token: rotated\n");
     assert_eq!(app.mode, Mode::Prompt);
     assert!(app.prompt_over_document());
+    assert!(
+        app.prompt_label
+            .starts_with("Update secret creds in default: change token · remove cert?")
+            && app.prompt_label.contains("type 'creds'"),
+        "{}",
+        app.prompt_label
+    );
     for c in "creds".chars() {
         app.handle_key(press(KeyCode::Char(c))).unwrap();
     }
