@@ -68,6 +68,10 @@ impl LogResume {
         self.skip = self.at_last;
     }
 
+    pub(super) fn last(&self) -> Option<Timestamp> {
+        self.last
+    }
+
     pub(super) fn since(&self) -> Option<Timestamp> {
         Timestamp::from_second(self.last?.as_second()).ok()
     }
@@ -76,9 +80,12 @@ impl LogResume {
 #[derive(Debug, PartialEq)]
 pub(super) enum StreamEnd {
     Gone,
+    /// A new pod took the name of a stream that reads only the old one.
+    Replaced,
     Finished(String),
     Restarted(i32),
-    Recreated,
+    /// A new pod took the name. Carries its creation time.
+    Recreated(Option<Timestamp>),
     Resume,
 }
 
@@ -99,11 +106,12 @@ pub(super) fn stream_end(
     let uid = pod.metadata.uid.clone();
     if known_uid.is_some() && uid.is_some() && *known_uid != uid {
         if pinned {
-            return StreamEnd::Gone;
+            return StreamEnd::Replaced;
         }
         *known_uid = uid;
         *known_restarts = None;
-        return StreamEnd::Recreated;
+        let created = pod.metadata.creation_timestamp.as_ref().map(|t| t.0);
+        return StreamEnd::Recreated(created);
     }
     if known_uid.is_none() {
         *known_uid = uid;
@@ -195,15 +203,20 @@ enum Pumped {
     Stale,
 }
 
+/// Which pod a stream reads. Log requests go by name, so a replacement pod
+/// with the same name answers them too.
+pub(super) enum Instance {
+    /// Whichever pod has the name, starting with this UID when known.
+    Named(Option<String>),
+    /// Only this pod. The stream ends when a replacement takes the name.
+    Only(String),
+}
+
 /// One container's log stream.
 pub(super) struct LogStream {
     pub(super) api: Api<Pod>,
     pub(super) pod: String,
-    /// The pod instance the stream starts on, when known.
-    pub(super) uid: Option<String>,
-    /// Set for pods a selector found: a replacement with the same name gets
-    /// its own stream, so this one ends.
-    pub(super) pinned: bool,
+    pub(super) instance: Instance,
     pub(super) params: LogParams,
     pub(super) prefix: String,
     pub(super) tx: Sender<Msg>,
@@ -234,8 +247,10 @@ impl LogStream {
 
     pub(super) async fn run(mut self) {
         let follow = self.params.follow && !self.params.previous;
-        let pinned = self.pinned;
-        let mut known_uid = self.uid.clone();
+        let (pinned, mut known_uid) = match &self.instance {
+            Instance::Named(uid) => (false, uid.clone()),
+            Instance::Only(uid) => (true, Some(uid.clone())),
+        };
         let mut known_restarts = None;
         let mut resume = LogResume::default();
         let mut delay = RECONNECT_MIN;
@@ -308,6 +323,10 @@ impl LogStream {
                         self.send("[sofka] pod deleted; stream ended".into()).await;
                         return;
                     }
+                    StreamEnd::Replaced => {
+                        self.send("[sofka] pod replaced; stream ended".into()).await;
+                        return;
+                    }
                     StreamEnd::Finished(how) => {
                         self.send(format!("[sofka] {how}; stream ended")).await;
                         return;
@@ -323,15 +342,23 @@ impl LogStream {
                         }
                         delay = RECONNECT_MIN;
                     }
-                    StreamEnd::Recreated => {
+                    StreamEnd::Recreated(created) => {
                         if !self.send("[sofka] pod recreated".into()).await {
                             return;
                         }
-                        // The new instance has its own log, read from the start.
-                        resume = LogResume::default();
-                        self.params.tail_lines = None;
-                        self.params.since_seconds = None;
-                        self.params.since_time = None;
+                        // Read the new pod from its start, unless the lines
+                        // shown already came from it: a replacement that
+                        // landed before the first request answered that one.
+                        let seen = matches!(
+                            (resume.last(), created),
+                            (Some(last), Some(created)) if last >= created
+                        );
+                        if !seen {
+                            resume = LogResume::default();
+                            self.params.tail_lines = None;
+                            self.params.since_seconds = None;
+                            self.params.since_time = None;
+                        }
                         delay = RECONNECT_MIN;
                     }
                     StreamEnd::Resume => {}
@@ -644,8 +671,10 @@ impl SelectorLogs {
             let stream = LogStream {
                 api: Api::namespaced(self.client.clone(), &ns),
                 pod: name.clone(),
-                uid: pod.metadata.uid.clone(),
-                pinned: true,
+                instance: match &pod.metadata.uid {
+                    Some(uid) => Instance::Only(uid.clone()),
+                    None => Instance::Named(None),
+                },
                 params: LogParams {
                     follow: true,
                     container: Some(container),
@@ -721,10 +750,13 @@ mod tests {
                 "containerStatuses": [{"name": "app", "restartCount": 0, "image": "", "imageID": "", "ready": true}]}}));
         assert_eq!(
             check(Some(&running), true, &mut Some("1".into())),
-            StreamEnd::Gone
+            StreamEnd::Replaced
         );
         let mut uid = Some("1".into());
-        assert_eq!(check(Some(&running), false, &mut uid), StreamEnd::Recreated);
+        assert_eq!(
+            check(Some(&running), false, &mut uid),
+            StreamEnd::Recreated(None)
+        );
         assert_eq!(uid.as_deref(), Some("2"));
         assert_eq!(check(Some(&running), false, &mut uid), StreamEnd::Resume);
 

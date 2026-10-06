@@ -557,16 +557,21 @@ impl App {
                     containers,
                 } in pods
                 {
+                    // The marked set is fixed, so a replacement is not followed.
+                    let instance = || match &uid {
+                        Some(uid) => log_follow::Instance::Only(uid.clone()),
+                        None => log_follow::Instance::Named(None),
+                    };
                     if containers.is_empty() {
                         let prefix = format!("[{ns}/{name}] ");
-                        self.spawn_one_log(ns, name, uid, None, prefix, false);
+                        self.spawn_one_log(ns, name, instance(), None, prefix, false);
                     } else {
                         for c in containers {
                             let prefix = format!("[{ns}/{name}:{c}] ");
                             self.spawn_one_log(
                                 ns.clone(),
                                 name.clone(),
-                                uid.clone(),
+                                instance(),
                                 Some(c),
                                 prefix,
                                 false,
@@ -583,7 +588,8 @@ impl App {
             }) => {
                 if containers.is_empty() {
                     // Unknown container set (e.g. from xray) — stream the default.
-                    self.spawn_one_log(ns, name, uid, None, String::new(), false);
+                    let instance = log_follow::Instance::Named(uid);
+                    self.spawn_one_log(ns, name, instance, None, String::new(), false);
                 } else {
                     let multi = containers.len() > 1;
                     for c in containers {
@@ -595,7 +601,7 @@ impl App {
                         self.spawn_one_log(
                             ns.clone(),
                             name.clone(),
-                            uid.clone(),
+                            log_follow::Instance::Named(uid.clone()),
                             Some(c),
                             prefix,
                             false,
@@ -609,7 +615,14 @@ impl App {
                 pod,
                 container,
                 previous,
-            }) => self.spawn_one_log(ns, pod, None, container, String::new(), previous),
+            }) => self.spawn_one_log(
+                ns,
+                pod,
+                log_follow::Instance::Named(None),
+                container,
+                String::new(),
+                previous,
+            ),
             Some(LogSource::Provider { request }) => self.spawn_provider_logs(request),
             None => {}
         }
@@ -692,7 +705,7 @@ impl App {
         &mut self,
         ns: String,
         pod: String,
-        uid: Option<String>,
+        instance: log_follow::Instance,
         container: Option<String>,
         prefix: String,
         previous: bool,
@@ -712,8 +725,7 @@ impl App {
         let stream = log_follow::LogStream {
             api: Api::namespaced(client, &ns),
             pod,
-            uid,
-            pinned: false,
+            instance,
             params: LogParams {
                 follow: !previous,
                 previous,

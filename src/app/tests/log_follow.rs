@@ -459,3 +459,64 @@ async fn a_refused_pod_watch_keeps_existing_streams_and_stops_asking() {
         .count();
     assert_eq!(watches, 1);
 }
+
+#[tokio::test]
+async fn a_marked_pod_that_is_replaced_stops_streaming() {
+    let (mut app, mut rx) = pod_logs_app();
+    app.handle_key(press(KeyCode::Char(' '))).unwrap();
+    let requests = serve(
+        &mut app,
+        Arc::new(|path, _query, _nth| {
+            if path.ends_with("/log") {
+                (200, closed_body("2026-10-06T10:00:00Z marked\n"))
+            } else {
+                (200, closed_body(pod_json("web", "u2", 0).to_string()))
+            }
+        }),
+    );
+    app.handle_key(press(KeyCode::Char('l'))).unwrap();
+    wait_for(&mut app, &mut rx, "pod replaced").await;
+
+    assert_eq!(
+        app.filtered_log_text(),
+        "[default/web:app] marked\n[default/web:app] [sofka] pod replaced; stream ended"
+    );
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    assert_eq!(log_queries(&requests).len(), 1);
+}
+
+#[tokio::test]
+async fn a_replacement_read_by_the_first_request_is_not_shown_twice() {
+    let (mut app, mut rx) = pod_logs_app();
+    let requests = serve(
+        &mut app,
+        Arc::new(|path, _query, nth| {
+            if path.ends_with("/log") {
+                if nth == 0 {
+                    (200, closed_body("2026-10-06T10:00:05Z first\n"))
+                } else {
+                    (
+                        200,
+                        open_body("2026-10-06T10:00:05Z first\n2026-10-06T10:00:06Z second\n"),
+                    )
+                }
+            } else {
+                let mut replacement = pod_json("web", "u2", 0);
+                replacement["metadata"]["creationTimestamp"] = json!("2026-10-06T10:00:00Z");
+                (200, closed_body(replacement.to_string()))
+            }
+        }),
+    );
+    app.handle_key(press(KeyCode::Char('l'))).unwrap();
+    wait_for(&mut app, &mut rx, "second").await;
+
+    assert_eq!(
+        app.filtered_log_text(),
+        "first\n[sofka] pod recreated\nsecond"
+    );
+    let queries = log_queries(&requests);
+    assert_eq!(
+        queries[1].get("sinceTime").map(String::as_str),
+        Some("2026-10-06T10:00:05Z")
+    );
+}
