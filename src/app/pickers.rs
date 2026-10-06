@@ -51,16 +51,6 @@ impl App {
         });
     }
 
-    /// Warm the namespace cache when the command palette opens, so `:<kind>
-    /// <ns>` can offer completions without waiting for the switcher popup. A
-    /// no-op once real namespaces are cached (the `<all>` sentinel doesn't
-    /// count).
-    pub(super) fn ensure_namespace_cache(&mut self) {
-        if !self.ns_list.iter().any(|n| n != "<all>") {
-            self.spawn_namespace_fetch();
-        }
-    }
-
     /// Namespaces for the switcher: `<all>` is always pinned first. When
     /// browsing (no filter), configured favourites lead, then session recents,
     /// then the remaining namespaces alphabetically. With a filter active,

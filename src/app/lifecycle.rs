@@ -1999,6 +1999,9 @@ impl App {
                     .and_then(|selected| names.iter().position(|n| n == selected))
                     .unwrap_or_else(|| keep.min(names.len().saturating_sub(1)));
                 self.ns_state.select(Some(index));
+                if self.mode == Mode::Command && !self.cmd_navigated {
+                    self.update_suggestions();
+                }
             }
             Msg::Contexts { generation, list } if generation == self.generation => {
                 self.all_contexts = list.clone();

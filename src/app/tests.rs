@@ -11269,6 +11269,73 @@ async fn namespace_switcher_known_rows_do_not_block_palette_fetch_retry() {
 }
 
 #[tokio::test]
+async fn palette_refetches_namespaces_created_after_launch() {
+    let (mut app, mut rx) = test_app();
+    let (requests, mut request_rx) = mpsc::unbounded_channel();
+    let mut attempts = 0;
+    app.cluster.client = kube::Client::new(
+        tower::service_fn(move |request: http::Request<kube::client::Body>| {
+            assert_eq!(request.uri().path(), "/api/v1/namespaces");
+            attempts += 1;
+            requests.send(attempts).unwrap();
+            let mut items = vec![json!({"metadata": {"name": "default"}})];
+            if attempts > 1 {
+                items.push(json!({"metadata": {"name": "fresh"}}));
+            }
+            let body = json!({
+                "kind": "NamespaceList", "apiVersion": "v1", "metadata": {},
+                "items": items
+            });
+            async move {
+                Ok::<_, std::convert::Infallible>(
+                    http::Response::builder()
+                        .status(200)
+                        .body(http_body_util::Full::new(hyper::body::Bytes::from(
+                            body.to_string(),
+                        )))
+                        .unwrap(),
+                )
+            }
+        }),
+        "default",
+    );
+
+    app.handle_key(press(KeyCode::Char(':'))).unwrap();
+    let message = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    app.handle_msg(message);
+    assert_eq!(app.ns_list, ["<all>", "default"]);
+    app.handle_key(press(KeyCode::Esc)).unwrap();
+
+    for c in ":pods fre".chars() {
+        app.handle_key(press(KeyCode::Char(c))).unwrap();
+    }
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(2), request_rx.recv())
+            .await
+            .unwrap(),
+        Some(1)
+    );
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(2), request_rx.recv())
+            .await
+            .unwrap(),
+        Some(2)
+    );
+    let message = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    app.handle_msg(message);
+    assert_eq!(app.ns_list, ["<all>", "default", "fresh"]);
+    let suggestion = app.cmd_suggestions.first().expect("namespace suggestion");
+    assert_eq!(suggestion.kind, SuggestKind::Namespace);
+    assert_eq!(suggestion.label, "fresh");
+}
+
+#[tokio::test]
 async fn namespace_switcher_selects_current_and_preserves_cursor_on_refresh() {
     let (mut app, _rx) = test_app();
     app.namespace = "prod".into();

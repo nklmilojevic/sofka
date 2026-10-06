@@ -807,7 +807,7 @@ impl App {
         self.palette_return = self.mode;
         self.mode = Mode::Command;
         self.command.clear();
-        self.ensure_namespace_cache();
+        self.spawn_namespace_fetch();
         self.update_suggestions();
     }
 
