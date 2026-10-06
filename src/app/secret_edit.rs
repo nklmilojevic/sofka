@@ -14,14 +14,21 @@ use std::path::{Path, PathBuf};
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
+use fs2::FileExt as _;
 
 use super::*;
 
-/// Every edit directory starts with this, followed by the owning process id.
+/// Every edit directory starts with this.
 const DIR_PREFIX: &str = "sofka-secret-";
 
-/// An edit directory older than this is abandoned whoever owns it.
-const ABANDONED_AFTER: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
+/// The file in an edit directory that its owner holds an exclusive lock on
+/// for as long as the edit is open. The lock goes away with the process, so
+/// a lock anyone can take means the edit is abandoned.
+const LOCK_FILE: &str = "owner.lock";
+
+/// An edit directory with no lock file yet is still being created, unless it
+/// is older than this.
+const UNLOCKED_GRACE: std::time::Duration = std::time::Duration::from_secs(60 * 60);
 
 const HEADER: &str = "\
 # Values are plain text and are base64-encoded on save. Only changed keys
@@ -31,6 +38,7 @@ const HEADER: &str = "\
 /// A decoded Secret open in the editor.
 pub(super) struct SecretEdit {
     dir: PathBuf,
+    lock: Option<std::fs::File>,
     path: PathBuf,
     kind: Kind,
     object: DynamicObject,
@@ -41,6 +49,8 @@ pub(super) struct SecretEdit {
 
 impl Drop for SecretEdit {
     fn drop(&mut self) {
+        // Windows cannot remove a directory holding an open file.
+        drop(self.lock.take());
         let _ = std::fs::remove_dir_all(&self.dir);
     }
 }
@@ -58,7 +68,27 @@ impl SecretChanges {
         self.changed.is_empty() && self.added.is_empty() && self.removed.is_empty()
     }
 
+    /// The keys by name, or by count when the names would not fit on a
+    /// dialog or prompt.
     fn summary(&self) -> String {
+        const MAX: usize = 80;
+        let names = self.named_summary();
+        if names.chars().count() <= MAX {
+            return names;
+        }
+        [
+            ("change", self.changed.len()),
+            ("add", self.added.len()),
+            ("remove", self.removed.len()),
+        ]
+        .into_iter()
+        .filter(|(_, n)| *n > 0)
+        .map(|(verb, n)| format!("{verb} {n} {}", if n == 1 { "key" } else { "keys" }))
+        .collect::<Vec<_>>()
+        .join(" · ")
+    }
+
+    fn named_summary(&self) -> String {
         [
             ("change", &self.changed),
             ("add", &self.added),
@@ -275,7 +305,7 @@ fn create_private(path: &Path, contents: &str) -> std::io::Result<()> {
 /// Create a directory only this user can read, holding one file with
 /// `contents`. The file name is fixed: a Secret name can be longer than a
 /// file name may be, or reserved on Windows (`con`).
-fn private_file(contents: &str) -> std::io::Result<(PathBuf, PathBuf)> {
+fn private_file(contents: &str) -> std::io::Result<(PathBuf, std::fs::File, PathBuf)> {
     static NEXT: AtomicU64 = AtomicU64::new(0);
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -290,61 +320,61 @@ fn private_file(contents: &str) -> std::io::Result<(PathBuf, PathBuf)> {
     #[cfg(unix)]
     std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
     builder.create(&dir)?;
-    let path = dir.join("secret.yaml");
-    if let Err(e) = create_private(&path, contents) {
-        let _ = std::fs::remove_dir_all(&dir);
-        return Err(e);
+    let created = (|| {
+        let lock = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(dir.join(LOCK_FILE))?;
+        lock.try_lock_exclusive()?;
+        let path = dir.join("secret.yaml");
+        create_private(&path, contents)?;
+        Ok((lock, path))
+    })();
+    match created {
+        Ok((lock, path)) => Ok((dir, lock, path)),
+        Err(e) => {
+            let _ = std::fs::remove_dir_all(&dir);
+            Err(e)
+        }
     }
-    Ok((dir, path))
 }
 
-/// Whether the process that created an edit directory is gone. Only a
-/// definite "no such process" counts; anything else keeps the directory.
-#[cfg(unix)]
-fn process_gone(pid: u32) -> bool {
-    let Ok(pid) = libc::pid_t::try_from(pid) else {
-        return false;
-    };
-    // SAFETY: signal 0 sends nothing; it only checks that the process exists.
-    let alive = unsafe { libc::kill(pid, 0) } == 0;
-    !alive && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
-}
-
-#[cfg(not(unix))]
-fn process_gone(_pid: u32) -> bool {
-    false
+/// Whether nobody holds the edit directory `dir` open. Taking its lock
+/// proves the owner is gone; the lock is dropped again before returning.
+fn abandoned(dir: &Path) -> bool {
+    match std::fs::OpenOptions::new()
+        .write(true)
+        .open(dir.join(LOCK_FILE))
+    {
+        Ok(lock) => lock.try_lock_exclusive().is_ok(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => std::fs::metadata(dir)
+            .and_then(|meta| meta.modified())
+            .ok()
+            .and_then(|t| t.elapsed().ok())
+            .is_some_and(|age| age > UNLOCKED_GRACE),
+        Err(_) => false,
+    }
 }
 
 /// Remove edit directories in `root` left by a sofka that crashed or was
-/// killed with the editor open: their process is gone, or they are older than
-/// [`ABANDONED_AFTER`]. Another user's directories cannot be removed and are
-/// skipped.
+/// killed with the editor open. An edit whose owner still runs keeps its
+/// lock and is left alone however old it is. Another user's directories
+/// cannot be opened and are skipped.
 pub(super) fn sweep_abandoned_in(root: &Path) {
     let Ok(entries) = std::fs::read_dir(root) else {
         return;
     };
-    let me = std::process::id();
     for entry in entries.flatten() {
-        let name = entry.file_name();
-        let Some(rest) = name.to_str().and_then(|n| n.strip_prefix(DIR_PREFIX)) else {
-            continue;
-        };
-        let Some(pid) = rest.split('-').next().and_then(|p| p.parse::<u32>().ok()) else {
-            continue;
-        };
-        let Ok(meta) = entry.metadata() else {
-            continue;
-        };
-        if !meta.is_dir() {
+        let is_edit = entry
+            .file_name()
+            .to_str()
+            .is_some_and(|name| name.starts_with(DIR_PREFIX));
+        if !is_edit || !entry.file_type().is_ok_and(|t| t.is_dir()) {
             continue;
         }
-        let stale = meta
-            .modified()
-            .ok()
-            .and_then(|t| t.elapsed().ok())
-            .is_some_and(|age| age > ABANDONED_AFTER);
-        if stale || (pid != me && process_gone(pid)) {
-            let _ = std::fs::remove_dir_all(entry.path());
+        let dir = entry.path();
+        if abandoned(&dir) {
+            let _ = std::fs::remove_dir_all(dir);
         }
     }
 }
@@ -390,7 +420,7 @@ impl App {
                 return;
             }
         };
-        let (dir, path) = match private_file(&written) {
+        let (dir, lock, path) = match private_file(&written) {
             Ok(paths) => paths,
             Err(e) => {
                 self.flash_warn(&format!("cannot edit: temp file: {e}"));
@@ -400,6 +430,7 @@ impl App {
         self.pending = Some(Suspend::Shell(editor_argv(configured_editor(), &path)));
         self.secret_edit = Some(SecretEdit {
             dir,
+            lock: Some(lock),
             path,
             kind,
             object: fresh,
@@ -715,7 +746,7 @@ mod tests {
     #[test]
     fn temp_file_is_private_to_the_user() {
         use std::os::unix::fs::PermissionsExt;
-        let (dir, path) = private_file("stringData: {}\n").unwrap();
+        let (dir, _lock, path) = private_file("stringData: {}\n").unwrap();
         let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode(&dir), 0o700);
         assert_eq!(mode(&path), 0o600);
@@ -723,9 +754,8 @@ mod tests {
         std::fs::remove_dir_all(dir).unwrap();
     }
 
-    #[cfg(unix)]
     #[test]
-    fn sweep_removes_edits_whose_process_is_gone() {
+    fn sweep_removes_only_edits_nobody_holds() {
         let root = std::env::temp_dir().join(format!(
             "sofka-sweep-test-{}-{}",
             std::process::id(),
@@ -735,18 +765,48 @@ mod tests {
                 .as_nanos()
         ));
         std::fs::create_dir(&root).unwrap();
-        // A pid above the kernel's limit can never be running.
-        let gone = root.join(format!("{DIR_PREFIX}2147483646-1-0"));
-        let live = root.join(format!("{DIR_PREFIX}{}-1-0", std::process::id()));
+        let edit = |name: &str| {
+            let dir = root.join(format!("{DIR_PREFIX}{name}"));
+            std::fs::create_dir(&dir).unwrap();
+            std::fs::write(dir.join(LOCK_FILE), "").unwrap();
+            std::fs::write(dir.join("secret.yaml"), "stringData: {}\n").unwrap();
+            dir
+        };
+        let gone = edit("gone");
+        let live = edit("live");
+        let lock = std::fs::OpenOptions::new()
+            .write(true)
+            .open(live.join(LOCK_FILE))
+            .unwrap();
+        lock.try_lock_exclusive().unwrap();
+        // Being created right now: no lock file yet.
+        let starting = root.join(format!("{DIR_PREFIX}starting"));
+        std::fs::create_dir(&starting).unwrap();
         let other = root.join("unrelated");
-        for dir in [&gone, &live, &other] {
-            std::fs::create_dir(dir).unwrap();
-        }
-        std::fs::write(gone.join("secret.yaml"), "stringData: {}\n").unwrap();
+        std::fs::create_dir(&other).unwrap();
+
         sweep_abandoned_in(&root);
         assert!(!gone.exists());
-        assert!(live.exists());
+        assert!(
+            live.join("secret.yaml").exists(),
+            "a held edit is never swept"
+        );
+        assert!(starting.exists());
         assert!(other.exists());
+
+        drop(lock);
+        sweep_abandoned_in(&root);
+        assert!(!live.exists());
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn long_summaries_fall_back_to_counts() {
+        let changes = SecretChanges {
+            changed: (0..20).map(|i| format!("key-number-{i}")).collect(),
+            added: vec!["new".into()],
+            removed: vec![],
+        };
+        assert_eq!(changes.summary(), "change 20 keys · add 1 key");
     }
 }
