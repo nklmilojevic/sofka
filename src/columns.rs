@@ -348,7 +348,7 @@ const HELM_HISTORY_COLUMNS: &[Column] = &[
 
 /// Every revision of one workload — like `kubectl rollout history`. Backed
 /// by ReplicaSets or ControllerRevisions (see `crate::rollout`). STATUS is
-/// filled per frame from the other revisions: see `App::live_cell`.
+/// filled in by the app from the other revisions.
 const ROLLOUT_HISTORY_COLUMNS: &[Column] = &[
     column("REVISION", col_rollout_revision),
     status_column("STATUS", col_rollout_status),
@@ -1638,8 +1638,8 @@ fn col_rollout_revision<'a>(ctx: &CellContext<'a>) -> Cow<'a, str> {
     )
 }
 
-/// The widest value, so the column is sized for it; the table shows the
-/// real one from `App::live_cell`.
+/// A placeholder: the real value depends on the other revisions, so the app
+/// fills it in when it renders the row.
 fn col_rollout_status<'a>(_ctx: &CellContext<'a>) -> Cow<'a, str> {
     Cow::Borrowed("superseded")
 }

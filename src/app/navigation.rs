@@ -1,7 +1,7 @@
 use super::*;
 
 impl App {
-    pub(super) fn retain_filter_selectors(&mut self) {
+    fn retain_filter_selectors(&mut self) {
         let parsed = self.parsed_filter();
         let mut selectors = Vec::new();
         if let Some(labels) = parsed.labels() {

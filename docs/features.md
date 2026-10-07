@@ -714,14 +714,19 @@ include those conditions. Row filters can search the route paths.
 - **Rollout history and rollback** (`:rollout-history`) - list the revisions of
   the selected Deployment, StatefulSet, or DaemonSet, newest first, like
   `kubectl rollout history`. Deployment revisions come from their ReplicaSets,
-  StatefulSet and DaemonSet revisions from their ControllerRevisions. Each row
-  shows the revision, `deployed` or `superseded`, the images, and the
-  `kubernetes.io/change-cause` annotation. `⏎` diffs the current pod template
-  against the selected revision's. `r` rolls the workload back to that revision
-  after confirmation, like `kubectl rollout undo --to-revision`. sofka reads the
-  workload first and refuses a paused Deployment or a template that already
-  matches. When Flux or Argo CD manages the workload, the confirmation warns
-  that the next sync reverts the rollback. The `rollback` guardrail applies.
+  StatefulSet and DaemonSet revisions from their ControllerRevisions. Only
+  revisions whose owner reference carries the workload's UID are listed, and
+  the workload's table filter is not carried over. Each row shows the revision,
+  `deployed` or `superseded`, the images, and the `kubernetes.io/change-cause`
+  annotation. `⏎` reads the live workload and diffs its pod template against the
+  selected revision's. `r` rolls the workload back to that revision after
+  confirmation, like `kubectl rollout undo --to-revision`. sofka reads the
+  workload first and refuses a paused Deployment, a template that already
+  matches, or a workload recreated since the history was opened; the patch
+  carries the read's resourceVersion, so a change in between fails. When Flux or
+  Argo CD manages the workload, the confirmation warns that the next sync
+  reverts the rollback. The `rollback` guardrail applies. Delete, edit, and
+  scale are refused in this view: revisions belong to their workload.
 - **Scale discovered resources** (`s`) - scale built-in or custom resources when
   API discovery lists a `scale` subresource with PATCH support. Changes use
   `/scale`, including when a CRD stores replicas at a custom path. Marked rows

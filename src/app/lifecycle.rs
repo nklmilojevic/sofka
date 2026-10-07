@@ -1792,6 +1792,27 @@ impl App {
                     None => self.clear_claimed_status(claim),
                 }
             }
+            Msg::Diff {
+                generation,
+                claim,
+                title,
+                lines,
+                warn,
+            } if generation == self.generation => {
+                self.stop_resource_refresh();
+                self.clear_document_source();
+                self.detail = Scrollable {
+                    wrap: self.detail.wrap,
+                    title,
+                    lines: lines.into(),
+                    ..Default::default()
+                };
+                self.mode = Mode::Diff;
+                match warn {
+                    Some(w) => self.set_claimed_status(claim, w, false),
+                    None => self.clear_claimed_status(claim),
+                }
+            }
             Msg::ResourceRefresh { generation, result }
                 if generation == self.refresh_generation
                     && (self.refresh_task.is_some()

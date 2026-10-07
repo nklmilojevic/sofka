@@ -19,7 +19,7 @@ impl App {
     // ----- actions -------------------------------------------------------
 
     pub(super) fn request_delete(&mut self, force: bool) {
-        if self.deny_readonly() {
+        if self.deny_readonly() || self.deny_revision_mutation() {
             return;
         }
         // A Helm release row's underlying object is its storage Secret —
@@ -676,7 +676,7 @@ impl App {
     }
 
     pub(super) fn request_edit(&mut self) {
-        if self.deny_readonly() {
+        if self.deny_readonly() || self.deny_revision_mutation() {
             return;
         }
         let Some(obj) = self.selected_ref() else {
@@ -692,7 +692,11 @@ impl App {
     /// `kubectl edit` goes by name, so the object is read first to make sure
     /// it was not replaced under the same name while the document was open.
     pub(super) fn request_document_edit(&mut self) {
-        if !self.document_editable() || self.deny_readonly() || self.document_edit_task.is_some() {
+        if !self.document_editable()
+            || self.deny_readonly()
+            || self.deny_revision_mutation()
+            || self.document_edit_task.is_some()
+        {
             return;
         }
         let Some(source) = self.document_source.clone() else {
@@ -1124,7 +1128,7 @@ impl App {
     }
 
     pub(super) fn request_scale(&mut self) {
-        if self.deny_readonly() {
+        if self.deny_readonly() || self.deny_revision_mutation() {
             return;
         }
         if !self.kind.as_ref().is_some_and(|kind| kind.scalable) {

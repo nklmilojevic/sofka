@@ -207,16 +207,27 @@ impl App {
     ) -> &'c CellCacheEntry {
         use std::collections::hash_map::Entry;
         let rv = o.metadata.resource_version.as_deref();
+        let rollout_current = (self.kind_plural == crate::rollout::VIEW)
+            .then(|| self.rollout_current())
+            .flatten();
         let fresh = |e: &CellCacheEntry| {
-            e.plural == self.kind_plural && e.resource_version.as_deref() == rv
+            e.plural == self.kind_plural
+                && e.resource_version.as_deref() == rv
+                && e.rollout_current == rollout_current
         };
         let slot = match cells.entry(key.clone()) {
             Entry::Occupied(e) if fresh(e.get()) => return e.into_mut(),
             slot => slot,
         };
-        let (rendered, status_idx, helm_updated) =
+        let (mut rendered, status_idx, helm_updated) =
             self.spec
                 .cells_with_helm_time(o, now, self.server_table.cells(o));
+        // Whether a revision is the one in effect depends on its siblings.
+        if self.kind_plural == crate::rollout::VIEW
+            && let Some(cell) = status_idx.and_then(|i| rendered.get_mut(i))
+        {
+            *cell = crate::rollout::status(o, rollout_current).into();
+        }
         let cell_masks: Vec<u64> = rendered.iter().map(|c| subseq_mask(c)).collect();
         let row_mask = cell_masks.iter().fold(0u64, |a, m| a | m);
         let built = CellCacheEntry {
@@ -225,6 +236,7 @@ impl App {
             cells: rendered,
             status_idx,
             helm_updated,
+            rollout_current,
             cell_masks,
             row_mask,
         };
@@ -524,8 +536,11 @@ impl App {
         // CPU/MEM (and the node capacity percentages and pod counts) sort by
         // live poll snapshots, which move without a new resourceVersion, so
         // those keys can never be cached.
-        let volatile_sort =
-            sort_header.is_some_and(|h| self.spec.metric(h).is_some()) || time_dependent_sort;
+        // Rollout history STATUS depends on the other revisions, not on the
+        // row's own resourceVersion.
+        let volatile_sort = sort_header.is_some_and(|h| self.spec.metric(h).is_some())
+            || time_dependent_sort
+            || self.kind_plural == crate::rollout::VIEW;
         // The aggregated Helm release list (`helm list` semantics) shows only
         // the latest revision per release; `helmhistory` (one release's full
         // history) shows every revision, so it skips this.
@@ -569,9 +584,7 @@ impl App {
             {
                 continue;
             }
-            if let Some(owner) = &self.owner
-                && !owner.owns(o)
-            {
+            if !self.in_owner_scope(o) {
                 continue;
             }
             if !self.matches_filter_cached(o, k, &parsed, cells, now) {
@@ -1020,12 +1033,6 @@ impl App {
     }
 
     pub(crate) fn live_cell(&self, obj: &DynamicObject, idx: usize) -> Option<String> {
-        // Whether a revision is the one in effect depends on its siblings, so
-        // it can't live in the per-object cell cache.
-        if self.kind_plural == crate::rollout::VIEW && self.spec.header_index("STATUS") == Some(idx)
-        {
-            return Some(crate::rollout::status(obj, self.rollout_current()).into());
-        }
         let metric = self.spec.metric_at(idx)?;
         if metric.trend() {
             return Some(self.node_trend_cell(obj, metric.cpu()));
@@ -1118,6 +1125,9 @@ impl App {
             }
             "REVISION" if self.kind_plural == crate::rollout::VIEW => {
                 SortKey::Num(crate::rollout::revision(o).unwrap_or(0) as f64)
+            }
+            "STATUS" if self.kind_plural == crate::rollout::VIEW => {
+                SortKey::Text(Rc::from(crate::rollout::status(o, self.rollout_current())))
             }
             _ => match self.spec.sort_value(o, header, now) {
                 Some(v) => SortKey::from(v),

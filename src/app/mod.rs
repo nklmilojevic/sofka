@@ -371,7 +371,7 @@ enum ConfirmAction {
         kind: Kind,
         workload: crate::rollout::Workload,
         name: String,
-        ns: String,
+        uid: Option<String>,
         revision: i64,
         rev: Box<DynamicObject>,
     },
@@ -1740,6 +1740,9 @@ struct CellCacheEntry {
     cells: Vec<String>,
     status_idx: Option<usize>,
     helm_updated: Option<i64>,
+    /// The revision in effect when a rollout history row was rendered; its
+    /// STATUS cell is stale once that changes.
+    rollout_current: Option<i64>,
     /// Per-cell character-presence masks, and their union across the row.
     /// See [`subseq_mask`]: a cheap necessary condition for a fuzzy
     /// subsequence match, used to skip cells (and whole rows) without paying
@@ -1837,6 +1840,22 @@ pub struct OwnerScope {
 }
 
 impl OwnerScope {
+    /// Like [`Self::owns`], but only through an owner reference carrying this
+    /// scope's UID: no name-prefix fallback for orphans.
+    pub fn owns_strictly(&self, obj: &DynamicObject) -> bool {
+        let Some(uid) = &self.uid else {
+            return false;
+        };
+        obj.metadata
+            .owner_references
+            .as_deref()
+            .unwrap_or_default()
+            .iter()
+            .any(|r| {
+                r.kind.eq_ignore_ascii_case(&self.kind) && r.name == self.name && r.uid == *uid
+            })
+    }
+
     pub fn owns(&self, obj: &DynamicObject) -> bool {
         let refs = obj.metadata.owner_references.as_deref().unwrap_or_default();
         if refs.is_empty() {
@@ -1897,6 +1916,9 @@ pub struct App {
     /// The Flux or Argo CD owner of the workload whose rollout history is
     /// open, named in the rollback confirmation.
     rollout_managed: Option<String>,
+    /// The revision in effect, keyed by the watch generation and store
+    /// version it was computed for.
+    rollout_current_cache: std::cell::Cell<Option<(u64, u64, Option<i64>)>>,
     /// Drill-down breadcrumb shown in the header, e.g. "deploy/foo".
     pub scope_label: Option<String>,
 
@@ -2482,6 +2504,7 @@ impl App {
             fields: None,
             owner: None,
             rollout_managed: None,
+            rollout_current_cache: std::cell::Cell::new(None),
             scope_label: None,
             generation: 0,
             gen_flag: Arc::new(AtomicU64::new(0)),

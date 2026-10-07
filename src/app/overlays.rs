@@ -155,11 +155,11 @@ impl App {
                 kind,
                 workload,
                 name,
-                ns,
+                uid,
                 revision,
                 rev,
             } => {
-                self.do_rollout_undo(kind, workload, name, ns, revision, *rev);
+                self.do_rollout_undo(kind, workload, name, uid, revision, *rev);
             }
             ConfirmAction::ArgocdSyncPrune { targets } => {
                 self.do_argocd_sync(targets, true);

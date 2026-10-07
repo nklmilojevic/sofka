@@ -237,6 +237,15 @@ pub enum Msg {
         lines: Vec<String>,
         warn: Option<String>,
     },
+    /// Like [`Msg::Detail`], but the lines are a unified diff and open in the
+    /// diff view.
+    Diff {
+        generation: u64,
+        claim: StatusClaim,
+        title: String,
+        lines: Vec<String>,
+        warn: Option<String>,
+    },
     ResourceRefresh {
         generation: u64,
         result: Result<RefreshContent, String>,
