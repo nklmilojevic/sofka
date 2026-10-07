@@ -57,4 +57,5 @@ pub mod theme;
 pub mod thresholds;
 pub mod timeline;
 pub mod ui;
+pub mod update;
 pub mod views;

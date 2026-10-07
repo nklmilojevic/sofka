@@ -26,6 +26,7 @@ mod rollout;
 mod scale;
 mod server_table;
 mod synchronized_output;
+mod update;
 mod watch_status;
 
 fn obj(v: serde_json::Value) -> DynamicObject {
@@ -44,6 +45,7 @@ fn test_app() -> (App, Receiver<Msg>) {
             .stderr(std::process::Stdio::null())
             .spawn()
     };
+    app.update_fetcher = |_force| Box::pin(async { Err("no network in tests".to_string()) });
     (app, rx)
 }
 

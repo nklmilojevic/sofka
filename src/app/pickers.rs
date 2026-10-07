@@ -937,6 +937,7 @@ impl App {
         self.remember_sort = resolved.config.remember_sort.unwrap_or(true);
         self.hide_header = resolved.config.hide_header;
         self.terminal_title = resolved.config.terminal_title.unwrap_or(true);
+        self.update_check = resolved.config.update_check.unwrap_or(true);
         self.plugins = resolved.config.plugins;
         self.bookmarks = resolved.config.bookmarks;
         self.workspaces = resolved.config.workspaces;

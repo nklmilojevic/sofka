@@ -1494,6 +1494,7 @@ impl App {
             crate::config::mouse_scroll_lines(resolved.config.mouse_scroll_lines, &mut warnings);
         self.hide_header = resolved.config.hide_header;
         self.terminal_title = resolved.config.terminal_title.unwrap_or(true);
+        self.update_check = resolved.config.update_check.unwrap_or(true);
         self.plugins = resolved.config.plugins;
         self.bookmarks = resolved.config.bookmarks;
         self.workspaces = resolved.config.workspaces;

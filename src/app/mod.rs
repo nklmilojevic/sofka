@@ -275,6 +275,22 @@ impl Drop for PortForward {
 /// so the unit suite doesn't require `kubectl` on PATH.
 type PortForwardSpawner = fn(&[String]) -> std::io::Result<tokio::process::Child>;
 
+/// Looks up the latest release (`force` skips the daily cache). Overridable
+/// in tests so the unit suite never reaches GitHub.
+type UpdateFetcher = fn(
+    bool,
+) -> std::pin::Pin<
+    Box<dyn std::future::Future<Output = Result<crate::update::Release, String>> + Send>,
+>;
+
+fn default_update_fetcher(
+    force: bool,
+) -> std::pin::Pin<
+    Box<dyn std::future::Future<Output = Result<crate::update::Release, String>> + Send>,
+> {
+    Box::pin(crate::update::check(force))
+}
+
 fn default_pf_spawner(argv: &[String]) -> std::io::Result<tokio::process::Child> {
     tokio::process::Command::new(&argv[0])
         .args(&argv[1..])
@@ -716,6 +732,7 @@ enum PaletteAction {
     Snapshot,
     Snapshots,
     Info,
+    CheckUpdate,
     Fleet,
     Rightsize,
     PvcExplore,
@@ -866,6 +883,10 @@ const PALETTE_COMMANDS: &[PaletteCommand] = &[
     PaletteCommand {
         action: PaletteAction::Info,
         names: &["info", "diagnostics", "about"],
+    },
+    PaletteCommand {
+        action: PaletteAction::CheckUpdate,
+        names: &["check-update", "update-check"],
     },
     PaletteCommand {
         action: PaletteAction::Fleet,
@@ -2485,6 +2506,12 @@ pub struct App {
     /// Hide the header in normal and compact modes.
     pub hide_header: bool,
     pub terminal_title: bool,
+    /// Background update checks are allowed (`update_check`). Off until
+    /// startup reads the config, so tests never reach the network.
+    pub update_check: bool,
+    /// The latest release the last update check found.
+    pub latest_release: Option<crate::update::Release>,
+    update_fetcher: UpdateFetcher,
     /// Active column layout for the current view; rebuilt by
     /// [`App::refresh_view_spec`] whenever kind/views/wide change.
     spec: crate::columns::ViewSpec,
@@ -2802,6 +2829,9 @@ impl App {
             compact: false,
             hide_header: false,
             terminal_title: true,
+            update_check: false,
+            latest_release: None,
+            update_fetcher: default_update_fetcher,
             spec: crate::columns::build_spec("", "", None, None, false),
         }
     }
@@ -2910,6 +2940,7 @@ mod secret_edit;
 mod snapshot;
 mod timeline;
 mod transfer;
+mod update;
 mod workspaces;
 
 use helpers::*;

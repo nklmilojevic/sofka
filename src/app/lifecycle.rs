@@ -1181,6 +1181,7 @@ impl App {
             } if generation == self.generation => {
                 self.set_claimed_status(claim, message, err);
             }
+            Msg::UpdateCheck { claim, result } => self.finish_update_check(claim, result),
             Msg::Panic(error) => {
                 crate::log_error!("task.panic", error = error);
                 self.last_error = Some(error.clone());

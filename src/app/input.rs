@@ -816,6 +816,7 @@ impl App {
             PaletteAction::Snapshot => self.take_snapshot(""),
             PaletteAction::Snapshots => self.open_snapshots(),
             PaletteAction::Info => self.open_info(),
+            PaletteAction::CheckUpdate => self.start_update_check(true),
             PaletteAction::Fleet => self.open_fleet(),
             PaletteAction::Rightsize => self.open_rightsize(),
             PaletteAction::PvcExplore => self.open_pvc_explore(),

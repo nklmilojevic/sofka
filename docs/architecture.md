@@ -40,6 +40,8 @@ diagnostics.rs Build stamp, state/log/snapshot/bundle directories, the
              sections `sofka info` and `:info` both render.
 applog.rs    Structured logging: levels, logfmt rendering, and a bounded queue
              feeding one writer thread so a stalled disk never stalls the UI.
+update.rs    Latest-release check, its daily cache, and the upgrade command
+             for the detected install method. Never installs anything.
 redact.rs    What counts as a credential, and how it is stripped from text.
              Shared by the log, the diagnostics reports, and `bundle.rs`.
 ```

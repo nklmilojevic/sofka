@@ -132,6 +132,7 @@ sofka plugin install ID      # install the latest compatible package
 sofka plugin update          # explicitly update all managed packages
 sofka plugin list            # offline installed-package inventory
 sofka import k9s             # convert your k9s config, plugins, hotkeys, and views
+sofka check-update           # check for a newer release and print the upgrade command
 ```
 
 Native describe is experimental and uses the standalone `deskribe` Rust library.

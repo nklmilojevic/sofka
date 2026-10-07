@@ -1018,7 +1018,7 @@ fn build_client(allow_http: bool) -> Result<HttpClient, String> {
     )
 }
 
-async fn get(url: &str, limit: usize) -> Result<Vec<u8>, String> {
+pub(crate) async fn get(url: &str, limit: usize) -> Result<Vec<u8>, String> {
     get_with(url, limit, METADATA_BUDGET, false).await
 }
 

@@ -1065,6 +1065,14 @@ pod is rejected; browse through a pod that already mounts the claim instead.
   stays visible in the main header.
   Identifiers, paths, and counts only, never credentials, tokens, or Secret
   values. See [Runtime diagnostics](debugging.md#runtime-diagnostics).
+- **Update notifications** (`:check-update`, or `sofka check-update`) - sofka
+  checks GitHub for a newer release once a day at startup. A newer release
+  appears in the header and on the status bar with the upgrade command for the
+  install method: Homebrew, Nix, Cargo, winget, or a download link for distro
+  packages and other installs. `:info` shows the latest known release and its
+  notes link. sofka never downloads or installs a release itself. Set
+  `update_check = false` to turn off the startup check. See
+  [Base options](configuration.md#base-options).
 - **Structured logging** (`[logging]`, or `SOFKA_LOG=debug`) - sofka's own
   session log as logfmt lines under the state directory, with every value
   redacted on the way in and writes off the UI thread. Off by default. See

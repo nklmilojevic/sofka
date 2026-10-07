@@ -479,6 +479,12 @@ pub enum Msg {
         /// still wants to read as a "no".
         err: bool,
     },
+    /// Result of an update check. `claim` is set for `:check-update`, which
+    /// reports every outcome; the startup check only reports a newer release.
+    UpdateCheck {
+        claim: Option<StatusClaim>,
+        result: Result<crate::update::Release, String>,
+    },
     /// A panic in a background task, reported by the process panic hook.
     /// Deliberately generation-free: it must surface no matter which view is
     /// current.

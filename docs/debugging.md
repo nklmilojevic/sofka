@@ -274,7 +274,7 @@ capture-and-review workflow.
 available from sofka 0.24.8. Run `sofka --version` and update older versions
 before collecting diagnostics for a bug report.
 
-`:info` shows the version and build, config sources, live context/cluster/API
+`:info` shows the version and build, the latest known release, config sources, live context/cluster/API
 server and Kubernetes revision, discovery and Metrics API status, watch error
 and reconnect counts, API request latency, the logging destination, and the
 state/log/snapshot/bundle directories. It also names the active skin and the

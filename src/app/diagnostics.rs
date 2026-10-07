@@ -14,6 +14,13 @@ impl App {
         let mut lines = crate::diagnostics::version_lines();
 
         lines.push(String::new());
+        lines.extend(crate::update::report_lines(
+            self.latest_release.as_ref(),
+            self.update_check,
+            crate::update::InstallMethod::current(),
+        ));
+
+        lines.push(String::new());
         lines.push("Cluster".into());
         lines.push(format!("  connected:   {}", self.cluster.connected));
         lines.push(format!(

@@ -520,13 +520,21 @@ const HEADER_INFO_MIN: u16 = 44;
 /// Width of the logo column on the right of the header.
 const HEADER_LOGO_WIDTH: u16 = 26;
 
-fn header_title(server_version: &str) -> Line<'static> {
+fn header_title(server_version: &str, update: Option<&str>) -> Line<'static> {
     let mut spans = vec![Span::styled(" sofka ", theme::title())];
     if !server_version.is_empty() {
         spans.push(Span::styled("· K8s Rev: ", theme::dim()));
         spans.push(Span::styled(
             server_version.to_string(),
             Style::default().fg(theme::sapphire()),
+        ));
+        spans.push(Span::raw(" "));
+    }
+    if let Some(version) = update {
+        spans.push(Span::styled("· ", theme::dim()));
+        spans.push(Span::styled(
+            format!("v{version} available"),
+            Style::default().fg(theme::yellow()),
         ));
         spans.push(Span::raw(" "));
     }
@@ -580,7 +588,11 @@ fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .border_style(theme::border())
-        .title(header_title(&app.cluster.server_version));
+        .title(header_title(
+            &app.cluster.server_version,
+            app.available_update()
+                .map(|release| release.version.as_str()),
+        ));
     let inner = block.inner(cols[0]);
     frame.render_widget(block, cols[0]);
 
@@ -2910,6 +2922,10 @@ fn build_help(app: &App, width: usize) -> (Vec<Line<'static>>, String) {
     lines.push(bind(
         ":reload · :config · :info",
         "reload config · config sources + warnings · runtime diagnostics",
+    ));
+    lines.push(bind(
+        ":check-update",
+        "check for a newer sofka release and show how to upgrade",
     ));
     lines.push(bind(
         ":users / :groups",
@@ -6247,10 +6263,18 @@ mod tests {
 
     #[test]
     fn header_title_shows_connected_kubernetes_revision() {
-        assert_eq!(line_text(&header_title("")), " sofka ");
+        assert_eq!(line_text(&header_title("", None)), " sofka ");
         assert_eq!(
-            line_text(&header_title("v1.36.2-eks-bca9cf6")),
+            line_text(&header_title("v1.36.2-eks-bca9cf6", None)),
             " sofka · K8s Rev: v1.36.2-eks-bca9cf6 "
+        );
+    }
+
+    #[test]
+    fn header_title_shows_an_available_update() {
+        assert_eq!(
+            line_text(&header_title("v1.36.2", Some("0.32.0"))),
+            " sofka · K8s Rev: v1.36.2 · v0.32.0 available "
         );
     }
 

@@ -130,6 +130,9 @@ enum Command {
     Plugin(sofka::plugin_cli::PluginArgs),
     /// Convert another tool's configuration into sofka config files.
     Import(sofka::k9s_import::ImportArgs),
+    /// Check GitHub for a newer sofka release and print how to upgrade.
+    /// Never downloads or installs anything.
+    CheckUpdate,
 }
 
 #[derive(clap::Args, Debug, Clone, Default)]
@@ -259,6 +262,15 @@ async fn run_main(args: Args) -> Result<()> {
         return sofka::plugin_cli::run(plugin)
             .await
             .map_err(anyhow::Error::msg);
+    }
+    if let Some(Command::CheckUpdate) = &args.command {
+        let release = sofka::update::check(true)
+            .await
+            .map_err(anyhow::Error::msg)?;
+        for line in check_update_lines(&release, sofka::update::InstallMethod::current()) {
+            println!("{line}");
+        }
+        return Ok(());
     }
 
     let (loader, mut config_warnings) = config::ConfigLoader::load();
@@ -429,6 +441,7 @@ async fn run_main(args: Args) -> Result<()> {
     app.compact = cfg.compact_mode;
     app.detail.wrap = cfg.detail_wrap;
     app.terminal_title = cfg.terminal_title.unwrap_or(true);
+    app.update_check = cfg.update_check.unwrap_or(true);
     // The last namespace picked per context persists too, so a relaunch (or
     // a `:ctx` switch back) lands where you left off.
     let namespace_memory_path = nsmem::NamespaceMemory::default_path();
@@ -555,6 +568,9 @@ async fn run_main(args: Args) -> Result<()> {
         return result;
     }
 
+    if app.update_check {
+        app.start_update_check(false);
+    }
     app.mouse_enabled = cfg.mouse.unwrap_or(false);
     let mut terminal = ratatui::init();
     if app.wants_mouse_capture() {
@@ -751,7 +767,12 @@ fn ring_notification(text: &str, cfg: &config::NotifyConfig) {
 fn info_request(args: &Args) -> Option<InfoArgs> {
     match &args.command {
         Some(Command::Info(info)) => Some(info.clone()),
-        Some(Command::Plugin(_) | Command::Import(_) | Command::Completion { .. }) => None,
+        Some(
+            Command::Plugin(_)
+            | Command::Import(_)
+            | Command::Completion { .. }
+            | Command::CheckUpdate,
+        ) => None,
         None if args.info => Some(InfoArgs { offline: true }),
         None => None,
     }
@@ -791,6 +812,29 @@ fn start_logging(cfg: &config::LoggingConfig, warnings: &mut Vec<String>) {
 ///
 /// Emits identifiers, paths, and counts only; every value that could carry a
 /// credential is redacted first.
+fn check_update_lines(
+    release: &sofka::update::Release,
+    method: sofka::update::InstallMethod,
+) -> Vec<String> {
+    if release.is_newer() {
+        vec![
+            format!(
+                "sofka v{} is available (running v{})",
+                release.version,
+                diagnostics::VERSION
+            ),
+            format!("  notes:   {}", release.url),
+            format!("  upgrade: {}", method.upgrade_hint(release)),
+        ]
+    } else {
+        vec![format!(
+            "sofka v{} is up to date (latest release: v{})",
+            diagnostics::VERSION,
+            release.version
+        )]
+    }
+}
+
 async fn run_info(
     info: &InfoArgs,
     args: &Args,
@@ -848,6 +892,13 @@ async fn run_info(
     );
 
     let mut lines = diagnostics::version_lines();
+
+    lines.push(String::new());
+    lines.extend(sofka::update::report_lines(
+        sofka::update::cached(&sofka::update::cache_path()).as_ref(),
+        cfg.update_check.unwrap_or(true),
+        sofka::update::InstallMethod::current(),
+    ));
 
     lines.push(String::new());
     lines.push("Cluster".into());
@@ -1283,6 +1334,39 @@ mod tests {
         let args = Args::try_parse_from(["sofka", "--resource", "plugin"]).unwrap();
         assert!(args.command.is_none());
         assert_eq!(args.resource(), Some("plugin"));
+    }
+
+    #[test]
+    fn check_update_prints_the_upgrade_for_a_newer_release() {
+        let args = Args::try_parse_from(["sofka", "check-update"]).unwrap();
+        assert!(matches!(args.command, Some(Command::CheckUpdate)));
+
+        let newer = sofka::update::Release {
+            version: "999.0.0".into(),
+            url: "https://github.com/nklmilojevic/sofka/releases/tag/v999.0.0".into(),
+        };
+        assert_eq!(
+            check_update_lines(&newer, sofka::update::InstallMethod::Homebrew),
+            [
+                format!(
+                    "sofka v999.0.0 is available (running v{})",
+                    diagnostics::VERSION
+                ),
+                "  notes:   https://github.com/nklmilojevic/sofka/releases/tag/v999.0.0".into(),
+                "  upgrade: brew upgrade sofka".into(),
+            ]
+        );
+        let current = sofka::update::Release {
+            version: diagnostics::VERSION.into(),
+            url: String::new(),
+        };
+        assert_eq!(
+            check_update_lines(&current, sofka::update::InstallMethod::Homebrew),
+            [format!(
+                "sofka v{0} is up to date (latest release: v{0})",
+                diagnostics::VERSION
+            )]
+        );
     }
 
     #[test]

@@ -137,6 +137,8 @@ pub struct Config {
     pub terminal_title: Option<bool>,
     /// Save and restore sort choices per kind. Defaults to true.
     pub remember_sort: Option<bool>,
+    /// Check GitHub once a day for a newer release. Defaults to true.
+    pub update_check: Option<bool>,
     /// How `:notify` events are delivered — see [`NotifyConfig`].
     pub notify: NotifyConfig,
     /// Built-in keyboard bindings, validated by [`crate::keymap::Keymap::compile`].

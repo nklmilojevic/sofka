@@ -236,6 +236,7 @@ mouse_scroll_lines = 3     # steps per wheel event in captured views; 1 for one 
 terminal_title = true # false disables terminal title changes
 remember_sort     = true   # save and restore sort choices per resource kind
                            # false makes sort changes temporary
+update_check = true # false turns off the daily check for a newer release
 
 # Namespaces pinned to the top of the `n` switcher (★); session recents (·)
 # follow them. Keys 1 to 9 select the first nine entries in this fixed order.
@@ -252,6 +253,16 @@ returns. It clears the title when the setting is disabled, on normal exit, and
 on a fatal main-thread panic. It does not restore the title from before startup.
 Set `terminal_title = false` to keep your shell or terminal in control of the
 title. Headless modes do not change the title.
+
+`update_check` is enabled by default. At startup, sofka asks the GitHub API for
+the latest release at most once a day and keeps the answer in
+`update-check.toml` under the state directory. When a newer release exists,
+the header shows `vX.Y.Z available` and the status bar shows the upgrade
+command. A failed check is logged and otherwise ignored. Set
+`update_check = false` to stop the startup check, for example on air-gapped
+machines. `:check-update` and `sofka check-update` still check on request. sofka
+never downloads or installs a release; upgrade with the package manager that
+installed it.
 
 Set `hide_header = true` to remove the header and logo and give more space to
 the active view. The default is `false`. This option supports cluster and
