@@ -19,6 +19,26 @@ pub fn suspend_and_run(
     suspend_and_await(terminal, captured, run_command_async(argv))?
 }
 
+/// Run `context`'s exec auth plugin with the TUI suspended so it can prompt,
+/// then hand the outcome to the app, which retries the connection.
+pub fn authenticate(
+    terminal: &mut ratatui::DefaultTerminal,
+    app: &mut crate::app::App,
+    context: String,
+    switch: bool,
+    captured: bool,
+) {
+    let result = suspend_and_await(
+        terminal,
+        captured,
+        crate::k8s::authenticate_interactively(Some(&context)),
+    )
+    .map_err(anyhow::Error::from)
+    .and_then(|result| result)
+    .map_err(|e| format!("{e:#}"));
+    app.authenticated(context, switch, result);
+}
+
 /// Suspend the TUI, give the terminal to whatever `future` runs, then restore
 /// the terminal modes. Same rules as [`suspend_and_run`]. The future runs on a
 /// runtime of its own, since the caller is inside the main loop's runtime.

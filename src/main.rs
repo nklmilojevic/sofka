@@ -1152,15 +1152,7 @@ fn take_suspend(terminal: &mut ratatui::DefaultTerminal, app: &mut App, captured
             app::Suspend::Shell(argv) => (argv, None),
             app::Suspend::Recovery { argv, failure } => (argv, Some(failure)),
             app::Suspend::Authenticate { context, switch } => {
-                let result = terminal::suspend_and_await(
-                    terminal,
-                    captured,
-                    k8s::authenticate_interactively(Some(&context)),
-                )
-                .map_err(anyhow::Error::from)
-                .and_then(|result| result)
-                .map_err(|e| format!("{e:#}"));
-                app.authenticated(context, switch, result);
+                terminal::authenticate(terminal, app, context, switch, captured);
                 terminal_title::set(app.terminal_title().as_deref());
                 continue;
             }
