@@ -65,6 +65,16 @@ pub(crate) fn client_builder_with_certificate(
     if no_tls_resumption {
         tls.resumption = rustls::client::Resumption::disabled();
     }
+    // The exec plugin runs once for auth and again for the TLS identity.
+    // When the first run issued a certificate, auth adds no layer; kube-rs
+    // swallows a failed second run, which would leave a client that sends no
+    // credentials and has no expiry to renew at.
+    if config.auth_info.exec.is_some()
+        && auth.is_none()
+        && !tls.client_auth_cert_resolver.has_certs()
+    {
+        bail!("Authentication command failed. Log in with your credential provider, then retry.");
+    }
     let mut expiration = None;
     let mut certificate = None;
     if config.auth_info.exec.is_some() && tls.client_auth_cert_resolver.has_certs() {
@@ -1012,6 +1022,54 @@ printf '%s' '{"apiVersion":"client.authentication.k8s.io/v1","kind":"ExecCredent
         assert!(!built.has_certificate());
         // Once for the auth layer, once for the TLS identity lookup.
         assert_eq!(count.trim(), "2");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn exec_certificate_lost_by_a_later_plugin_run_fails_the_build() {
+        let directory = std::env::temp_dir().join(format!(
+            "sofka-exec-partial-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&directory).unwrap();
+        let counter = directory.join("count");
+        let credential = serde_json::json!({
+            "apiVersion": "client.authentication.k8s.io/v1", "kind": "ExecCredential",
+            "status": {
+                "expirationTimestamp": "2120-01-01T00:00:00Z",
+                "clientCertificateData": std::str::from_utf8(CLIENT_V3).unwrap(),
+                "clientKeyData": std::str::from_utf8(KEY).unwrap()
+            }
+        })
+        .to_string();
+        let mut config = without_identity(&config());
+        config.auth_info.exec = Some(
+            serde_json::from_value(serde_json::json!({
+                "apiVersion": "client.authentication.k8s.io/v1", "command": "sh",
+                "args": ["-c", r#"
+count=0
+if test -f "$1"; then read -r count < "$1"; fi
+count=$((count + 1))
+printf '%s\n' "$count" > "$1"
+if test "$count" -gt 1; then echo 'not logged in' >&2; exit 1; fi
+printf '%s' "$SOFKA_TEST_EXEC_CREDENTIAL"
+"#, "sofka-exec-test", counter.to_str().unwrap()],
+                "interactiveMode": "Never",
+                "env": [{"name": "SOFKA_TEST_EXEC_CREDENTIAL", "value": credential}]
+            }))
+            .unwrap(),
+        );
+        let result = crate::k8s::build_exec_client(config, false, false);
+        std::fs::remove_dir_all(&directory).unwrap();
+        let error = result.err().expect("a client without credentials");
+        assert_eq!(
+            error.to_string(),
+            "Authentication command failed. Log in with your credential provider, then retry."
+        );
     }
 
     #[tokio::test]
