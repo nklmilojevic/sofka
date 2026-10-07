@@ -368,7 +368,7 @@ impl std::fmt::Display for ConnectError {
 
 /// Run the exec auth plugin of `context` (the current context when `None`)
 /// attached to the terminal, so it can prompt for an MFA code or a login.
-/// Its credential output is discarded: the plugin is expected to cache what
+/// Its credential output goes to /dev/null: the plugin is expected to cache what
 /// it obtained, as the AWS CLI does for assumed roles, so the next detached
 /// run succeeds without input. Call only while sofka is not drawing.
 pub async fn authenticate_interactively(context: Option<&str>) -> Result<()> {
@@ -417,18 +417,18 @@ async fn run_exec_interactively(exec: &kube::config::ExecConfig) -> Result<()> {
         )
         .env("KUBERNETES_EXEC_INFO", info.to_string())
         .stdin(std::process::Stdio::inherit())
-        .stdout(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::inherit())
         .kill_on_drop(true);
     for name in exec.drop_env.iter().flatten() {
         cmd.env_remove(name);
     }
-    let output = cmd
-        .output()
+    let status = cmd
+        .status()
         .await
         .with_context(|| format!("running {command}"))?;
-    if !output.status.success() {
-        anyhow::bail!("{} exited with {}", exec_command_line(exec), output.status);
+    if !status.success() {
+        anyhow::bail!("{} exited with {status}", exec_command_line(exec));
     }
     Ok(())
 }

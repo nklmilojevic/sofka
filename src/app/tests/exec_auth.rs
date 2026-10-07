@@ -81,13 +81,76 @@ async fn the_offer_never_interrupts_typing() {
 }
 
 #[tokio::test]
-async fn authenticating_reconnects_and_a_failure_is_shown() {
+async fn the_offer_never_interrupts_filtering_the_picker() {
     let (mut app, _rx) = test_app();
-    switch_failed(&mut app, "eks", needs_input());
+    app.handle_key(press(KeyCode::Char(':'))).unwrap();
+    for c in "ctx".chars() {
+        app.handle_key(press(KeyCode::Char(c))).unwrap();
+    }
     app.handle_key(press(KeyCode::Enter)).unwrap();
+    assert_eq!(app.mode, Mode::Contexts);
+    app.handle_key(press(KeyCode::Char('/'))).unwrap();
+    assert!(app.ctx_filtering);
+    needs_input_watch_error(&mut app);
+    assert_eq!(app.mode, Mode::Contexts);
+    assert!(app.ctx_filtering);
+}
+
+fn accept(app: &mut App) -> String {
+    assert_eq!(app.mode, Mode::Confirm);
+    app.handle_key(press(KeyCode::Char('y'))).unwrap();
     let Some(Suspend::Authenticate { context }) = app.pending.take() else {
         panic!("no authentication queued");
     };
+    context
+}
+
+#[tokio::test]
+async fn authenticating_the_live_context_keeps_the_view_and_restarts_the_watch() {
+    let (mut app, _rx) = test_app();
+    app.switch_kind("deployments");
+    app.filter = "api".into();
+    let generation = app.generation;
+    needs_input_watch_error(&mut app);
+    let context = accept(&mut app);
+    assert_eq!(context, "test");
+    app.authenticated(context, Ok(()));
+    assert!(app.context_switch_target.is_none());
+    assert_eq!(app.kind_plural, "deployments");
+    assert_eq!(app.filter, "api");
+    assert!(app.generation > generation, "watch not restarted");
+    assert_eq!(app.flash, "authenticated");
+}
+
+#[tokio::test]
+async fn an_authenticated_retry_still_lands_where_the_switch_was_going() {
+    for accepted in [true, false] {
+        let (mut app, _rx) = test_app();
+        bind_bookmark(&mut app, "services", "west");
+        app.handle_key(ctrl(KeyCode::Char('y'))).unwrap();
+        assert!(app.pending_bookmark.is_some());
+        switch_failed(&mut app, "west", needs_input());
+        assert!(app.pending_bookmark.is_some(), "dropped before the answer");
+        if accepted {
+            let context = accept(&mut app);
+            app.authenticated(context, Ok(()));
+            assert_eq!(
+                app.context_switch_target,
+                Some((app.generation, "west".to_string()))
+            );
+            assert!(app.pending_bookmark.is_some(), "retry lost the bookmark");
+        } else {
+            app.handle_key(press(KeyCode::Char('n'))).unwrap();
+            assert!(app.pending_bookmark.is_none(), "declined switch kept it");
+        }
+    }
+}
+
+#[tokio::test]
+async fn authenticating_another_context_reconnects_and_a_failure_is_shown() {
+    let (mut app, _rx) = test_app();
+    switch_failed(&mut app, "eks", needs_input());
+    let context = accept(&mut app);
     app.authenticated(context, Ok(()));
     assert_eq!(
         app.context_switch_target,

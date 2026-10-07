@@ -169,11 +169,13 @@ impl App {
     /// Offer to run `context`'s exec auth plugin on the terminal, because it
     /// stopped to ask for input. Once per generation, and only over the table
     /// or the context picker, so it never interrupts typing or another dialog.
-    pub(super) fn offer_authentication(&mut self, context: String) {
+    /// Returns whether the offer is open.
+    pub(super) fn offer_authentication(&mut self, context: String) -> bool {
         if self.auth_offered == Some(self.generation)
             || !matches!(self.mode, Mode::Table | Mode::Contexts)
+            || self.ctx_filtering
         {
-            return;
+            return false;
         }
         self.auth_offered = Some(self.generation);
         self.confirm_label = format!(
@@ -182,28 +184,49 @@ impl App {
         self.confirm_action = Some(ConfirmAction::Authenticate { context });
         self.confirm_return = Mode::Table;
         self.mode = Mode::Confirm;
+        true
     }
 
-    /// The exec auth plugin for `context` ran on the terminal. Reconnect so
-    /// the client picks up the credentials the plugin cached.
+    /// The exec auth plugin for `context` ran on the terminal and cached its
+    /// credentials. The live context keeps its client and view: kube-rs runs
+    /// a token plugin per request, so restarting the watch picks them up, and
+    /// a certificate plugin renews. Any other context is connected again,
+    /// still headed where the failed switch was going.
     pub fn authenticated(&mut self, context: String, result: Result<(), String>) {
-        match result {
-            Ok(()) => {
-                crate::log_info!("cluster.credentials.authenticated", context = context);
-                self.switch_context_inner(context, true);
+        if let Err(error) = result {
+            crate::log_warn!(
+                "cluster.credentials.authenticate_failed",
+                context = context,
+                error = error
+            );
+            self.abandon_switch_destination();
+            self.flash_warn(&format!("authentication failed: {error}"));
+            if !self.cluster.connected {
+                self.open_contexts();
             }
-            Err(error) => {
-                crate::log_warn!(
-                    "cluster.credentials.authenticate_failed",
-                    context = context,
-                    error = error
-                );
-                self.flash_warn(&format!("authentication failed: {error}"));
-                if !self.cluster.connected {
-                    self.open_contexts();
-                }
-            }
+            return;
         }
+        crate::log_info!("cluster.credentials.authenticated", context = context);
+        if self.cluster.connected && context == self.cluster.context {
+            if self.cluster.renews_credentials() {
+                self.credential_rejected = true;
+            }
+            self.set_flash("authenticated");
+            self.resume_pending = Some("authenticated");
+            self.restart_pending_watch();
+            return;
+        }
+        let query = self.pending_resource_query.take();
+        let bookmark = self.pending_bookmark.take();
+        let workspace = self.pending_workspace.take();
+        let argocd_target = self.pending_argocd_target.take();
+        let argocd_return = self.pending_argocd_return.take();
+        self.switch_context_inner(context, true);
+        self.pending_resource_query = query;
+        self.pending_bookmark = bookmark;
+        self.pending_workspace = workspace;
+        self.pending_argocd_target = argocd_target;
+        self.pending_argocd_return = argocd_return;
     }
 
     /// Forget a renewal that belongs to the client a context switch replaced.

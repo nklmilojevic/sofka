@@ -925,6 +925,21 @@ impl App {
         self.watch_error_flash = Some(self.flash.clone());
     }
 
+    /// Drop what a failed context switch was going to open.
+    pub(super) fn abandon_switch_destination(&mut self) {
+        self.pending_resource_query = None;
+        self.pending_bookmark = None;
+        self.pending_workspace = None;
+        // A jump that never landed reopens the view it left; a
+        // return that never landed leaves its way back on the table.
+        if let Some(jump) = self.pending_argocd_target.take() {
+            self.reopen_argocd(jump.back);
+        }
+        if let Some(back) = self.pending_argocd_return.take() {
+            self.argocd_return = Some(back);
+        }
+    }
+
     fn show_watch_error(&mut self, error: String, failure: WatchFailure) {
         self.watch_errors = self.watch_errors.saturating_add(1);
         self.last_error = Some(error.clone());
@@ -2061,26 +2076,18 @@ impl App {
                 match result {
                     Ok(cluster) => self.apply_context_switch(name, cluster),
                     Err(e) => {
-                        self.pending_resource_query = None;
-                        self.pending_bookmark = None;
-                        self.pending_workspace = None;
-                        // A jump that never landed reopens the view it left; a
-                        // return that never landed leaves its way back on the table.
-                        if let Some(jump) = self.pending_argocd_target.take() {
-                            self.reopen_argocd(jump.back);
-                        }
-                        if let Some(back) = self.pending_argocd_return.take() {
-                            self.argocd_return = Some(back);
-                        }
-                        self.flash_warn(&format!("context switch failed: {e}"));
                         // Never connected anywhere yet — put the picker back up
                         // instead of stranding the user on an empty table.
                         if !self.cluster.connected {
                             self.open_contexts();
                         }
-                        if e.needs_input {
-                            self.offer_authentication(name);
+                        // Whatever the switch was for waits on the answer: an
+                        // authenticated retry still lands there.
+                        if !(e.needs_input && self.offer_authentication(name)) {
+                            self.abandon_switch_destination();
                         }
+                        // Last, so a view the abandoned jump reopens keeps it.
+                        self.flash_warn(&format!("context switch failed: {e}"));
                     }
                 }
             }

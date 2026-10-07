@@ -560,9 +560,10 @@ controlling terminal, so a prompt fails at once instead of hanging.
 - **At startup** the terminal is still free. Sofka runs the plugin attached to
   it, you type the code as in a shell, and sofka connects.
 - **While running**, a context switch or watch that hits the prompt asks
-  whether to run the auth plugin now. `y` suspends the TUI, runs the plugin on
-  the terminal, then reconnects. `n` keeps the error, which names the command
-  to run in another shell. The question comes once per connection, and only
+  whether to run the auth plugin now. `y` suspends the TUI and runs the plugin
+  on the terminal. Sofka then restarts the watch, keeping your view, or retries
+  the context switch with its destination. `n` keeps the error, which names the
+  command to run in another shell. The question comes once per connection, and only
   over the table or the context picker.
 
 The plugin must cache what it obtains, as the AWS CLI does for assumed roles.
