@@ -3057,7 +3057,15 @@ async fn cordoned_node_statuses_keep_readiness_colors() {
 async fn narrow_header_drops_the_logo_before_the_key_hints() {
     use ratatui::{Terminal, backend::TestBackend};
 
-    for (width, hints, logo) in [(80, false, true), (100, true, false), (130, true, true)] {
+    for (width, hints, logo) in [
+        (80, false, true),
+        (91, false, true),
+        (92, true, false),
+        (100, true, false),
+        (117, true, false),
+        (118, true, true),
+        (130, true, true),
+    ] {
         let (mut app, _rx) = test_app();
         app.handle_key(press(KeyCode::Char(':'))).unwrap();
         for c in "pods".chars() {

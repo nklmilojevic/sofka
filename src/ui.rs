@@ -631,37 +631,37 @@ fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
         frame.render_widget(Paragraph::new(info), inner);
     }
 
-    // Sophie the Russian Blue: tall pointed ears, a narrow watchful stare
-    // (not round cutesy eyes), cool grey-blue coat. Lines are equal width so
-    // the right-aligned block stays coherent.
-    let logo = vec![
-        Line::from(Span::styled(
-            "  /\\        /\\ ",
-            Style::default().fg(theme::overlay1()),
-        )),
-        Line::from(Span::styled(
-            " /  \\______/  \\",
-            Style::default().fg(theme::overlay1()),
-        )),
-        Line::from(Span::styled(
-            "( -        -  )",
-            Style::default().fg(theme::green()),
-        )),
-        Line::from(Span::styled(
-            " \\     ᴥ      /",
-            Style::default().fg(theme::maroon()),
-        )),
-        Line::from(Span::styled(
-            "  \\    \\__/   /",
-            Style::default().fg(theme::overlay1()),
-        )),
-        Line::from(Span::styled(
-            "   '--------'  ",
-            Style::default().fg(theme::overlay1()),
-        )),
-        Line::from(Span::styled(format!("   sofka v{VERSION}"), theme::dim())),
-    ];
     if show_logo {
+        // Sophie the Russian Blue: tall pointed ears, a narrow watchful stare
+        // (not round cutesy eyes), cool grey-blue coat. Lines are equal width so
+        // the right-aligned block stays coherent.
+        let logo = vec![
+            Line::from(Span::styled(
+                "  /\\        /\\ ",
+                Style::default().fg(theme::overlay1()),
+            )),
+            Line::from(Span::styled(
+                " /  \\______/  \\",
+                Style::default().fg(theme::overlay1()),
+            )),
+            Line::from(Span::styled(
+                "( -        -  )",
+                Style::default().fg(theme::green()),
+            )),
+            Line::from(Span::styled(
+                " \\     ᴥ      /",
+                Style::default().fg(theme::maroon()),
+            )),
+            Line::from(Span::styled(
+                "  \\    \\__/   /",
+                Style::default().fg(theme::overlay1()),
+            )),
+            Line::from(Span::styled(
+                "   '--------'  ",
+                Style::default().fg(theme::overlay1()),
+            )),
+            Line::from(Span::styled(format!("   sofka v{VERSION}"), theme::dim())),
+        ];
         frame.render_widget(Paragraph::new(logo).alignment(Alignment::Right), cols[1]);
     }
 }
