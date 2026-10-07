@@ -81,7 +81,7 @@ pub fn severity(line: &str) -> Severity {
 }
 
 /// Severity for a level token in lowercase.
-fn parse_level(level: &str) -> Severity {
+pub(crate) fn parse_level(level: &str) -> Severity {
     if level.starts_with("err")
         || level.starts_with("fatal")
         || level.starts_with("crit")

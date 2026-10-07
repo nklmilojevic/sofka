@@ -37936,6 +37936,9 @@ async fn log_json_shortcut_renders_structured_records_on_one_row() {
         "plain text".into(),
         r#"{"msg":"crash","level":"error"}"#.into(),
         r#"{"msg":"panic\nat main.go:1","level":"error"}"#.into(),
+        r#"{"time":"2026\n[other] fake","level":"in\u001bfo","msg":"ok","k\ney":1}"#.into(),
+        r#"{"msg":"ok","flag":"true","count":"3","data":"{}","real":true,"name":"web"}"#.into(),
+        r#"{"lvl":"warn","msg":"stall"}"#.into(),
     ];
     shortcut_log_lines(&mut app, lines);
     let raw = app.filtered_log_text();
@@ -37958,7 +37961,16 @@ async fn log_json_shortcut_renders_structured_records_on_one_row() {
     assert_eq!(app.logs.display_line(4), "plain text");
     assert_eq!(app.logs.display_line(5), "ERROR crash");
     assert_eq!(app.logs.display_line(6), r#"ERROR "panic\nat main.go:1""#);
-    assert_eq!(app.logs.refresh_index(0).total_rows(), 7);
+    assert_eq!(
+        app.logs.display_line(7),
+        r#""2026\n[other] fake" "IN\u001bFO" ok "k\ney"=1"#
+    );
+    assert_eq!(
+        app.logs.display_line(8),
+        r#"ok count="3" data="{}" flag="true" name=web real=true"#
+    );
+    assert_eq!(app.logs.display_line(9), "WARN  stall");
+    assert_eq!(app.logs.refresh_index(0).total_rows(), 10);
     assert_eq!(app.filtered_log_text(), raw);
 
     app.logs.set_filter(r#""controller":"x""#.into());
@@ -37974,18 +37986,22 @@ async fn log_json_shortcut_renders_structured_records_on_one_row() {
     app.handle_key(press(KeyCode::Char('t'))).unwrap();
 
     app.compact = true;
-    let mut terminal = Terminal::new(TestBackend::new(100, 20)).unwrap();
+    let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
     terminal.draw(|f| crate::ui::draw(f, &mut app)).unwrap();
     let buffer = terminal.backend().buffer();
-    let crash = (0..buffer.area.height)
-        .find_map(|y| {
-            let row: String = (0..buffer.area.width)
-                .map(|x| buffer[(x, y)].symbol())
-                .collect();
-            row.find("crash").map(|x| buffer[(x as u16, y)].fg)
-        })
-        .unwrap();
-    assert_eq!(crash, crate::theme::red());
+    let color_of = |word: &str| {
+        (0..buffer.area.height)
+            .find_map(|y| {
+                let row: String = (0..buffer.area.width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect();
+                row.find(word).map(|x| buffer[(x as u16, y)].fg)
+            })
+            .unwrap()
+    };
+    assert_eq!(color_of("crash"), crate::theme::red());
+    assert_eq!(color_of("boom"), crate::theme::red());
+    assert_eq!(color_of("stall"), crate::theme::peach());
 
     app.handle_key(press(KeyCode::Char('J'))).unwrap();
     assert_eq!(app.logs.json, JsonView::Pretty);
@@ -37995,6 +38011,20 @@ async fn log_json_shortcut_renders_structured_records_on_one_row() {
     assert_eq!(app.logs.json, JsonView::Raw);
     assert_eq!(app.flash, "JSON view: raw");
     assert_eq!(app.logs.display_line(1), app.logs.view.lines[1]);
+}
+
+#[tokio::test]
+async fn log_json_record_view_does_not_depend_on_the_pretty_cache() {
+    let (mut app, _rx) = test_app();
+    app.mode = Mode::Logs;
+    let line = r#"{"msg":"hi","a":{"b":[1,2,3]}}"#;
+    app.logs.json_budget = line.len() + 20;
+    shortcut_log_lines(&mut app, vec![line.into()]);
+    app.handle_key(press(KeyCode::Char('J'))).unwrap();
+    assert_eq!(app.logs.display_line(0), r#"hi a={"b":[1,2,3]}"#);
+    app.handle_key(press(KeyCode::Char('J'))).unwrap();
+    assert_eq!(app.logs.json, JsonView::Pretty);
+    assert_eq!(app.logs.display_line(0), line);
 }
 
 #[tokio::test]

@@ -102,8 +102,10 @@ Record view shows each structured log record (zap, slog, logrus, pino) on one ro
 time, level, message, then the other fields as `key=value`. It reads the time from
 `time`, `ts`, `timestamp`, or `@timestamp`, the level from `level`, `lvl`, or
 `severity`, and the message from `msg` or `message`. Epoch times become RFC 3339.
-Records without a level or message field stay raw. The row color comes from the
-level in the original record.
+Values with control characters, and strings that read as another JSON type
+(`"true"`, `"3"`, `"{}"`), are shown as quoted JSON strings, so a record stays on
+one row. Records without a level or message field stay raw. The row color comes
+from the record's level.
 
 Only individual JSON objects and arrays are formatted. Other text stays unchanged.
 Source labels and timestamps stay with their record. Filters and severity selection

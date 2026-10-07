@@ -2035,10 +2035,7 @@ fn draw_logs(frame: &mut Frame, app: &mut App, area: Rect) {
                 continue;
             };
             let l = app.logs.display_line(buf_idx);
-            // A record row drops the JSON keys the severity check reads, so
-            // its color comes from the raw record.
-            let record_color = (app.logs.json == crate::app::JsonView::Record)
-                .then(|| log_level_color(&app.logs.view.lines[buf_idx]));
+            let record_color = app.logs.record_severity(buf_idx).map(severity_color);
             let mut offset = 0;
             for part in l.split('\n') {
                 if row + offset >= scroll + inner_h {
@@ -2547,7 +2544,11 @@ fn ansi_16_color(code: u8) -> Option<Color> {
 }
 
 fn log_level_color(line: &str) -> Color {
-    match crate::logfilter::severity(line) {
+    severity_color(crate::logfilter::severity(line))
+}
+
+fn severity_color(severity: crate::logfilter::Severity) -> Color {
+    match severity {
         crate::logfilter::Severity::Error => theme::red(),
         crate::logfilter::Severity::Warning => theme::peach(),
         crate::logfilter::Severity::Debug => theme::overlay1(),

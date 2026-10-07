@@ -5,6 +5,7 @@ pub(super) struct LogLineMeta {
     sort_time: Option<i128>,
     pub(super) pretty: Option<String>,
     record: Option<String>,
+    record_severity: Option<crate::logfilter::Severity>,
     checked_json: bool,
     pub(super) json_charge: usize,
     timestamp: Option<(usize, String)>,
@@ -82,29 +83,31 @@ impl LogLineMeta {
         let Ok(value) = serde_json::from_str::<serde_json::Value>(payload) else {
             return;
         };
-        // The input and parser depth limits also bound the temporary output.
-        let Ok(pretty) = serde_json::to_string_pretty(&value) else {
-            return;
-        };
         let timestamp_reserve = self
             .timestamp
             .as_ref()
             .map_or(0, |(_, timestamp)| timestamp.len());
-        let charge = pretty.len() + time_end + timestamp_reserve;
-        if charge > *budget {
-            return;
-        }
-        *budget -= charge;
-        self.json_charge += charge;
-        self.pretty = Some(format!("{}{}", &line[..time_end], pretty));
-        if let Some(record) = render_record(&value) {
-            let charge = record.len() + time_end + timestamp_reserve;
-            if charge <= *budget {
-                *budget -= charge;
-                self.json_charge += charge;
-                self.record = Some(format!("{}{}", &line[..time_end], record));
+        let mut cache = |text: String| {
+            let charge = text.len() + time_end + timestamp_reserve;
+            if charge > *budget {
+                return None;
             }
-        }
+            *budget -= charge;
+            self.json_charge += charge;
+            Some(format!("{}{}", &line[..time_end], text))
+        };
+        // The input and parser depth limits also bound the temporary output.
+        // Each view is charged on its own, so an indented form that does not
+        // fit cannot keep a short record row raw.
+        let record = render_record(&value);
+        let record_severity = record.as_ref().map(|(_, severity)| *severity);
+        let record = record.and_then(|(text, _)| cache(text));
+        let pretty = serde_json::to_string_pretty(&value)
+            .ok()
+            .and_then(&mut cache);
+        self.record_severity = record_severity.filter(|_| record.is_some());
+        self.record = record;
+        self.pretty = pretty;
     }
 
     pub(super) fn display(&self, view: JsonView) -> Option<&str> {
@@ -150,9 +153,9 @@ const RECORD_LEVEL_KEYS: &[&str] = &["level", "lvl", "severity"];
 const RECORD_MESSAGE_KEYS: &[&str] = &["msg", "message"];
 
 /// One-line rendering of a structured log record (zap, slog, logrus, pino):
-/// `time LEVEL message key=value ...`. `None` when the value is not an object
-/// with a level or message field.
-fn render_record(value: &serde_json::Value) -> Option<String> {
+/// `time LEVEL message key=value ...`, with the severity of its level. `None`
+/// when the value is not an object with a level or message field.
+fn render_record(value: &serde_json::Value) -> Option<(String, crate::logfilter::Severity)> {
     let fields = value.as_object()?;
     let find = |keys: &[&'static str]| {
         keys.iter()
@@ -174,14 +177,14 @@ fn render_record(value: &serde_json::Value) -> Option<String> {
     if let Some((_, time)) = time {
         push(&record_time(time));
     }
-    if let Some((_, level)) = level {
-        push(&format!("{:<5}", record_level(level)));
+    let level_name = level.map(|(_, level)| record_level(level));
+    if let Some(name) = &level_name {
+        push(&format!("{:<5}", record_text(name)));
     }
     if let Some((_, message)) = message {
-        // A multi-line message (a stack trace) stays escaped on its row.
         match message.as_str() {
-            Some(text) if !text.contains(char::is_control) => push(text),
-            _ => push(&message.to_string()),
+            Some(text) => push(&record_text(text)),
+            None => push(&message.to_string()),
         }
     }
     let used = [time, level, message].map(|field| field.map(|(key, _)| key));
@@ -189,9 +192,22 @@ fn render_record(value: &serde_json::Value) -> Option<String> {
         if used.contains(&Some(key.as_str())) {
             continue;
         }
-        push(&format!("{key}={}", record_value(value)));
+        push(&format!("{}={}", record_text(key), record_value(value)));
     }
-    Some(out)
+    let severity = level_name.map_or(crate::logfilter::Severity::Other, |name| {
+        crate::logfilter::parse_level(&name.to_ascii_lowercase())
+    });
+    Some((out, severity))
+}
+
+/// Text with control characters (a multi-line stack trace, terminal escapes)
+/// as an escaped JSON string, so it stays on the record's row.
+fn record_text(text: &str) -> std::borrow::Cow<'_, str> {
+    if text.contains(char::is_control) {
+        serde_json::Value::from(text).to_string().into()
+    } else {
+        text.into()
+    }
 }
 
 /// Epoch numbers (zap seconds, pino milliseconds) become RFC 3339; strings
@@ -200,7 +216,7 @@ fn record_time(time: &serde_json::Value) -> String {
     let Some(number) = time.as_f64() else {
         return time
             .as_str()
-            .map_or_else(|| time.to_string(), str::to_owned);
+            .map_or_else(|| time.to_string(), |text| record_text(text).into_owned());
     };
     let micros = if number.abs() >= 1e11 {
         number * 1e3
@@ -226,12 +242,15 @@ fn record_level(level: &serde_json::Value) -> String {
     }
 }
 
-/// Bare strings stay bare; strings that would be ambiguous in `key=value`
-/// form and every other JSON value use compact JSON.
+/// Bare strings stay bare. Strings that would be ambiguous in `key=value`
+/// form or read as another JSON type (`"true"`, `"3"`, `"{}"`), and every
+/// other JSON value, use compact JSON.
 fn record_value(value: &serde_json::Value) -> String {
     match value.as_str() {
         Some(text)
             if !text.is_empty()
+                && !text.starts_with(['{', '['])
+                && serde_json::from_str::<serde_json::Value>(text).is_err()
                 && !text
                     .chars()
                     .any(|c| c.is_whitespace() || c.is_control() || matches!(c, '"' | '=')) =>
@@ -260,6 +279,16 @@ impl LogsView {
             .get(i)
             .and_then(|m| m.display(self.json))
             .unwrap_or(&self.view.lines[i])
+    }
+
+    /// Severity of the record row shown for line `i`, when record view shows
+    /// one. Its level can sit under any supported key or be a pino number,
+    /// which the raw-line severity check does not read.
+    pub fn record_severity(&self, i: usize) -> Option<crate::logfilter::Severity> {
+        if self.json != JsonView::Record {
+            return None;
+        }
+        self.line_meta.get(i)?.record_severity
     }
 
     pub(super) fn toggle_json(&mut self) {
