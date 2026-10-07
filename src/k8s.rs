@@ -176,7 +176,9 @@ fn exec_auth_failure(
             error.downcast_ref::<kube::client::AuthError>()
         {
             let stderr = String::from_utf8_lossy(&out.stderr).to_ascii_lowercase();
-            let mfa = stderr.contains("mfa");
+            // The prompt itself, not any mention of MFA: a rejected code or a
+            // bad mfa_serial also says "MFA" but asks for nothing.
+            let mfa = stderr.contains("enter mfa code");
             return Some(if stderr.contains("sso") {
                 ExecAuthFailure::Message(
                     "Authentication failed. Run 'aws sso login' for the active AWS profile, then retry."
@@ -222,14 +224,38 @@ pub fn exec_needs_input<'a>(
     None
 }
 
-/// The exec plugin's command line, for telling the user what to run.
+/// The exec plugin's command line, for telling the user what to run. The
+/// kubeconfig's `env` entries come first as assignments, since they can pick
+/// the profile the command runs with. Values of credential-named flags and
+/// variables are redacted: this text ends up on screen and in the log.
 fn exec_command_line(exec: &kube::config::ExecConfig) -> String {
-    exec.command
-        .iter()
-        .chain(exec.args.iter().flatten())
-        .map(|word| shell_word(word))
-        .collect::<Vec<_>>()
-        .join(" ")
+    let mut words = Vec::new();
+    for var in exec.env.iter().flatten() {
+        if let (Some(name), Some(value)) = (var.get("name"), var.get("value")) {
+            words.push(if crate::redact::is_credential_key(name) {
+                format!("{name}={}", crate::redact::REDACTED)
+            } else {
+                format!("{name}={}", shell_word(value))
+            });
+        }
+    }
+    words.extend(exec.command.as_deref().map(shell_word));
+    let mut secret_next = false;
+    for arg in exec.args.iter().flatten() {
+        if std::mem::take(&mut secret_next) && !arg.starts_with('-') {
+            words.push(crate::redact::REDACTED.into());
+            continue;
+        }
+        if !arg.starts_with('-') || !crate::redact::is_credential_key(arg) {
+            words.push(shell_word(arg));
+        } else if let Some((flag, _)) = arg.split_once('=') {
+            words.push(format!("{}={}", shell_word(flag), crate::redact::REDACTED));
+        } else {
+            words.push(shell_word(arg));
+            secret_next = true;
+        }
+    }
+    words.join(" ")
 }
 
 fn shell_word(word: &str) -> String {
@@ -1971,6 +1997,42 @@ pub(crate) mod tests {
             super::exec_command_line(&exec),
             "aws eks get-token --cluster-name prod --profile 'it'\\''s mine' ''"
         );
+    }
+
+    #[test]
+    fn exec_command_line_keeps_the_profile_env_and_hides_credentials() {
+        let exec: kube::config::ExecConfig = serde_json::from_value(serde_json::json!({
+            "command": "kubelogin",
+            "args": ["get-token", "--client-secret", "s3cr3t", "--password=hunter2", "--token", "--server-id", "x"],
+            "env": [
+                {"name": "AWS_PROFILE", "value": "prod admin"},
+                {"name": "AWS_SECRET_ACCESS_KEY", "value": "abc123"}
+            ]
+        }))
+        .unwrap();
+        let line = super::exec_command_line(&exec);
+        assert_eq!(
+            line,
+            "AWS_PROFILE='prod admin' AWS_SECRET_ACCESS_KEY=«redacted» kubelogin get-token --client-secret «redacted» --password=«redacted» --token --server-id x"
+        );
+        for secret in ["s3cr3t", "hunter2", "abc123"] {
+            assert!(!line.contains(secret), "{line}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn mfa_errors_that_asked_for_nothing_are_not_input_requests() {
+        for stderr in [
+            "An error occurred (AccessDenied) when calling the AssumeRole operation: MultiFactorAuthentication failed with invalid MFA one time pass code.",
+            "The mfa_serial in profile prod is not a valid ARN",
+        ] {
+            assert_eq!(
+                exec_auth_message(&exec_run_failure(stderr)).unwrap(),
+                "Authentication command failed. Log in with your credential provider, then retry.",
+                "{stderr}"
+            );
+        }
     }
 
     use super::*;

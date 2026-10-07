@@ -125,7 +125,15 @@ users:
             break status;
         }
         if started.elapsed() > Duration::from_secs(20) {
-            child.kill().unwrap();
+            // pre_exec made sofka a session and process group leader, so this
+            // also stops a plugin still blocked on the terminal.
+            // SAFETY: plain syscalls on ids and a descriptor this test owns.
+            unsafe {
+                libc::kill(-(child.id() as libc::pid_t), libc::SIGKILL);
+                libc::close(master);
+            }
+            let _ = child.wait();
+            let _ = std::fs::remove_dir_all(&dir);
             panic!("sofka hung on an exec plugin waiting for terminal input");
         }
         std::thread::sleep(Duration::from_millis(50));
