@@ -229,7 +229,8 @@ pub fn exec_needs_input<'a>(
 /// the profile the command runs with. This text ends up on screen and in the
 /// log, so the word after a credential-named flag is always redacted (it may
 /// look like a flag), as are credential-named variables, and every other word
-/// goes through [`crate::redact::text`] for URL passwords and inline tokens.
+/// goes through [`crate::redact::credentials`] for URL passwords and inline
+/// tokens before it is quoted, so the line stays runnable.
 fn exec_command_line(exec: &kube::config::ExecConfig) -> String {
     let redacted = crate::redact::REDACTED;
     let mut words = Vec::new();
@@ -238,21 +239,21 @@ fn exec_command_line(exec: &kube::config::ExecConfig) -> String {
             words.push(if crate::redact::is_credential_key(name) {
                 format!("{name}={redacted}")
             } else {
-                format!("{name}={}", crate::redact::text(&shell_word(value)))
+                format!("{name}={}", shell_word(&crate::redact::credentials(value)))
             });
         }
     }
     words.extend(
         exec.command
             .as_deref()
-            .map(|command| crate::redact::text(&shell_word(command)).into_owned()),
+            .map(|command| shell_word(&crate::redact::credentials(command))),
     );
     let mut secret_next = false;
     for arg in exec.args.iter().flatten() {
         if std::mem::take(&mut secret_next) {
             words.push(redacted.into());
         } else if !arg.starts_with('-') || !crate::redact::is_credential_key(arg) {
-            words.push(crate::redact::text(&shell_word(arg)).into_owned());
+            words.push(shell_word(&crate::redact::credentials(arg)));
         } else if let Some((flag, _)) = arg.split_once('=') {
             words.push(format!("{}={redacted}", shell_word(flag)));
         } else {
@@ -2015,16 +2016,18 @@ pub(crate) mod tests {
             "env": [
                 {"name": "AWS_PROFILE", "value": "prod admin"},
                 {"name": "AWS_SECRET_ACCESS_KEY", "value": "abc123"},
-                {"name": "HTTPS_PROXY", "value": "http://user:pw2@proxy:3128"}
+                {"name": "HTTPS_PROXY", "value": "http://user:pw2@10.0.0.5:3128"},
+                {"name": "NOTE", "value": "basic admin"}
             ]
         }))
         .unwrap();
         let line = super::exec_command_line(&exec);
         assert_eq!(
             line,
-            "AWS_PROFILE='prod admin' AWS_SECRET_ACCESS_KEY=«redacted» HTTPS_PROXY=http://«redacted»@proxy:3128 \
+            "AWS_PROFILE='prod admin' AWS_SECRET_ACCESS_KEY=«redacted» \
+             HTTPS_PROXY='http://«redacted»@10.0.0.5:3128' NOTE='basic «redacted»' \
              kubelogin get-token --client-secret «redacted» --password=«redacted» --token «redacted» \
-             --server-id x --login=https://«redacted»@idp"
+             --server-id x '--login=https://«redacted»@idp'"
         );
         for secret in ["s3cr3t", "hunter2", "abc123", "-dashed", "pw1", "pw2"] {
             assert!(!line.contains(secret), "{line}");

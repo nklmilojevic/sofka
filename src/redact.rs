@@ -150,7 +150,9 @@ fn ip_name_char(ch: char) -> bool {
     ch.is_alphanumeric() || matches!(ch, '_' | '-' | '.')
 }
 
-fn credentials(input: &str) -> Cow<'_, str> {
+/// [`text`] without the IP address pass: only credential-like values. For
+/// text that has to stay usable, such as a command the user is told to run.
+pub fn credentials(input: &str) -> Cow<'_, str> {
     let bytes = input.as_bytes();
     let mut out: Option<String> = None;
     let mut last = 0usize;
