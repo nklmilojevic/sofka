@@ -517,6 +517,8 @@ const HEADER_HINT_COLUMNS: [usize; 3] = [16, 13, 13];
 const HEADER_HINTS_WIDTH: u16 = 46;
 /// Minimum width the info cluster keeps before the hint column may appear.
 const HEADER_INFO_MIN: u16 = 44;
+/// Width of the logo column on the right of the header.
+const HEADER_LOGO_WIDTH: u16 = 26;
 
 fn header_title(server_version: &str) -> Line<'static> {
     let mut spans = vec![Span::styled(" sofka ", theme::title())];
@@ -545,9 +547,13 @@ fn diagnostic_value<'a>(app: &App, value: &'a str) -> std::borrow::Cow<'a, str> 
 }
 
 fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
+    let hints = header_hints(app);
+    let show_hints = !hints.is_empty() && header_hints_fit(area.width);
+    let show_logo = !show_hints || header_logo_fits(area.width);
+    let logo_width = if show_logo { HEADER_LOGO_WIDTH } else { 0 };
     let cols = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Min(30), Constraint::Length(26)])
+        .constraints([Constraint::Min(30), Constraint::Length(logo_width)])
         .split(area);
 
     let ns = if app.all_namespaces() {
@@ -578,8 +584,6 @@ fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
     let inner = block.inner(cols[0]);
     frame.render_widget(block, cols[0]);
 
-    let hints = header_hints(app);
-    let show_hints = !hints.is_empty() && header_hints_fit(area.width);
     let info_width = if show_hints {
         inner.width.saturating_sub(HEADER_HINTS_WIDTH)
     } else {
@@ -657,7 +661,9 @@ fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
         )),
         Line::from(Span::styled(format!("   sofka v{VERSION}"), theme::dim())),
     ];
-    frame.render_widget(Paragraph::new(logo).alignment(Alignment::Right), cols[1]);
+    if show_logo {
+        frame.render_widget(Paragraph::new(logo).alignment(Alignment::Right), cols[1]);
+    }
 }
 
 fn favorite_namespace_spans(app: &App, width: usize) -> Vec<Span<'static>> {
@@ -765,9 +771,15 @@ fn draw_compact_header(frame: &mut Frame, app: &App, area: Rect) {
 }
 
 /// Whether the frame is wide enough for the header's key-hint column:
-/// logo (26) + box borders (2) + info cluster + hints.
+/// box borders (2) + info cluster + hints. The logo gives up its column
+/// before the hints do.
 fn header_hints_fit(frame_width: u16) -> bool {
-    frame_width.saturating_sub(26 + 2) >= HEADER_INFO_MIN + HEADER_HINTS_WIDTH
+    frame_width.saturating_sub(2) >= HEADER_INFO_MIN + HEADER_HINTS_WIDTH
+}
+
+/// Whether the logo still fits next to the info cluster and the hints.
+fn header_logo_fits(frame_width: u16) -> bool {
+    header_hints_fit(frame_width.saturating_sub(HEADER_LOGO_WIDTH))
 }
 
 /// Show the first effective binding for each action.

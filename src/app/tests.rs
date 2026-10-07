@@ -3054,6 +3054,34 @@ async fn cordoned_node_statuses_keep_readiness_colors() {
 }
 
 #[tokio::test]
+async fn narrow_header_drops_the_logo_before_the_key_hints() {
+    use ratatui::{Terminal, backend::TestBackend};
+
+    for (width, hints, logo) in [(80, false, true), (100, true, false), (130, true, true)] {
+        let (mut app, _rx) = test_app();
+        app.handle_key(press(KeyCode::Char(':'))).unwrap();
+        for c in "pods".chars() {
+            app.handle_key(press(KeyCode::Char(c))).unwrap();
+        }
+        app.handle_key(press(KeyCode::Enter)).unwrap();
+        assert_eq!(app.kind_plural, "pods");
+
+        let mut terminal = Terminal::new(TestBackend::new(width, 24)).unwrap();
+        terminal.draw(|f| crate::ui::draw(f, &mut app)).unwrap();
+        let header: String = (0..8)
+            .flat_map(|y| (0..width).map(move |x| (x, y)))
+            .map(|pos| terminal.backend().buffer()[pos].symbol().to_string())
+            .collect();
+        assert_eq!(
+            header.contains("prev logs"),
+            hints,
+            "hints at width {width}"
+        );
+        assert_eq!(header.contains("sofka v"), logo, "logo at width {width}");
+    }
+}
+
+#[tokio::test]
 async fn scrolling_pods_keeps_column_positions_stable() {
     use ratatui::{Terminal, backend::TestBackend};
 
