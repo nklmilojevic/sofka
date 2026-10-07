@@ -1919,6 +1919,8 @@ pub struct App {
     /// The revision in effect, keyed by the watch generation and store
     /// version it was computed for.
     rollout_current_cache: std::cell::Cell<Option<(u64, u64, Option<i64>)>>,
+    /// The latest rollback preview request; an older one's diff is dropped.
+    rollout_preview: u64,
     /// Drill-down breadcrumb shown in the header, e.g. "deploy/foo".
     pub scope_label: Option<String>,
 
@@ -2505,6 +2507,7 @@ impl App {
             owner: None,
             rollout_managed: None,
             rollout_current_cache: std::cell::Cell::new(None),
+            rollout_preview: 0,
             scope_label: None,
             generation: 0,
             gen_flag: Arc::new(AtomicU64::new(0)),

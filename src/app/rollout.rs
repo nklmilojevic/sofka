@@ -120,6 +120,8 @@ impl App {
         let client = self.cluster.client.clone();
         let tx = self.tx.clone();
         let genr = self.generation;
+        self.rollout_preview = self.rollout_preview.wrapping_add(1);
+        let request = self.rollout_preview;
         tokio::spawn(async move {
             let api: Api<DynamicObject> = Api::namespaced_with(client, &ns, &kind.ar);
             let yaml = |v: &Value| serde_yaml::to_string(v).unwrap_or_default();
@@ -138,6 +140,7 @@ impl App {
                         .then(|| format!("revision {revision} matches the live pod template"));
                     Msg::Diff {
                         generation: genr,
+                        request,
                         claim,
                         title,
                         lines,
@@ -174,6 +177,12 @@ impl App {
             self.flash_warn("could not determine this revision's number");
             return;
         };
+        if self.rollout_current() == Some(revision) {
+            self.flash_warn(&format!(
+                "revision {revision} is already the current revision"
+            ));
+            return;
+        }
         let Some(kind) = self.cluster.resolve(workload.plural()) else {
             self.flash_warn(&format!("{} kind unavailable", workload.plural()));
             return;

@@ -241,6 +241,8 @@ pub enum Msg {
     /// diff view.
     Diff {
         generation: u64,
+        /// The rollback preview request this answers; only the latest opens.
+        request: u64,
         claim: StatusClaim,
         title: String,
         lines: Vec<String>,

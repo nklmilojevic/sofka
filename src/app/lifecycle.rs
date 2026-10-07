@@ -1794,11 +1794,15 @@ impl App {
             }
             Msg::Diff {
                 generation,
+                request,
                 claim,
                 title,
                 lines,
                 warn,
-            } if generation == self.generation => {
+            } if generation == self.generation
+                && request == self.rollout_preview
+                && self.mode == Mode::Table =>
+            {
                 self.stop_resource_refresh();
                 self.clear_document_source();
                 self.detail = Scrollable {
@@ -1813,6 +1817,9 @@ impl App {
                     None => self.clear_claimed_status(claim),
                 }
             }
+            // A newer preview, a rollback confirmation, or another view took
+            // over while this one was reading the workload.
+            Msg::Diff { claim, .. } => self.clear_claimed_status(claim),
             Msg::ResourceRefresh { generation, result }
                 if generation == self.refresh_generation
                     && (self.refresh_task.is_some()

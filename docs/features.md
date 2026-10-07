@@ -720,7 +720,8 @@ include those conditions. Row filters can search the route paths.
   `deployed` or `superseded`, the images, and the `kubernetes.io/change-cause`
   annotation. `⏎` reads the live workload and diffs its pod template against the
   selected revision's. `r` rolls the workload back to that revision after
-  confirmation, like `kubectl rollout undo --to-revision`. sofka reads the
+  confirmation, like `kubectl rollout undo --to-revision`; the `deployed`
+  revision is refused without asking. Before patching, sofka reads the
   workload first and refuses a paused Deployment, a template that already
   matches, or a workload recreated since the history was opened; the patch
   carries the read's resourceVersion, so a change in between fails. When Flux or

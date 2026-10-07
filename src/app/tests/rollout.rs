@@ -344,16 +344,99 @@ async fn rollback_to_the_live_template_is_refused_without_a_patch() {
     let (mut app, mut rx) = deployment_app(json!({}));
     open_history(&mut app);
     apply_revisions(&mut app);
-    let mut requests = mock_workload_api(&mut app, deployment(json!({}), false, "web:3"));
-    select_revision(&mut app, 3);
+    // The live template drifted back to revision 2's without a new revision.
+    let mut requests = mock_workload_api(&mut app, deployment(json!({}), false, "web:2"));
+    select_revision(&mut app, 2);
     app.handle_key(press(KeyCode::Char('r'))).unwrap();
     app.handle_key(press(KeyCode::Char('y'))).unwrap();
 
     let (message, err) = next_flash(&mut rx).await;
     assert!(err);
-    assert!(message.contains("already matches revision 3"), "{message}");
+    assert!(message.contains("already matches revision 2"), "{message}");
     requests.recv().await.unwrap();
     assert!(requests.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn rollback_to_the_current_revision_is_refused_without_confirmation() {
+    let (mut app, _rx) = deployment_app(json!({}));
+    open_history(&mut app);
+    apply_revisions(&mut app);
+    let mut requests = mock_workload_api(&mut app, deployment(json!({}), false, "web:3"));
+    select_revision(&mut app, 3);
+    app.handle_key(press(KeyCode::Char('r'))).unwrap();
+
+    assert_eq!(app.mode, Mode::Table);
+    assert!(
+        app.flash
+            .contains("revision 3 is already the current revision"),
+        "{}",
+        app.flash
+    );
+    assert!(requests.try_recv().is_err());
+}
+
+/// The next `n` rollback previews, in the order their reads finished.
+async fn next_diffs(rx: &mut Receiver<Msg>, n: usize) -> Vec<Msg> {
+    tokio::time::timeout(Duration::from_secs(2), async {
+        let mut diffs = Vec::new();
+        while diffs.len() < n {
+            if let Some(msg @ Msg::Diff { .. }) = rx.recv().await {
+                diffs.push(msg);
+            }
+        }
+        diffs
+    })
+    .await
+    .unwrap()
+}
+
+#[tokio::test]
+async fn only_the_latest_rollback_preview_opens() {
+    let (mut app, mut rx) = deployment_app(json!({}));
+    open_history(&mut app);
+    apply_revisions(&mut app);
+    let _requests = mock_workload_api(&mut app, deployment(json!({}), false, "web:3"));
+    select_revision(&mut app, 1);
+    app.handle_key(press(KeyCode::Enter)).unwrap();
+    select_revision(&mut app, 2);
+    app.handle_key(press(KeyCode::Enter)).unwrap();
+    assert_eq!(app.mode, Mode::Table);
+
+    let mut diffs = next_diffs(&mut rx, 2).await;
+    diffs.sort_by_key(|msg| match msg {
+        Msg::Diff { request, .. } => std::cmp::Reverse(*request),
+        _ => unreachable!(),
+    });
+    for msg in diffs {
+        app.handle_msg(msg);
+    }
+    assert_eq!(app.mode, Mode::Diff);
+    assert_eq!(
+        app.detail.title,
+        "web — rollback preview (live → revision 2)"
+    );
+}
+
+#[tokio::test]
+async fn a_late_rollback_preview_does_not_replace_the_confirmation() {
+    let (mut app, mut rx) = deployment_app(json!({}));
+    open_history(&mut app);
+    apply_revisions(&mut app);
+    let _requests = mock_workload_api(&mut app, deployment(json!({}), false, "web:3"));
+    select_revision(&mut app, 1);
+    app.handle_key(press(KeyCode::Enter)).unwrap();
+    app.handle_key(press(KeyCode::Char('r'))).unwrap();
+    assert_eq!(app.mode, Mode::Confirm);
+
+    for msg in next_diffs(&mut rx, 1).await {
+        app.handle_msg(msg);
+    }
+    assert_eq!(app.mode, Mode::Confirm);
+    assert_eq!(
+        app.confirm_label,
+        "Roll back deploy/web in default to revision 1?"
+    );
 }
 
 #[tokio::test]
