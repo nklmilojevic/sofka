@@ -51,6 +51,7 @@ impl App {
         };
         let plural = self.kind_plural.clone();
         let is_resourceset = plural == "resourcesets" && kind.ar.group == FLUX_OPERATOR_GROUP;
+        let group = kind.ar.group.clone();
         let name = obj.metadata.name.clone().unwrap_or_default();
         let ns = obj.metadata.namespace.clone().unwrap_or_default();
         let subject = format!("{}/{name}", kind.ar.kind);
@@ -90,8 +91,9 @@ impl App {
                     name,
                     namespace: ns,
                 };
-                let owner_ref = gitops::owner_ref(&obj)
-                    .or_else(|| gitops::is_owner_plural(&plural).then(|| selection_ref.clone()));
+                let owner_ref = gitops::owner_ref(&obj).or_else(|| {
+                    gitops::is_owner_plural(&group, &plural).then(|| selection_ref.clone())
+                });
                 let self_is_owner = owner_ref.as_ref() == Some(&selection_ref);
                 let owner_inline = self_is_owner.then(|| obj.clone());
                 let owner_plural_inline = self_is_owner.then(|| plural.clone());
@@ -142,10 +144,20 @@ impl App {
                     source,
                     deps,
                 };
-                let mut findings = gitops::describe(&ev);
-                if is_resourceset {
-                    findings.extend(gitops::input_provider_findings(&obj));
+                // The providers of the selected ResourceSet, or of the
+                // ResourceSet that applied the selection.
+                let providers = if is_resourceset {
+                    Some(&obj)
+                } else {
+                    ev.owner
+                        .as_ref()
+                        .filter(|o| o.reference.kind == "ResourceSet")
+                        .and_then(|o| o.obj.as_ref())
                 }
+                .map(gitops::input_provider_findings)
+                .unwrap_or_default();
+                let mut findings = gitops::describe(&ev);
+                findings.extend(providers);
                 findings.extend(gitops::inventory_findings(&obj, &inventory_kinds));
                 prepend_warn_finding(&mut findings, warn);
                 Ok((obj, findings))
@@ -178,14 +190,24 @@ impl App {
             "buckets",
             "helmrepositories",
             "helmcharts",
-            "resourcesets",
-            "fluxinstances",
         ] {
             if let Some(kind) = self.cluster.resolve(k) {
                 let plural = kind.ar.plural.to_lowercase();
                 let entry = (kind.ar.clone(), kind.namespaced, plural.clone());
                 m.insert(kind.ar.kind.to_lowercase(), entry.clone());
                 m.insert(plural, entry);
+            }
+        }
+        // flux-operator plurals are generic enough that another group may hold
+        // the bare key, so resolve them in their group and jump by the
+        // group-qualified plural.
+        for k in ["ResourceSet", "FluxInstance"] {
+            if let Some(kind) = self.cluster.resolve_in_group(k, FLUX_OPERATOR_GROUP) {
+                let plural = format!("{}.{}", kind.ar.plural.to_lowercase(), kind.ar.group);
+                m.insert(
+                    kind.ar.kind.to_lowercase(),
+                    (kind.ar.clone(), kind.namespaced, plural),
+                );
             }
         }
         m

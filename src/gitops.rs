@@ -98,11 +98,14 @@ pub fn owner_ref(obj: &DynamicObject) -> Option<FluxRef> {
     None
 }
 
-/// Whether `plural` is a Flux kind that applies resources (an owner kind).
-pub fn is_owner_plural(plural: &str) -> bool {
+/// Whether `group`/`plural` is a Flux kind that applies resources (an owner
+/// kind).
+pub fn is_owner_plural(group: &str, plural: &str) -> bool {
     matches!(
-        plural,
-        "kustomizations" | "helmreleases" | "resourcesets" | "fluxinstances"
+        (group, plural),
+        ("kustomize.toolkit.fluxcd.io", "kustomizations")
+            | ("helm.toolkit.fluxcd.io", "helmreleases")
+            | ("fluxcd.controlplane.io", "resourcesets" | "fluxinstances")
     )
 }
 
@@ -186,30 +189,64 @@ pub fn input_provider_findings(resourceset: &DynamicObject) -> Vec<Finding> {
             out.push(
                 finding(1, Level::Info, format!("ResourceSetInputProvider/{name}")).with_target(
                     Target {
-                        plural: "resourcesetinputproviders".into(),
+                        plural: "resourcesetinputproviders.fluxcd.controlplane.io".into(),
                         namespace: namespace.clone(),
                         name: name.to_string(),
                     },
                 ),
             );
-        } else if let Some(labels) = r
-            .pointer("/selector/matchLabels")
-            .and_then(Value::as_object)
-            .filter(|l| !l.is_empty())
-        {
-            let selector = labels
-                .iter()
-                .map(|(k, v)| format!("{k}={}", v.as_str().unwrap_or_default()))
-                .collect::<Vec<_>>()
-                .join(",");
-            out.push(finding(1, Level::Info, format!("selector {selector}")));
-        } else if r.get("selector").is_some() {
-            out.push(finding(1, Level::Info, "selector with match expressions"));
+        } else if let Some(selector) = r.get("selector") {
+            out.push(finding(
+                1,
+                Level::Info,
+                format!("selector {}", label_selector(selector)),
+            ));
         } else {
             out.push(finding(1, Level::Warn, "invalid input provider reference"));
         }
     }
     out
+}
+
+/// A label selector in `kubectl -l` syntax: `matchLabels` as `k=v`, then
+/// `matchExpressions` as `k in (a,b)`, `k notin (a,b)`, `k`, or `!k`. An
+/// empty selector matches everything.
+fn label_selector(selector: &Value) -> String {
+    let mut parts: Vec<String> = selector
+        .get("matchLabels")
+        .and_then(Value::as_object)
+        .into_iter()
+        .flatten()
+        .map(|(k, v)| format!("{k}={}", v.as_str().unwrap_or_default()))
+        .collect();
+    for e in selector
+        .get("matchExpressions")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        let key = e.get("key").and_then(Value::as_str).unwrap_or_default();
+        let values = e
+            .get("values")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .collect::<Vec<_>>()
+            .join(",");
+        parts.push(match e.get("operator").and_then(Value::as_str) {
+            Some("In") => format!("{key} in ({values})"),
+            Some("NotIn") => format!("{key} notin ({values})"),
+            Some("Exists") => key.to_string(),
+            Some("DoesNotExist") => format!("!{key}"),
+            other => format!("{key} {} ({values})", other.unwrap_or("?")),
+        });
+    }
+    if parts.is_empty() {
+        "(everything)".to_string()
+    } else {
+        parts.join(",")
+    }
 }
 
 /// Show the inventory without reading each managed resource.

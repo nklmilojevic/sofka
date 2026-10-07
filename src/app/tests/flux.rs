@@ -380,7 +380,10 @@ async fn enter_on_a_resourceset_opens_gitops_with_providers_and_inventory() {
         "spec": {
             "inputsFrom": [
                 {"kind": "ResourceSetInputProvider", "name": "prs"},
-                {"kind": "ResourceSetInputProvider", "selector": {"matchLabels": {"team": "web"}}}
+                {"kind": "ResourceSetInputProvider", "selector": {
+                    "matchLabels": {"team": "web"},
+                    "matchExpressions": [{"key": "env", "operator": "In", "values": ["dev", "prod"]}]
+                }}
             ],
             "dependsOn": [{
                 "apiVersion": "apiextensions.k8s.io/v1", "kind": "CustomResourceDefinition",
@@ -426,7 +429,10 @@ async fn enter_on_a_resourceset_opens_gitops_with_providers_and_inventory() {
         !texts.iter().any(|t| t.starts_with("waiting on dependency")),
         "{texts:?}"
     );
-    assert!(texts.contains(&"selector team=web"), "{texts:?}");
+    assert!(
+        texts.contains(&"selector team=web,env in (dev,prod)"),
+        "{texts:?}"
+    );
     assert!(texts.contains(&"Managed resources"), "{texts:?}");
     assert!(
         app.gitops_items
@@ -494,6 +500,7 @@ async fn gitops_follows_flux_operator_labels_to_the_owner() {
         let owner = json!({
             "apiVersion": "fluxcd.controlplane.io/v1", "kind": kind,
             "metadata": {"name": name, "namespace": "flux-system"},
+            "spec": {"inputsFrom": [{"kind": "ResourceSetInputProvider", "name": "prs"}]},
             "status": {
                 "conditions": [{"type": "Ready", "status": "False", "reason": "BuildFailed", "message": "bad template"}]
             }
@@ -501,7 +508,9 @@ async fn gitops_follows_flux_operator_labels_to_the_owner() {
         let (mut app, rx) = test_app();
         app.cluster
             .register_kind("fluxcd.controlplane.io", kind, plural, true);
-        let (mut app, mut rx, responses, _) =
+        // Another group registered later takes the bare plural.
+        app.cluster.register_kind("example.com", kind, plural, true);
+        let (mut app, mut rx, responses, requests) =
             health_report_app_with(app, rx, "deployments", deployment.clone());
         responses.lock().unwrap().extend([
             (
@@ -518,6 +527,20 @@ async fn gitops_follows_flux_operator_labels_to_the_owner() {
         let texts: Vec<_> = app.gitops_items.iter().map(|f| f.text.as_str()).collect();
         let managed = format!("Deployment/web is managed by {kind}/{name}");
         assert!(texts.contains(&managed.as_str()), "{texts:?}");
+        assert!(
+            !requests
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|p| p.starts_with("/apis/example.com")),
+            "{plural} owner read from the wrong group"
+        );
+        // Only a ResourceSet reads input providers.
+        assert_eq!(
+            texts.contains(&"ResourceSetInputProvider/prs"),
+            kind == "ResourceSet",
+            "{texts:?}"
+        );
         assert!(!texts.contains(&"Source"), "{texts:?}");
         assert!(
             texts.contains(&"not ready (BuildFailed) — bad template"),
@@ -533,7 +556,37 @@ async fn gitops_follows_flux_operator_labels_to_the_owner() {
         app.handle_key(press(KeyCode::Enter)).unwrap();
         assert_eq!(app.mode, Mode::Table);
         assert_eq!(app.kind_plural, plural);
+        assert_eq!(
+            app.kind.as_ref().unwrap().ar.group,
+            "fluxcd.controlplane.io"
+        );
         assert_eq!(app.namespace, "flux-system");
+    }
+}
+
+#[tokio::test]
+async fn gitops_on_another_groups_resourceset_is_not_a_flux_owner() {
+    for (kind, plural) in [
+        ("ResourceSet", "resourcesets"),
+        ("FluxInstance", "fluxinstances"),
+    ] {
+        let object = json!({
+            "apiVersion": "example.com/v1", "kind": kind,
+            "metadata": {"name": "apps", "namespace": "default"}
+        });
+        let (mut app, rx) = test_app();
+        app.cluster.register_kind("example.com", kind, plural, true);
+        let (mut app, mut rx, responses, _) =
+            health_report_app_with(app, rx, plural, object.clone());
+        responses.lock().unwrap().insert(
+            format!("/apis/example.com/v1/namespaces/default/{plural}/apps"),
+            (200, object),
+        );
+        open_health_report_key(&mut app, true);
+        receive_health_report(&mut app, &mut rx, true).await;
+        let texts: Vec<_> = app.gitops_items.iter().map(|f| f.text.as_str()).collect();
+        let unmanaged = format!("{kind}/apps is not managed by Flux");
+        assert!(texts.contains(&unmanaged.as_str()), "{texts:?}");
     }
 }
 

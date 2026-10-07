@@ -616,8 +616,9 @@ include those conditions. Row filters can search the route paths.
   unavailable. Helm hooks and controller-created children are not added to this
   list. Navigation uses the normal resource view and its access error handling.
   A flux-operator **ResourceSet** or **FluxInstance** is its own owner: `⏎` on
-  one opens this view, with no Source section. A ResourceSet also lists the
-  input providers in `spec.inputsFrom`; `⏎` on a named provider opens it. An
+  one opens this view, with no Source section. The view also lists the input
+  providers in the ResourceSet's `spec.inputsFrom`, for the ResourceSet and for
+  the objects it applied. `⏎` on a named provider opens it. An
   object a ResourceSet applied finds its owner from the
   `resourceset.fluxcd.controlplane.io/name` label. An object a FluxInstance
   applied finds it from `fluxcd.controlplane.io/name`, as `flux-operator trace`
