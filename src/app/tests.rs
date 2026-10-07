@@ -37959,6 +37959,21 @@ async fn log_json_view_starts_from_config_and_follows_context_overrides() {
     palette(&mut app, "reload");
     assert_eq!(app.logs.json, JsonView::Pretty);
 
+    // A reload that changes the value replaces the session choice and
+    // re-renders the buffered line.
+    write_config(&dir, "[logs]\njson_view = \"raw\"\n");
+    palette(&mut app, "reload");
+    assert_eq!(app.logs.json, JsonView::Raw);
+    assert_eq!(app.logs.display_line(0), app.logs.view.lines[0]);
+    write_config(&dir, "[logs]\njson_view = \"record\"\n");
+    palette(&mut app, "reload");
+    assert_eq!(app.logs.json, JsonView::Record);
+    assert!(
+        app.logs
+            .display_line(0)
+            .starts_with("INFO  ready port=8080")
+    );
+
     // A context with a different value switches to it, buffered lines too.
     land_context(&mut app, "prod");
     assert_eq!(app.logs.json, JsonView::Raw);

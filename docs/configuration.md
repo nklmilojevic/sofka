@@ -385,7 +385,7 @@ Each of these is documented where the feature itself is:
 | `[[workspaces]]`      | named sets of views for one task            | [Plugins](plugins.md#workspaces)                           |
 | `[[forwards]]`        | saved port-forwards, optionally autostarted | [Plugins](plugins.md#saved-forwards)                       |
 | `[[guardrails]]`      | enforced rules on destructive actions       | [Safety](safety.md#guardrails)                             |
-| `[logs]`              | log tail, follow buffer, `since` lookback   | [Log controls](debugging.md#log-controls)                  |
+| `[logs]`              | tail, buffer, `since`, starting `json_view` | [Log controls](debugging.md#log-controls)                  |
 | `[notify]`            | bell and desktop notification delivery      | [Notifications](debugging.md#notifications)                |
 | `[keys]`              | built-in keyboard bindings                  | [Key bindings](keybindings.md)                             |
 | `[debug]`             | ephemeral and node debug images             | [Debug containers](debugging.md#debug-containers-and-pods) |
