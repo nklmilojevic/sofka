@@ -143,9 +143,13 @@ where
             .ok_or_else(|| "the last update check failed; retrying within a day".to_string());
     }
     let result = fetch().await.and_then(|bytes| parse_release(&bytes));
+    // Read again after a failure: a `:check-update` or another session may
+    // have saved a release while this request was in flight.
     let known = match &result {
         Ok(release) => Some(release.clone()),
-        Err(_) => previous.and_then(|cache| cache.release),
+        Err(_) => read_cache(path)
+            .and_then(|cache| cache.release)
+            .or_else(|| previous.and_then(|cache| cache.release)),
     };
     if let Err(error) = store(path, now, known.as_ref()) {
         crate::log_warn!("update.cache", error = error);
@@ -333,6 +337,24 @@ mod tests {
             "a forced check ignores the cache"
         );
         assert_eq!(cached(&path), Some(release("1.4.0")));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn a_failure_keeps_a_release_saved_while_it_was_in_flight() {
+        let dir = scratch("overlap");
+        let path = dir.join("update-check.toml");
+        let concurrent = path.clone();
+        let fail_after_another_check = move || async move {
+            store(&concurrent, 1_500, Some(&release("1.2.3"))).unwrap();
+            Err("timed out".to_string())
+        };
+        assert!(
+            check_at(&path, 1_000, false, fail_after_another_check)
+                .await
+                .is_err()
+        );
+        assert_eq!(cached(&path), Some(release("1.2.3")));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
