@@ -123,7 +123,7 @@ actions! {
     Stream => ("stream", "stream"),
     SwitchPane => ("switch_pane", "switch pane"),
     Timeline => ("timeline", "timeline"),
-    Json => ("json", "JSON formatting"),
+    Json => ("json", "JSON view: raw/record/pretty"),
     Timestamps => ("timestamps", "timestamps"),
     Toggle => ("toggle", "toggle"),
     Transfer => ("transfer", "transfer"),

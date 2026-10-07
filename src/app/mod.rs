@@ -1256,7 +1256,7 @@ pub struct LogsView {
     pub warnings_only: bool,
     pub wrap: bool,
     pub timestamps: bool,
-    pub json: bool,
+    pub json: logs::JsonView,
     json_budget: usize,
     pub stopped: bool,
     /// Fullscreen (`F`, k9s): the pane takes the whole frame with no header,
@@ -1296,7 +1296,7 @@ impl Default for LogsView {
             warnings_only: false,
             wrap: false,
             timestamps: false,
-            json: false,
+            json: logs::JsonView::Raw,
             json_budget: logs::JSON_CACHE_LIMIT,
             stopped: false,
             fullscreen: false,
@@ -1455,14 +1455,10 @@ impl LogsView {
                 continue;
             }
             index.shown.push(Some(i as u32));
-            let display = if *json {
-                line_meta
-                    .get(i)
-                    .and_then(|m| m.pretty.as_deref())
-                    .unwrap_or(line)
-            } else {
-                line
-            };
+            let display = line_meta
+                .get(i)
+                .and_then(|m| m.display(*json))
+                .unwrap_or(line);
             index.total_rows += logs::display_height(display, wrap_width);
             index.ends.push(index.total_rows as u32);
         }
@@ -2847,6 +2843,7 @@ mod journal;
 mod lifecycle;
 mod log_follow;
 mod logs;
+pub use logs::JsonView;
 mod metrics_history;
 mod mouse;
 mod namespace_patterns;

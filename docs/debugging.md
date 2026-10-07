@@ -94,8 +94,17 @@ herdr's own `ui.toast` delivery (in-app, outer terminal, or system).
 
 ## Log controls
 
-Press `J` to switch between raw and indented JSON. Raw display is the default.
-The setting applies to buffered and new records and stays active for the session.
+Press `J` to cycle the JSON view: raw, record, and indented JSON. Raw display is
+the default. The setting applies to buffered and new records and stays active for
+the session.
+
+Record view shows each structured log record (zap, slog, logrus, pino) on one row:
+time, level, message, then the other fields as `key=value`. It reads the time from
+`time`, `ts`, `timestamp`, or `@timestamp`, the level from `level`, `lvl`, or
+`severity`, and the message from `msg` or `message`. Epoch times become RFC 3339.
+Records without a level or message field stay raw. The row color comes from the
+level in the original record.
+
 Only individual JSON objects and arrays are formatted. Other text stays unchanged.
 Source labels and timestamps stay with their record. Filters and severity selection
 use the original record and show all its formatted rows when it matches.

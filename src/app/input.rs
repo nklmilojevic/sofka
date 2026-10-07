@@ -1411,10 +1411,7 @@ impl App {
             }
             (Some(Action::Json), _) => {
                 self.logs.toggle_json();
-                self.flash = format!(
-                    "JSON formatting: {}",
-                    if self.logs.json { "on" } else { "off" }
-                );
+                self.flash = format!("JSON view: {}", self.logs.json.label());
                 self.flash_err = false;
                 return;
             }

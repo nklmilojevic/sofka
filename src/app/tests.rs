@@ -37877,7 +37877,8 @@ async fn log_json_shortcut_formats_records_and_keeps_raw_save() {
     let raw = app.filtered_log_text();
     let generation = app.log_gen;
     app.handle_key(press(KeyCode::Char('J'))).unwrap();
-    assert!(app.logs.json);
+    app.handle_key(press(KeyCode::Char('J'))).unwrap();
+    assert_eq!(app.logs.json, JsonView::Pretty);
     assert!(app.logs.display_line(0).starts_with("[ns/pod:app] {\n"));
     assert!(app.logs.display_line(0).contains("    \"items\": [\n"));
     assert!(app.logs.display_line(1).starts_with("[\n"));
@@ -37917,9 +37918,83 @@ async fn log_json_shortcut_formats_records_and_keeps_raw_save() {
     shortcut_log_lines(&mut app, vec![r#"[app] {"new":[3]}"#.into()]);
     assert!(app.logs.display_line(6).starts_with("[app] {\n"));
     app.handle_key(press(KeyCode::Char('J'))).unwrap();
-    assert!(!app.logs.json);
+    assert_eq!(app.logs.json, JsonView::Raw);
     assert_eq!(app.logs.display_line(0), app.logs.view.lines[0]);
     assert_eq!(app.log_gen, generation);
+}
+
+#[tokio::test]
+async fn log_json_shortcut_renders_structured_records_on_one_row() {
+    use ratatui::{Terminal, backend::TestBackend};
+    let (mut app, _rx) = test_app();
+    app.mode = Mode::Logs;
+    let lines = vec![
+        r#"[ns/pod:app] 2026-09-10T10:00:00Z {"level":"info","ts":1757498400.25,"logger":"ctrl","msg":"Reconciling","controller":"x"}"#.into(),
+        r#"{"time":"2026-09-10T10:00:00Z","level":"WARN","msg":"slow request","path":"/api v1","n":3}"#.into(),
+        r#"{"level":50,"time":1757498400000,"msg":"boom","err":{"type":"Error"}}"#.into(),
+        r#"{"record":1}"#.into(),
+        "plain text".into(),
+        r#"{"msg":"crash","level":"error"}"#.into(),
+        r#"{"msg":"panic\nat main.go:1","level":"error"}"#.into(),
+    ];
+    shortcut_log_lines(&mut app, lines);
+    let raw = app.filtered_log_text();
+    app.handle_key(press(KeyCode::Char('J'))).unwrap();
+    assert_eq!(app.logs.json, JsonView::Record);
+    assert_eq!(app.flash, "JSON view: record");
+    assert_eq!(
+        app.logs.display_line(0),
+        "[ns/pod:app] 2025-09-10T10:00:00.25Z INFO  Reconciling controller=x logger=ctrl"
+    );
+    assert_eq!(
+        app.logs.display_line(1),
+        r#"2026-09-10T10:00:00Z WARN  slow request n=3 path="/api v1""#
+    );
+    assert_eq!(
+        app.logs.display_line(2),
+        r#"2025-09-10T10:00:00Z ERROR boom err={"type":"Error"}"#
+    );
+    assert_eq!(app.logs.display_line(3), app.logs.view.lines[3]);
+    assert_eq!(app.logs.display_line(4), "plain text");
+    assert_eq!(app.logs.display_line(5), "ERROR crash");
+    assert_eq!(app.logs.display_line(6), r#"ERROR "panic\nat main.go:1""#);
+    assert_eq!(app.logs.refresh_index(0).total_rows(), 7);
+    assert_eq!(app.filtered_log_text(), raw);
+
+    app.logs.set_filter(r#""controller":"x""#.into());
+    assert_eq!(app.logs.refresh_index(0).matched_lines(), 1);
+    app.logs.set_filter(String::new());
+
+    app.handle_key(press(KeyCode::Char('t'))).unwrap();
+    assert!(
+        app.logs
+            .display_line(0)
+            .starts_with("[ns/pod:app] 2026-09-10T10:00:00Z 2025-09-10T10:00:00.25Z INFO ")
+    );
+    app.handle_key(press(KeyCode::Char('t'))).unwrap();
+
+    app.compact = true;
+    let mut terminal = Terminal::new(TestBackend::new(100, 20)).unwrap();
+    terminal.draw(|f| crate::ui::draw(f, &mut app)).unwrap();
+    let buffer = terminal.backend().buffer();
+    let crash = (0..buffer.area.height)
+        .find_map(|y| {
+            let row: String = (0..buffer.area.width)
+                .map(|x| buffer[(x, y)].symbol())
+                .collect();
+            row.find("crash").map(|x| buffer[(x as u16, y)].fg)
+        })
+        .unwrap();
+    assert_eq!(crash, crate::theme::red());
+
+    app.handle_key(press(KeyCode::Char('J'))).unwrap();
+    assert_eq!(app.logs.json, JsonView::Pretty);
+    assert_eq!(app.flash, "JSON view: pretty");
+    assert!(app.logs.display_line(1).starts_with("{\n"));
+    app.handle_key(press(KeyCode::Char('J'))).unwrap();
+    assert_eq!(app.logs.json, JsonView::Raw);
+    assert_eq!(app.flash, "JSON view: raw");
+    assert_eq!(app.logs.display_line(1), app.logs.view.lines[1]);
 }
 
 #[tokio::test]
@@ -37939,6 +38014,7 @@ async fn log_json_shortcut_formats_primitive_arrays_with_trailing_whitespace() {
         records.iter().map(|(raw, _)| (*raw).into()).collect(),
     );
     let raw_lines = app.logs.view.lines.clone();
+    app.handle_key(press(KeyCode::Char('J'))).unwrap();
     app.handle_key(press(KeyCode::Char('J'))).unwrap();
     for (i, (_, pretty)) in records.iter().enumerate() {
         assert_eq!(app.logs.display_line(i), *pretty);
@@ -37963,6 +38039,7 @@ async fn log_json_shortcut_keeps_scroll_follow_wrap_and_record_limits() {
             .map(|i| format!(r#"{{"record":{i},"message":"long message for wrapping"}}"#))
             .collect(),
     );
+    app.handle_key(press(KeyCode::Char('J'))).unwrap();
     app.handle_key(press(KeyCode::Char('J'))).unwrap();
     let mut terminal = Terminal::new(TestBackend::new(24, 12)).unwrap();
     for width in [24, 8] {
@@ -37995,7 +38072,7 @@ async fn log_json_shortcut_keeps_scroll_follow_wrap_and_record_limits() {
     shortcut_log_lines(&mut app, vec![large.clone()]);
     assert_eq!(app.logs.display_line(29), large);
     app.logs.clear_lines();
-    assert!(app.logs.json);
+    assert_eq!(app.logs.json, JsonView::Record);
     assert_eq!(app.logs.json_budget, logs::JSON_CACHE_LIMIT);
 }
 
@@ -38011,6 +38088,7 @@ async fn log_json_full_buffer_performance_and_cache_limits() {
             .collect(),
     );
     let start = std::time::Instant::now();
+    app.handle_key(press(KeyCode::Char('J'))).unwrap();
     app.handle_key(press(KeyCode::Char('J'))).unwrap();
     let toggle = start.elapsed();
     assert_eq!(app.logs.view.lines.len(), 100_000);

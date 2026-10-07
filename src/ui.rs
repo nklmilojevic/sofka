@@ -2035,12 +2035,20 @@ fn draw_logs(frame: &mut Frame, app: &mut App, area: Rect) {
                 continue;
             };
             let l = app.logs.display_line(buf_idx);
+            // A record row drops the JSON keys the severity check reads, so
+            // its color comes from the raw record.
+            let record_color = (app.logs.json == crate::app::JsonView::Record)
+                .then(|| log_level_color(&app.logs.view.lines[buf_idx]));
             let mut offset = 0;
             for part in l.split('\n') {
                 if row + offset >= scroll + inner_h {
                     break;
                 }
-                let line = render_log_line(part, highlight);
+                let line = render_log_line_in(
+                    part,
+                    highlight,
+                    record_color.unwrap_or_else(|| log_level_color(part)),
+                );
                 let parts = if wrap {
                     wrap_line(line, inner_w)
                 } else {
@@ -2059,7 +2067,11 @@ fn draw_logs(frame: &mut Frame, app: &mut App, area: Rect) {
 
     let flags = format!(
         "{}{}{}{}{}{}",
-        if app.logs.json { " JSON" } else { "" },
+        match app.logs.json {
+            crate::app::JsonView::Raw => "",
+            crate::app::JsonView::Record => " record",
+            crate::app::JsonView::Pretty => " JSON",
+        },
         if app.logs.warnings_only {
             " [warn/error]"
         } else {
@@ -2208,8 +2220,7 @@ fn wrap_line<'a>(line: Line<'a>, width: usize) -> Vec<Line<'a>> {
 /// in its own stable color, an optional leading RFC3339 timestamp dimmed (k9s
 /// style), then the message body in its severity color with search matches
 /// highlighted on top.
-fn render_log_line(line: &str, needle: &str) -> Line<'static> {
-    let base = log_level_color(line);
+fn render_log_line_in(line: &str, needle: &str, base: Color) -> Line<'static> {
     let mut spans: Vec<Span<'static>> = Vec::new();
     let mut rest = line;
 
@@ -2234,6 +2245,11 @@ fn render_log_line(line: &str, needle: &str) -> Line<'static> {
     //    falling back to the severity color, with search matches on top.
     spans.extend(render_body(rest, needle, base));
     Line::from(spans)
+}
+
+#[cfg(test)]
+fn render_log_line(line: &str, needle: &str) -> Line<'static> {
+    render_log_line_in(line, needle, log_level_color(line))
 }
 
 /// Length of a leading RFC3339 timestamp (`2026-06-30T12:52:20.876Z`,
