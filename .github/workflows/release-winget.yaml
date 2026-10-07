@@ -1,0 +1,58 @@
+name: Release WinGet
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Published release tag (for example, v0.29.3)
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: winget-${{ inputs.tag }}
+  cancel-in-progress: false
+
+jobs:
+  submit:
+    if: github.repository == 'nklmilojevic/sofka' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      RELEASE_TAG: ${{ inputs.tag }}
+    steps:
+      - name: Check release and Windows assets
+        id: release
+        shell: bash
+        run: |
+          if ! [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Use a release tag such as v0.29.3"
+            exit 1
+          fi
+          gh release view "$RELEASE_TAG" --json isDraft,isPrerelease > release.json
+          jq -e '.isDraft == false and .isPrerelease == false' release.json
+          mkdir assets
+          gh release download "$RELEASE_TAG" --dir assets \
+            --pattern SHA256SUMS \
+            --pattern "sofka-$RELEASE_TAG-x86_64-pc-windows-msvc.zip" \
+            --pattern "sofka-$RELEASE_TAG-aarch64-pc-windows-msvc.zip"
+          cd assets
+          for target in x86_64 aarch64; do
+            name="sofka-$RELEASE_TAG-$target-pc-windows-msvc.zip"
+            test -s "$name"
+            awk -v name="$name" '$2 == name { print; found++ } END { if (found != 1) exit 1 }' SHA256SUMS > "$target.sha256"
+            sha256sum --check "$target.sha256"
+            unzip -Z1 "$name" | grep -Fx sofka.exe
+          done
+          echo "tag=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Submit manifest update
+        uses: vedantmgoyal9/winget-releaser@a8fff44b123f115ce4c21543edf8b677376fc7e0
+        with:
+          identifier: nklmilojevic.sofka
+          release-tag: ${{ steps.release.outputs.tag }}
+          installers-regex: '^sofka-v[0-9]+\.[0-9]+\.[0-9]+-(x86_64|aarch64)-pc-windows-msvc\.zip$'
+          token: ${{ secrets.WINGET_TOKEN }}
