@@ -19,6 +19,9 @@ const AUTH_TEST: &str = "terminal::tests::exec_auth_child";
 struct Session {
     child: Child,
     master: Option<File>,
+    /// Output read past the last marker, which the next `expect` starts from:
+    /// a child can print two markers in one write.
+    unread: Vec<u8>,
 }
 
 impl Session {
@@ -86,12 +89,16 @@ impl Session {
         Self {
             child: command.spawn().unwrap(),
             master: Some(master),
+            unread: Vec::new(),
         }
     }
 
     fn expect(&mut self, marker: &str) {
         let deadline = Instant::now() + Duration::from_secs(15);
-        let mut output = Vec::new();
+        let mut output = std::mem::take(&mut self.unread);
+        if self.consume(&mut output, marker) {
+            return;
+        }
         while Instant::now() < deadline {
             let mut fd = libc::pollfd {
                 fd: self.master.as_ref().unwrap().as_raw_fd(),
@@ -108,12 +115,24 @@ impl Session {
                     Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
                     Err(_) => break,
                 }
-                if String::from_utf8_lossy(&output).contains(marker) {
+                if self.consume(&mut output, marker) {
                     return;
                 }
             }
         }
         panic!("missing {marker}: {}", String::from_utf8_lossy(&output));
+    }
+
+    /// Whether `output` holds `marker`; what follows it is kept for later.
+    fn consume(&mut self, output: &mut Vec<u8>, marker: &str) -> bool {
+        let Some(at) = output
+            .windows(marker.len())
+            .position(|window| window == marker.as_bytes())
+        else {
+            return false;
+        };
+        self.unread = output.split_off(at + marker.len());
+        true
     }
 
     fn send(&mut self, bytes: &[u8]) {
@@ -377,21 +396,20 @@ fn exec_auth_runs_the_plugin_on_the_terminal_and_restores_the_tui() {
         let dir = std::env::temp_dir().join(format!("sofka-auth-{case}-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let kubeconfig = dir.join("kubeconfig");
-        let plugin = AUTH_PLUGIN.replace('\'', "'\\''");
-        std::fs::write(
-            &kubeconfig,
-            format!(
-                "apiVersion: v1\nkind: Config\ncurrent-context: test\n\
-                 contexts:\n- name: test\n  context:\n    cluster: test\n    user: mfa\n\
-                 clusters:\n- name: test\n  cluster:\n    server: https://127.0.0.1:1\n\
-                 users:\n- name: mfa\n  user:\n    exec:\n\
-                 \x20     apiVersion: client.authentication.k8s.io/v1beta1\n\
-                 \x20     command: sh\n      args:\n      - -c\n      - '{plugin}'\n\
-                 \x20     env:\n      - name: CACHE\n        value: {}\n",
-                dir.join("cache").display()
-            ),
-        )
-        .unwrap();
+        let config = serde_json::json!({
+            "apiVersion": "v1",
+            "kind": "Config",
+            "current-context": "test",
+            "contexts": [{"name": "test", "context": {"cluster": "test", "user": "mfa"}}],
+            "clusters": [{"name": "test", "cluster": {"server": "https://127.0.0.1:1"}}],
+            "users": [{"name": "mfa", "user": {"exec": {
+                "apiVersion": "client.authentication.k8s.io/v1beta1",
+                "command": "sh",
+                "args": ["-c", AUTH_PLUGIN],
+                "env": [{"name": "CACHE", "value": dir.join("cache")}]
+            }}}]
+        });
+        std::fs::write(&kubeconfig, serde_yaml::to_string(&config).unwrap()).unwrap();
         let mut session = Session::start_test(AUTH_TEST, case, &[("KUBECONFIG", &kubeconfig)]);
         session.expect("TUI_READY");
         session.send(b"y");
