@@ -34,10 +34,13 @@ impl Release {
     }
 }
 
+/// The last network attempt and the last release any attempt found. A failed
+/// attempt still updates `checked_at`, so an offline machine or a rate limit
+/// does not turn every startup into another request.
 #[derive(Serialize, Deserialize)]
 struct Cache {
     checked_at: u64,
-    release: Release,
+    release: Option<Release>,
 }
 
 /// Where the last check result lives: `<state-dir>/update-check.toml`.
@@ -60,24 +63,20 @@ fn read_cache(path: &Path) -> Option<Cache> {
 /// The last release any check found, however old. `None` when no check has
 /// succeeded yet or the file is unreadable.
 pub fn cached(path: &Path) -> Option<Release> {
-    read_cache(path).map(|cache| cache.release)
+    read_cache(path).and_then(|cache| cache.release)
 }
 
-/// The cached release when it was checked within [`CHECK_INTERVAL`] of `now`.
-/// A timestamp in the future (a clock that moved back) counts as stale.
-fn fresh(path: &Path, now: u64) -> Option<Release> {
-    read_cache(path)
-        .filter(|cache| {
-            now.checked_sub(cache.checked_at)
-                .is_some_and(|age| age < CHECK_INTERVAL.as_secs())
-        })
-        .map(|cache| cache.release)
+/// Whether the last attempt was within [`CHECK_INTERVAL`] of `now`. A
+/// timestamp in the future (a clock that moved back) counts as stale.
+fn is_fresh(cache: &Cache, now: u64) -> bool {
+    now.checked_sub(cache.checked_at)
+        .is_some_and(|age| age < CHECK_INTERVAL.as_secs())
 }
 
-fn store(path: &Path, now: u64, release: &Release) -> Result<(), String> {
+fn store(path: &Path, now: u64, release: Option<&Release>) -> Result<(), String> {
     let cache = Cache {
         checked_at: now,
-        release: release.clone(),
+        release: release.cloned(),
     };
     let text = toml::to_string(&cache).map_err(|e| e.to_string())?;
     crate::atomicfile::write(path, &text)
@@ -122,16 +121,36 @@ pub fn parse_release(bytes: &[u8]) -> Result<Release, String> {
 /// The latest release: from the cache when it is fresh and `force` is false,
 /// otherwise from GitHub, refreshing the cache.
 pub async fn check(force: bool) -> Result<Release, String> {
-    let path = cache_path();
-    if !force && let Some(release) = fresh(&path, now()) {
-        return Ok(release);
+    check_at(&cache_path(), now(), force, || {
+        crate::plugin_catalog::get(LATEST_URL, RESPONSE_LIMIT)
+    })
+    .await
+}
+
+/// [`check`] against an explicit cache file, clock, and fetch. Within a day
+/// of the last attempt an unforced check answers from the cache, and fails
+/// without a request when that attempt found nothing.
+async fn check_at<F, Fut>(path: &Path, now: u64, force: bool, fetch: F) -> Result<Release, String>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = Result<Vec<u8>, String>>,
+{
+    let previous = read_cache(path);
+    if !force && let Some(cache) = previous.as_ref().filter(|cache| is_fresh(cache, now)) {
+        return cache
+            .release
+            .clone()
+            .ok_or_else(|| "the last update check failed; retrying within a day".to_string());
     }
-    let bytes = crate::plugin_catalog::get(LATEST_URL, RESPONSE_LIMIT).await?;
-    let release = parse_release(&bytes)?;
-    if let Err(error) = store(&path, now(), &release) {
+    let result = fetch().await.and_then(|bytes| parse_release(&bytes));
+    let known = match &result {
+        Ok(release) => Some(release.clone()),
+        Err(_) => previous.and_then(|cache| cache.release),
+    };
+    if let Err(error) = store(path, now, known.as_ref()) {
         crate::log_warn!("update.cache", error = error);
     }
-    Ok(release)
+    result
 }
 
 /// How the running executable was installed, judged from its resolved path.
@@ -209,6 +228,7 @@ pub fn report_lines(latest: Option<&Release>, enabled: bool, method: InstallMeth
         }
         Some(release) => {
             lines.push(format!("  latest:   v{} (up to date)", release.version));
+            lines.push(format!("  notes:    {}", release.url));
         }
         None => lines.push("  latest:   not checked".into()),
     }
@@ -278,17 +298,75 @@ mod tests {
         );
     }
 
-    #[test]
-    fn cache_is_fresh_for_a_day() {
+    fn body(version: &str) -> Vec<u8> {
+        format!(r#"{{"tag_name":"v{version}","html_url":"{RELEASES_URL}/tag/v{version}"}}"#)
+            .into_bytes()
+    }
+
+    #[tokio::test]
+    async fn unforced_checks_reach_the_network_once_a_day() {
         let dir = scratch("fresh");
         let path = dir.join("update-check.toml");
-        assert_eq!(fresh(&path, 1_000), None);
-        store(&path, 1_000, &release("1.2.3")).unwrap();
-        assert_eq!(fresh(&path, 1_000), Some(release("1.2.3")));
-        assert_eq!(fresh(&path, 1_000 + 86_399), Some(release("1.2.3")));
-        assert_eq!(fresh(&path, 1_000 + 86_400), None);
-        assert_eq!(fresh(&path, 999), None);
-        assert_eq!(cached(&path), Some(release("1.2.3")));
+        let ok = |version: &'static str| move || async move { Ok(body(version)) };
+        let unreachable = || async { panic!("a fresh cache must not fetch") };
+
+        assert_eq!(
+            check_at(&path, 1_000, false, ok("1.2.3")).await,
+            Ok(release("1.2.3"))
+        );
+        assert_eq!(
+            check_at(&path, 1_000 + 86_399, false, unreachable).await,
+            Ok(release("1.2.3"))
+        );
+        assert_eq!(
+            check_at(&path, 1_000 + 86_400, false, ok("1.3.0")).await,
+            Ok(release("1.3.0"))
+        );
+        assert_eq!(
+            check_at(&path, 500, false, ok("1.3.1")).await,
+            Ok(release("1.3.1")),
+            "a clock that moved back is stale"
+        );
+        assert_eq!(
+            check_at(&path, 501, true, ok("1.4.0")).await,
+            Ok(release("1.4.0")),
+            "a forced check ignores the cache"
+        );
+        assert_eq!(cached(&path), Some(release("1.4.0")));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn a_failed_check_still_waits_a_day_and_keeps_the_known_release() {
+        let dir = scratch("failed");
+        let path = dir.join("update-check.toml");
+        let fail = || async { Err("rate limited".to_string()) };
+        let unreachable = || async { panic!("a failed attempt must throttle the next one") };
+
+        assert_eq!(
+            check_at(&path, 1_000, false, fail).await,
+            Err("rate limited".into())
+        );
+        assert!(
+            check_at(&path, 2_000, false, unreachable)
+                .await
+                .unwrap_err()
+                .contains("retrying within a day")
+        );
+        assert_eq!(cached(&path), None);
+
+        let ok = || async { Ok(body("1.2.3")) };
+        assert_eq!(check_at(&path, 3_000, true, ok).await, Ok(release("1.2.3")));
+        assert!(check_at(&path, 3_000 + 86_400, false, fail).await.is_err());
+        assert_eq!(
+            cached(&path),
+            Some(release("1.2.3")),
+            "a failure keeps the last release"
+        );
+        assert_eq!(
+            check_at(&path, 3_000 + 86_401, false, unreachable).await,
+            Ok(release("1.2.3"))
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -299,7 +377,6 @@ mod tests {
         let path = dir.join("update-check.toml");
         std::fs::write(&path, "not = [toml").unwrap();
         assert_eq!(cached(&path), None);
-        assert_eq!(fresh(&path, 0), None);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -355,6 +432,10 @@ mod tests {
             InstallMethod::Homebrew,
         );
         assert!(current.iter().any(|line| line.contains("(up to date)")));
+        assert!(current.contains(&format!(
+            "  notes:    {RELEASES_URL}/tag/v{}",
+            crate::diagnostics::VERSION
+        )));
         assert!(!current.iter().any(|line| line.contains("upgrade:")));
         assert!(current.contains(&"  checks:   off (update_check = false)".to_string()));
         let none = report_lines(None, true, InstallMethod::Unknown);

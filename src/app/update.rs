@@ -52,6 +52,12 @@ impl App {
         }
     }
 
+    /// Start from the release the last check on disk found, so `:info` and
+    /// the header know it without a request, even with `update_check = false`.
+    pub fn load_cached_release(&mut self, path: &std::path::Path) {
+        self.latest_release = crate::update::cached(path);
+    }
+
     /// The newer release to advertise in the header, if any.
     pub fn available_update(&self) -> Option<&crate::update::Release> {
         self.latest_release

@@ -257,8 +257,9 @@ title. Headless modes do not change the title.
 `update_check` is enabled by default. At startup, sofka asks the GitHub API for
 the latest release at most once a day and keeps the answer in
 `update-check.toml` under the state directory. When a newer release exists,
-the header shows `vX.Y.Z available` and the status bar shows the upgrade
-command. A failed check is logged and otherwise ignored. Set
+the header, including the compact header, shows `vX.Y.Z available` and the
+status bar shows the upgrade command. A failed check is logged and otherwise
+ignored, and also waits a day before the next startup check. Set
 `update_check = false` to stop the startup check, for example on air-gapped
 machines. `:check-update` and `sofka check-update` still check on request. sofka
 never downloads or installs a release; upgrade with the package manager that

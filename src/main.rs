@@ -442,6 +442,7 @@ async fn run_main(args: Args) -> Result<()> {
     app.detail.wrap = cfg.detail_wrap;
     app.terminal_title = cfg.terminal_title.unwrap_or(true);
     app.update_check = cfg.update_check.unwrap_or(true);
+    app.load_cached_release(&sofka::update::cache_path());
     // The last namespace picked per context persists too, so a relaunch (or
     // a `:ctx` switch back) lands where you left off.
     let namespace_memory_path = nsmem::NamespaceMemory::default_path();

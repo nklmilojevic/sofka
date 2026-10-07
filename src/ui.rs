@@ -759,6 +759,14 @@ fn draw_compact_header(frame: &mut Frame, app: &App, area: Rect) {
             style,
         ));
     }
+    // After the status text, so a warning keeps its room; it stays once the
+    // update notice on the status bar expires.
+    if let Some(release) = app.available_update() {
+        spans.push(Span::styled(
+            format!("  v{} available", release.version),
+            Style::default().fg(theme::yellow()),
+        ));
+    }
 
     let (synced, sync_color) = if app.refresh_task.is_some() {
         ("● refresh", theme::sky())

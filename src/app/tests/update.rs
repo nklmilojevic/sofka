@@ -129,3 +129,65 @@ async fn info_shows_the_latest_release_and_the_check_setting() {
     ));
     assert!(lines.contains(&"  checks:   daily (update_check = true)".to_string()));
 }
+
+#[tokio::test]
+async fn info_shows_the_cached_release_with_checks_off() {
+    let dir = std::env::temp_dir().join(format!("sofka-update-info-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("update-check.toml");
+    std::fs::write(
+        &path,
+        "checked_at = 1\n[release]\nversion = \"999.0.0\"\nurl = \"https://github.com/nklmilojevic/sofka/releases/tag/v999.0.0\"\n",
+    )
+    .unwrap();
+    let (mut app, _rx) = test_app();
+    app.load_cached_release(&path);
+    let _ = std::fs::remove_dir_all(&dir);
+
+    palette(&mut app, "info");
+    let lines: Vec<String> = app
+        .detail
+        .lines
+        .iter()
+        .map(|line| line.as_str().to_string())
+        .collect();
+    assert!(
+        lines.contains(&"  latest:   v999.0.0 (newer)".to_string()),
+        "{lines:#?}"
+    );
+    assert!(lines.contains(&"  checks:   off (update_check = false)".to_string()));
+}
+
+#[tokio::test]
+async fn compact_header_keeps_the_update_after_the_notice_expires() {
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    let (mut app, mut rx) = test_app();
+    app.update_fetcher = |_force| Box::pin(async { Ok(release("999.0.0")) });
+    app.handle_key(ctrl(KeyCode::Char('e'))).unwrap();
+    assert!(app.compact);
+    app.start_update_check(false);
+    finish(&mut app, &mut rx).await;
+    assert!(app.flash.contains("is available"), "{}", app.flash);
+
+    app.flash_since = Instant::now() - Duration::from_secs(60);
+    app.expire_flash();
+    assert_eq!(app.flash, "");
+
+    let mut term = Terminal::new(TestBackend::new(120, 10)).unwrap();
+    let header = |term: &mut Terminal<TestBackend>, app: &mut App| {
+        term.draw(|f| crate::ui::draw(f, app)).unwrap();
+        let buffer = term.backend().buffer();
+        (0..buffer.area.width)
+            .map(|x| buffer[(x, 0)].symbol().to_string())
+            .collect::<String>()
+    };
+    let line = header(&mut term, &mut app);
+    assert!(line.contains("v999.0.0 available"), "{line}");
+
+    app.flash_warn("watch failed");
+    let line = header(&mut term, &mut app);
+    let warning = line.find("watch failed").expect(&line);
+    assert!(warning < line.find("v999.0.0 available").expect(&line));
+}
