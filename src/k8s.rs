@@ -226,30 +226,35 @@ pub fn exec_needs_input<'a>(
 
 /// The exec plugin's command line, for telling the user what to run. The
 /// kubeconfig's `env` entries come first as assignments, since they can pick
-/// the profile the command runs with. Values of credential-named flags and
-/// variables are redacted: this text ends up on screen and in the log.
+/// the profile the command runs with. This text ends up on screen and in the
+/// log, so the word after a credential-named flag is always redacted (it may
+/// look like a flag), as are credential-named variables, and every other word
+/// goes through [`crate::redact::text`] for URL passwords and inline tokens.
 fn exec_command_line(exec: &kube::config::ExecConfig) -> String {
+    let redacted = crate::redact::REDACTED;
     let mut words = Vec::new();
     for var in exec.env.iter().flatten() {
         if let (Some(name), Some(value)) = (var.get("name"), var.get("value")) {
             words.push(if crate::redact::is_credential_key(name) {
-                format!("{name}={}", crate::redact::REDACTED)
+                format!("{name}={redacted}")
             } else {
-                format!("{name}={}", shell_word(value))
+                format!("{name}={}", crate::redact::text(&shell_word(value)))
             });
         }
     }
-    words.extend(exec.command.as_deref().map(shell_word));
+    words.extend(
+        exec.command
+            .as_deref()
+            .map(|command| crate::redact::text(&shell_word(command)).into_owned()),
+    );
     let mut secret_next = false;
     for arg in exec.args.iter().flatten() {
-        if std::mem::take(&mut secret_next) && !arg.starts_with('-') {
-            words.push(crate::redact::REDACTED.into());
-            continue;
-        }
-        if !arg.starts_with('-') || !crate::redact::is_credential_key(arg) {
-            words.push(shell_word(arg));
+        if std::mem::take(&mut secret_next) {
+            words.push(redacted.into());
+        } else if !arg.starts_with('-') || !crate::redact::is_credential_key(arg) {
+            words.push(crate::redact::text(&shell_word(arg)).into_owned());
         } else if let Some((flag, _)) = arg.split_once('=') {
-            words.push(format!("{}={}", shell_word(flag), crate::redact::REDACTED));
+            words.push(format!("{}={redacted}", shell_word(flag)));
         } else {
             words.push(shell_word(arg));
             secret_next = true;
@@ -2003,19 +2008,25 @@ pub(crate) mod tests {
     fn exec_command_line_keeps_the_profile_env_and_hides_credentials() {
         let exec: kube::config::ExecConfig = serde_json::from_value(serde_json::json!({
             "command": "kubelogin",
-            "args": ["get-token", "--client-secret", "s3cr3t", "--password=hunter2", "--token", "--server-id", "x"],
+            "args": [
+                "get-token", "--client-secret", "s3cr3t", "--password=hunter2",
+                "--token", "-dashed", "--server-id", "x", "--login=https://me:pw1@idp"
+            ],
             "env": [
                 {"name": "AWS_PROFILE", "value": "prod admin"},
-                {"name": "AWS_SECRET_ACCESS_KEY", "value": "abc123"}
+                {"name": "AWS_SECRET_ACCESS_KEY", "value": "abc123"},
+                {"name": "HTTPS_PROXY", "value": "http://user:pw2@proxy:3128"}
             ]
         }))
         .unwrap();
         let line = super::exec_command_line(&exec);
         assert_eq!(
             line,
-            "AWS_PROFILE='prod admin' AWS_SECRET_ACCESS_KEY=«redacted» kubelogin get-token --client-secret «redacted» --password=«redacted» --token --server-id x"
+            "AWS_PROFILE='prod admin' AWS_SECRET_ACCESS_KEY=«redacted» HTTPS_PROXY=http://«redacted»@proxy:3128 \
+             kubelogin get-token --client-secret «redacted» --password=«redacted» --token «redacted» \
+             --server-id x --login=https://«redacted»@idp"
         );
-        for secret in ["s3cr3t", "hunter2", "abc123"] {
+        for secret in ["s3cr3t", "hunter2", "abc123", "-dashed", "pw1", "pw2"] {
             assert!(!line.contains(secret), "{line}");
         }
     }
