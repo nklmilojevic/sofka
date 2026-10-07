@@ -619,7 +619,9 @@ include those conditions. Row filters can search the route paths.
   one opens this view, with no Source section. A ResourceSet also lists the
   input providers in `spec.inputsFrom`; `⏎` on a named provider opens it. An
   object a ResourceSet applied finds its owner from the
-  `resourceset.fluxcd.controlplane.io/name` label.
+  `resourceset.fluxcd.controlplane.io/name` label. An object a FluxInstance
+  applied finds it from `fluxcd.controlplane.io/name`, as `flux-operator trace`
+  does.
 - **Argo CD view** (`:argocd` / `:argo`) - the state of the selected Application:
   sync and health, the project and destination, every source it deploys from with
   the revision actually deployed from that source, every object in

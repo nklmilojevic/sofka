@@ -1104,6 +1104,11 @@ fn header_hints(app: &App) -> Vec<Line<'static>> {
             // the YAML, the order `App::drill` tries them in.
             let open = match app.configured_drill() {
                 Some(drill) => drill.kind,
+                None if app.flux_operator_kind()
+                    && matches!(app.kind_plural.as_str(), "resourcesets" | "fluxinstances") =>
+                {
+                    "gitops".to_string()
+                }
                 None if app.node_pointer().is_some() => "node".to_string(),
                 None => "yaml".to_string(),
             };
@@ -6534,6 +6539,27 @@ mod tests {
         let text = text.join("\n");
         assert!(text.contains("argo view"), "{text}");
         assert_eq!(text.matches("yaml").count(), 1, "{text}");
+    }
+
+    /// `⏎` on a ResourceSet or FluxInstance opens the GitOps view; the same
+    /// plural in another group still opens YAML.
+    #[tokio::test]
+    async fn flux_operator_owner_rows_hint_enter_as_the_gitops_view() {
+        for (group, gitops) in [("fluxcd.controlplane.io", true), ("example.com", false)] {
+            for (kind, plural) in [
+                ("ResourceSet", "resourcesets"),
+                ("FluxInstance", "fluxinstances"),
+            ] {
+                let (tx, _rx) = tokio::sync::mpsc::channel(16);
+                let mut app = App::new(crate::k8s::Cluster::fake(), tx);
+                app.cluster.register_kind(group, kind, plural, true);
+                app.switch_kind(plural);
+                let text: Vec<String> = header_hints(&app).iter().map(line_text).collect();
+                let text = text.join("\n");
+                assert_eq!(text.contains("gitops"), gitops, "{group} {text}");
+                assert_eq!(text.matches("yaml").count(), 1, "{text}");
+            }
+        }
     }
 
     /// With a configured drill, `⏎` runs the drill, so the hint names its

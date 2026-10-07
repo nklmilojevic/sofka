@@ -465,65 +465,76 @@ async fn enter_on_a_resourceset_from_another_group_does_not_open_gitops() {
 }
 
 #[tokio::test]
-async fn gitops_follows_resourceset_labels_to_the_owner() {
-    let deployment = json!({
-        "apiVersion": "apps/v1", "kind": "Deployment",
-        "metadata": {
-            "name": "web", "namespace": "default",
-            "labels": {
+async fn gitops_follows_flux_operator_labels_to_the_owner() {
+    for (kind, plural, name, labels) in [
+        (
+            "ResourceSet",
+            "resourcesets",
+            "apps",
+            json!({
                 "resourceset.fluxcd.controlplane.io/name": "apps",
                 "resourceset.fluxcd.controlplane.io/namespace": "flux-system"
+            }),
+        ),
+        (
+            "FluxInstance",
+            "fluxinstances",
+            "flux",
+            json!({
+                "app.kubernetes.io/managed-by": "flux-operator",
+                "fluxcd.controlplane.io/name": "flux",
+                "fluxcd.controlplane.io/namespace": "flux-system"
+            }),
+        ),
+    ] {
+        let deployment = json!({
+            "apiVersion": "apps/v1", "kind": "Deployment",
+            "metadata": {"name": "web", "namespace": "default", "labels": labels}
+        });
+        let owner = json!({
+            "apiVersion": "fluxcd.controlplane.io/v1", "kind": kind,
+            "metadata": {"name": name, "namespace": "flux-system"},
+            "status": {
+                "conditions": [{"type": "Ready", "status": "False", "reason": "BuildFailed", "message": "bad template"}]
             }
-        }
-    });
-    let owner = json!({
-        "apiVersion": "fluxcd.controlplane.io/v1", "kind": "ResourceSet",
-        "metadata": {"name": "apps", "namespace": "flux-system"},
-        "status": {
-            "conditions": [{"type": "Ready", "status": "False", "reason": "BuildFailed", "message": "bad template"}]
-        }
-    });
-    let (mut app, rx) = test_app();
-    app.cluster.register_kind(
-        "fluxcd.controlplane.io",
-        "ResourceSet",
-        "resourcesets",
-        true,
-    );
-    let (mut app, mut rx, responses, _) =
-        health_report_app_with(app, rx, "deployments", deployment.clone());
-    responses.lock().unwrap().extend([
-        (
-            "/apis/apps/v1/namespaces/default/deployments/web".to_string(),
-            (200, deployment),
-        ),
-        (
-            "/apis/fluxcd.controlplane.io/v1/namespaces/flux-system/resourcesets/apps".to_string(),
-            (200, owner),
-        ),
-    ]);
-    open_health_report_key(&mut app, true);
-    receive_health_report(&mut app, &mut rx, true).await;
-    let texts: Vec<_> = app.gitops_items.iter().map(|f| f.text.as_str()).collect();
-    assert!(
-        texts.contains(&"Deployment/web is managed by ResourceSet/apps"),
-        "{texts:?}"
-    );
-    assert!(!texts.contains(&"Source"), "{texts:?}");
-    assert!(
-        texts.contains(&"not ready (BuildFailed) — bad template"),
-        "{texts:?}"
-    );
-    let owner = app
-        .gitops_items
-        .iter()
-        .position(|f| f.text == "ResourceSet/apps")
-        .unwrap();
-    app.gitops_state.select(Some(owner));
-    app.handle_key(press(KeyCode::Enter)).unwrap();
-    assert_eq!(app.mode, Mode::Table);
-    assert_eq!(app.kind_plural, "resourcesets");
-    assert_eq!(app.namespace, "flux-system");
+        });
+        let (mut app, rx) = test_app();
+        app.cluster
+            .register_kind("fluxcd.controlplane.io", kind, plural, true);
+        let (mut app, mut rx, responses, _) =
+            health_report_app_with(app, rx, "deployments", deployment.clone());
+        responses.lock().unwrap().extend([
+            (
+                "/apis/apps/v1/namespaces/default/deployments/web".to_string(),
+                (200, deployment),
+            ),
+            (
+                format!("/apis/fluxcd.controlplane.io/v1/namespaces/flux-system/{plural}/{name}"),
+                (200, owner),
+            ),
+        ]);
+        open_health_report_key(&mut app, true);
+        receive_health_report(&mut app, &mut rx, true).await;
+        let texts: Vec<_> = app.gitops_items.iter().map(|f| f.text.as_str()).collect();
+        let managed = format!("Deployment/web is managed by {kind}/{name}");
+        assert!(texts.contains(&managed.as_str()), "{texts:?}");
+        assert!(!texts.contains(&"Source"), "{texts:?}");
+        assert!(
+            texts.contains(&"not ready (BuildFailed) — bad template"),
+            "{texts:?}"
+        );
+        let owner_line = format!("{kind}/{name}");
+        let owner = app
+            .gitops_items
+            .iter()
+            .position(|f| f.text == owner_line)
+            .unwrap();
+        app.gitops_state.select(Some(owner));
+        app.handle_key(press(KeyCode::Enter)).unwrap();
+        assert_eq!(app.mode, Mode::Table);
+        assert_eq!(app.kind_plural, plural);
+        assert_eq!(app.namespace, "flux-system");
+    }
 }
 
 #[tokio::test]

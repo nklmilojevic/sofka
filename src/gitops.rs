@@ -85,6 +85,16 @@ pub fn owner_ref(obj: &DynamicObject) -> Option<FluxRef> {
             namespace: get("resourceset.fluxcd.controlplane.io/namespace").unwrap_or_default(),
         });
     }
+    // FluxInstance labels its objects the way `flux-operator trace` reads them.
+    if get("app.kubernetes.io/managed-by").as_deref() == Some("flux-operator")
+        && let Some(name) = get("fluxcd.controlplane.io/name")
+    {
+        return Some(FluxRef {
+            kind: "FluxInstance".into(),
+            name,
+            namespace: get("fluxcd.controlplane.io/namespace").unwrap_or_default(),
+        });
+    }
     None
 }
 
@@ -653,6 +663,30 @@ mod tests {
                 "helm.toolkit.fluxcd.io/namespace":"default"}}
         }));
         assert_eq!(owner_ref(&helm).unwrap().kind, "HelmRelease");
+
+        let rset = obj(json!({
+            "apiVersion":"v1","kind":"Service",
+            "metadata":{"name":"s","labels":{"resourceset.fluxcd.controlplane.io/name":"apps",
+                "resourceset.fluxcd.controlplane.io/namespace":"flux-system"}}
+        }));
+        let r = owner_ref(&rset).unwrap();
+        assert_eq!((r.kind.as_str(), r.name.as_str()), ("ResourceSet", "apps"));
+
+        let instance = |managed_by: &str| {
+            obj(json!({
+                "apiVersion":"apps/v1","kind":"Deployment",
+                "metadata":{"name":"source-controller","labels":{
+                    "app.kubernetes.io/managed-by":managed_by,
+                    "fluxcd.controlplane.io/name":"flux",
+                    "fluxcd.controlplane.io/namespace":"flux-system"}}
+            }))
+        };
+        let r = owner_ref(&instance("flux-operator")).unwrap();
+        assert_eq!(
+            (r.kind.as_str(), r.name.as_str(), r.namespace.as_str()),
+            ("FluxInstance", "flux", "flux-system")
+        );
+        assert!(owner_ref(&instance("Helm")).is_none());
 
         // No labels → not managed.
         assert!(owner_ref(&obj(json!({"metadata":{"name":"x"}}))).is_none());
