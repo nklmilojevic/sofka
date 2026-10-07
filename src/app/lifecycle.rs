@@ -947,7 +947,7 @@ impl App {
         self.note_watch_failure(failure);
         self.set_watch_error_flash(error, failure);
         if failure == WatchFailure::NeedsInput {
-            self.offer_authentication(self.cluster.context.clone());
+            self.offer_authentication(self.cluster.context.clone(), false);
         }
     }
 
@@ -2083,7 +2083,7 @@ impl App {
                         }
                         // Whatever the switch was for waits on the answer: an
                         // authenticated retry still lands there.
-                        if !(e.needs_input && self.offer_authentication(name)) {
+                        if !(e.needs_input && self.offer_authentication(name, true)) {
                             self.abandon_switch_destination();
                         }
                         // Last, so a view the abandoned jump reopens keeps it.

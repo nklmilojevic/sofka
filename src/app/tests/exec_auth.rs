@@ -31,7 +31,7 @@ async fn a_switch_that_needs_input_offers_to_authenticate() {
     assert_eq!(app.mode, Mode::Confirm);
     assert!(app.confirm_label.contains("'eks' needs terminal input"));
     app.handle_key(press(KeyCode::Char('y'))).unwrap();
-    let Some(Suspend::Authenticate { context }) = app.pending.take() else {
+    let Some(Suspend::Authenticate { context, .. }) = app.pending.take() else {
         panic!("no authentication queued");
     };
     assert_eq!(context, "eks");
@@ -96,13 +96,13 @@ async fn the_offer_never_interrupts_filtering_the_picker() {
     assert!(app.ctx_filtering);
 }
 
-fn accept(app: &mut App) -> String {
+fn accept(app: &mut App) -> (String, bool) {
     assert_eq!(app.mode, Mode::Confirm);
     app.handle_key(press(KeyCode::Char('y'))).unwrap();
-    let Some(Suspend::Authenticate { context }) = app.pending.take() else {
+    let Some(Suspend::Authenticate { context, switch }) = app.pending.take() else {
         panic!("no authentication queued");
     };
-    context
+    (context, switch)
 }
 
 #[tokio::test]
@@ -112,9 +112,10 @@ async fn authenticating_the_live_context_keeps_the_view_and_restarts_the_watch()
     app.filter = "api".into();
     let generation = app.generation;
     needs_input_watch_error(&mut app);
-    let context = accept(&mut app);
+    let (context, switch) = accept(&mut app);
     assert_eq!(context, "test");
-    app.authenticated(context, Ok(()));
+    assert!(!switch);
+    app.authenticated(context, switch, Ok(()));
     assert!(app.context_switch_target.is_none());
     assert_eq!(app.kind_plural, "deployments");
     assert_eq!(app.filter, "api");
@@ -132,8 +133,9 @@ async fn an_authenticated_retry_still_lands_where_the_switch_was_going() {
         switch_failed(&mut app, "west", needs_input());
         assert!(app.pending_bookmark.is_some(), "dropped before the answer");
         if accepted {
-            let context = accept(&mut app);
-            app.authenticated(context, Ok(()));
+            let (context, switch) = accept(&mut app);
+            assert!(switch);
+            app.authenticated(context, switch, Ok(()));
             assert_eq!(
                 app.context_switch_target,
                 Some((app.generation, "west".to_string()))
@@ -146,19 +148,44 @@ async fn an_authenticated_retry_still_lands_where_the_switch_was_going() {
     }
 }
 
+/// An Argo CD jump reloads the live context on purpose; authenticating that
+/// reload retries it rather than only restarting the watch.
+#[tokio::test]
+async fn an_authenticated_reload_of_the_live_context_is_retried() {
+    let (mut app, _rx) = test_app();
+    app.pending_bookmark = Some(crate::config::Bookmark {
+        name: "bm".into(),
+        resource: "services".into(),
+        ..Default::default()
+    });
+    switch_failed(&mut app, "test", needs_input());
+    assert!(app.pending_bookmark.is_some());
+    let (context, switch) = accept(&mut app);
+    app.authenticated(context, switch, Ok(()));
+    assert_eq!(
+        app.context_switch_target,
+        Some((app.generation, "test".to_string()))
+    );
+    assert!(app.pending_bookmark.is_some());
+}
+
 #[tokio::test]
 async fn authenticating_another_context_reconnects_and_a_failure_is_shown() {
     let (mut app, _rx) = test_app();
     switch_failed(&mut app, "eks", needs_input());
-    let context = accept(&mut app);
-    app.authenticated(context, Ok(()));
+    let (context, switch) = accept(&mut app);
+    app.authenticated(context, switch, Ok(()));
     assert_eq!(
         app.context_switch_target,
         Some((app.generation, "eks".to_string()))
     );
 
     let (mut app, _rx) = test_app();
-    app.authenticated("eks".into(), Err("aws exited with exit status: 255".into()));
+    app.authenticated(
+        "eks".into(),
+        true,
+        Err("aws exited with exit status: 255".into()),
+    );
     assert!(app.context_switch_target.is_none());
     assert!(
         app.flash.contains("authentication failed: aws exited"),

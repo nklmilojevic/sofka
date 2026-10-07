@@ -205,8 +205,8 @@ impl App {
                 claim,
             } => self.do_pvc_shell(ns, pod, container, path, claim),
             ConfirmAction::PvcClean { scope } => self.cleanup_pvc_helpers(scope),
-            ConfirmAction::Authenticate { context } => {
-                self.pending = Some(Suspend::Authenticate { context });
+            ConfirmAction::Authenticate { context, switch } => {
+                self.pending = Some(Suspend::Authenticate { context, switch });
             }
         }
     }

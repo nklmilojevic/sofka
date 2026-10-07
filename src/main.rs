@@ -1151,7 +1151,7 @@ fn take_suspend(terminal: &mut ratatui::DefaultTerminal, app: &mut App, captured
         let (argv, recovery) = match command {
             app::Suspend::Shell(argv) => (argv, None),
             app::Suspend::Recovery { argv, failure } => (argv, Some(failure)),
-            app::Suspend::Authenticate { context } => {
+            app::Suspend::Authenticate { context, switch } => {
                 let result = terminal::suspend_and_await(
                     terminal,
                     captured,
@@ -1160,7 +1160,7 @@ fn take_suspend(terminal: &mut ratatui::DefaultTerminal, app: &mut App, captured
                 .map_err(anyhow::Error::from)
                 .and_then(|result| result)
                 .map_err(|e| format!("{e:#}"));
-                app.authenticated(context, result);
+                app.authenticated(context, switch, result);
                 terminal_title::set(app.terminal_title().as_deref());
                 continue;
             }

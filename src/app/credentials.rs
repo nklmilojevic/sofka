@@ -170,7 +170,7 @@ impl App {
     /// stopped to ask for input. Once per generation, and only over the table
     /// or the context picker, so it never interrupts typing or another dialog.
     /// Returns whether the offer is open.
-    pub(super) fn offer_authentication(&mut self, context: String) -> bool {
+    pub(super) fn offer_authentication(&mut self, context: String, switch: bool) -> bool {
         if self.auth_offered == Some(self.generation)
             || !matches!(self.mode, Mode::Table | Mode::Contexts)
             || self.ctx_filtering
@@ -181,18 +181,18 @@ impl App {
         self.confirm_label = format!(
             "'{context}' needs terminal input to authenticate, such as an MFA code. Run its auth plugin now?"
         );
-        self.confirm_action = Some(ConfirmAction::Authenticate { context });
+        self.confirm_action = Some(ConfirmAction::Authenticate { context, switch });
         self.confirm_return = Mode::Table;
         self.mode = Mode::Confirm;
         true
     }
 
     /// The exec auth plugin for `context` ran on the terminal and cached its
-    /// credentials. The live context keeps its client and view: kube-rs runs
-    /// a token plugin per request, so restarting the watch picks them up, and
-    /// a certificate plugin renews. Any other context is connected again,
-    /// still headed where the failed switch was going.
-    pub fn authenticated(&mut self, context: String, result: Result<(), String>) {
+    /// credentials. After a watch error the live context keeps its client and
+    /// view: kube-rs runs a token plugin per request, so restarting the watch
+    /// picks them up, and a certificate plugin renews. A failed `switch` is
+    /// retried, even to the same context, still headed where it was going.
+    pub fn authenticated(&mut self, context: String, switch: bool, result: Result<(), String>) {
         if let Err(error) = result {
             crate::log_warn!(
                 "cluster.credentials.authenticate_failed",
@@ -207,7 +207,7 @@ impl App {
             return;
         }
         crate::log_info!("cluster.credentials.authenticated", context = context);
-        if self.cluster.connected && context == self.cluster.context {
+        if !switch && self.cluster.connected && context == self.cluster.context {
             if self.cluster.renews_credentials() {
                 self.credential_rejected = true;
             }

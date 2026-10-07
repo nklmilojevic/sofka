@@ -240,10 +240,11 @@ pub enum Suspend {
         argv: Vec<String>,
         failure: Box<CommandFailure>,
     },
-    /// Run this context's exec auth plugin on the terminal, then reconnect
+    /// Run this context's exec auth plugin on the terminal, then retry
     /// through [`App::authenticated`].
     Authenticate {
         context: String,
+        switch: bool,
     },
 }
 
@@ -439,8 +440,9 @@ enum ConfirmAction {
     /// `None` sweeps every namespace, matching an all-namespaces view.
     PvcClean { scope: Option<String> },
     /// Suspend the TUI and run `context`'s exec auth plugin on the terminal,
-    /// because it wants input such as an MFA code.
-    Authenticate { context: String },
+    /// because it wants input such as an MFA code. `switch` when a context
+    /// switch asked, which is retried afterwards; otherwise a watch did.
+    Authenticate { context: String, switch: bool },
     /// Run a confirmed plugin (`confirm`/`dangerous`) once accepted — one job
     /// (label, argv) per target, so a bulk run confirms once.
     Plugin {
