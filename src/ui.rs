@@ -1027,6 +1027,19 @@ fn header_hints(app: &App) -> Vec<Line<'static>> {
             ),
             hint_line(app, &[(Action::Delete, "uninstall")]),
         ],
+        "rollouthistory" => vec![
+            hint_line(
+                app,
+                &[
+                    (Action::Open, "diff"),
+                    (Action::RestartOrRefresh, "rollback"),
+                ],
+            ),
+            hint_line(
+                app,
+                &[(Action::Yaml, "yaml"), (Action::Describe, "describe")],
+            ),
+        ],
         "customresourcedefinitions" => vec![
             hint_line(
                 app,
@@ -2800,7 +2813,7 @@ fn build_help(app: &App, width: usize) -> (Vec<Line<'static>>, String) {
         } else if scope == "table" && action == Action::Describe {
             "describe; experimental native backend: --experimental-describe or experimental.native_describe in config"
         } else if scope == "table" && action == Action::RestartOrRefresh {
-            "restart workloads (marked rows, or current); force-sync external secrets; rollback Helm history; refresh elsewhere"
+            "restart workloads (marked rows, or current); force-sync external secrets; rollback Helm or rollout history; refresh elsewhere"
         } else if scope == "table" && action == Action::Logs {
             "logs (marked pods, or current row)"
         } else if scope == "table" && action == Action::ActionMenu {
@@ -2870,6 +2883,10 @@ fn build_help(app: &App, width: usize) -> (Vec<Line<'static>>, String) {
     lines.push(bind(
         ":xray · :diff",
         "hierarchical tree · live-vs-last-applied diff",
+    ));
+    lines.push(bind(
+        ":rollout-history",
+        "deployment/statefulset/daemonset revisions: ⏎ diff · r rollback",
     ));
     lines.push(bind(":events", "browse all events"));
     lines.push(bind(":pf", "view/stop background port-forwards"));

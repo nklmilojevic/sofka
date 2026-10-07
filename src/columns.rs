@@ -346,6 +346,17 @@ const HELM_HISTORY_COLUMNS: &[Column] = &[
     column("UPDATED", col_helm_updated),
 ];
 
+/// Every revision of one workload — like `kubectl rollout history`. Backed
+/// by ReplicaSets or ControllerRevisions (see `crate::rollout`). STATUS is
+/// filled per frame from the other revisions: see `App::live_cell`.
+const ROLLOUT_HISTORY_COLUMNS: &[Column] = &[
+    column("REVISION", col_rollout_revision),
+    status_column("STATUS", col_rollout_status),
+    column("IMAGES", col_rollout_images),
+    column("CHANGE-CAUSE", col_rollout_change_cause),
+    column("AGE", col_age),
+];
+
 const ARGOCD_APP_COLUMNS: &[Column] = &[
     column("NAME", col_name),
     status_column("SYNC", col_argocd_sync),
@@ -397,6 +408,7 @@ fn columns_for(group: &str, plural: &str) -> &'static [Column] {
         ("argoproj.io", "applicationsets") => ARGOCD_APPSET_COLUMNS,
         ("", "helm") => HELM_COLUMNS,
         ("", "helmhistory") => HELM_HISTORY_COLUMNS,
+        ("apps", crate::rollout::VIEW) => ROLLOUT_HISTORY_COLUMNS,
         _ => DEFAULT_COLUMNS,
     }
 }
@@ -1616,6 +1628,28 @@ fn col_helm_revision<'a>(ctx: &CellContext<'a>) -> Cow<'a, str> {
             .map(|v| v.to_string())
             .unwrap_or_else(|| "-".into()),
     )
+}
+
+fn col_rollout_revision<'a>(ctx: &CellContext<'a>) -> Cow<'a, str> {
+    Cow::Owned(
+        crate::rollout::revision(ctx.obj)
+            .map(|v| v.to_string())
+            .unwrap_or_else(|| "-".into()),
+    )
+}
+
+/// The widest value, so the column is sized for it; the table shows the
+/// real one from `App::live_cell`.
+fn col_rollout_status<'a>(_ctx: &CellContext<'a>) -> Cow<'a, str> {
+    Cow::Borrowed("superseded")
+}
+
+fn col_rollout_images<'a>(ctx: &CellContext<'a>) -> Cow<'a, str> {
+    Cow::Owned(crate::rollout::images(ctx.obj))
+}
+
+fn col_rollout_change_cause<'a>(ctx: &CellContext<'a>) -> Cow<'a, str> {
+    Cow::Borrowed(crate::rollout::change_cause(ctx.obj))
 }
 
 fn col_helm_status<'a>(ctx: &CellContext<'a>) -> Cow<'a, str> {

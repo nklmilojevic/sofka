@@ -711,6 +711,17 @@ include those conditions. Row filters can search the route paths.
   DaemonSets after confirmation. With no marked rows, restart the current row.
   Guardrails apply to the full target set. A failed request does not stop requests
   for the other targets. The final error report retains all failed targets.
+- **Rollout history and rollback** (`:rollout-history`) - list the revisions of
+  the selected Deployment, StatefulSet, or DaemonSet, newest first, like
+  `kubectl rollout history`. Deployment revisions come from their ReplicaSets,
+  StatefulSet and DaemonSet revisions from their ControllerRevisions. Each row
+  shows the revision, `deployed` or `superseded`, the images, and the
+  `kubernetes.io/change-cause` annotation. `⏎` diffs the current pod template
+  against the selected revision's. `r` rolls the workload back to that revision
+  after confirmation, like `kubectl rollout undo --to-revision`. sofka reads the
+  workload first and refuses a paused Deployment or a template that already
+  matches. When Flux or Argo CD manages the workload, the confirmation warns
+  that the next sync reverts the rollback. The `rollback` guardrail applies.
 - **Scale discovered resources** (`s`) - scale built-in or custom resources when
   API discovery lists a `scale` subresource with PATCH support. Changes use
   `/scale`, including when a CRD stores replicas at a custom path. Marked rows

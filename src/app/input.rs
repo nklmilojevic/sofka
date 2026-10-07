@@ -505,6 +505,8 @@ impl App {
                     self.request_refresh_es();
                 } else if self.kind_plural == "helmhistory" {
                     self.request_helm_rollback();
+                } else if self.kind_plural == crate::rollout::VIEW {
+                    self.request_rollout_undo();
                 } else {
                     self.refresh_namespace_selection();
                 }
@@ -820,6 +822,7 @@ impl App {
             PaletteAction::PvcClean => self.request_pvc_clean(),
             PaletteAction::Find => self.flash_warn("usage: :find <text>"),
             PaletteAction::Diff => self.open_diff(),
+            PaletteAction::RolloutHistory => self.open_rollout_history(),
             PaletteAction::Events => self.switch_kind("events.events.k8s.io"),
             PaletteAction::PortForwards => self.open_port_forwards(),
             PaletteAction::ProviderLogs => self.open_provider_logs(),

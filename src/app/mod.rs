@@ -365,6 +365,16 @@ enum ConfirmAction {
         name: String,
         revision: String,
     },
+    /// Roll a workload back to one of its revisions (`kubectl rollout undo
+    /// --to-revision`), from the selected rollout history row.
+    RolloutUndo {
+        kind: Kind,
+        workload: crate::rollout::Workload,
+        name: String,
+        ns: String,
+        revision: i64,
+        rev: Box<DynamicObject>,
+    },
     /// Sync one or more ArgoCD Applications with pruning, which deletes
     /// resources no longer in Git.
     ArgocdSyncPrune { targets: Vec<(String, String)> },
@@ -712,6 +722,7 @@ enum PaletteAction {
     PvcClean,
     Find,
     Diff,
+    RolloutHistory,
     Events,
     PortForwards,
     ProviderLogs,
@@ -755,6 +766,10 @@ const PALETTE_COMMANDS: &[PaletteCommand] = &[
     PaletteCommand {
         action: PaletteAction::Timeline,
         names: &["timeline", "tl", "history"],
+    },
+    PaletteCommand {
+        action: PaletteAction::RolloutHistory,
+        names: &["rollout-history"],
     },
     PaletteCommand {
         action: PaletteAction::Adjacent,
@@ -1851,6 +1866,7 @@ struct Frame {
     labels: Option<String>,
     fields: Option<String>,
     owner: Option<OwnerScope>,
+    rollout_managed: Option<String>,
     filter: String,
     scope_label: Option<String>,
     selected: Option<usize>,
@@ -1878,6 +1894,9 @@ pub struct App {
     pub labels: Option<String>,
     pub fields: Option<String>,
     pub owner: Option<OwnerScope>,
+    /// The Flux or Argo CD owner of the workload whose rollout history is
+    /// open, named in the rollback confirmation.
+    rollout_managed: Option<String>,
     /// Drill-down breadcrumb shown in the header, e.g. "deploy/foo".
     pub scope_label: Option<String>,
 
@@ -2462,6 +2481,7 @@ impl App {
             labels: None,
             fields: None,
             owner: None,
+            rollout_managed: None,
             scope_label: None,
             generation: 0,
             gen_flag: Arc::new(AtomicU64::new(0)),
@@ -2858,6 +2878,7 @@ pub mod rbac;
 mod refresh;
 mod resume;
 mod rightsize;
+mod rollout;
 mod rows;
 mod secret_edit;
 mod snapshot;

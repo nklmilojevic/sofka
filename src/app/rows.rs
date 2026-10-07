@@ -1020,6 +1020,12 @@ impl App {
     }
 
     pub(crate) fn live_cell(&self, obj: &DynamicObject, idx: usize) -> Option<String> {
+        // Whether a revision is the one in effect depends on its siblings, so
+        // it can't live in the per-object cell cache.
+        if self.kind_plural == crate::rollout::VIEW && self.spec.header_index("STATUS") == Some(idx)
+        {
+            return Some(crate::rollout::status(obj, self.rollout_current()).into());
+        }
         let metric = self.spec.metric_at(idx)?;
         if metric.trend() {
             return Some(self.node_trend_cell(obj, metric.cpu()));
@@ -1109,6 +1115,9 @@ impl App {
             // `main@sha1:…`) stay text.
             "REVISION" if matches!(self.kind_plural.as_str(), "helm" | "helmhistory") => {
                 SortKey::Num(crate::helm::revision(o).unwrap_or(0) as f64)
+            }
+            "REVISION" if self.kind_plural == crate::rollout::VIEW => {
+                SortKey::Num(crate::rollout::revision(o).unwrap_or(0) as f64)
             }
             _ => match self.spec.sort_value(o, header, now) {
                 Some(v) => SortKey::from(v),

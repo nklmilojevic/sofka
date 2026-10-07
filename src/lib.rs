@@ -43,6 +43,7 @@ pub mod pvcexplore;
 pub mod rbac;
 pub mod redact;
 pub mod rightsize;
+pub mod rollout;
 pub mod sanitize;
 pub mod server_table;
 mod server_tls;

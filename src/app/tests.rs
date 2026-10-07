@@ -22,6 +22,7 @@ mod proxy;
 mod rbac;
 mod restart;
 mod resume;
+mod rollout;
 mod scale;
 mod server_table;
 mod synchronized_output;

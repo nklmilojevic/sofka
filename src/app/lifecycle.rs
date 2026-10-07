@@ -196,6 +196,7 @@ impl App {
         match self.kind_plural.as_str() {
             "helm" => Some("helm"),
             "helmhistory" => Some("helm history"),
+            crate::rollout::VIEW => Some("rollout history"),
             _ => None,
         }
     }
@@ -317,6 +318,7 @@ impl App {
             labels: self.labels.clone(),
             fields: self.fields.clone(),
             owner: self.owner.clone(),
+            rollout_managed: self.rollout_managed.clone(),
             filter: self.filter.clone(),
             scope_label: self.scope_label.clone(),
             selected: self.table_state.selected(),
@@ -330,6 +332,7 @@ impl App {
         self.labels = f.labels;
         self.fields = f.fields;
         self.owner = f.owner;
+        self.rollout_managed = f.rollout_managed;
         self.filter = f.filter;
         self.scope_label = f.scope_label;
         self.reset_sort();

@@ -23,7 +23,8 @@ Each rule matches on `contexts`, `namespaces`, `resources`, and `actions` globs
 (all optional - an omitted glob matches everything). Rules can set `deny`
 (block the action), `confirmation` (require confirmation), and `max_bulk`
 (a row limit for one action). The gated `actions` are the destructive verbs sofka
-performs directly: `delete`, `force-delete`, `drain`, `restart`, `shell` (exec),
+performs directly: `delete`, `force-delete`, `drain`, `restart`, `rollback` (a
+rollout undo, matched against the workload kind), `shell` (exec),
 `debug`, `node-debug`, `transfer` (a file upload into a pod), `secret-edit`
 (saving values edited in the decoded Secret view), `prune` (an
 Argo CD Application sync with prune, matched against `applications`), `pvc-explore`

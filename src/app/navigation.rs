@@ -1,7 +1,7 @@
 use super::*;
 
 impl App {
-    fn retain_filter_selectors(&mut self) {
+    pub(super) fn retain_filter_selectors(&mut self) {
         let parsed = self.parsed_filter();
         let mut selectors = Vec::new();
         if let Some(labels) = parsed.labels() {
@@ -61,6 +61,8 @@ impl App {
             // Helm: release -> every revision, revision -> its values.
             "helm" => self.drill_into_helm_history(&obj),
             "helmhistory" => self.open_helm_values(&obj),
+            // Rollout history: revision -> what rolling back to it changes.
+            crate::rollout::VIEW => self.open_rollout_diff(&obj),
             // A Flux HelmRelease bridges into the same native inspector:
             // enter opens the history of the Helm release it manages.
             "helmreleases" => self.drill_into_helmrelease(&obj),
