@@ -37939,6 +37939,7 @@ async fn log_json_shortcut_renders_structured_records_on_one_row() {
         r#"{"time":"2026\n[other] fake","level":"in\u001bfo","msg":"ok","k\ney":1}"#.into(),
         r#"{"msg":"ok","flag":"true","count":"3","data":"{}","real":true,"name":"web"}"#.into(),
         r#"{"lvl":"warn","msg":"stall"}"#.into(),
+        r#"[app] {"msg":"request error: connection refused"}"#.into(),
     ];
     shortcut_log_lines(&mut app, lines);
     let raw = app.filtered_log_text();
@@ -37970,7 +37971,11 @@ async fn log_json_shortcut_renders_structured_records_on_one_row() {
         r#"ok count="3" data="{}" flag="true" name=web real=true"#
     );
     assert_eq!(app.logs.display_line(9), "WARN  stall");
-    assert_eq!(app.logs.refresh_index(0).total_rows(), 10);
+    assert_eq!(
+        app.logs.display_line(10),
+        "[app] request error: connection refused"
+    );
+    assert_eq!(app.logs.refresh_index(0).total_rows(), 11);
     assert_eq!(app.filtered_log_text(), raw);
 
     app.logs.set_filter(r#""controller":"x""#.into());
@@ -38002,6 +38007,7 @@ async fn log_json_shortcut_renders_structured_records_on_one_row() {
     assert_eq!(color_of("crash"), crate::theme::red());
     assert_eq!(color_of("boom"), crate::theme::red());
     assert_eq!(color_of("stall"), crate::theme::peach());
+    assert_eq!(color_of("connection refused"), crate::theme::red());
 
     app.handle_key(press(KeyCode::Char('J'))).unwrap();
     assert_eq!(app.logs.json, JsonView::Pretty);

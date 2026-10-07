@@ -100,12 +100,12 @@ impl LogLineMeta {
         // Each view is charged on its own, so an indented form that does not
         // fit cannot keep a short record row raw.
         let record = render_record(&value);
-        let record_severity = record.as_ref().map(|(_, severity)| *severity);
+        let record_severity = record.as_ref().and_then(|(_, severity)| *severity);
         let record = record.and_then(|(text, _)| cache(text));
         let pretty = serde_json::to_string_pretty(&value)
             .ok()
             .and_then(&mut cache);
-        self.record_severity = record_severity.filter(|_| record.is_some());
+        self.record_severity = record_severity;
         self.record = record;
         self.pretty = pretty;
     }
@@ -153,9 +153,12 @@ const RECORD_LEVEL_KEYS: &[&str] = &["level", "lvl", "severity"];
 const RECORD_MESSAGE_KEYS: &[&str] = &["msg", "message"];
 
 /// One-line rendering of a structured log record (zap, slog, logrus, pino):
-/// `time LEVEL message key=value ...`, with the severity of its level. `None`
-/// when the value is not an object with a level or message field.
-fn render_record(value: &serde_json::Value) -> Option<(String, crate::logfilter::Severity)> {
+/// `time LEVEL message key=value ...`, with the severity of its level if it
+/// has one. `None` when the value is not an object with a level or message
+/// field.
+fn render_record(
+    value: &serde_json::Value,
+) -> Option<(String, Option<crate::logfilter::Severity>)> {
     let fields = value.as_object()?;
     let find = |keys: &[&'static str]| {
         keys.iter()
@@ -194,9 +197,7 @@ fn render_record(value: &serde_json::Value) -> Option<(String, crate::logfilter:
         }
         push(&format!("{}={}", record_text(key), record_value(value)));
     }
-    let severity = level_name.map_or(crate::logfilter::Severity::Other, |name| {
-        crate::logfilter::parse_level(&name.to_ascii_lowercase())
-    });
+    let severity = level_name.map(|name| crate::logfilter::parse_level(&name.to_ascii_lowercase()));
     Some((out, severity))
 }
 
@@ -283,12 +284,18 @@ impl LogsView {
 
     /// Severity of the record row shown for line `i`, when record view shows
     /// one. Its level can sit under any supported key or be a pino number,
-    /// which the raw-line severity check does not read.
+    /// which the raw-line severity check does not read. A record without a
+    /// level keeps the raw line's severity (`"msg":"request error: …"`).
     pub fn record_severity(&self, i: usize) -> Option<crate::logfilter::Severity> {
         if self.json != JsonView::Record {
             return None;
         }
-        self.line_meta.get(i)?.record_severity
+        let meta = self.line_meta.get(i)?;
+        meta.record.as_ref()?;
+        Some(
+            meta.record_severity
+                .unwrap_or_else(|| crate::logfilter::severity(&self.view.lines[i])),
+        )
     }
 
     pub(super) fn toggle_json(&mut self) {
