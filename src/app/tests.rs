@@ -37981,6 +37981,14 @@ async fn log_json_view_starts_from_config_and_follows_context_overrides() {
     assert_eq!(app.logs.json, JsonView::Record);
     assert!(app.logs.display_line(0).starts_with("INFO  ready"));
 
+    // A context with the same value keeps a `J` choice, buffered lines too.
+    app.mode = Mode::Logs;
+    app.handle_key(press(KeyCode::Char('J'))).unwrap();
+    assert_eq!(app.logs.json, JsonView::Pretty);
+    land_context(&mut app, "staging");
+    assert_eq!(app.logs.json, JsonView::Pretty);
+    assert!(app.logs.display_line(0).starts_with("{\n"));
+
     land_context(&mut app, "typo");
     assert_eq!(app.logs.json, JsonView::Raw);
     assert!(
