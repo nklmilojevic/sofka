@@ -39,6 +39,8 @@ pub enum WatchFailure {
     NoResponse,
     /// The API server answered with an error, such as a forbidden resource.
     Response,
+    /// The exec auth plugin wanted terminal input, such as an MFA code.
+    NeedsInput,
 }
 
 /// Messages flowing from watch tasks to the UI loop. Tagged with a
@@ -341,7 +343,7 @@ pub enum Msg {
     ContextSwitched {
         generation: u64,
         name: String,
-        result: Result<Box<crate::k8s::Cluster>, String>,
+        result: Result<Box<crate::k8s::Cluster>, crate::k8s::ConnectError>,
     },
     /// Result of re-running the exec plugin for an expiring client
     /// certificate, for renewal `attempt`.

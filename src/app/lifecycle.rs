@@ -931,6 +931,9 @@ impl App {
         crate::log_warn!("view.error", kind = self.kind_plural, error = error);
         self.note_watch_failure(failure);
         self.set_watch_error_flash(error, failure);
+        if failure == WatchFailure::NeedsInput {
+            self.offer_authentication(self.cluster.context.clone());
+        }
     }
 
     fn clear_watch_error_flash(&mut self) -> bool {
@@ -2074,6 +2077,9 @@ impl App {
                         // instead of stranding the user on an empty table.
                         if !self.cluster.connected {
                             self.open_contexts();
+                        }
+                        if e.needs_input {
+                            self.offer_authentication(name);
                         }
                     }
                 }

@@ -22,7 +22,7 @@ async fn wrapped_kubeconfig_reaches_discovery_on_startup_and_context_selection()
             tokio::time::timeout(Duration::from_secs(5), async {
                 loop {
                     if let Msg::ContextSwitched { result, .. } = rx.recv().await.unwrap() {
-                        break result.err().unwrap();
+                        break result.err().unwrap().message;
                     }
                 }
             })

@@ -910,7 +910,7 @@ impl App {
             let result = Cluster::connect_context(&name, allow_v1_client_cert, no_tls_resumption)
                 .await
                 .map(Box::new)
-                .map_err(|e| e.to_string());
+                .map_err(|e| crate::k8s::ConnectError::from(&e));
             let _ = tx
                 .send(Msg::ContextSwitched {
                     generation: genr,

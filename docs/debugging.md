@@ -547,3 +547,26 @@ Refresh also requires `idp-issuer-url`, `client-id`, `client-secret`, and
 
 The identity provider uses a separate HTTPS connection with system trust.
 The Kubernetes API server CA exception does not apply to that connection.
+
+## Exec plugins that ask for input
+
+Some exec credential plugins prompt on the terminal. The common case is
+`aws eks get-token` with a profile that assumes a role with `mfa_serial`: the
+AWS CLI asks for an MFA code when it has no cached role credentials.
+
+Sofka never lets a plugin prompt behind the TUI. Plugins run without a
+controlling terminal, so a prompt fails at once instead of hanging.
+
+- **At startup** the terminal is still free. Sofka runs the plugin attached to
+  it, you type the code as in a shell, and sofka connects.
+- **While running**, a context switch or watch that hits the prompt asks
+  whether to run the auth plugin now. `y` suspends the TUI, runs the plugin on
+  the terminal, then reconnects. `n` keeps the error, which names the command
+  to run in another shell. The question comes once per connection, and only
+  over the table or the context picker.
+
+The plugin must cache what it obtains, as the AWS CLI does for assumed roles.
+Sofka discards the interactive run's output and connects with a normal run
+afterwards. Setting `interactiveMode: Never` on the kubeconfig `exec` entry
+turns the prompt off. Headless runs (`--check`, `--snapshot`) prompt at
+startup only when stdin is a terminal.

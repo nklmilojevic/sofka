@@ -11,7 +11,7 @@
 //! keeps renewing every 30 seconds until the watch recovers or a new client
 //! is installed.
 
-use super::{App, Msg, WatchFailure};
+use super::{App, ConfirmAction, Mode, Msg, WatchFailure};
 use crate::k8s::ExecClient;
 
 use k8s_openapi::jiff::{SignedDuration, Timestamp};
@@ -157,13 +157,53 @@ impl App {
         let explains = match failure {
             WatchFailure::CredentialsRefused => true,
             WatchFailure::NoResponse => expired,
-            WatchFailure::Response => false,
+            WatchFailure::Response | WatchFailure::NeedsInput => false,
         };
         if !explains {
             return None;
         }
         let hint = self.credential_error.as_ref()?;
         Some(format!("{error}; credential renewal failed: {hint}"))
+    }
+
+    /// Offer to run `context`'s exec auth plugin on the terminal, because it
+    /// stopped to ask for input. Once per generation, and only over the table
+    /// or the context picker, so it never interrupts typing or another dialog.
+    pub(super) fn offer_authentication(&mut self, context: String) {
+        if self.auth_offered == Some(self.generation)
+            || !matches!(self.mode, Mode::Table | Mode::Contexts)
+        {
+            return;
+        }
+        self.auth_offered = Some(self.generation);
+        self.confirm_label = format!(
+            "'{context}' needs terminal input to authenticate, such as an MFA code. Run its auth plugin now?"
+        );
+        self.confirm_action = Some(ConfirmAction::Authenticate { context });
+        self.confirm_return = Mode::Table;
+        self.mode = Mode::Confirm;
+    }
+
+    /// The exec auth plugin for `context` ran on the terminal. Reconnect so
+    /// the client picks up the credentials the plugin cached.
+    pub fn authenticated(&mut self, context: String, result: Result<(), String>) {
+        match result {
+            Ok(()) => {
+                crate::log_info!("cluster.credentials.authenticated", context = context);
+                self.switch_context_inner(context, true);
+            }
+            Err(error) => {
+                crate::log_warn!(
+                    "cluster.credentials.authenticate_failed",
+                    context = context,
+                    error = error
+                );
+                self.flash_warn(&format!("authentication failed: {error}"));
+                if !self.cluster.connected {
+                    self.open_contexts();
+                }
+            }
+        }
     }
 
     /// Forget a renewal that belongs to the client a context switch replaced.

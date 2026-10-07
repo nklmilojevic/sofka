@@ -205,6 +205,9 @@ impl App {
                 claim,
             } => self.do_pvc_shell(ns, pod, container, path, claim),
             ConfirmAction::PvcClean { scope } => self.cleanup_pvc_helpers(scope),
+            ConfirmAction::Authenticate { context } => {
+                self.pending = Some(Suspend::Authenticate { context });
+            }
         }
     }
 
@@ -278,6 +281,12 @@ impl App {
                 }
                 self.mode = self.overlay_return();
                 self.confirm_return = Mode::Table;
+                // Never connected: the picker is the only useful place to be.
+                if matches!(cancelled, Some(ConfirmAction::Authenticate { .. }))
+                    && !self.cluster.connected
+                {
+                    self.open_contexts();
+                }
             }
             _ => {}
         }

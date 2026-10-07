@@ -198,6 +198,10 @@ include those conditions. Row filters can search the route paths.
 
 - **Connect** to the current kubeconfig context, including exec credential
   plugins (GKE, EKS, and friends).
+- **MFA prompts from exec plugins** - a plugin that asks for input, such as
+  `aws eks get-token` with an MFA profile, prompts on the terminal at startup.
+  Later, sofka offers to suspend and run it. See
+  [exec plugins that ask for input](debugging.md#exec-plugins-that-ask-for-input).
 - **Optional TLS session resumption workaround** through `--no-tls-resumption`
   for clusters that reject resumed connections with HTTP 401. The default is
   unchanged. See [TLS session resumption](debugging.md#tls-session-resumption-and-http-401).

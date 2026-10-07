@@ -328,9 +328,117 @@ pub fn run_detached(argv: &[std::ffi::OsString]) -> std::io::Error {
     std::process::Command::new(command).args(args).exec()
 }
 
+/// Why a connection could not be made, as the UI needs it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConnectError {
+    pub message: String,
+    /// The exec auth plugin wanted terminal input; see [`ExecNeedsInput`].
+    pub needs_input: bool,
+}
+
+impl From<&anyhow::Error> for ConnectError {
+    fn from(error: &anyhow::Error) -> Self {
+        Self {
+            message: error.to_string(),
+            needs_input: exec_needs_input(error.as_ref()).is_some(),
+        }
+    }
+}
+
+impl From<String> for ConnectError {
+    fn from(message: String) -> Self {
+        Self {
+            message,
+            needs_input: false,
+        }
+    }
+}
+
+impl From<&str> for ConnectError {
+    fn from(message: &str) -> Self {
+        message.to_string().into()
+    }
+}
+
+impl std::fmt::Display for ConnectError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+/// Run the exec auth plugin of `context` (the current context when `None`)
+/// attached to the terminal, so it can prompt for an MFA code or a login.
+/// Its credential output is discarded: the plugin is expected to cache what
+/// it obtained, as the AWS CLI does for assumed roles, so the next detached
+/// run succeeds without input. Call only while sofka is not drawing.
+pub async fn authenticate_interactively(context: Option<&str>) -> Result<()> {
+    let kubeconfig = Kubeconfig::read().context("reading kubeconfig")?;
+    let options = KubeConfigOptions {
+        context: context.map(str::to_string),
+        cluster: None,
+        user: None,
+    };
+    let config = kubeconfig::from_custom(kubeconfig, &options)
+        .await
+        .context("building config")?;
+    let exec = config
+        .auth_info
+        .exec
+        .context("the context does not use an exec auth plugin")?;
+    run_exec_interactively(&exec).await
+}
+
+async fn run_exec_interactively(exec: &kube::config::ExecConfig) -> Result<()> {
+    if exec.interactive_mode == Some(kube::config::ExecInteractiveMode::Never) {
+        anyhow::bail!("the kubeconfig sets interactiveMode: Never for this exec plugin");
+    }
+    let command = exec
+        .command
+        .as_deref()
+        .context("the exec auth plugin has no command")?;
+    let mut spec = serde_json::json!({ "interactive": true });
+    if exec.provide_cluster_info
+        && let Some(cluster) = &exec.cluster
+    {
+        spec["cluster"] = serde_json::to_value(cluster)?;
+    }
+    let info = serde_json::json!({
+        "apiVersion": exec.api_version,
+        "kind": "ExecCredential",
+        "spec": spec,
+    });
+    let mut cmd = tokio::process::Command::new(command);
+    cmd.args(exec.args.iter().flatten())
+        .envs(
+            exec.env
+                .iter()
+                .flatten()
+                .filter_map(|var| Some((var.get("name")?, var.get("value")?))),
+        )
+        .env("KUBERNETES_EXEC_INFO", info.to_string())
+        .stdin(std::process::Stdio::inherit())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::inherit())
+        .kill_on_drop(true);
+    for name in exec.drop_env.iter().flatten() {
+        cmd.env_remove(name);
+    }
+    let output = cmd
+        .output()
+        .await
+        .with_context(|| format!("running {command}"))?;
+    if !output.status.success() {
+        anyhow::bail!("{} exited with {}", exec_command_line(exec), output.status);
+    }
+    Ok(())
+}
+
 /// What a failed watch request ran into, judged from the error's source
 /// chain rather than its text.
 fn watch_failure(error: &watcher::Error) -> WatchFailure {
+    if exec_needs_input(error).is_some() {
+        return WatchFailure::NeedsInput;
+    }
     if credentials_refused(error) {
         return WatchFailure::CredentialsRefused;
     }
@@ -1990,6 +2098,50 @@ pub(crate) mod tests {
         let error = anyhow::Error::new(needs.clone()).context("connecting");
         assert_eq!(super::exec_needs_input(error.as_ref()), Some(&needs));
         assert!(super::exec_needs_input(&std::io::Error::other("refused")).is_none());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn the_interactive_run_tells_the_plugin_it_may_prompt() {
+        let out = std::env::temp_dir().join(format!("sofka-exec-info-{}", std::process::id()));
+        let exec = |mode: Option<&str>, status: u8| -> kube::config::ExecConfig {
+            serde_json::from_value(serde_json::json!({
+                "apiVersion": "client.authentication.k8s.io/v1beta1",
+                "command": "sh",
+                "args": ["-c", format!("printf '%s' \"$KUBERNETES_EXEC_INFO $PROFILE\" > \"$OUT\"; exit {status}")],
+                "env": [
+                    {"name": "OUT", "value": out.to_str().unwrap()},
+                    {"name": "PROFILE", "value": "mfa"}
+                ],
+                "interactiveMode": mode
+            }))
+            .unwrap()
+        };
+
+        super::run_exec_interactively(&exec(None, 0)).await.unwrap();
+        let info = std::fs::read_to_string(&out).unwrap();
+        assert!(info.contains(r#""interactive":true"#), "{info}");
+        assert!(
+            info.contains(r#""apiVersion":"client.authentication.k8s.io/v1beta1""#),
+            "{info}"
+        );
+        assert!(info.ends_with(" mfa"), "{info}");
+
+        let error = super::run_exec_interactively(&exec(Some("IfAvailable"), 3))
+            .await
+            .unwrap_err();
+        assert!(error.to_string().starts_with("OUT="), "{error}");
+        assert!(error.to_string().contains("exit status: 3"), "{error}");
+
+        std::fs::remove_file(&out).unwrap();
+        let error = super::run_exec_interactively(&exec(Some("Never"), 0))
+            .await
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("interactiveMode: Never"),
+            "{error}"
+        );
+        assert!(!out.exists(), "a Never plugin must not run");
     }
 
     #[test]

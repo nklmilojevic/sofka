@@ -316,14 +316,33 @@ async fn run_main(args: Args) -> Result<()> {
         (Cluster::disconnected(args.context.as_deref()), None)
     } else {
         eprintln!("Connecting to cluster…");
-        let connect = match args.context.as_deref() {
-            Some(name) => {
-                Cluster::connect_context(name, args.allow_v1_client_cert, args.no_tls_resumption)
+        let connect = || async {
+            match args.context.as_deref() {
+                Some(name) => {
+                    Cluster::connect_context(
+                        name,
+                        args.allow_v1_client_cert,
+                        args.no_tls_resumption,
+                    )
                     .await
+                }
+                None => Cluster::connect(args.allow_v1_client_cert, args.no_tls_resumption).await,
             }
-            None => Cluster::connect(args.allow_v1_client_cert, args.no_tls_resumption).await,
         };
-        match connect {
+        let mut connected = connect().await;
+        // The terminal is still ours, so an exec plugin that wants an MFA
+        // code can ask for it here instead of failing.
+        if let Err(e) = &connected
+            && k8s::exec_needs_input(e.as_ref()).is_some()
+            && std::io::IsTerminal::is_terminal(&std::io::stdin())
+        {
+            eprintln!("The exec auth plugin needs input; running it on this terminal…");
+            match k8s::authenticate_interactively(args.context.as_deref()).await {
+                Ok(()) => connected = connect().await,
+                Err(auth) => eprintln!("\x1b[33mwarning:\x1b[0m authentication failed: {auth:#}"),
+            }
+        }
+        match connected {
             Ok(c) => (c, None),
             Err(e) if args.check || args.snapshot => {
                 eprintln!("\x1b[31merror:\x1b[0m {e:#}");
@@ -1132,6 +1151,19 @@ fn take_suspend(terminal: &mut ratatui::DefaultTerminal, app: &mut App, captured
         let (argv, recovery) = match command {
             app::Suspend::Shell(argv) => (argv, None),
             app::Suspend::Recovery { argv, failure } => (argv, Some(failure)),
+            app::Suspend::Authenticate { context } => {
+                let result = terminal::suspend_and_await(
+                    terminal,
+                    captured,
+                    k8s::authenticate_interactively(Some(&context)),
+                )
+                .map_err(anyhow::Error::from)
+                .and_then(|result| result)
+                .map_err(|e| format!("{e:#}"));
+                app.authenticated(context, result);
+                terminal_title::set(app.terminal_title().as_deref());
+                continue;
+            }
         };
         let target = app.shell_target.take();
         let result = terminal::suspend_and_run(terminal, &argv, captured);

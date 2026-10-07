@@ -9,6 +9,7 @@ use tokio::sync::mpsc::{self, Receiver};
 #[cfg(unix)]
 mod clipboard;
 mod credentials;
+mod exec_auth;
 mod flux;
 mod kubeconfig;
 mod label_filter;
