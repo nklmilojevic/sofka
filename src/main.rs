@@ -452,7 +452,7 @@ async fn run_main(args: Args) -> Result<()> {
     app.debug = cfg.debug.clone();
     app.bundle_cfg = cfg.bundle.clone();
     app.pvc_cfg = cfg.pvc_explore.clone();
-    app.logs_cfg = cfg.logs.clone();
+    app.apply_logs_config(cfg.logs.clone());
     // Seed the session toggle once; later `F` presses (and per-context config
     // reloads) don't fight the user's in-session choice.
     app.logs.fullscreen = cfg.logs.fullscreen;
@@ -467,6 +467,7 @@ async fn run_main(args: Args) -> Result<()> {
         .chain(config::forward_warnings(&app.forwards_cfg))
         .chain(config::notify_warnings(&app.notify_cfg))
         .chain(config::pvc_explore_warnings(&app.pvc_cfg))
+        .chain(config::logs_warnings(&app.logs_cfg))
     {
         eprintln!("warning: {w}");
         config_warnings.push(w);

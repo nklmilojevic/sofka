@@ -1497,7 +1497,7 @@ impl App {
         self.debug = resolved.config.debug;
         self.bundle_cfg = resolved.config.bundle;
         self.pvc_cfg = resolved.config.pvc_explore;
-        self.logs_cfg = resolved.config.logs;
+        self.apply_logs_config(resolved.config.logs);
         self.fleet_cfg = resolved.config.fleet;
         // Running forwards keep running; :reload only refreshes what's saved.
         self.forwards_cfg = resolved.config.forwards;
@@ -1509,6 +1509,7 @@ impl App {
         warnings.extend(crate::config::forward_warnings(&self.forwards_cfg));
         warnings.extend(crate::config::notify_warnings(&self.notify_cfg));
         warnings.extend(crate::config::pvc_explore_warnings(&self.pvc_cfg));
+        warnings.extend(crate::config::logs_warnings(&self.logs_cfg));
         warnings.extend(self.configure_keys(&resolved.config.keys));
         let (views, view_warnings) = crate::views::compile(&resolved.config.views);
         self.user_views = views;

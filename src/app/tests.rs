@@ -37924,6 +37924,76 @@ async fn log_json_shortcut_formats_records_and_keeps_raw_save() {
 }
 
 #[tokio::test]
+async fn log_json_view_starts_from_config_and_follows_context_overrides() {
+    let dir = std::env::temp_dir().join(format!("sofka-json-view-{}", std::process::id()));
+    write_config(&dir, "[logs]\njson_view = \"record\"\n");
+    write_config(
+        &dir.join("clusters/test-cluster/prod"),
+        "[logs]\njson_view = \"raw\"\n",
+    );
+    write_config(
+        &dir.join("clusters/test-cluster/typo"),
+        "[logs]\njson_view = \"fancy\"\n",
+    );
+    let (mut app, _rx) = test_app();
+    app.config = crate::config::ConfigLoader::from_dir(Some(dir.clone()));
+    land_context(&mut app, "dev");
+    assert_eq!(app.logs.json, JsonView::Record);
+
+    app.mode = Mode::Logs;
+    shortcut_log_lines(
+        &mut app,
+        vec![r#"{"level":"info","msg":"ready","port":8080}"#.into()],
+    );
+    assert!(
+        app.logs
+            .display_line(0)
+            .starts_with("INFO  ready port=8080"),
+        "{}",
+        app.logs.display_line(0)
+    );
+
+    // A session choice survives a reload that leaves the value alone.
+    app.handle_key(press(KeyCode::Char('J'))).unwrap();
+    assert_eq!(app.logs.json, JsonView::Pretty);
+    palette(&mut app, "reload");
+    assert_eq!(app.logs.json, JsonView::Pretty);
+
+    // A context with a different value switches to it, buffered lines too.
+    land_context(&mut app, "prod");
+    assert_eq!(app.logs.json, JsonView::Raw);
+    land_context(&mut app, "dev");
+    assert_eq!(app.logs.json, JsonView::Record);
+    assert!(app.logs.display_line(0).starts_with("INFO  ready"));
+
+    land_context(&mut app, "typo");
+    assert_eq!(app.logs.json, JsonView::Raw);
+    assert!(
+        app.config_warnings
+            .iter()
+            .any(|w| w.contains("json_view \"fancy\" is not one of raw, record, pretty")),
+        "{:?}",
+        app.config_warnings
+    );
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn json_view_config_names_match_the_j_cycle() {
+    let views = [JsonView::Raw, JsonView::Record, JsonView::Pretty];
+    assert_eq!(crate::config::JSON_VIEWS.len(), views.len());
+    for (name, view) in crate::config::JSON_VIEWS.iter().zip(views) {
+        assert_eq!(view.label(), *name);
+        assert_eq!(JsonView::from_config(name), view);
+        let cfg = crate::config::LogsConfig {
+            json_view: (*name).into(),
+            ..Default::default()
+        };
+        assert!(crate::config::logs_warnings(&cfg).is_empty());
+    }
+}
+
+#[tokio::test]
 async fn log_json_shortcut_renders_structured_records_on_one_row() {
     use ratatui::{Terminal, backend::TestBackend};
     let (mut app, _rx) = test_app();

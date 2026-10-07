@@ -351,6 +351,7 @@ pub struct FleetConfig {
 /// buffer = 5000      # max lines retained while following (bounded tail)
 /// since = "1h"       # optional: only logs newer than this, within the tail limit
 /// fullscreen = false # open log views fullscreen (F toggles; k9s fullScreenLogs)
+/// json_view = "raw"  # how JSON lines start: raw, record, or pretty (J cycles)
 /// ```
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
@@ -366,6 +367,10 @@ pub struct LogsConfig {
     /// Start log views fullscreen — the pane takes the whole frame, without
     /// header or borders (k9s `fullScreenLogs`). `F` toggles per session.
     pub fullscreen: bool,
+    /// How JSON log lines are shown when a session starts or a context with a
+    /// different value is entered: `raw`, `record`, or `pretty`. `J` cycles
+    /// from there. Validated by [`logs_warnings`].
+    pub json_view: String,
 }
 
 impl Default for LogsConfig {
@@ -375,8 +380,22 @@ impl Default for LogsConfig {
             buffer: 5000,
             since: None,
             fullscreen: false,
+            json_view: "raw".into(),
         }
     }
+}
+
+/// The `[logs] json_view` values, in `J` order.
+pub const JSON_VIEWS: &[&str] = &["raw", "record", "pretty"];
+
+pub fn logs_warnings(cfg: &LogsConfig) -> Vec<String> {
+    if JSON_VIEWS.contains(&cfg.json_view.as_str()) {
+        return Vec::new();
+    }
+    vec![format!(
+        "logs: json_view {:?} is not one of raw, record, pretty; using raw",
+        cfg.json_view
+    )]
 }
 
 /// Optional action history on disk. Changes take effect on restart.

@@ -944,7 +944,7 @@ impl App {
         self.debug = resolved.config.debug;
         self.bundle_cfg = resolved.config.bundle;
         self.pvc_cfg = resolved.config.pvc_explore;
-        self.logs_cfg = resolved.config.logs;
+        self.apply_logs_config(resolved.config.logs);
         self.fleet_cfg = resolved.config.fleet;
         // Tracked debuggers belong to the previous cluster/context.
         self.launched_node_debuggers.clear();
@@ -957,6 +957,7 @@ impl App {
         plugin_warnings.extend(crate::config::workspace_warnings(&self.workspaces));
         plugin_warnings.extend(crate::config::guardrail_warnings(&self.guardrails));
         plugin_warnings.extend(crate::config::pvc_explore_warnings(&self.pvc_cfg));
+        plugin_warnings.extend(crate::config::logs_warnings(&self.logs_cfg));
         let (views, view_warnings) = crate::views::compile(&resolved.config.views);
         self.user_views = views;
         let (thresholds, threshold_warnings) =

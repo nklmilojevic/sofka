@@ -131,6 +131,16 @@ pub enum JsonView {
 }
 
 impl JsonView {
+    /// The view a `[logs] json_view` value names; `Raw` for anything else,
+    /// which `config::logs_warnings` reports.
+    pub fn from_config(name: &str) -> Self {
+        match name {
+            "record" => Self::Record,
+            "pretty" => Self::Pretty,
+            _ => Self::Raw,
+        }
+    }
+
     fn next(self) -> Self {
         match self {
             Self::Raw => Self::Record,
@@ -299,11 +309,18 @@ impl LogsView {
     }
 
     pub(super) fn toggle_json(&mut self) {
+        self.set_json(self.json.next());
+    }
+
+    pub(super) fn set_json(&mut self, view: JsonView) {
+        if self.json == view {
+            return;
+        }
         let scroll = self.view.scroll;
         let shown = self
             .refresh_index(self.last_wrap_width)
             .first_at_row(scroll);
-        self.json = self.json.next();
+        self.json = view;
         self.prepare_json();
         self.view.revision = self.view.revision.wrapping_add(1);
         let width = self.last_wrap_width;
@@ -445,6 +462,16 @@ impl LogsView {
 }
 
 impl App {
+    /// Take a new `[logs]` config. The JSON view follows `json_view` only
+    /// when the configured value changes, at startup or on a context switch,
+    /// so `J` keeps the session's choice across views otherwise.
+    pub fn apply_logs_config(&mut self, cfg: crate::config::LogsConfig) {
+        if cfg.json_view != self.logs_cfg.json_view {
+            self.logs.set_json(JsonView::from_config(&cfg.json_view));
+        }
+        self.logs_cfg = cfg;
+    }
+
     // ----- selection -----------------------------------------------------
 
     pub(super) fn push_log_lines<I>(&mut self, lines: I)

@@ -94,9 +94,12 @@ herdr's own `ui.toast` delivery (in-app, outer terminal, or system).
 
 ## Log controls
 
-Press `J` to cycle the JSON view: raw, record, and indented JSON. Raw display is
-the default. The setting applies to buffered and new records and stays active for
-the session.
+Press `J` to cycle the JSON view: raw, record, and indented JSON. The setting
+applies to buffered and new records and stays active for the session. Set
+`json_view` in `[logs]` to `raw` (the default), `record`, or `pretty` to choose
+the view a session starts with. A per-cluster or per-context override takes
+effect when you switch to a context whose value differs; `J` presses are kept
+otherwise. Any other value is reported in `:config` and treated as `raw`.
 
 Record view shows each structured log record (zap, slog, logrus, pino) on one row:
 time, level, message, then the other fields as `key=value`. It reads the time from
@@ -160,6 +163,7 @@ tail = 300         # initial lines fetched per stream (kubectl --tail)
 buffer = 5000      # max lines kept while following (oldest dropped)
 since = "1h"       # optional: only logs newer than this, within the tail limit
 fullscreen = false # open log views fullscreen (F toggles per session)
+json_view = "raw"  # raw, record, or pretty: the JSON view a session starts in
 ```
 
 Press `T` to enter a positive duration such as `90s`, `30m`, `24h`, or `2d`.
