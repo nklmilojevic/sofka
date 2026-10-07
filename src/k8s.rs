@@ -77,17 +77,21 @@ pub(crate) fn build_exec_client(
         .auth_info
         .token
         .filter(|token| !token.expose_secret().is_empty());
+    let mut command = String::new();
     if let Some(exec) = &mut config.auth_info.exec {
         // Authentication commands must not read from or write to the TUI terminal.
         exec.interactive_mode = Some(kube::config::ExecInteractiveMode::Never);
+        command = exec_command_line(exec);
+        detach_exec(exec);
     }
     let (builder, certificate) = crate::legacy_tls::client_builder_with_certificate(
         config,
         allow_v1_client_cert,
         no_tls_resumption,
     )
-    .map_err(|error| match exec_auth_message(error.as_ref()) {
-        Some(message) => anyhow::anyhow!(message),
+    .map_err(|error| match exec_auth_failure(error.as_ref(), &command) {
+        Some(ExecAuthFailure::NeedsInput(needs)) => anyhow::Error::new(needs),
+        Some(ExecAuthFailure::Message(message)) => anyhow::anyhow!(message),
         None => error,
     })?;
     let layer =
@@ -105,12 +109,14 @@ pub(crate) fn build_exec_client(
             }
             request
         });
-    let auth_errors = tower::util::MapErrLayer::new(|error: tower::BoxError| -> tower::BoxError {
-        match exec_auth_message(error.as_ref()) {
-            Some(message) => std::io::Error::other(message).into(),
-            None => error,
-        }
-    });
+    let auth_errors =
+        tower::util::MapErrLayer::new(move |error: tower::BoxError| -> tower::BoxError {
+            match exec_auth_failure(error.as_ref(), &command) {
+                Some(ExecAuthFailure::NeedsInput(needs)) => std::io::Error::other(needs).into(),
+                Some(ExecAuthFailure::Message(message)) => std::io::Error::other(message).into(),
+                None => error,
+            }
+        });
     let client = builder
         .with_layer(&layer)
         .with_layer(&auth_errors)
@@ -122,24 +128,172 @@ pub(crate) fn build_exec_client(
     })
 }
 
-fn exec_auth_message(error: &(dyn std::error::Error + 'static)) -> Option<String> {
+/// An exec auth plugin stopped because it wanted terminal input, such as an
+/// MFA code. sofka runs plugins without a terminal, so the user has to run the
+/// command themselves.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExecNeedsInput {
+    /// The plugin command line as the kubeconfig spells it.
+    pub command: String,
+    mfa: bool,
+}
+
+impl std::fmt::Display for ExecNeedsInput {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.mfa {
+            write!(
+                f,
+                "MFA code required. Run this in a shell, enter the code, then retry: {}",
+                self.command
+            )
+        } else {
+            write!(
+                f,
+                "Authentication command needs terminal input. Run this in a shell, then retry: {}",
+                self.command
+            )
+        }
+    }
+}
+
+impl std::error::Error for ExecNeedsInput {}
+
+enum ExecAuthFailure {
+    NeedsInput(ExecNeedsInput),
+    Message(String),
+}
+
+fn exec_auth_failure(
+    error: &(dyn std::error::Error + 'static),
+    command: &str,
+) -> Option<ExecAuthFailure> {
+    if let Some(needs) = exec_needs_input(error) {
+        return Some(ExecAuthFailure::NeedsInput(needs.clone()));
+    }
     let mut source = Some(error);
     while let Some(error) = source {
         if let Some(kube::client::AuthError::AuthExecRun { out, .. }) =
             error.downcast_ref::<kube::client::AuthError>()
         {
             let stderr = String::from_utf8_lossy(&out.stderr).to_ascii_lowercase();
+            let mfa = stderr.contains("mfa");
             return Some(if stderr.contains("sso") {
-                "Authentication failed. Run 'aws sso login' for the active AWS profile, then retry."
-                    .into()
+                ExecAuthFailure::Message(
+                    "Authentication failed. Run 'aws sso login' for the active AWS profile, then retry."
+                        .into(),
+                )
+            } else if mfa || stderr.contains("/dev/tty") {
+                ExecAuthFailure::NeedsInput(ExecNeedsInput {
+                    command: command.to_string(),
+                    mfa,
+                })
             } else {
-                "Authentication command failed. Log in with your credential provider, then retry."
-                    .into()
+                ExecAuthFailure::Message(
+                    "Authentication command failed. Log in with your credential provider, then retry."
+                        .into(),
+                )
             });
         }
         source = error.source();
     }
     None
+}
+
+/// The plugin that needs terminal input somewhere in `error`'s source chain.
+/// Also looks inside `io::Error`s, whose `source` skips the error they wrap.
+pub fn exec_needs_input<'a>(
+    error: &'a (dyn std::error::Error + 'static),
+) -> Option<&'a ExecNeedsInput> {
+    let mut source = Some(error);
+    while let Some(error) = source {
+        let inner = error
+            .downcast_ref::<std::io::Error>()
+            .and_then(std::io::Error::get_ref)
+            .map(|inner| inner as &(dyn std::error::Error + 'static));
+        if let Some(needs) = [Some(error), inner]
+            .into_iter()
+            .flatten()
+            .find_map(|error| error.downcast_ref::<ExecNeedsInput>())
+        {
+            return Some(needs);
+        }
+        source = error.source();
+    }
+    None
+}
+
+/// The exec plugin's command line, for telling the user what to run.
+fn exec_command_line(exec: &kube::config::ExecConfig) -> String {
+    exec.command
+        .iter()
+        .chain(exec.args.iter().flatten())
+        .map(|word| shell_word(word))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn shell_word(word: &str) -> String {
+    let plain = !word.is_empty()
+        && word
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "-_./:=@,+%".contains(c));
+    if plain {
+        word.to_string()
+    } else {
+        format!("'{}'", word.replace('\'', "'\\''"))
+    }
+}
+
+#[cfg(unix)]
+static EXEC_WRAPPER: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+
+/// The argument that makes sofka run the rest of its arguments as a detached
+/// exec auth plugin. See [`run_detached`].
+pub const EXEC_DETACHED_ARG: &str = "--exec-detached";
+
+/// Route exec auth plugins through `exe` so they run without a controlling
+/// terminal. Call once at startup with the sofka binary.
+pub fn detach_exec_plugins(exe: std::path::PathBuf) {
+    #[cfg(unix)]
+    let _ = EXEC_WRAPPER.set(exe);
+    #[cfg(not(unix))]
+    let _ = exe;
+}
+
+/// Run the plugin through the sofka binary, which drops the controlling
+/// terminal first. kube-rs runs the plugin with stdin closed, but a plugin can
+/// still open /dev/tty for a prompt (the AWS CLI does for MFA codes). That
+/// prompt lands under the TUI and its read never finishes. Without a
+/// controlling terminal the open fails and the plugin exits with an error.
+fn detach_exec(exec: &mut kube::config::ExecConfig) {
+    #[cfg(unix)]
+    if let Some(wrapper) = EXEC_WRAPPER.get()
+        && let Some(command) = exec.command.take()
+    {
+        let mut args = vec![EXEC_DETACHED_ARG.to_string(), "--".into(), command];
+        args.extend(exec.args.take().unwrap_or_default());
+        exec.command = Some(wrapper.to_string_lossy().into_owned());
+        exec.args = Some(args);
+    }
+    #[cfg(not(unix))]
+    let _ = exec;
+}
+
+/// Run `argv` in a new session with no controlling terminal, replacing this
+/// process. Only returns if the command cannot be started.
+#[cfg(unix)]
+pub fn run_detached(argv: &[std::ffi::OsString]) -> std::io::Error {
+    use std::os::unix::process::CommandExt;
+
+    let Some((command, args)) = argv.split_first() else {
+        return std::io::Error::other("no exec plugin command");
+    };
+    // SAFETY: setsid has no preconditions; it fails only when this process
+    // already leads a process group, which leaves the terminal attached.
+    if unsafe { libc::setsid() } == -1 {
+        return std::io::Error::last_os_error();
+    }
+    std::process::Command::new(command).args(args).exec()
 }
 
 /// What a failed watch request ran into, judged from the error's source
@@ -1742,27 +1896,81 @@ pub(crate) mod tests {
     }
 
     #[cfg(unix)]
-    #[test]
-    fn watch_auth_failure_has_a_login_hint() {
+    fn exec_run_failure(stderr: &str) -> kube::runtime::watcher::Error {
         use std::os::unix::process::ExitStatusExt;
 
-        let error = kube::runtime::watcher::Error::WatchStartFailed(kube::Error::Auth(
+        kube::runtime::watcher::Error::WatchStartFailed(kube::Error::Auth(
             kube::client::AuthError::AuthExecRun {
                 cmd: "aws".into(),
                 status: std::process::ExitStatus::from_raw(256),
                 out: std::process::Output {
                     status: std::process::ExitStatus::from_raw(256),
                     stdout: vec![],
-                    stderr: b"Error loading SSO Token: Token has expired".to_vec(),
+                    stderr: stderr.as_bytes().to_vec(),
                 },
             },
-        ));
-        assert!(
-            super::exec_auth_message(&error)
-                .unwrap()
-                .contains("aws sso login")
+        ))
+    }
+
+    fn exec_auth_message(error: &(dyn std::error::Error + 'static)) -> Option<String> {
+        super::exec_auth_failure(error, "aws eks get-token --profile 'mfa role'").map(|failure| {
+            match failure {
+                super::ExecAuthFailure::NeedsInput(needs) => needs.to_string(),
+                super::ExecAuthFailure::Message(message) => message,
+            }
+        })
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn watch_auth_failure_has_a_login_hint() {
+        let error = exec_run_failure("Error loading SSO Token: Token has expired");
+        assert!(exec_auth_message(&error).unwrap().contains("aws sso login"));
+        assert!(exec_auth_message(&std::io::Error::other("connection refused")).is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn mfa_prompt_failure_names_the_command_to_run() {
+        let error = exec_run_failure(
+            "Warning: Password input may be echoed.\nEnter MFA code for arn:aws:iam::1:mfa/me: \nEOF when reading a line",
         );
-        assert!(super::exec_auth_message(&std::io::Error::other("connection refused")).is_none());
+        assert_eq!(
+            exec_auth_message(&error).unwrap(),
+            "MFA code required. Run this in a shell, enter the code, then retry: aws eks get-token --profile 'mfa role'"
+        );
+        let error = exec_run_failure("sh: /dev/tty: Device not configured");
+        assert_eq!(
+            exec_auth_message(&error).unwrap(),
+            "Authentication command needs terminal input. Run this in a shell, then retry: aws eks get-token --profile 'mfa role'"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn needs_input_survives_the_io_error_the_client_layer_wraps_it_in() {
+        let needs = super::ExecNeedsInput {
+            command: "aws eks get-token".into(),
+            mfa: true,
+        };
+        let wrapped = kube::Error::Service(std::io::Error::other(needs.clone()).into());
+        assert_eq!(super::exec_needs_input(&wrapped), Some(&needs));
+        let error = anyhow::Error::new(needs.clone()).context("connecting");
+        assert_eq!(super::exec_needs_input(error.as_ref()), Some(&needs));
+        assert!(super::exec_needs_input(&std::io::Error::other("refused")).is_none());
+    }
+
+    #[test]
+    fn exec_command_line_quotes_only_words_that_need_it() {
+        let exec: kube::config::ExecConfig = serde_json::from_value(serde_json::json!({
+            "command": "aws",
+            "args": ["eks", "get-token", "--cluster-name", "prod", "--profile", "it's mine", ""]
+        }))
+        .unwrap();
+        assert_eq!(
+            super::exec_command_line(&exec),
+            "aws eks get-token --cluster-name prod --profile 'it'\\''s mine' ''"
+        );
     }
 
     use super::*;

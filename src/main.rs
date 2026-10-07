@@ -153,6 +153,21 @@ struct InfoArgs {
 static ALLOC: dhat::Alloc = dhat::Alloc;
 
 fn main() -> Result<()> {
+    #[cfg(unix)]
+    {
+        let argv: Vec<_> = std::env::args_os().collect();
+        if argv
+            .get(1)
+            .is_some_and(|arg| arg == sofka::k8s::EXEC_DETACHED_ARG)
+        {
+            let error = sofka::k8s::run_detached(argv.get(3..).unwrap_or_default());
+            eprintln!("sofka: cannot run exec auth plugin: {error}");
+            std::process::exit(127);
+        }
+        if let Ok(exe) = std::env::current_exe() {
+            sofka::k8s::detach_exec_plugins(exe);
+        }
+    }
     if completion::try_complete() {
         return Ok(());
     }
