@@ -261,7 +261,8 @@ include those conditions. Row filters can search the route paths.
   own after the machine wakes from sleep on macOS and Linux.
 - **Curated columns** for common kinds (pods, deployments, replicasets,
   statefulsets, daemonsets, services, nodes, namespaces, configmaps, secrets,
-  jobs, cronjobs, PVC/PV, ingresses, endpoints, CustomResourceDefinitions), with
+  jobs, cronjobs, PVC/PV, ingresses, endpoints, CustomResourceDefinitions,
+  Flux and flux-operator objects), with
   a NAME/AGE fallback for everything else. STATUS columns use a fixed width of
   26 characters, or 27 for Nodes, so status changes do not move adjacent
   columns. A configured column width takes priority. Column widths use the full filtered list so
@@ -567,7 +568,13 @@ include those conditions. Row filters can search the route paths.
 - **Flux CD controls** (`t`) - a suspend/resume/reconcile-now menu built on
   native Kubernetes API patches, for Kustomizations, HelmReleases, HelmCharts, git/helm/oci
   repositories, buckets, image automation, and notification alerts and
-  receivers. No `flux` binary needed. Works with bulk multiselect. For
+  receivers. No `flux` binary needed. Works with bulk multiselect. The
+  flux-operator kinds (ResourceSet, ResourceSetInputProvider, FluxInstance) get
+  the same menu. They have no `spec.suspend`, so suspend sets the
+  `fluxcd.controlplane.io/reconcile` annotation to `disabled`. Resume sets it to
+  `enabled` and requests a reconcile, as `flux-operator resume` does. Their
+  SUSPENDED column reads that annotation. ResourceSetInputProvider and
+  FluxInstance also offer **Force reconcile**. For
   HelmRelease resources, **Force reconcile** requests a Helm install or upgrade
   even when the specification has not changed. It sets
   `reconcile.fluxcd.io/requestedAt` and `reconcile.fluxcd.io/forceAt` to the same
@@ -608,6 +615,11 @@ include those conditions. Row filters can search the route paths.
   its resources can be in another cluster. An absent inventory is reported as
   unavailable. Helm hooks and controller-created children are not added to this
   list. Navigation uses the normal resource view and its access error handling.
+  A flux-operator **ResourceSet** or **FluxInstance** is its own owner: `⏎` on
+  one opens this view, with no Source section. A ResourceSet also lists the
+  input providers in `spec.inputsFrom`; `⏎` on a named provider opens it. An
+  object a ResourceSet applied finds its owner from the
+  `resourceset.fluxcd.controlplane.io/name` label.
 - **Argo CD view** (`:argocd` / `:argo`) - the state of the selected Application:
   sync and health, the project and destination, every source it deploys from with
   the revision actually deployed from that source, every object in

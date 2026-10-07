@@ -302,6 +302,26 @@ const FLUX_SOURCE_COLUMNS: &[Column] = &[
     column("AGE", col_age),
 ];
 
+const FLUX_OPERATOR_COLUMNS: &[Column] = &[
+    column("NAME", col_name),
+    status_column("READY", col_flux_ready),
+    column("MESSAGE", col_flux_message),
+    column("REVISION", col_flux_revision),
+    column("RESOURCES", col_flux_inventory),
+    column("SUSPENDED", col_flux_operator_suspended),
+    column("AGE", col_age),
+];
+
+const FLUX_INPUT_PROVIDER_COLUMNS: &[Column] = &[
+    column("NAME", col_name),
+    status_column("READY", col_flux_ready),
+    column("MESSAGE", col_flux_message),
+    column("REVISION", col_flux_exported_revision),
+    column("INPUTS", col_flux_exported_inputs),
+    column("SUSPENDED", col_flux_operator_suspended),
+    column("AGE", col_age),
+];
+
 const DEFAULT_COLUMNS: &[Column] = &[column("NAME", col_name), column("AGE", col_age)];
 
 /// One row per release, at its latest revision — like `helm list`. Backed by
@@ -371,6 +391,8 @@ fn columns_for(group: &str, plural: &str) -> &'static [Column] {
             "source.toolkit.fluxcd.io",
             "gitrepositories" | "helmrepositories" | "ocirepositories" | "buckets",
         ) => FLUX_SOURCE_COLUMNS,
+        ("fluxcd.controlplane.io", "resourcesets" | "fluxinstances") => FLUX_OPERATOR_COLUMNS,
+        ("fluxcd.controlplane.io", "resourcesetinputproviders") => FLUX_INPUT_PROVIDER_COLUMNS,
         ("argoproj.io", "applications") => ARGOCD_APP_COLUMNS,
         ("argoproj.io", "applicationsets") => ARGOCD_APPSET_COLUMNS,
         ("", "helm") => HELM_COLUMNS,
@@ -902,8 +924,19 @@ fn is_numeric_header(group: &str, plural: &str, header: &str) -> bool {
     // True/False/Unknown, which must sort as text.
     if header == "READY" {
         let cols = columns_for(group, plural);
-        return cols.as_ptr() != FLUX_OBJECT_COLUMNS.as_ptr()
-            && cols.as_ptr() != FLUX_SOURCE_COLUMNS.as_ptr();
+        return ![
+            FLUX_OBJECT_COLUMNS,
+            FLUX_SOURCE_COLUMNS,
+            FLUX_OPERATOR_COLUMNS,
+            FLUX_INPUT_PROVIDER_COLUMNS,
+        ]
+        .iter()
+        .any(|flux| cols.as_ptr() == flux.as_ptr());
+    }
+    // Inventory and input counts, named generically enough that only the
+    // flux-operator kinds' own columns are known to hold numbers.
+    if matches!(header, "RESOURCES" | "INPUTS") {
+        return group == "fluxcd.controlplane.io";
     }
     matches!(
         header,
@@ -1492,6 +1525,31 @@ fn col_flux_source_url<'a>(ctx: &CellContext<'a>) -> Cow<'a, str> {
 
 fn col_flux_suspended<'a>(ctx: &CellContext<'a>) -> Cow<'a, str> {
     Cow::Owned(bget(ctx.data, &["spec", "suspend"]).to_string())
+}
+
+fn col_flux_inventory<'a>(ctx: &CellContext<'a>) -> Cow<'a, str> {
+    Cow::Owned(count_arr(ctx.data, &["status", "inventory", "entries"]).to_string())
+}
+
+fn col_flux_exported_revision<'a>(ctx: &CellContext<'a>) -> Cow<'a, str> {
+    Cow::Borrowed(sget(ctx.data, &["status", "lastExportedRevision"]).unwrap_or_default())
+}
+
+fn col_flux_exported_inputs<'a>(ctx: &CellContext<'a>) -> Cow<'a, str> {
+    Cow::Owned(count_arr(ctx.data, &["status", "exportedInputs"]).to_string())
+}
+
+/// flux-operator kinds pause through `fluxcd.controlplane.io/reconcile:
+/// disabled` rather than `spec.suspend`.
+fn col_flux_operator_suspended<'a>(ctx: &CellContext<'a>) -> Cow<'a, str> {
+    let disabled = ctx
+        .obj
+        .metadata
+        .annotations
+        .as_ref()
+        .and_then(|a| a.get("fluxcd.controlplane.io/reconcile"))
+        .is_some_and(|v| v == "disabled");
+    Cow::Owned(disabled.to_string())
 }
 
 fn col_argocd_sync<'a>(ctx: &CellContext<'a>) -> Cow<'a, str> {
@@ -3277,6 +3335,129 @@ mod tests {
         assert_eq!(cells[1], "Unknown");
         assert_eq!(cells[2], "");
         assert_eq!(cells[3], "");
+    }
+
+    #[test]
+    fn flux_operator_cells_show_inventory_inputs_and_annotation_suspend() {
+        let rset = obj(json!({
+            "apiVersion": "fluxcd.controlplane.io/v1",
+            "kind": "ResourceSet",
+            "metadata": {
+                "name": "apps",
+                "annotations": {"fluxcd.controlplane.io/reconcile": "disabled"}
+            },
+            "status": {
+                "conditions": [{"type": "Ready", "status": "True", "message": "Reconciliation finished"}],
+                "lastAppliedRevision": "sha256:abc",
+                "inventory": {"entries": [
+                    {"id": "apps_web_apps_Deployment", "v": "v1"},
+                    {"id": "apps_web__Service", "v": "v1"}
+                ]}
+            }
+        }));
+        assert_eq!(
+            headers("fluxcd.controlplane.io", "resourcesets"),
+            [
+                "NAME",
+                "READY",
+                "MESSAGE",
+                "REVISION",
+                "RESOURCES",
+                "SUSPENDED",
+                "AGE"
+            ]
+        );
+        let (row, status_idx) = cells(&rset, "fluxcd.controlplane.io", "resourcesets", now_secs());
+        assert_eq!(
+            &row[..6],
+            [
+                "apps",
+                "True",
+                "Reconciliation finished",
+                "sha256:abc",
+                "2",
+                "true"
+            ]
+        );
+        assert_eq!(status_idx, Some(1));
+
+        let instance = obj(json!({
+            "apiVersion": "fluxcd.controlplane.io/v1",
+            "kind": "FluxInstance",
+            "metadata": {
+                "name": "flux",
+                "annotations": {"fluxcd.controlplane.io/reconcile": "enabled"}
+            },
+            "status": {"lastAttemptedRevision": "v2.7.0@sha256:def"}
+        }));
+        let (row, _) = cells(
+            &instance,
+            "fluxcd.controlplane.io",
+            "fluxinstances",
+            now_secs(),
+        );
+        assert_eq!(
+            &row[..6],
+            ["flux", "Unknown", "", "v2.7.0@sha256:def", "0", "false"]
+        );
+
+        let provider = obj(json!({
+            "apiVersion": "fluxcd.controlplane.io/v1",
+            "kind": "ResourceSetInputProvider",
+            "metadata": {"name": "prs"},
+            "status": {
+                "lastExportedRevision": "sha256:123",
+                "exportedInputs": [{"id": "1"}, {"id": "2"}, {"id": "3"}]
+            }
+        }));
+        assert_eq!(
+            headers("fluxcd.controlplane.io", "resourcesetinputproviders"),
+            [
+                "NAME",
+                "READY",
+                "MESSAGE",
+                "REVISION",
+                "INPUTS",
+                "SUSPENDED",
+                "AGE"
+            ]
+        );
+        let (row, _) = cells(
+            &provider,
+            "fluxcd.controlplane.io",
+            "resourcesetinputproviders",
+            now_secs(),
+        );
+        assert_eq!(&row[3..6], ["sha256:123", "3", "false"]);
+
+        // Same plural in another group gets no curated columns.
+        assert!(!has_curated("example.com", "resourcesets"));
+    }
+
+    #[test]
+    fn flux_operator_counts_sort_numerically_ready_as_text() {
+        use crate::views::SortValue;
+        let rset = |entries: usize| {
+            obj(json!({
+                "apiVersion": "fluxcd.controlplane.io/v1",
+                "kind": "ResourceSet",
+                "metadata": {"name": "apps"},
+                "status": {
+                    "conditions": [{"type": "Ready", "status": "True"}],
+                    "inventory": {"entries": vec![json!({"id": "a_b__C", "v": "v1"}); entries]}
+                }
+            }))
+        };
+        let spec = build_spec("fluxcd.controlplane.io", "resourcesets", None, None, false);
+        let count = |n| match spec.sort_value(&rset(n), "RESOURCES", now_secs()).unwrap() {
+            SortValue::Num(n) => n,
+            SortValue::Text(t) => panic!("RESOURCES must sort as a number, got {t}"),
+        };
+        assert!(count(9) < count(10));
+        assert!(matches!(
+            spec.sort_value(&rset(1), "READY", now_secs()).unwrap(),
+            SortValue::Text(_)
+        ));
     }
 
     #[test]

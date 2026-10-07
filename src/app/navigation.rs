@@ -72,6 +72,13 @@ impl App {
             {
                 self.show_argocd(obj)
             }
+            // flux-operator: what the object applied and what feeds it, in
+            // the GitOps view. A configured drill still wins.
+            "resourcesets" | "fluxinstances"
+                if self.flux_operator_kind() && self.configured_drill().is_none() =>
+            {
+                self.open_gitops()
+            }
             // Everything else is configuration: a `[views."…"].drill` opens
             // another kind scoped to this row; failing that, anything that
             // names a node (`[views."…"].node`) drills into it. Pods name one

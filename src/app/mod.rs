@@ -98,6 +98,10 @@ const FLASH_TTL: std::time::Duration = std::time::Duration::from_secs(8);
 /// and `applicationsets` plurals — only `argoproj.io` kinds get the `t` menu.
 const ARGOCD_GROUP: &str = "argoproj.io";
 
+/// The flux-operator CRD group (ResourceSet, ResourceSetInputProvider,
+/// FluxInstance). These kinds pause through an annotation, not `spec.suspend`.
+const FLUX_OPERATOR_GROUP: &str = "fluxcd.controlplane.io";
+
 /// Items in the Flux action menu (`t`), in display order. Deliberately a menu
 /// — not a single-key toggle — so suspending something always takes an
 /// explicit, visible choice rather than one accidental keystroke. "Reconcile
@@ -105,7 +109,9 @@ const ARGOCD_GROUP: &str = "argoproj.io";
 /// `flux reconcile` CLI uses, shared by every controller in the toolkit.
 pub const FLUX_MENU_ITEMS: &[&str] = &["Suspend", "Resume", "Reconcile now", "Cancel"];
 
-pub const HELMRELEASE_MENU_ITEMS: &[&str] = &[
+/// The Flux menu for kinds whose controller honours `reconcile.fluxcd.io/forceAt`:
+/// HelmRelease, ResourceSetInputProvider, and FluxInstance.
+pub const FLUX_FORCE_MENU_ITEMS: &[&str] = &[
     "Suspend",
     "Resume",
     "Reconcile now",

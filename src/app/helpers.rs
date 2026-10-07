@@ -27,6 +27,22 @@ pub(super) fn suspend_patch(suspend: bool) -> Value {
     json!({ "spec": { "suspend": suspend } })
 }
 
+/// flux-operator suspend/resume, matching `flux-operator suspend|resume`:
+/// the reconcile annotation pauses the loop, and resume also requests a
+/// reconcile so the object catches up straight away.
+pub(super) fn operator_suspend_patch(suspend: bool, requested_at: &str) -> Value {
+    if suspend {
+        json!({ "metadata": { "annotations": {
+            "fluxcd.controlplane.io/reconcile": "disabled"
+        }}})
+    } else {
+        json!({ "metadata": { "annotations": {
+            "fluxcd.controlplane.io/reconcile": "enabled",
+            "reconcile.fluxcd.io/requestedAt": requested_at
+        }}})
+    }
+}
+
 pub(super) fn reconcile_patch(requested_at: &str, force: bool) -> Value {
     let mut patch = json!({
         "metadata": { "annotations": { "reconcile.fluxcd.io/requestedAt": requested_at } }
@@ -430,6 +446,17 @@ impl App {
                     )
                     | ("notification.toolkit.fluxcd.io", "alerts" | "receivers")
             )
+        }) || self.flux_operator_kind()
+    }
+
+    /// Whether the current kind is a flux-operator CRD with a reconcile loop.
+    pub fn flux_operator_kind(&self) -> bool {
+        self.kind.as_ref().is_some_and(|kind| {
+            kind.ar.group == FLUX_OPERATOR_GROUP
+                && matches!(
+                    kind.ar.plural.as_str(),
+                    "resourcesets" | "resourcesetinputproviders" | "fluxinstances"
+                )
         })
     }
 
@@ -471,13 +498,17 @@ impl App {
             ARGOCD_MENU_ITEMS
         } else if self.argocd_kind() {
             ARGOCD_APPSET_MENU_ITEMS
-        } else if self.kind_plural == "helmreleases"
-            && self
-                .kind
-                .as_ref()
-                .is_some_and(|kind| kind.ar.group == "helm.toolkit.fluxcd.io")
-        {
-            HELMRELEASE_MENU_ITEMS
+        } else if self.kind.as_ref().is_some_and(|kind| {
+            matches!(
+                (kind.ar.group.as_str(), kind.ar.plural.as_str()),
+                ("helm.toolkit.fluxcd.io", "helmreleases")
+                    | (
+                        FLUX_OPERATOR_GROUP,
+                        "resourcesetinputproviders" | "fluxinstances"
+                    )
+            )
+        }) {
+            FLUX_FORCE_MENU_ITEMS
         } else {
             FLUX_MENU_ITEMS
         }

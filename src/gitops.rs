@@ -78,12 +78,27 @@ pub fn owner_ref(obj: &DynamicObject) -> Option<FluxRef> {
             namespace: get("helm.toolkit.fluxcd.io/namespace").unwrap_or_default(),
         });
     }
+    if let Some(name) = get("resourceset.fluxcd.controlplane.io/name") {
+        return Some(FluxRef {
+            kind: "ResourceSet".into(),
+            name,
+            namespace: get("resourceset.fluxcd.controlplane.io/namespace").unwrap_or_default(),
+        });
+    }
     None
 }
 
-/// Whether `plural` is a Flux Kustomization/HelmRelease (an owner kind).
+/// Whether `plural` is a Flux kind that applies resources (an owner kind).
 pub fn is_owner_plural(plural: &str) -> bool {
-    matches!(plural, "kustomizations" | "helmreleases")
+    matches!(
+        plural,
+        "kustomizations" | "helmreleases" | "resourcesets" | "fluxinstances"
+    )
+}
+
+/// flux-operator owners render manifests themselves and have no source.
+fn is_operator_kind(kind: &str) -> bool {
+    matches!(kind, "ResourceSet" | "FluxInstance")
 }
 
 /// The source a Kustomization/HelmRelease reconciles from. Kustomizations use
@@ -110,8 +125,16 @@ pub fn source_ref(owner: &DynamicObject) -> Option<FluxRef> {
 }
 
 /// The `dependsOn` Kustomizations gating `owner` (namespace defaults to the
-/// owner's).
+/// owner's). A ResourceSet's `dependsOn` names arbitrary objects with CEL
+/// readiness checks, which this chain can't judge, so it contributes none.
 pub fn depends_on(owner: &DynamicObject) -> Vec<FluxRef> {
+    if owner
+        .types
+        .as_ref()
+        .is_some_and(|t| is_operator_kind(&t.kind))
+    {
+        return Vec::new();
+    }
     let owner_ns = owner.metadata.namespace.clone().unwrap_or_default();
     owner
         .data
@@ -133,6 +156,50 @@ pub fn depends_on(owner: &DynamicObject) -> Vec<FluxRef> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+/// The ResourceSetInputProviders a ResourceSet reads (`spec.inputsFrom`), by
+/// name with a jump target, or by label selector.
+pub fn input_provider_findings(resourceset: &DynamicObject) -> Vec<Finding> {
+    let Some(refs) = resourceset
+        .data
+        .pointer("/spec/inputsFrom")
+        .and_then(Value::as_array)
+        .filter(|refs| !refs.is_empty())
+    else {
+        return Vec::new();
+    };
+    let namespace = resourceset.metadata.namespace.clone();
+    let mut out = vec![finding(0, Level::Heading, "Input providers")];
+    for r in refs {
+        if let Some(name) = r.get("name").and_then(Value::as_str) {
+            out.push(
+                finding(1, Level::Info, format!("ResourceSetInputProvider/{name}")).with_target(
+                    Target {
+                        plural: "resourcesetinputproviders".into(),
+                        namespace: namespace.clone(),
+                        name: name.to_string(),
+                    },
+                ),
+            );
+        } else if let Some(labels) = r
+            .pointer("/selector/matchLabels")
+            .and_then(Value::as_object)
+            .filter(|l| !l.is_empty())
+        {
+            let selector = labels
+                .iter()
+                .map(|(k, v)| format!("{k}={}", v.as_str().unwrap_or_default()))
+                .collect::<Vec<_>>()
+                .join(",");
+            out.push(finding(1, Level::Info, format!("selector {selector}")));
+        } else if r.get("selector").is_some() {
+            out.push(finding(1, Level::Info, "selector with match expressions"));
+        } else {
+            out.push(finding(1, Level::Warn, "invalid input provider reference"));
+        }
+    }
+    out
 }
 
 /// Show the inventory without reading each managed resource.
@@ -247,8 +314,16 @@ pub fn ready(obj: &DynamicObject) -> Option<(String, String, String)> {
     Some((s("status"), s("reason"), s("message")))
 }
 
+/// Toolkit kinds set `spec.suspend`; flux-operator kinds disable their
+/// reconcile loop with an annotation.
 fn suspended(obj: &DynamicObject) -> bool {
     obj.data.pointer("/spec/suspend").and_then(Value::as_bool) == Some(true)
+        || obj
+            .metadata
+            .annotations
+            .as_ref()
+            .and_then(|a| a.get("fluxcd.controlplane.io/reconcile"))
+            .is_some_and(|v| v == "disabled")
 }
 
 fn str_at(obj: &DynamicObject, p: &str) -> Option<String> {
@@ -286,7 +361,7 @@ pub fn describe(ev: &Evidence) -> Vec<Finding> {
         out.push(finding(
             1,
             Level::Info,
-            "no kustomize/helm toolkit labels found",
+            "no kustomize/helm toolkit or ResourceSet labels found",
         ));
         return out;
     };
@@ -314,8 +389,11 @@ pub fn describe(ev: &Evidence) -> Vec<Finding> {
     push_flux_object(&mut out, owner, ev.self_is_owner);
 
     // Source block.
-    out.push(finding(0, Level::Heading, "Source"));
+    if !is_operator_kind(&owner.reference.kind) {
+        out.push(finding(0, Level::Heading, "Source"));
+    }
     match &ev.source {
+        None if is_operator_kind(&owner.reference.kind) => {}
         Some(src) => {
             let mut f = finding(1, source_level(src), source_line(src));
             if let Some(t) = src.target() {

@@ -1956,7 +1956,7 @@ impl App {
             return;
         }
         if !self.flux_suspendable() && !self.cronjob_kind() && !self.argocd_kind() {
-            self.flash_warn("suspend/resume only applies to CronJobs, Flux resources (ks/hr/HelmCharts/git-, helm-, oci-repos, buckets, image automation, alerts, receivers), and ArgoCD Applications/ApplicationSets");
+            self.flash_warn("suspend/resume only applies to CronJobs, Flux resources (ks/hr/HelmCharts/git-, helm-, oci-repos, buckets, image automation, alerts, receivers, ResourceSets, input providers, FluxInstances), and ArgoCD Applications/ApplicationSets");
             return;
         }
         if self.action_targets().is_empty() {
@@ -2050,10 +2050,16 @@ impl App {
         } else {
             format!("{verb_done} {} {}", targets.len(), self.kind_plural)
         };
+        let patch = if self.flux_operator_kind() {
+            let now = k8s_openapi::jiff::Timestamp::now().to_string();
+            operator_suspend_patch(suspend, &now)
+        } else {
+            suspend_patch(suspend)
+        };
         self.spawn_patch_action(
             kind,
             targets,
-            Patch::Merge(suspend_patch(suspend)),
+            Patch::Merge(patch),
             claim,
             ok_message,
             move |name, _, e| format!("{verb} {name} failed: {e}"),

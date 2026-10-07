@@ -50,6 +50,7 @@ impl App {
             return;
         };
         let plural = self.kind_plural.clone();
+        let is_resourceset = plural == "resourcesets" && kind.ar.group == FLUX_OPERATOR_GROUP;
         let name = obj.metadata.name.clone().unwrap_or_default();
         let ns = obj.metadata.namespace.clone().unwrap_or_default();
         let subject = format!("{}/{name}", kind.ar.kind);
@@ -142,6 +143,9 @@ impl App {
                     deps,
                 };
                 let mut findings = gitops::describe(&ev);
+                if is_resourceset {
+                    findings.extend(gitops::input_provider_findings(&obj));
+                }
                 findings.extend(gitops::inventory_findings(&obj, &inventory_kinds));
                 prepend_warn_finding(&mut findings, warn);
                 Ok((obj, findings))
@@ -174,6 +178,8 @@ impl App {
             "buckets",
             "helmrepositories",
             "helmcharts",
+            "resourcesets",
+            "fluxinstances",
         ] {
             if let Some(kind) = self.cluster.resolve(k) {
                 let plural = kind.ar.plural.to_lowercase();

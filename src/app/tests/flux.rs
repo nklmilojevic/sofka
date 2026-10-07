@@ -260,6 +260,273 @@ async fn helmchart_actions_patch_selected_and_marked_charts() {
 }
 
 #[tokio::test]
+async fn flux_operator_actions_patch_the_reconcile_annotations() {
+    for (plural, kind) in [
+        ("resourcesets", "ResourceSet"),
+        ("resourcesetinputproviders", "ResourceSetInputProvider"),
+        ("fluxinstances", "FluxInstance"),
+    ] {
+        let mut actions = vec!["Suspend", "Resume", "Reconcile now"];
+        if plural != "resourcesets" {
+            actions.push("Force reconcile");
+        }
+        for action in actions {
+            let (mut app, mut rx) = test_app();
+            app.cluster
+                .register_kind("fluxcd.controlplane.io", kind, plural, true);
+            app.switch_kind(plural);
+            let object = json!({
+                "apiVersion": "fluxcd.controlplane.io/v1", "kind": kind,
+                "metadata": {"name": "apps", "namespace": "default"}
+            });
+            apply(&mut app, object.clone());
+            let (requests, mut received) = mpsc::unbounded_channel();
+            app.cluster.client = kube::Client::new(
+                tower::service_fn(move |request: http::Request<kube::client::Body>| {
+                    let requests = requests.clone();
+                    let object = object.clone();
+                    async move {
+                        let (parts, body) = request.into_parts();
+                        assert_eq!(parts.method, http::Method::PATCH);
+                        assert_eq!(
+                            parts.headers["content-type"],
+                            "application/merge-patch+json"
+                        );
+                        let bytes = body.collect().await.unwrap().to_bytes();
+                        let patch: Value = serde_json::from_slice(&bytes).unwrap();
+                        requests
+                            .send((parts.uri.path().to_string(), patch))
+                            .unwrap();
+                        Ok::<_, std::convert::Infallible>(http::Response::new(
+                            http_body_util::Full::new(hyper::body::Bytes::from(object.to_string())),
+                        ))
+                    }
+                }),
+                "default",
+            );
+            choose(&mut app, action);
+            let (path, patch) = tokio::time::timeout(Duration::from_secs(2), received.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                path,
+                format!("/apis/fluxcd.controlplane.io/v1/namespaces/default/{plural}/apps")
+            );
+            assert!(patch.get("spec").is_none(), "{plural} {action}: {patch}");
+            let annotations = &patch["metadata"]["annotations"];
+            let requested = annotations["reconcile.fluxcd.io/requestedAt"].as_str();
+            match action {
+                "Suspend" => assert_eq!(
+                    patch,
+                    json!({"metadata": {"annotations": {
+                        "fluxcd.controlplane.io/reconcile": "disabled"
+                    }}})
+                ),
+                "Resume" => {
+                    let requested = requested.unwrap();
+                    assert!(requested.parse::<Timestamp>().is_ok());
+                    assert_eq!(
+                        patch,
+                        json!({"metadata": {"annotations": {
+                            "fluxcd.controlplane.io/reconcile": "enabled",
+                            "reconcile.fluxcd.io/requestedAt": requested
+                        }}})
+                    );
+                }
+                "Reconcile now" => {
+                    assert!(requested.unwrap().parse::<Timestamp>().is_ok());
+                    assert_eq!(annotations.as_object().unwrap().len(), 1);
+                }
+                _ => {
+                    assert_eq!(
+                        annotations["reconcile.fluxcd.io/forceAt"].as_str(),
+                        requested
+                    );
+                    assert_eq!(annotations.as_object().unwrap().len(), 2);
+                }
+            }
+            let verb = match action {
+                "Suspend" => "suspended apps",
+                "Resume" => "resumed apps",
+                "Reconcile now" => "reconcile requested: apps",
+                _ => "force reconcile requested: apps",
+            };
+            let reply = tokio::time::timeout(Duration::from_secs(2), async {
+                loop {
+                    let msg = rx.recv().await.unwrap();
+                    if matches!(&msg, Msg::Flash { message, .. } if message == verb) {
+                        break msg;
+                    }
+                }
+            })
+            .await
+            .unwrap();
+            app.handle_msg(reply);
+            assert!(!app.flash_err);
+            assert_eq!(app.flash, verb);
+        }
+    }
+}
+
+#[tokio::test]
+async fn enter_on_a_resourceset_opens_gitops_with_providers_and_inventory() {
+    let root = json!({
+        "apiVersion": "fluxcd.controlplane.io/v1", "kind": "ResourceSet",
+        "metadata": {
+            "name": "apps", "namespace": "default",
+            "annotations": {"fluxcd.controlplane.io/reconcile": "disabled"}
+        },
+        "spec": {
+            "inputsFrom": [
+                {"kind": "ResourceSetInputProvider", "name": "prs"},
+                {"kind": "ResourceSetInputProvider", "selector": {"matchLabels": {"team": "web"}}}
+            ],
+            "dependsOn": [{
+                "apiVersion": "apiextensions.k8s.io/v1", "kind": "CustomResourceDefinition",
+                "name": "helmreleases.helm.toolkit.fluxcd.io", "ready": true
+            }]
+        },
+        "status": {
+            "conditions": [{"type": "Ready", "status": "True"}],
+            "inventory": {"entries": [{"id": "default_web__Service", "v": "v1"}]}
+        }
+    });
+    let (mut app, rx) = test_app();
+    for (kind, plural) in [
+        ("ResourceSet", "resourcesets"),
+        ("ResourceSetInputProvider", "resourcesetinputproviders"),
+    ] {
+        app.cluster
+            .register_kind("fluxcd.controlplane.io", kind, plural, true);
+    }
+    let (mut app, mut rx, responses, _) =
+        health_report_app_with(app, rx, "resourcesets", root.clone());
+    responses.lock().unwrap().insert(
+        "/apis/fluxcd.controlplane.io/v1/namespaces/default/resourcesets/apps".into(),
+        (200, root),
+    );
+    app.handle_key(press(KeyCode::Enter)).unwrap();
+    assert_eq!(app.mode, Mode::Gitops);
+    receive_health_report(&mut app, &mut rx, true).await;
+    let texts: Vec<_> = app.gitops_items.iter().map(|f| f.text.as_str()).collect();
+    assert!(
+        texts.contains(&"ResourceSet/apps — Flux ResourceSet"),
+        "{texts:?}"
+    );
+    assert!(texts.contains(&"suspended"), "{texts:?}");
+    assert!(
+        texts.contains(&"owner is suspended — not reconciling"),
+        "{texts:?}"
+    );
+    assert!(!texts.contains(&"Source"), "{texts:?}");
+    assert!(!texts.contains(&"no source resolved"), "{texts:?}");
+    assert!(!texts.contains(&"Depends on"), "{texts:?}");
+    assert!(
+        !texts.iter().any(|t| t.starts_with("waiting on dependency")),
+        "{texts:?}"
+    );
+    assert!(texts.contains(&"selector team=web"), "{texts:?}");
+    assert!(texts.contains(&"Managed resources"), "{texts:?}");
+    assert!(
+        app.gitops_items
+            .iter()
+            .any(|f| f.target.as_ref().is_some_and(|t| t.plural == "services"))
+    );
+    let provider = app
+        .gitops_items
+        .iter()
+        .position(|f| f.text == "ResourceSetInputProvider/prs")
+        .unwrap();
+    app.gitops_state.select(Some(provider));
+    app.handle_key(press(KeyCode::Enter)).unwrap();
+    assert_eq!(app.mode, Mode::Table);
+    assert_eq!(app.kind_plural, "resourcesetinputproviders");
+    assert_eq!(app.namespace, "default");
+    assert_eq!(app.fields.as_deref(), Some("metadata.name=prs"));
+}
+
+#[tokio::test]
+async fn enter_on_a_resourceset_from_another_group_does_not_open_gitops() {
+    let (mut app, _rx) = test_app();
+    app.cluster
+        .register_kind("example.com", "ResourceSet", "resourcesets", true);
+    app.switch_kind("resourcesets");
+    apply(
+        &mut app,
+        json!({
+            "apiVersion": "example.com/v1", "kind": "ResourceSet",
+            "metadata": {"name": "apps", "namespace": "default"}
+        }),
+    );
+    app.table_state.select(Some(0));
+    app.handle_key(press(KeyCode::Enter)).unwrap();
+    assert_ne!(app.mode, Mode::Gitops);
+}
+
+#[tokio::test]
+async fn gitops_follows_resourceset_labels_to_the_owner() {
+    let deployment = json!({
+        "apiVersion": "apps/v1", "kind": "Deployment",
+        "metadata": {
+            "name": "web", "namespace": "default",
+            "labels": {
+                "resourceset.fluxcd.controlplane.io/name": "apps",
+                "resourceset.fluxcd.controlplane.io/namespace": "flux-system"
+            }
+        }
+    });
+    let owner = json!({
+        "apiVersion": "fluxcd.controlplane.io/v1", "kind": "ResourceSet",
+        "metadata": {"name": "apps", "namespace": "flux-system"},
+        "status": {
+            "conditions": [{"type": "Ready", "status": "False", "reason": "BuildFailed", "message": "bad template"}]
+        }
+    });
+    let (mut app, rx) = test_app();
+    app.cluster.register_kind(
+        "fluxcd.controlplane.io",
+        "ResourceSet",
+        "resourcesets",
+        true,
+    );
+    let (mut app, mut rx, responses, _) =
+        health_report_app_with(app, rx, "deployments", deployment.clone());
+    responses.lock().unwrap().extend([
+        (
+            "/apis/apps/v1/namespaces/default/deployments/web".to_string(),
+            (200, deployment),
+        ),
+        (
+            "/apis/fluxcd.controlplane.io/v1/namespaces/flux-system/resourcesets/apps".to_string(),
+            (200, owner),
+        ),
+    ]);
+    open_health_report_key(&mut app, true);
+    receive_health_report(&mut app, &mut rx, true).await;
+    let texts: Vec<_> = app.gitops_items.iter().map(|f| f.text.as_str()).collect();
+    assert!(
+        texts.contains(&"Deployment/web is managed by ResourceSet/apps"),
+        "{texts:?}"
+    );
+    assert!(!texts.contains(&"Source"), "{texts:?}");
+    assert!(
+        texts.contains(&"not ready (BuildFailed) — bad template"),
+        "{texts:?}"
+    );
+    let owner = app
+        .gitops_items
+        .iter()
+        .position(|f| f.text == "ResourceSet/apps")
+        .unwrap();
+    app.gitops_state.select(Some(owner));
+    app.handle_key(press(KeyCode::Enter)).unwrap();
+    assert_eq!(app.mode, Mode::Table);
+    assert_eq!(app.kind_plural, "resourcesets");
+    assert_eq!(app.namespace, "flux-system");
+}
+
+#[tokio::test]
 async fn flux_menu_requires_the_resource_api_group() {
     for (plural, kind, group) in [
         (
@@ -297,6 +564,13 @@ async fn flux_menu_requires_the_resource_api_group() {
         ),
         ("alerts", "Alert", "notification.toolkit.fluxcd.io"),
         ("receivers", "Receiver", "notification.toolkit.fluxcd.io"),
+        ("resourcesets", "ResourceSet", "fluxcd.controlplane.io"),
+        (
+            "resourcesetinputproviders",
+            "ResourceSetInputProvider",
+            "fluxcd.controlplane.io",
+        ),
+        ("fluxinstances", "FluxInstance", "fluxcd.controlplane.io"),
     ] {
         let other_flux_group = if group == "source.toolkit.fluxcd.io" {
             "helm.toolkit.fluxcd.io"
@@ -334,22 +608,47 @@ async fn flux_menu_requires_the_resource_api_group() {
 }
 
 #[tokio::test]
-async fn force_reconcile_menu_is_limited_to_flux_helmreleases() {
-    for (plural, group, kind) in [
-        ("helmreleases", "helm.toolkit.fluxcd.io", "HelmRelease"),
-        ("helmcharts", "source.toolkit.fluxcd.io", "HelmChart"),
+async fn force_reconcile_menu_is_limited_to_kinds_that_honour_force_at() {
+    for (plural, group, kind, force) in [
+        (
+            "helmreleases",
+            "helm.toolkit.fluxcd.io",
+            "HelmRelease",
+            true,
+        ),
+        (
+            "resourcesetinputproviders",
+            "fluxcd.controlplane.io",
+            "ResourceSetInputProvider",
+            true,
+        ),
+        (
+            "fluxinstances",
+            "fluxcd.controlplane.io",
+            "FluxInstance",
+            true,
+        ),
+        (
+            "resourcesets",
+            "fluxcd.controlplane.io",
+            "ResourceSet",
+            false,
+        ),
+        ("helmcharts", "source.toolkit.fluxcd.io", "HelmChart", false),
         (
             "kustomizations",
             "kustomize.toolkit.fluxcd.io",
             "Kustomization",
+            false,
         ),
         (
             "gitrepositories",
             "source.toolkit.fluxcd.io",
             "GitRepository",
+            false,
         ),
-        ("cronjobs", "batch", "CronJob"),
-        ("applications", "argoproj.io", "Application"),
+        ("cronjobs", "batch", "CronJob", false),
+        ("applications", "argoproj.io", "Application", false),
     ] {
         let (mut app, _rx) = test_app();
         app.cluster.register_kind(group, kind, plural, true);
@@ -365,7 +664,8 @@ async fn force_reconcile_menu_is_limited_to_flux_helmreleases() {
         assert_eq!(app.mode, Mode::FluxMenu);
         assert_eq!(
             app.action_menu_items().contains(&"Force reconcile"),
-            group == "helm.toolkit.fluxcd.io"
+            force,
+            "{plural}"
         );
     }
 }
