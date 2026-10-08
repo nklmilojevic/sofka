@@ -93,19 +93,34 @@ async fn aggregated_endpoint(
 }
 
 // Some aggregated APIs (KubeVirt's subresources.kubevirt.io) send `"verbs": null`.
-// kube's types default missing lists but reject null, so drop null fields first.
+// kube's types default a missing list but reject null, so drop only null verbs and
+// let any other malformed field fail the parse.
 fn parse_aggregated(mut document: serde_json::Value) -> Result<APIGroupDiscoveryList> {
-    fn strip_nulls(value: &mut serde_json::Value) {
-        match value {
-            serde_json::Value::Object(map) => {
-                map.retain(|_, v| !v.is_null());
-                map.values_mut().for_each(strip_nulls);
-            }
-            serde_json::Value::Array(items) => items.iter_mut().for_each(strip_nulls),
-            _ => {}
+    fn drop_null_verbs(object: &mut serde_json::Value) {
+        if let Some(map) = object.as_object_mut()
+            && map.get("verbs").is_some_and(serde_json::Value::is_null)
+        {
+            map.remove("verbs");
         }
     }
-    strip_nulls(&mut document);
+    let resources = document
+        .get_mut("items")
+        .and_then(serde_json::Value::as_array_mut)
+        .into_iter()
+        .flatten()
+        .filter_map(|group| group.get_mut("versions")?.as_array_mut())
+        .flatten()
+        .filter_map(|version| version.get_mut("resources")?.as_array_mut())
+        .flatten();
+    for resource in resources {
+        drop_null_verbs(resource);
+        if let Some(subresources) = resource
+            .get_mut("subresources")
+            .and_then(serde_json::Value::as_array_mut)
+        {
+            subresources.iter_mut().for_each(drop_null_verbs);
+        }
+    }
     Ok(serde_json::from_value(document)?)
 }
 
@@ -339,5 +354,17 @@ mod tests {
         assert_eq!(resources.len(), 2);
         assert!(resources.iter().all(|r| !r.listable && !r.kind.scalable));
         assert!(child_candidates(&resources).is_empty());
+    }
+
+    #[test]
+    fn aggregated_discovery_rejects_other_null_lists() {
+        for document in [
+            json!({"kind": "APIGroupDiscoveryList", "items": null}),
+            json!({"kind": "APIGroupDiscoveryList", "items": [
+                {"metadata": {"name": "example.io"}, "versions": [{"version": "v1", "resources": null}]}
+            ]}),
+        ] {
+            assert!(parse_aggregated(document).is_err());
+        }
     }
 }
