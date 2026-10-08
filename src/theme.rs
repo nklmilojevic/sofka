@@ -391,7 +391,7 @@ thread_local! {
 /// palette so `:skin` can update colors without restarting the TUI.
 pub fn init(p: Palette) {
     if ACTIVE.set(RwLock::new(p)).is_err() {
-        set(p);
+        set_shared(p);
     }
     EPOCH.fetch_add(1, Ordering::Release);
 }
@@ -400,16 +400,18 @@ pub fn set(p: Palette) {
     #[cfg(test)]
     TEST_PALETTE.with(|c| c.set(Some(p)));
     #[cfg(not(test))]
-    {
-        let lock = ACTIVE.get_or_init(|| RwLock::new(catppuccin_mocha()));
-        match lock.write() {
-            Ok(mut active) => *active = p,
-            Err(poisoned) => *poisoned.into_inner() = p,
-        }
-        // After the write, so any thread that observes the new epoch also
-        // observes the new palette behind the lock.
-        EPOCH.fetch_add(1, Ordering::Release);
+    set_shared(p);
+}
+
+fn set_shared(p: Palette) {
+    let lock = ACTIVE.get_or_init(|| RwLock::new(catppuccin_mocha()));
+    match lock.write() {
+        Ok(mut active) => *active = p,
+        Err(poisoned) => *poisoned.into_inner() = p,
     }
+    // After the write, so any thread that observes the new epoch also
+    // observes the new palette behind the lock.
+    EPOCH.fetch_add(1, Ordering::Release);
 }
 
 /// The active palette, as a snapshot. Prefer this over calling several
@@ -419,10 +421,16 @@ pub fn snapshot() -> Palette {
 }
 
 fn palette() -> Palette {
+    // Never the shared palette in tests: the cache test below rewrites it.
     #[cfg(test)]
-    if let Some(p) = TEST_PALETTE.with(|c| c.get()) {
-        return p;
-    }
+    return TEST_PALETTE
+        .with(|c| c.get())
+        .unwrap_or_else(catppuccin_mocha);
+    #[cfg(not(test))]
+    shared_palette()
+}
+
+fn shared_palette() -> Palette {
     let epoch = EPOCH.load(Ordering::Acquire);
     CACHED.with(|c| {
         let (cached_epoch, cached) = c.get();
@@ -686,17 +694,27 @@ mod tests {
         let dawn = builtin("rose-pine-dawn").unwrap();
         assert_ne!(mocha.base, dawn.base, "test needs two distinct palettes");
 
-        set(mocha);
-        assert_eq!(base(), mocha.base);
-        // Warm the cache on several swatches, not just one.
-        let _ = (text(), red(), green());
+        // The shared, cached palette that production reads; test builds
+        // route `set`/accessors to a per-thread copy instead.
+        set_shared(mocha);
+        assert_eq!(shared_palette().base, mocha.base);
+        // Warm the cache several times, not just once.
+        let _ = (shared_palette(), shared_palette());
 
-        set(dawn);
-        assert_eq!(base(), dawn.base, "stale palette served after :skin");
-        assert_eq!(text(), dawn.text);
+        set_shared(dawn);
+        assert_eq!(
+            shared_palette().base,
+            dawn.base,
+            "stale palette served after :skin"
+        );
+        assert_eq!(shared_palette().text, dawn.text);
 
-        set(mocha);
-        assert_eq!(base(), mocha.base, "stale palette served on switch back");
+        set_shared(mocha);
+        assert_eq!(
+            shared_palette().base,
+            mocha.base,
+            "stale palette served on switch back"
+        );
     }
 
     #[test]

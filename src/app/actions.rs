@@ -1509,8 +1509,6 @@ impl App {
     /// cluster/context override file wins, otherwise the session skin (config
     /// `skin.name`, the auto-detected default, or the last `:skin` choice).
     pub(super) fn apply_context_skin(&mut self, override_skin: Option<String>) {
-        // The context's skin replaces any picker preview outright.
-        self.skin_preview_origin = None;
         let Some(name) = override_skin.or_else(|| self.session_skin.clone()) else {
             return;
         };
@@ -1518,6 +1516,8 @@ impl App {
             self.flash_warn(&format!("unknown skin '{name}' in config"));
             return;
         }
+        // The context's skin replaces any picker preview outright.
+        self.skin_preview_origin = None;
         let palette = crate::theme::resolve_skin(Some(&name), &self.skin_colors);
         crate::theme::set(palette);
         self.active_skin = Some(name);

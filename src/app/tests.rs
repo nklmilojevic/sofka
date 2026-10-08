@@ -1920,6 +1920,36 @@ async fn skin_preview_survives_palette_visits_and_restores_when_a_command_leaves
 }
 
 #[tokio::test]
+async fn reload_with_an_unknown_skin_restores_the_skin_preview() {
+    let mocha = crate::theme::builtin("catppuccin-mocha").unwrap();
+    let latte = crate::theme::builtin("catppuccin-latte").unwrap();
+    crate::theme::set(mocha);
+    let dir =
+        std::env::temp_dir().join(format!("sofka-reload-skin-preview-{}", std::process::id()));
+    write_config(&dir, "[skin]\nname = \"no-such-skin\"\n");
+    let (mut app, _rx) = test_app();
+    app.config = crate::config::ConfigLoader::from_dir(Some(dir.clone()));
+    app.session_skin = Some("catppuccin-mocha".into());
+    app.active_skin = Some("catppuccin-mocha".into());
+
+    assert!(app.run_palette_command("skin"));
+    app.handle_key(press(KeyCode::Char('j'))).unwrap();
+    assert_eq!(crate::theme::snapshot(), latte);
+
+    app.handle_key(press(KeyCode::Char(':'))).unwrap();
+    for c in "reload".chars() {
+        app.handle_key(press(KeyCode::Char(c))).unwrap();
+    }
+    app.handle_key(press(KeyCode::Enter)).unwrap();
+    assert_ne!(app.mode, Mode::Skins);
+    assert_eq!(crate::theme::snapshot(), mocha);
+    assert_eq!(app.active_skin.as_deref(), Some("catppuccin-mocha"));
+    assert!(app.skin_preview_origin.is_none());
+
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[tokio::test]
 async fn diff_falls_back_to_session_previous_revision() {
     let (mut app, _rx) = test_app();
     app.switch_kind("deployments");
