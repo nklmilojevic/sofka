@@ -73,10 +73,18 @@ jobs:
         run: rm -rf "$RUNNER_TEMP/keys"
       - name: Install, upgrade, and remove through the repositories
         run: uv run --locked python scripts/package_repos.py verify --tree target/package-repos
+      # Ubuntu's rclone 1.60 checks each upload with HEAD ?versionId=, which R2
+      # answers with 501 Not Implemented although the upload succeeded.
       - name: Install rclone
+        env:
+          RCLONE_VERSION: v1.75.1
+          RCLONE_SHA256: 982b5aa772841168f8e380f139e9e787b2a105403e32b94da8676a0e1c0a13ab
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq rclone
+          curl -fsSLo "$RUNNER_TEMP/rclone.zip" "https://downloads.rclone.org/$RCLONE_VERSION/rclone-$RCLONE_VERSION-linux-amd64.zip"
+          echo "$RCLONE_SHA256  $RUNNER_TEMP/rclone.zip" | sha256sum --check --strict -
+          unzip -q -j "$RUNNER_TEMP/rclone.zip" '*/rclone' -d "$RUNNER_TEMP/rclone"
+          echo "$RUNNER_TEMP/rclone" >> "$GITHUB_PATH"
+          "$RUNNER_TEMP/rclone/rclone" version
       - name: Upload to R2
         env:
           RCLONE_CONFIG_R2_TYPE: s3
