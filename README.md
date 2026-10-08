@@ -56,12 +56,37 @@ The [full feature list](docs/features.md) is long. So is the
 
 ## Installation
 
+### Linux packages
+
+`pkg.sofka.rs` serves signed apt, dnf, zypper, pacman, and apk repositories, so
+your normal system upgrade keeps Sofka current.
+
+Debian 12 or later and Ubuntu 22.04 or later:
+
+```sh
+sudo install -d -m 0755 /etc/apt/keyrings
+curl -fsSL https://pkg.sofka.rs/sofka.asc | sudo tee /etc/apt/keyrings/sofka.asc > /dev/null
+echo "deb [signed-by=/etc/apt/keyrings/sofka.asc] https://pkg.sofka.rs/deb stable main" | sudo tee /etc/apt/sources.list.d/sofka.list
+sudo apt update
+sudo apt install sofka
+```
+
+Fedora, RHEL, and compatible systems:
+
+```sh
+curl -fsSL https://pkg.sofka.rs/rpm/sofka.repo | sudo tee /etc/yum.repos.d/sofka.repo
+sudo dnf install sofka
+```
+
+For [openSUSE, Arch Linux, and Alpine](docs/release-packages.md#package-repositories),
+the signing key fingerprint, and package downloads without a repository, see
+[release packages](docs/release-packages.md).
+
+### Other platforms
+
 Every [release](https://github.com/nklmilojevic/sofka/releases) ships prebuilt
 binaries for macOS, Linux, and Windows (aarch64/x86_64).
 Windows ZIP files contain `sofka.exe` and the license notices.
-Linux releases also include DEB, RPM, Arch Linux, and Alpine APK packages,
-and `pkg.sofka.rs` serves them as signed apt, dnf, zypper, pacman, and apk repositories.
-See [release packages](docs/release-packages.md) for installation and platform limits.
 
 ```sh
 brew install nklmilojevic/sofka/sofka   # Homebrew project tap (macOS/Linux)

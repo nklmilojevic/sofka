@@ -9,6 +9,7 @@ on:
       - scripts/package_repos.py
       - scripts/test_package_repos.py
       - docs/release-packages.md
+      - README.md
 
 permissions:
   contents: read

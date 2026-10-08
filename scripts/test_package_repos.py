@@ -233,6 +233,12 @@ class DocumentationTest(unittest.TestCase):
             with self.subTest(name=name):
                 self.assertTrue(snippet.format(base=repos.BASE_URL) in text, name)
 
+    def test_readme_shows_the_verified_apt_and_dnf_snippets(self):
+        text = (repos.ROOT / "README.md").read_text()
+        for name in ("apt", "dnf"):
+            with self.subTest(name=name):
+                self.assertTrue(repos.SETUP[name].format(base=repos.BASE_URL) in text, name)
+
 
 if __name__ == "__main__":
     unittest.main()
