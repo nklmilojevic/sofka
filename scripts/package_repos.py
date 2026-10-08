@@ -13,6 +13,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 
 ROOT = Path(__file__).resolve().parent.parent
 REPOSITORY = "nklmilojevic/sofka"
@@ -31,7 +32,9 @@ NAMES = {
 }
 PACKAGE_FILES = ("*.deb", "*.rpm", "*.apk", "*.pkg.tar.zst", "*.pkg.tar.zst.sig")
 ARCH_DATABASE = "/arch/*/sofka.*"
-MANIFEST = ".publish-manifest"
+MANIFEST = ".publish-manifest.json"
+# Far longer than the metadata cache, so clients holding older indexes can still upgrade.
+RETENTION = 7 * 24 * 3600
 PACKAGE_CACHE = "Cache-Control: public, max-age=86400"
 METADATA_CACHE = "Cache-Control: public, max-age=60"
 
@@ -403,27 +406,29 @@ def verify(tree):
     print(f"Verified package repositories for sofka {versions['deb'][-1]}")
 
 
-def upload(tree, bucket):
+def upload(tree, bucket, now=None):
+    now = int(time.time()) if now is None else now
     current = {path.relative_to(tree).as_posix() for path in tree.rglob("*") if path.is_file()}
     published = set(output("rclone", "lsf", "--recursive", "--files-only", bucket).splitlines())
-    # Files the previous publish served stay one more cycle, because clients may
-    # still hold that publish's indexes. Without a manifest, nothing is pruned.
-    previous = published
-    if MANIFEST in published:
-        previous = set(output("rclone", "cat", f"{bucket}/{MANIFEST}").splitlines())
+    # The manifest maps each file to when a publish last served it. A file leaves
+    # the bucket only after RETENTION outside the indexes; unknown files start now.
+    recorded = json.loads(output("rclone", "cat", f"{bucket}/{MANIFEST}")) if MANIFEST in published else {}
+    served = {name: recorded.get(name, now) for name in published - {MANIFEST}}
+    served.update(dict.fromkeys(current, now))
     packages = ["- " + ARCH_DATABASE, *("+ " + pattern for pattern in PACKAGE_FILES), "- *"]
     metadata = ["+ " + ARCH_DATABASE, *("- " + pattern for pattern in PACKAGE_FILES), "+ *"]
     # New packages first, then the indexes that reference them, then prune.
     for rules, cache in ((packages, PACKAGE_CACHE), (metadata, METADATA_CACHE)):
         filters = [argument for rule in rules for argument in ("--filter", rule)]
         run("rclone", "copy", tree, bucket, "--checksum", *filters, "--header-upload", cache)
-    stale = sorted(published - current - previous - {MANIFEST})
+    stale = sorted(name for name, last in served.items() if now - last > RETENTION)
     if stale:
         with tempfile.NamedTemporaryFile("w", suffix=".txt") as listing:
             listing.write("".join(name + "\n" for name in stale))
             listing.flush()
             run("rclone", "delete", bucket, "--files-from-raw", listing.name)
-    run("rclone", "rcat", f"{bucket}/{MANIFEST}", input="".join(name + "\n" for name in sorted(current)), text=True)
+    manifest = {name: last for name, last in served.items() if name not in stale}
+    run("rclone", "rcat", f"{bucket}/{MANIFEST}", input=json.dumps(manifest, indent=1, sort_keys=True) + "\n", text=True)
     print(f"Uploaded package repositories to {bucket}; removed {len(stale)} files")
 
 

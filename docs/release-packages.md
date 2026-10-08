@@ -211,10 +211,10 @@ The documented setup commands above then install, upgrade, and remove Sofka on
 Ubuntu 22.04, Debian, Fedora, openSUSE, Arch Linux, and Alpine with signature
 checks enabled, and pacman must reject a repository with an unsigned database.
 Only then does rclone upload the tree to the `sofka-packages` R2 bucket behind
-`pkg.sofka.rs`: packages first, then metadata. A file leaves the bucket only
-after one more publish, so clients holding the previous indexes can still fetch
-what they reference. `.publish-manifest` records the files of each publish;
-without it, nothing is removed. RPM signatures use the package build
+`pkg.sofka.rs`: packages first, then metadata. `.publish-manifest.json` records
+when each file was last in the indexes. A file leaves the bucket only seven days
+after that, so clients holding older indexes can still fetch what they
+reference. RPM signatures use the package build
 time, so re-signing produces identical bytes in each run. Pull requests run the
 same build and checks with throwaway keys and do not upload.
 

@@ -1,4 +1,5 @@
 import hashlib
+import json
 import shutil
 import importlib.util
 from pathlib import Path
@@ -162,12 +163,14 @@ class ChecksumTest(unittest.TestCase):
 
 
 class UploadTest(unittest.TestCase):
+    NOW = 1_800_000_000
+
     def upload(self, current, published, manifest=None):
         listing = "\n".join(published + ([repos.MANIFEST] if manifest is not None else []))
         deleted = []
 
         def output(*args):
-            return listing if args[1] == "lsf" else "\n".join(manifest)
+            return listing if args[1] == "lsf" else json.dumps(manifest)
 
         def run(*args, **kwargs):
             if args[1] == "delete":
@@ -179,8 +182,9 @@ class UploadTest(unittest.TestCase):
                 (tree / name).parent.mkdir(parents=True, exist_ok=True)
                 (tree / name).write_text(name)
             with patch.object(repos, "output", side_effect=output), patch.object(repos, "run", side_effect=run) as mock:
-                repos.upload(tree, "r2:bucket")
-        return [call.args for call in mock.call_args_list], deleted, mock.call_args_list[-1].kwargs["input"]
+                repos.upload(tree, "r2:bucket", now=self.NOW)
+        calls = [call.args for call in mock.call_args_list]
+        return calls, deleted, json.loads(mock.call_args_list[-1].kwargs["input"])
 
     def test_packages_upload_before_metadata(self):
         calls, _, _ = self.upload(["deb/dists/stable/InRelease"], [])
@@ -193,20 +197,25 @@ class UploadTest(unittest.TestCase):
         self.assertEqual(metadata[metadata.index("--filter") + 1], "+ /arch/*/sofka.*")
         self.assertIn("- *.deb", metadata)
 
-    def test_files_dropped_by_the_previous_publish_are_removed(self):
+    def test_files_leave_only_after_the_retention_period(self):
+        expired = self.NOW - repos.RETENTION - 1
+        recent = self.NOW - repos.RETENTION + 60
         calls, deleted, manifest = self.upload(
             current=["sofka.asc", "rpm/x86_64/new.rpm"],
-            published=["sofka.asc", "rpm/x86_64/old.rpm", "rpm/x86_64/older.rpm", "rpm/x86_64/new.rpm"],
-            manifest=["sofka.asc", "rpm/x86_64/old.rpm"],
+            published=["sofka.asc", "rpm/x86_64/expired.rpm", "rpm/x86_64/recent.rpm", "rpm/x86_64/unknown.rpm"],
+            manifest={"sofka.asc": expired, "rpm/x86_64/expired.rpm": expired, "rpm/x86_64/recent.rpm": recent,
+                      "rpm/x86_64/gone.rpm": expired},
         )
-        self.assertEqual(deleted, ["rpm/x86_64/older.rpm"])
+        self.assertEqual(deleted, ["rpm/x86_64/expired.rpm"])
         self.assertEqual([call[1] for call in calls], ["copy", "copy", "delete", "rcat"])
-        self.assertEqual(manifest, "rpm/x86_64/new.rpm\nsofka.asc\n")
+        self.assertEqual(manifest, {"sofka.asc": self.NOW, "rpm/x86_64/new.rpm": self.NOW,
+                                    "rpm/x86_64/recent.rpm": recent, "rpm/x86_64/unknown.rpm": self.NOW})
 
     def test_without_a_manifest_nothing_is_removed(self):
-        calls, deleted, _ = self.upload(current=["sofka.asc"], published=["sofka.asc", "rpm/x86_64/old.rpm"])
+        calls, deleted, manifest = self.upload(current=["sofka.asc"], published=["sofka.asc", "rpm/x86_64/old.rpm"])
         self.assertEqual(deleted, [])
         self.assertNotIn("delete", [call[1] for call in calls])
+        self.assertEqual(manifest, {"sofka.asc": self.NOW, "rpm/x86_64/old.rpm": self.NOW})
 
 
 class DocumentationTest(unittest.TestCase):
