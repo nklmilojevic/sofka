@@ -37,7 +37,7 @@ macro_rules! palette_swatches {
     ($($idx:expr => $field:ident),+ $(,)?) => {
         /// A full 25-swatch palette. Field names double as the override keys
         /// accepted under `[skin.colors]` in config.
-        #[derive(Debug, Clone, Copy)]
+        #[derive(Debug, Clone, Copy, PartialEq)]
         pub struct Palette {
             $(pub $field: Color,)+
         }
@@ -378,6 +378,20 @@ thread_local! {
     static CACHED: Cell<(u64, Palette)> = Cell::new((0, catppuccin_mocha()));
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Set by [`isolate`]: this thread's own active palette, so a test that
+    /// switches skins can't repaint what parallel tests read.
+    static ISOLATED: Cell<Option<Palette>> = const { Cell::new(None) };
+}
+
+/// Give the calling test thread its own active palette, starting from the
+/// shared one. Later `set`/accessor calls on this thread use only that copy.
+#[cfg(test)]
+pub fn isolate() {
+    ISOLATED.with(|c| c.set(Some(load_active())));
+}
+
 /// Install the active palette. If called after startup, replaces the active
 /// palette so `:skin` can update colors without restarting the TUI.
 pub fn init(p: Palette) {
@@ -388,6 +402,11 @@ pub fn init(p: Palette) {
 }
 
 pub fn set(p: Palette) {
+    #[cfg(test)]
+    if ISOLATED.with(|c| c.get()).is_some() {
+        ISOLATED.with(|c| c.set(Some(p)));
+        return;
+    }
     let lock = ACTIVE.get_or_init(|| RwLock::new(catppuccin_mocha()));
     match lock.write() {
         Ok(mut active) => *active = p,
@@ -405,6 +424,10 @@ pub fn snapshot() -> Palette {
 }
 
 fn palette() -> Palette {
+    #[cfg(test)]
+    if let Some(p) = ISOLATED.with(|c| c.get()) {
+        return p;
+    }
     let epoch = EPOCH.load(Ordering::Acquire);
     CACHED.with(|c| {
         let (cached_epoch, cached) = c.get();

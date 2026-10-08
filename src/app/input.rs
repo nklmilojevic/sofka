@@ -115,6 +115,11 @@ impl App {
         if self.pvc.active && self.mode != Mode::PvcExplore && !overlay {
             self.leave_pvc_explore();
         }
+        // A palette command that leaves the skin picker abandons its preview;
+        // a palette or help visit that returns to the picker keeps it.
+        if self.skin_preview_origin.is_some() && self.mode != Mode::Skins && !overlay {
+            self.cancel_skin_preview();
+        }
         // A PVC shell waiting on a dialog can also be walked away from — `:`
         // is accepted from `Mode::Confirm` and simply abandons the action.
         // Nothing else will ever run the suspend, so release what it holds.

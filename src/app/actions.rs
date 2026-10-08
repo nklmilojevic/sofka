@@ -1395,14 +1395,17 @@ impl App {
     }
 
     pub(super) fn open_skins(&mut self) {
+        // An alias such as `latte` names the same built-in palette as its
+        // listed full name, so fall back to comparing the palettes.
         let current = self.active_skin.as_deref().and_then(|active| {
+            let palette = crate::theme::builtin(&active.trim().to_ascii_lowercase())?;
             self.skin_list
                 .iter()
                 .position(|name| name == active)
                 .or_else(|| {
-                    self.skin_list
-                        .iter()
-                        .position(|name| name.eq_ignore_ascii_case(active))
+                    self.skin_list.iter().position(|name| {
+                        crate::theme::builtin(&name.to_ascii_lowercase()) == Some(palette)
+                    })
                 })
         });
         self.skin_state.select(if self.skin_list.is_empty() {
@@ -1410,7 +1413,10 @@ impl App {
         } else {
             Some(current.unwrap_or(0))
         });
-        self.skin_preview_origin = Some((self.active_skin.clone(), crate::theme::snapshot()));
+        // Reopening from the palette mid-preview keeps the original origin.
+        if self.skin_preview_origin.is_none() {
+            self.skin_preview_origin = Some((self.active_skin.clone(), crate::theme::snapshot()));
+        }
         self.mode = Mode::Skins;
     }
 
@@ -1418,10 +1424,7 @@ impl App {
         let len = self.skin_list.len();
         match (key.action, key.code) {
             (Some(Action::Back), _) | (Some(Action::Close), _) => {
-                if let Some((active, palette)) = self.skin_preview_origin.take() {
-                    crate::theme::set(palette);
-                    self.active_skin = active;
-                }
+                self.cancel_skin_preview();
                 self.mode = Mode::Table;
             }
             (Some(Action::Down), _) => {
@@ -1455,6 +1458,14 @@ impl App {
         }
     }
 
+    /// Reinstall the skin that was active when the picker opened.
+    pub(super) fn cancel_skin_preview(&mut self) {
+        if let Some((active, palette)) = self.skin_preview_origin.take() {
+            crate::theme::set(palette);
+            self.active_skin = active;
+        }
+    }
+
     /// Install the highlighted skin while the picker is open, without making
     /// it the session skin; `esc` restores the palette captured on open.
     fn preview_selected_skin(&mut self) {
@@ -1485,6 +1496,7 @@ impl App {
         }
         let palette = crate::theme::resolve_skin(Some(name), &self.skin_colors);
         crate::theme::set(palette);
+        self.skin_preview_origin = None;
         // A manual choice becomes the session skin, so it survives context
         // switches into contexts without a config skin override.
         self.session_skin = Some(name.to_string());
@@ -1497,6 +1509,8 @@ impl App {
     /// cluster/context override file wins, otherwise the session skin (config
     /// `skin.name`, the auto-detected default, or the last `:skin` choice).
     pub(super) fn apply_context_skin(&mut self, override_skin: Option<String>) {
+        // The context's skin replaces any picker preview outright.
+        self.skin_preview_origin = None;
         let Some(name) = override_skin.or_else(|| self.session_skin.clone()) else {
             return;
         };
