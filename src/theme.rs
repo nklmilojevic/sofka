@@ -380,16 +380,11 @@ thread_local! {
 
 #[cfg(test)]
 thread_local! {
-    /// Set by [`isolate`]: this thread's own active palette, so a test that
-    /// switches skins can't repaint what parallel tests read.
-    static ISOLATED: Cell<Option<Palette>> = const { Cell::new(None) };
-}
-
-/// Give the calling test thread its own active palette, starting from the
-/// shared one. Later `set`/accessor calls on this thread use only that copy.
-#[cfg(test)]
-pub fn isolate() {
-    ISOLATED.with(|c| c.set(Some(load_active())));
+    /// Tests run on parallel threads of one process, so each test thread gets
+    /// its own active palette and background flag: a test that switches skins
+    /// can't repaint a frame another test is asserting on.
+    static TEST_PALETTE: Cell<Option<Palette>> = const { Cell::new(None) };
+    static TEST_BACKGROUND: Cell<bool> = const { Cell::new(false) };
 }
 
 /// Install the active palette. If called after startup, replaces the active
@@ -403,18 +398,18 @@ pub fn init(p: Palette) {
 
 pub fn set(p: Palette) {
     #[cfg(test)]
-    if ISOLATED.with(|c| c.get()).is_some() {
-        ISOLATED.with(|c| c.set(Some(p)));
-        return;
+    TEST_PALETTE.with(|c| c.set(Some(p)));
+    #[cfg(not(test))]
+    {
+        let lock = ACTIVE.get_or_init(|| RwLock::new(catppuccin_mocha()));
+        match lock.write() {
+            Ok(mut active) => *active = p,
+            Err(poisoned) => *poisoned.into_inner() = p,
+        }
+        // After the write, so any thread that observes the new epoch also
+        // observes the new palette behind the lock.
+        EPOCH.fetch_add(1, Ordering::Release);
     }
-    let lock = ACTIVE.get_or_init(|| RwLock::new(catppuccin_mocha()));
-    match lock.write() {
-        Ok(mut active) => *active = p,
-        Err(poisoned) => *poisoned.into_inner() = p,
-    }
-    // After the write, so any thread that observes the new epoch also
-    // observes the new palette behind the lock.
-    EPOCH.fetch_add(1, Ordering::Release);
 }
 
 /// The active palette, as a snapshot. Prefer this over calling several
@@ -425,7 +420,7 @@ pub fn snapshot() -> Palette {
 
 fn palette() -> Palette {
     #[cfg(test)]
-    if let Some(p) = ISOLATED.with(|c| c.get()) {
+    if let Some(p) = TEST_PALETTE.with(|c| c.get()) {
         return p;
     }
     let epoch = EPOCH.load(Ordering::Acquire);
@@ -461,13 +456,20 @@ static BACKGROUND: AtomicBool = AtomicBool::new(false);
 /// background color: pair it with a per-context skin override to make e.g. a
 /// light prod skin visibly glow.
 pub fn set_background(on: bool) {
+    #[cfg(test)]
+    TEST_BACKGROUND.with(|c| c.set(on));
+    #[cfg(not(test))]
     BACKGROUND.store(on, Ordering::Relaxed);
 }
 
 /// The background fill color when enabled, or `None` to leave the terminal
 /// background untouched.
 pub fn background() -> Option<Color> {
-    BACKGROUND.load(Ordering::Relaxed).then(base)
+    #[cfg(test)]
+    let on = TEST_BACKGROUND.with(|c| c.get());
+    #[cfg(not(test))]
+    let on = BACKGROUND.load(Ordering::Relaxed);
+    on.then(base)
 }
 
 // ---------------------------------------------------------------------------

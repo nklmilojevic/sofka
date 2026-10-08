@@ -1828,7 +1828,6 @@ async fn skin_palette_command_opens_picker() {
 
 #[tokio::test]
 async fn skin_picker_previews_selection_and_restores_on_escape() {
-    crate::theme::isolate();
     let mocha = crate::theme::builtin("catppuccin-mocha").unwrap();
     let latte = crate::theme::builtin("catppuccin-latte").unwrap();
     crate::theme::set(mocha);
@@ -1874,7 +1873,6 @@ async fn skin_picker_previews_selection_and_restores_on_escape() {
 
 #[tokio::test]
 async fn skin_preview_survives_palette_visits_and_restores_when_a_command_leaves() {
-    crate::theme::isolate();
     let mocha = crate::theme::builtin("catppuccin-mocha").unwrap();
     let latte = crate::theme::builtin("catppuccin-latte").unwrap();
     crate::theme::set(mocha);
