@@ -798,6 +798,10 @@ include those conditions. Row filters can search the route paths.
   namespace, covering restarted and deleted pods. Zero config: sofka finds the
   service in-cluster and reaches it through the API-server proxy. See
   [Providers](providers.md#log-provider-victorialogs).
+- **Log links** (`L`) - open the selection in Cloud Logging, with the pod,
+  workload selector, CronJob, namespace, or node filter set. Zero config on GKE
+  clusters named by gcloud. `type = "link"` fills a URL template for any other
+  log UI. See [Providers](providers.md#log-links-cloud-logging-and-other-log-uis).
 - **Right-sizing** (`:rightsize`) - estimate right-sized requests from past
   usage in a Prometheus or VictoriaMetrics backend, with a patch preview. Never
   mutates. See [Providers](providers.md#right-sizing-metrics-provider).

@@ -967,9 +967,13 @@ impl App {
         let (node_roles, role_warnings) = resolved.config.node_roles.compile();
         self.node_roles = Arc::new(node_roles);
         plugin_warnings.extend(role_warnings);
-        let (log_provider, provider_warnings) =
+        let (log_provider, mut provider_warnings) =
             crate::providers::compile(resolved.config.providers.logs.as_ref());
         self.log_provider = log_provider;
+        let (log_link, link_warnings) =
+            crate::providers::compile_link(resolved.config.providers.logs.as_ref());
+        self.log_link = log_link;
+        provider_warnings.extend(link_warnings);
         let (metrics_provider, _mw) =
             crate::providers::compile_metrics(resolved.config.providers.metrics.as_ref());
         self.metrics_provider = metrics_provider;

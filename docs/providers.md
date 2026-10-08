@@ -79,6 +79,62 @@ pod = "kubernetes.pod_name"
 container = "kubernetes.container_name"
 ```
 
+## Log links (Cloud Logging and other log UIs)
+
+Instead of showing logs in sofka, `L` can open the selection in the log UI you
+already use, with the filter set. sofka doesn't query that backend; the browser
+does.
+
+On GKE this works with no configuration. When the kubeconfig cluster is named
+`gke_<project>_<location>_<cluster>` (what `gcloud container clusters
+get-credentials` writes) and there is no `[providers.logs]` section, `L` opens
+the Cloud Logging Logs Explorer for the project, filtered to the selection:
+
+- a pod by `pod_name`, or one container from the container picker
+- a Deployment, StatefulSet, DaemonSet, ReplicaSet, Job, or Service by its pod
+  selector, so it covers every pod the workload owned, including deleted ones
+- a CronJob by GKE's `top_level_controller` labels
+- a namespace or a node by its own field
+
+The detection uses the kubeconfig cluster name, never the context name, so you
+can rename contexts freely. To keep VictoriaLogs on a GKE cluster, set
+`type = "victorialogs"`. To use Cloud Logging when the cluster name does not
+follow the gcloud format, there is no workaround yet: sofka needs the project,
+location, and cluster from it.
+
+```toml
+[providers.logs]
+type = "gcp"
+lookback = "1h"   # optional: the time range the Logs Explorer opens with
+```
+
+For any other log UI, `type = "link"` fills a URL template. Each placeholder is
+URL-encoded:
+
+| Placeholder   | Value                                           |
+| ------------- | ----------------------------------------------- |
+| `{context}`   | kubeconfig context name                         |
+| `{cluster}`   | kubeconfig cluster name                         |
+| `{namespace}` | namespace of the selection                      |
+| `{kind}`      | resource of the selection, e.g. `deployments`   |
+| `{name}`      | name of the selection                           |
+| `{pod}`       | pod name for a pod, empty otherwise             |
+| `{container}` | container from the container picker, else empty |
+| `{lookback}`  | the `lookback` setting, `1h` by default         |
+
+```toml
+[providers.logs]
+type = "link"
+url = "https://kibana.example.com/app/discover#/?_g=(time:(from:now-{lookback}))&_a=(query:(language:kuery,query:'kubernetes.namespace:{namespace} and kubernetes.pod.name:{pod}'))"
+lookback = "1h"
+```
+
+Check the generated link against your own log UI. URL formats differ between
+versions and installs.
+
+With no browser (over SSH, or no `open`/`xdg-open`), sofka copies the link to
+the clipboard and shows it in the status bar.
+
 Like every section, `[providers.logs]` can live in a per-cluster or per-context
 override file, so each cluster can use its own backend.
 

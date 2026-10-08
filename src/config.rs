@@ -824,7 +824,8 @@ pub struct MetricsProviderConfig {
     pub headers: HashMap<String, String>,
 }
 
-/// One log backend. Only `type = "victorialogs"` is supported today.
+/// One log backend: `type = "victorialogs"`, or `"gcp"` / `"link"` to open
+/// a web log UI instead (see [`crate::providers::LogLink`]).
 ///
 /// Everything here is optional except `type` — even the whole section:
 /// without one (or without `url`), sofka autodiscovers a VictoriaLogs
@@ -848,12 +849,13 @@ pub struct MetricsProviderConfig {
 #[derive(Debug, Default, Clone, Deserialize)]
 #[serde(default)]
 pub struct LogProviderConfig {
-    /// Backend kind: `"victorialogs"`.
+    /// Backend kind: `"victorialogs"`, `"gcp"`, or `"link"`.
     #[serde(rename = "type")]
     pub kind: String,
     /// Base URL of the backend, e.g. `https://vlogs.example.com` or
     /// `http://localhost:9428` (via a port-forward). Empty/omitted:
     /// autodiscover a VictoriaLogs service and use the API-server proxy.
+    /// For `type = "link"`, the URL template.
     pub url: String,
     /// How far back the initial query reaches (`"30m"`, `"1h"`, `"2d"`).
     pub lookback: Option<String>,

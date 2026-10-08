@@ -1530,6 +1530,10 @@ impl App {
             crate::providers::compile(resolved.config.providers.logs.as_ref());
         self.log_provider = log_provider;
         warnings.extend(provider_warnings);
+        let (log_link, link_warnings) =
+            crate::providers::compile_link(resolved.config.providers.logs.as_ref());
+        self.log_link = log_link;
+        warnings.extend(link_warnings);
         let (metrics_provider, metrics_warnings) =
             crate::providers::compile_metrics(resolved.config.providers.metrics.as_ref());
         self.metrics_provider = metrics_provider;
