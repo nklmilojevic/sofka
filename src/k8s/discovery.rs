@@ -132,7 +132,10 @@ fn append_aggregated(out: &mut Vec<Resource>, list: APIGroupDiscoveryList) -> Re
             let version_name = version.version.unwrap_or_default();
             for resource in version.resources {
                 let plural = resource.resource.unwrap_or_default();
-                if plural.contains('/') {
+                // A group that only serves subresources (subresources.kubevirt.io) lists
+                // the parent with no verbs. Legacy discovery has no such entry, and it
+                // must not claim the bare name from the group that serves the resource.
+                if plural.contains('/') || resource.verbs.is_empty() {
                     continue;
                 }
                 out.push(Resource {
@@ -339,7 +342,7 @@ mod tests {
     }
 
     #[test]
-    fn aggregated_discovery_accepts_null_verbs() {
+    fn aggregated_discovery_skips_resources_with_null_verbs() {
         let mut resources = Vec::new();
         append_aggregated(&mut resources, parse_aggregated(json!({
             "kind": "APIGroupDiscoveryList",
@@ -347,13 +350,13 @@ mod tests {
                 "version":"v1", "resources":[
                     {"resource":"virtualmachineinstances", "responseKind":{"kind":"VirtualMachineInstance"}, "scope":"Namespaced", "verbs":null,
                      "subresources":[{"subresource":"console", "verbs":null}]},
-                    {"resource":"expand-vm-spec", "responseKind":{"kind":"VirtualMachine"}, "scope":"Namespaced", "verbs":null}
+                    {"resource":"expand-vm-spec", "responseKind":{"kind":"VirtualMachine"}, "scope":"Namespaced", "verbs":null},
+                    {"resource":"guestfs", "responseKind":{"kind":"Guestfs"}, "scope":"Namespaced", "verbs":["get"]}
                 ]
             }]}]
         })).unwrap()).unwrap();
-        assert_eq!(resources.len(), 2);
-        assert!(resources.iter().all(|r| !r.listable && !r.kind.scalable));
-        assert!(child_candidates(&resources).is_empty());
+        assert_eq!(resources.len(), 1);
+        assert_eq!(resources[0].kind.ar.plural, "guestfs");
     }
 
     #[test]
