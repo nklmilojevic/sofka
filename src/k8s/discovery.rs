@@ -89,7 +89,24 @@ async fn aggregated_endpoint(
         "unexpected discovery response kind at {path}: {}",
         document["kind"]
     );
-    Ok(Some(serde_json::from_value(document)?))
+    Ok(Some(parse_aggregated(document)?))
+}
+
+// Some aggregated APIs (KubeVirt's subresources.kubevirt.io) send `"verbs": null`.
+// kube's types default missing lists but reject null, so drop null fields first.
+fn parse_aggregated(mut document: serde_json::Value) -> Result<APIGroupDiscoveryList> {
+    fn strip_nulls(value: &mut serde_json::Value) {
+        match value {
+            serde_json::Value::Object(map) => {
+                map.retain(|_, v| !v.is_null());
+                map.values_mut().for_each(strip_nulls);
+            }
+            serde_json::Value::Array(items) => items.iter_mut().for_each(strip_nulls),
+            _ => {}
+        }
+    }
+    strip_nulls(&mut document);
+    Ok(serde_json::from_value(document)?)
 }
 
 fn append_aggregated(out: &mut Vec<Resource>, list: APIGroupDiscoveryList) -> Result<()> {
@@ -304,5 +321,23 @@ mod tests {
         let kinds = child_candidates(&resources);
         assert_eq!(kinds.len(), 1);
         assert_eq!(kinds[0].ar.plural, "widgets");
+    }
+
+    #[test]
+    fn aggregated_discovery_accepts_null_verbs() {
+        let mut resources = Vec::new();
+        append_aggregated(&mut resources, parse_aggregated(json!({
+            "kind": "APIGroupDiscoveryList",
+            "items": [{"metadata":{"name":"subresources.kubevirt.io"}, "versions":[{
+                "version":"v1", "resources":[
+                    {"resource":"virtualmachineinstances", "responseKind":{"kind":"VirtualMachineInstance"}, "scope":"Namespaced", "verbs":null,
+                     "subresources":[{"subresource":"console", "verbs":null}]},
+                    {"resource":"expand-vm-spec", "responseKind":{"kind":"VirtualMachine"}, "scope":"Namespaced", "verbs":null}
+                ]
+            }]}]
+        })).unwrap()).unwrap();
+        assert_eq!(resources.len(), 2);
+        assert!(resources.iter().all(|r| !r.listable && !r.kind.scalable));
+        assert!(child_candidates(&resources).is_empty());
     }
 }
