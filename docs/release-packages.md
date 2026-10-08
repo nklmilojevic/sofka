@@ -4,23 +4,82 @@ Download the package for your operating system and processor from
 [GitHub Releases](https://github.com/nklmilojevic/sofka/releases).
 Keep all license files with the program.
 
-| System                            | Format         | Processor       |
-| --------------------------------- | -------------- | --------------- |
-| Debian and Ubuntu                 | `.deb`         | amd64, arm64    |
-| Fedora and compatible RPM systems | `.rpm`         | x86_64, aarch64 |
-| Arch Linux and Arch Linux ARM     | `.pkg.tar.zst` | x86_64, aarch64 |
-| Alpine Linux                      | `.apk`         | x86_64, aarch64 |
-| Other Linux systems               | `.tar.gz`      | x86_64, aarch64 |
-| macOS                             | `.tar.gz`      | x86_64, aarch64 |
-| Windows                           | `.zip`         | x86_64, aarch64 |
+| System                                  | Format         | Processor       |
+| --------------------------------------- | -------------- | --------------- |
+| Debian and Ubuntu                       | `.deb`         | amd64, arm64    |
+| Fedora, openSUSE, and other RPM systems | `.rpm`         | x86_64, aarch64 |
+| Arch Linux and Arch Linux ARM           | `.pkg.tar.zst` | x86_64, aarch64 |
+| Alpine Linux                            | `.apk`         | x86_64, aarch64 |
+| Other Linux systems                     | `.tar.gz`      | x86_64, aarch64 |
+| macOS                                   | `.tar.gz`      | x86_64, aarch64 |
+| Windows                                 | `.zip`         | x86_64, aarch64 |
+
+## Package repositories
+
+`https://pkg.sofka.rs` serves signed apt, dnf, zypper, pacman, and apk
+repositories. Your normal system upgrade then updates Sofka. The repositories
+keep the packages from the last five releases; Arch Linux keeps only the newest.
+apt, dnf, zypper, and pacman check the GPG key in `sofka.asc`.
+Its user ID is `Sofka packages <packages@sofka.rs>` and its fingerprint is
+`4ADE AA25 E1DB B624 5527 9CB4 CAE2 FA8B EBAD 8047`.
+apk checks the RSA key in `alpine/sofka.rsa.pub`.
+
+Debian 12 or later and Ubuntu 22.04 or later:
+
+```sh
+sudo install -d -m 0755 /etc/apt/keyrings
+curl -fsSL https://pkg.sofka.rs/sofka.asc | sudo tee /etc/apt/keyrings/sofka.asc > /dev/null
+echo "deb [signed-by=/etc/apt/keyrings/sofka.asc] https://pkg.sofka.rs/deb stable main" | sudo tee /etc/apt/sources.list.d/sofka.list
+sudo apt update
+sudo apt install sofka
+```
+
+Fedora, RHEL, and compatible systems:
+
+```sh
+curl -fsSL https://pkg.sofka.rs/rpm/sofka.repo | sudo tee /etc/yum.repos.d/sofka.repo
+sudo dnf install sofka
+```
+
+openSUSE (sofka 0.31.2 or later; earlier RPMs require Fedora's `libgcc`
+package name):
+
+```sh
+sudo zypper addrepo https://pkg.sofka.rs/rpm/sofka.repo
+sudo zypper install sofka
+```
+
+Arch Linux and Arch Linux ARM:
+
+```sh
+curl -fsSL https://pkg.sofka.rs/sofka.asc | sudo pacman-key --add -
+sudo pacman-key --lsign-key packages@sofka.rs
+printf '[sofka]\nServer = https://pkg.sofka.rs/arch/$arch\n' | sudo tee -a /etc/pacman.conf
+sudo pacman -Syu sofka
+```
+
+Alpine Linux, as root:
+
+```sh
+wget -qO /etc/apk/keys/sofka.rsa.pub https://pkg.sofka.rs/alpine/sofka.rsa.pub
+echo https://pkg.sofka.rs/alpine >> /etc/apk/repositories
+apk update
+apk add sofka
+```
+
+The repository packages are the release packages. RPM files are signed for the
+repository; the other formats keep their release bytes, and the signed
+repository metadata covers their checksums.
 
 ## Linux
 
-Download one package into an empty directory, then use the matching command:
+To install without a repository, download one package into an empty directory,
+then use the matching command:
 
 ```sh
 sudo apt install ./sofka_*.deb
 sudo dnf install ./sofka-*.rpm
+sudo zypper install ./sofka-*.rpm
 sudo pacman -U ./sofka-*.pkg.tar.zst
 sudo apk add --allow-untrusted ./sofka_*.apk
 ```
@@ -32,7 +91,8 @@ license files in `/usr/share/doc/sofka`.
 For an update, download the new package and run the same installation command.
 For removal, use `sudo apt remove sofka`, `sudo dnf remove sofka`,
 `sudo pacman -R sofka`, or `sudo apk del sofka`.
-These downloads do not configure a package repository for automatic updates.
+These downloads do not configure a package repository for automatic updates;
+use the [package repositories](#package-repositories) for that.
 
 GNU libc archives retain their existing target names. The separate `linux-musl`
 archives and APK files contain statically linked binaries for Alpine.
@@ -40,6 +100,8 @@ Rust uses its own musl libraries at link time. `musl-gcc` compiles C dependencie
 it is not used as the final linker because its wrapper can break static PIE builds.
 DEB dependencies are derived from the binary. RPM and Arch packages declare
 the required GNU libc version, compiler runtime, and certificate bundle.
+RPMs require the `libgcc_s.so.1` runtime by soname, which Fedora's `libgcc`
+and openSUSE's `libgcc_s1` packages both provide.
 The GNU builds cannot require a GLIBC symbol newer than 2.35.
 
 ## Windows
@@ -140,6 +202,27 @@ reinstallation, and removal tests in Linux containers. Arch Linux ARM receives
 payload and binary checks because no official test container is available.
 Windows and macOS archives are extracted logically and compared with the inputs;
 the built executable also runs with `--version` on its native runner.
+
+After the release assets are uploaded, `scripts/package_repos.py` rebuilds the
+package repositories from the Linux packages of the last five releases. It checks
+them against each release's `SHA256SUMS`, signs the repositories in containers,
+and serves the result locally. The documented setup commands above then install,
+upgrade, and remove Sofka on Ubuntu 22.04, Debian, Fedora, openSUSE, Arch Linux,
+and Alpine with signature checks enabled. Only then does rclone upload the tree
+to the `sofka-packages` R2 bucket behind `pkg.sofka.rs`: packages first,
+then metadata, then pruning of old files. RPM signatures use the package build
+time, so re-signing produces identical bytes in each run. Pull requests run the
+same build and checks with throwaway keys and do not upload.
+
+The `packages` environment holds `PKG_GPG_PRIVATE_KEY` (armored, without a
+passphrase), `PKG_APK_RSA_PRIVATE_KEY` (PEM), `R2_ACCOUNT_ID`,
+`R2_ACCESS_KEY_ID`, and `R2_SECRET_ACCESS_KEY`. To rebuild the repositories
+without a release, run the "Package repositories" workflow manually.
+To run the repository tests:
+
+```sh
+uv run --locked python -m unittest discover -s scripts -p 'test_package_repos.py'
+```
 
 Keep these four archive names and their internal file paths stable for Aqua and
 mise's Aqua backend:

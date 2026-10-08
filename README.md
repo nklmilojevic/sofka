@@ -59,7 +59,8 @@ The [full feature list](docs/features.md) is long. So is the
 Every [release](https://github.com/nklmilojevic/sofka/releases) ships prebuilt
 binaries for macOS, Linux, and Windows (aarch64/x86_64).
 Windows ZIP files contain `sofka.exe` and the license notices.
-Linux releases also include DEB, RPM, Arch Linux, and Alpine APK packages.
+Linux releases also include DEB, RPM, Arch Linux, and Alpine APK packages,
+and `pkg.sofka.rs` serves them as signed apt, dnf, zypper, pacman, and apk repositories.
 See [release packages](docs/release-packages.md) for installation and platform limits.
 
 ```sh

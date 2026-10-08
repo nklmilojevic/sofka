@@ -93,6 +93,13 @@ jobs:
       - name: Upload release assets
         run: gh release upload "$RELEASE_TAG" dist/*.tar.gz dist/*.zip dist/*.deb dist/*.rpm dist/*.apk dist/*.pkg.tar.zst dist/*.spdx.json dist/SHA256SUMS --clobber
 
+  # Rebuilds the signed apt/dnf/pacman/apk repositories at pkg.sofka.rs from
+  # the uploaded release packages. The signing keys and R2 credentials live in
+  # the `packages` environment of the called workflow.
+  package-repos:
+    needs: upload-assets
+    uses: $/.github/workflows/package-repos.yaml
+
   # Kick the tap's bump workflow so `brew install nklmilojevic/sofka/sofka`
   # picks up the new version immediately instead of waiting for the tap's
   # 6-hourly cron (which stays as the fallback). Needs TAP_GITHUB_TOKEN, a

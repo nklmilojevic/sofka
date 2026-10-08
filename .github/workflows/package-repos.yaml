@@ -1,0 +1,88 @@
+name: Package repositories
+
+on:
+  workflow_call:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - .github/workflows/package-repos.yaml
+      - scripts/package_repos.py
+      - scripts/test_package_repos.py
+      - docs/release-packages.md
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          version: "0.12.23"
+          python-version: "3.12"
+      - name: Test repository scripts
+        run: uv run --locked python -m unittest discover -s scripts -p 'test_package_repos.py'
+      - name: Generate throwaway signing keys
+        run: uv run --locked python scripts/package_repos.py keygen --out "$RUNNER_TEMP/keys"
+      - name: Download release packages
+        run: uv run --locked python scripts/package_repos.py download --releases 2 --out "$RUNNER_TEMP/packages"
+      - name: Build repositories
+        run: uv run --locked python scripts/package_repos.py build --packages "$RUNNER_TEMP/packages" --keys "$RUNNER_TEMP/keys" --out target/package-repos
+      - name: Install, upgrade, and remove through the repositories
+        run: uv run --locked python scripts/package_repos.py verify --tree target/package-repos
+
+  publish:
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    environment: packages
+    concurrency:
+      group: package-repos-publish
+      cancel-in-progress: false
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          version: "0.12.23"
+          python-version: "3.12"
+      - name: Write signing keys
+        env:
+          PKG_GPG_PRIVATE_KEY: ${{ secrets.PKG_GPG_PRIVATE_KEY }}
+          PKG_APK_RSA_PRIVATE_KEY: ${{ secrets.PKG_APK_RSA_PRIVATE_KEY }}
+        run: |
+          umask 077
+          mkdir "$RUNNER_TEMP/keys"
+          printf '%s\n' "$PKG_GPG_PRIVATE_KEY" > "$RUNNER_TEMP/keys/gpg.asc"
+          printf '%s\n' "$PKG_APK_RSA_PRIVATE_KEY" > "$RUNNER_TEMP/keys/sofka.rsa"
+      - name: Download release packages
+        run: uv run --locked python scripts/package_repos.py download --out "$RUNNER_TEMP/packages"
+      - name: Build repositories
+        run: uv run --locked python scripts/package_repos.py build --packages "$RUNNER_TEMP/packages" --keys "$RUNNER_TEMP/keys" --out target/package-repos
+      - name: Remove signing keys
+        if: always()
+        run: rm -rf "$RUNNER_TEMP/keys"
+      - name: Install, upgrade, and remove through the repositories
+        run: uv run --locked python scripts/package_repos.py verify --tree target/package-repos
+      - name: Install rclone
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq rclone
+      - name: Upload to R2
+        env:
+          RCLONE_CONFIG_R2_TYPE: s3
+          RCLONE_CONFIG_R2_PROVIDER: Cloudflare
+          RCLONE_CONFIG_R2_ENDPOINT: https://${{ secrets.R2_ACCOUNT_ID }}.r2.cloudflarestorage.com
+          RCLONE_CONFIG_R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          RCLONE_CONFIG_R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          RCLONE_CONFIG_R2_NO_CHECK_BUCKET: "true"
+        run: uv run --locked python scripts/package_repos.py upload --tree target/package-repos
