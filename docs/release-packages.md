@@ -214,8 +214,11 @@ Only then does rclone upload the tree to the `sofka-packages` R2 bucket behind
 `pkg.sofka.rs` in three passes: packages, then the metadata that lists them,
 then the entry points clients read first (`InRelease`, `repomd.xml`, the pacman
 databases, `APKINDEX.tar.gz`). Metadata is served with `no-cache`, so the CDN
-never pairs a new index with an old signature. `.publish-manifest.json` records
-when each file left the indexes, and the file is removed seven days later.
+never pairs a new index with an old signature. apt and apk indexes carry their
+signatures inline. dnf and pacman fetch an index and its detached signature
+separately, so a refresh during the final pass can fail once and succeed on the
+next try. `.publish-manifest.json` records when each file left the indexes,
+and the file is removed seven days later.
 RPM signatures use the package build time, so re-signing produces identical
 bytes in each run. Pull requests run the same build and checks with throwaway
 keys and do not upload.

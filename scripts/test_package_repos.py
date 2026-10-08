@@ -95,8 +95,7 @@ class LayoutTest(unittest.TestCase):
 
 class TreeTest(unittest.TestCase):
     def complete_tree(self, tree):
-        for name in ("sofka.asc", "rpm/sofka.repo", "alpine/sofka.rsa.pub", "deb/dists/stable/Release",
-                     "deb/dists/stable/InRelease", "deb/dists/stable/Release.gpg",
+        for name in ("sofka.asc", "rpm/sofka.repo", "alpine/sofka.rsa.pub", "deb/dists/stable/InRelease",
                      "deb/pool/main/s/sofka/sofka_1.0.0_amd64.deb", "rpm/x86_64/sofka-1.0.0-1.x86_64.rpm",
                      "rpm/x86_64/repodata/repomd.xml", "rpm/x86_64/repodata/repomd.xml.asc",
                      "arch/x86_64/sofka-1.0.0-1-x86_64.pkg.tar.zst", "arch/x86_64/sofka-1.0.0-1-x86_64.pkg.tar.zst.sig",

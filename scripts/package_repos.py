@@ -32,7 +32,7 @@ NAMES = {
 }
 PACKAGE_FILES = ("*.deb", "*.rpm", "*.apk", "*.pkg.tar.zst", "*.pkg.tar.zst.sig")
 # Files clients fetch first; they reference everything else, so they upload last.
-ENTRY_POINTS = ("/deb/dists/*/InRelease", "/deb/dists/*/Release", "/deb/dists/*/Release.gpg",
+ENTRY_POINTS = ("/deb/dists/*/InRelease",
                 "/rpm/*/repodata/repomd.xml", "/rpm/*/repodata/repomd.xml.asc",
                 "/arch/*/sofka.*", "/alpine/*/APKINDEX.tar.gz")
 MANIFEST = ".publish-manifest.json"
@@ -124,9 +124,9 @@ apt-ftparchive \\
     -o "APT::FTPArchive::Release::Architectures=amd64 arm64" \\
     -o APT::FTPArchive::Release::Components=main \\
     release dists/stable > /tmp/Release
-mv /tmp/Release dists/stable/Release
-gpg --batch --yes --local-user "$fpr" --clearsign -o dists/stable/InRelease dists/stable/Release
-gpg --batch --yes --local-user "$fpr" --armor --detach-sign -o dists/stable/Release.gpg dists/stable/Release
+# Only the inline-signed InRelease: a separate Release and Release.gpg could be
+# fetched from different publishes.
+gpg --batch --yes --local-user "$fpr" --clearsign -o dists/stable/InRelease /tmp/Release
 gpg --batch --armor --export "$fpr" > /repo/sofka.asc
 """),
     # A fixed signature time keeps re-signed packages byte-identical between runs,
@@ -301,7 +301,7 @@ def materialize_links(tree):
 
 def check_tree(tree):
     required = ["sofka.asc", "rpm/sofka.repo", "alpine/sofka.rsa.pub",
-                "deb/dists/stable/Release", "deb/dists/stable/InRelease", "deb/dists/stable/Release.gpg"]
+                "deb/dists/stable/InRelease"]
     for arch in ARCHITECTURES["deb"]:
         packages = sorted((tree / "deb/pool/main/s/sofka").glob(f"*_{arch}.deb"))
         index = (tree / f"deb/dists/stable/main/binary-{arch}/Packages").read_text()
