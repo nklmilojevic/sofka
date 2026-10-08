@@ -94,11 +94,20 @@ jobs:
         run: gh release upload "$RELEASE_TAG" dist/*.tar.gz dist/*.zip dist/*.deb dist/*.rpm dist/*.apk dist/*.pkg.tar.zst dist/*.spdx.json dist/SHA256SUMS --clobber
 
   # Rebuilds the signed apt/dnf/pacman/apk repositories at pkg.sofka.rs from
-  # the uploaded release packages. The signing keys and R2 credentials live in
-  # the `packages` environment of the called workflow.
+  # the uploaded release packages. It starts a separate run instead of calling
+  # the workflow, because a called workflow received the `packages`
+  # environment secrets empty. GITHUB_TOKEN may trigger workflow_dispatch.
   package-repos:
     needs: upload-assets
-    uses: $/.github/workflows/package-repos.yaml
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write # gh workflow run
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - name: Dispatch package repository publish
+        run: gh workflow run package-repos.yaml --ref main
 
   # Kick the tap's bump workflow so `brew install nklmilojevic/sofka/sofka`
   # picks up the new version immediately instead of waiting for the tap's

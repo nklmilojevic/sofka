@@ -1,7 +1,6 @@
 name: Package repositories
 
 on:
-  workflow_call:
   workflow_dispatch:
   pull_request:
     paths:
@@ -61,6 +60,10 @@ jobs:
           PKG_GPG_PRIVATE_KEY: ${{ secrets.PKG_GPG_PRIVATE_KEY }}
           PKG_APK_RSA_PRIVATE_KEY: ${{ secrets.PKG_APK_RSA_PRIVATE_KEY }}
         run: |
+          if [[ -z "$PKG_GPG_PRIVATE_KEY" || -z "$PKG_APK_RSA_PRIVATE_KEY" ]]; then
+            echo "::error::The packages environment signing keys are empty in this run"
+            exit 1
+          fi
           umask 077
           mkdir "$RUNNER_TEMP/keys"
           printf '%s\n' "$PKG_GPG_PRIVATE_KEY" > "$RUNNER_TEMP/keys/gpg.asc"
