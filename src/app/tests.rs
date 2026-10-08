@@ -19608,6 +19608,31 @@ async fn provider_logs_do_not_fall_back_to_gke_when_the_config_is_invalid() {
     app.handle_key(press(KeyCode::Char('L'))).unwrap();
 
     assert!(app.opened_links.is_empty(), "{:?}", app.opened_links);
+    assert_eq!(app.mode, Mode::Table);
+    assert!(app.logs.source.is_none());
+    assert!(app.flash_err);
+    assert!(
+        app.flash.contains("[providers.logs] is invalid"),
+        "{}",
+        app.flash
+    );
+
+    app.switch_kind("pods");
+    apply(
+        &mut app,
+        json!({
+            "apiVersion": "v1", "kind": "Pod",
+            "metadata": {"name": "api-1", "namespace": "web"},
+            "spec": {"containers": [{"name": "app"}, {"name": "istio"}]}
+        }),
+    );
+    app.table_state.select(Some(0));
+    app.handle_key(press(KeyCode::Enter)).unwrap();
+    assert_eq!(app.mode, Mode::Containers);
+    app.handle_key(press(KeyCode::Char('L'))).unwrap();
+    assert!(app.opened_links.is_empty(), "{:?}", app.opened_links);
+    assert_ne!(app.mode, Mode::Logs);
+    assert!(app.logs.source.is_none());
 }
 
 #[tokio::test]

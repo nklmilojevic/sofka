@@ -579,6 +579,9 @@ impl App {
     /// Mirrors [`App::open_logs`], but the backend answers instead of the
     /// kubelet — so it also covers restarted and deleted pods.
     pub(super) fn open_provider_logs(&mut self) {
+        if self.log_provider_invalid() {
+            return;
+        }
         if let Some(link) = self.active_log_link() {
             self.open_log_link(&link, None);
             return;
@@ -645,6 +648,17 @@ impl App {
             return self.log_link.clone();
         }
         crate::providers::LogLink::detect(&self.cluster.cluster_name)
+    }
+
+    /// Warn when `[providers.logs]` is present but did not compile, instead
+    /// of falling back to a backend the user did not pick.
+    fn log_provider_invalid(&mut self) -> bool {
+        let invalid =
+            self.log_provider_configured && self.log_link.is_none() && self.log_provider.is_none();
+        if invalid {
+            self.flash_warn("[providers.logs] is invalid, see :config");
+        }
+        invalid
     }
 
     /// Open the log UI link for the selected row, or for one container of a
@@ -769,6 +783,9 @@ impl App {
         pod: String,
         container: String,
     ) {
+        if self.log_provider_invalid() {
+            return;
+        }
         if let Some(link) = self.active_log_link() {
             self.open_log_link(&link, Some((ns, pod, container)));
             return;
