@@ -54,7 +54,7 @@ Arch Linux and Arch Linux ARM:
 ```sh
 curl -fsSL https://pkg.sofka.rs/sofka.asc | sudo pacman-key --add -
 sudo pacman-key --lsign-key packages@sofka.rs
-printf '[sofka]\nServer = https://pkg.sofka.rs/arch/$arch\n' | sudo tee -a /etc/pacman.conf
+printf '[sofka]\nSigLevel = Required\nServer = https://pkg.sofka.rs/arch/$arch\n' | sudo tee -a /etc/pacman.conf
 sudo pacman -Syu sofka
 ```
 
@@ -204,13 +204,17 @@ Windows and macOS archives are extracted logically and compared with the inputs;
 the built executable also runs with `--version` on its native runner.
 
 After the release assets are uploaded, `scripts/package_repos.py` rebuilds the
-package repositories from the Linux packages of the last five releases. It checks
-them against each release's `SHA256SUMS`, signs the repositories in containers,
-and serves the result locally. The documented setup commands above then install,
-upgrade, and remove Sofka on Ubuntu 22.04, Debian, Fedora, openSUSE, Arch Linux,
-and Alpine with signature checks enabled. Only then does rclone upload the tree
-to the `sofka-packages` R2 bucket behind `pkg.sofka.rs`: packages first,
-then metadata, then pruning of old files. RPM signatures use the package build
+package repositories from the Linux packages of the last five releases. Each
+release must contain all eight Linux packages, which must match its `SHA256SUMS`.
+The script signs the repositories in containers and serves the result locally.
+The documented setup commands above then install, upgrade, and remove Sofka on
+Ubuntu 22.04, Debian, Fedora, openSUSE, Arch Linux, and Alpine with signature
+checks enabled, and pacman must reject a repository with an unsigned database.
+Only then does rclone upload the tree to the `sofka-packages` R2 bucket behind
+`pkg.sofka.rs`: packages first, then metadata. A file leaves the bucket only
+after one more publish, so clients holding the previous indexes can still fetch
+what they reference. `.publish-manifest` records the files of each publish;
+without it, nothing is removed. RPM signatures use the package build
 time, so re-signing produces identical bytes in each run. Pull requests run the
 same build and checks with throwaway keys and do not upload.
 

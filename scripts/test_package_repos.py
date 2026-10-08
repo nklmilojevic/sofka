@@ -1,4 +1,5 @@
 import hashlib
+import shutil
 import importlib.util
 from pathlib import Path
 import tempfile
@@ -60,6 +61,30 @@ class LayoutTest(unittest.TestCase):
         self.assertEqual([name for name in files if name.startswith("arch/")],
                          ["arch/aarch64/sofka-0.30.0-1-aarch64.pkg.tar.zst", "arch/x86_64/sofka-0.30.0-1-x86_64.pkg.tar.zst"])
         self.assertEqual(len(files), 3 * 6 + 2)
+
+    def test_rejects_a_release_without_every_architecture(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            packages = release_fixture(root / "packages", "0.30.0", "0.31.0")
+            (packages / "v0.31.0/sofka-0.31.0-1.aarch64.rpm").unlink()
+            with self.assertRaisesRegex(ValueError, r"v0.31.0 is missing packages: \[\('rpm', 'aarch64'\)\]"):
+                repos.layout(packages, root / "tree")
+
+    def test_rejects_mixed_versions_in_a_release(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            packages = release_fixture(root / "packages", "0.31.0")
+            (packages / "v0.31.0/sofka_0.31.0_arm64.deb").rename(packages / "v0.31.0/sofka_0.30.0_arm64.deb")
+            with self.assertRaisesRegex(ValueError, "different versions"):
+                repos.layout(packages, root / "tree")
+
+    def test_rejects_a_version_in_two_releases(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            packages = release_fixture(root / "packages", "0.31.0")
+            shutil.copytree(packages / "v0.31.0", packages / "copy")
+            with self.assertRaisesRegex(ValueError, "more than one release"):
+                repos.layout(packages, root / "tree")
 
     def test_requires_packages(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -137,20 +162,51 @@ class ChecksumTest(unittest.TestCase):
 
 
 class UploadTest(unittest.TestCase):
-    def test_packages_upload_before_metadata_and_pruning(self):
-        with patch.object(repos, "run") as run:
-            repos.upload(Path("tree"), "r2:bucket")
-        commands = [[str(argument) for argument in call.args] for call in run.call_args_list]
-        self.assertEqual([command[1] for command in commands], ["copy", "copy", "sync"])
-        packages, metadata, prune = commands
+    def upload(self, current, published, manifest=None):
+        listing = "\n".join(published + ([repos.MANIFEST] if manifest is not None else []))
+        deleted = []
+
+        def output(*args):
+            return listing if args[1] == "lsf" else "\n".join(manifest)
+
+        def run(*args, **kwargs):
+            if args[1] == "delete":
+                deleted.extend(Path(args[args.index("--files-from-raw") + 1]).read_text().splitlines())
+
+        with tempfile.TemporaryDirectory() as temporary:
+            tree = Path(temporary)
+            for name in current:
+                (tree / name).parent.mkdir(parents=True, exist_ok=True)
+                (tree / name).write_text(name)
+            with patch.object(repos, "output", side_effect=output), patch.object(repos, "run", side_effect=run) as mock:
+                repos.upload(tree, "r2:bucket")
+        return [call.args for call in mock.call_args_list], deleted, mock.call_args_list[-1].kwargs["input"]
+
+    def test_packages_upload_before_metadata(self):
+        calls, _, _ = self.upload(["deb/dists/stable/InRelease"], [])
+        self.assertEqual([call[1] for call in calls], ["copy", "copy", "rcat"])
+        packages, metadata = ([str(argument) for argument in call] for call in calls[:2])
         self.assertEqual(packages[packages.index("--header-upload") + 1], repos.PACKAGE_CACHE)
         self.assertEqual(metadata[metadata.index("--header-upload") + 1], repos.METADATA_CACHE)
         self.assertEqual(packages[packages.index("--filter") + 1], "- /arch/*/sofka.*")
-        self.assertEqual(packages[-3:-2], ["- *"])
+        self.assertEqual(packages[-3], "- *")
         self.assertEqual(metadata[metadata.index("--filter") + 1], "+ /arch/*/sofka.*")
         self.assertIn("- *.deb", metadata)
-        self.assertNotIn("--header-upload", prune)
-        self.assertIn("--delete-after", prune)
+
+    def test_files_dropped_by_the_previous_publish_are_removed(self):
+        calls, deleted, manifest = self.upload(
+            current=["sofka.asc", "rpm/x86_64/new.rpm"],
+            published=["sofka.asc", "rpm/x86_64/old.rpm", "rpm/x86_64/older.rpm", "rpm/x86_64/new.rpm"],
+            manifest=["sofka.asc", "rpm/x86_64/old.rpm"],
+        )
+        self.assertEqual(deleted, ["rpm/x86_64/older.rpm"])
+        self.assertEqual([call[1] for call in calls], ["copy", "copy", "delete", "rcat"])
+        self.assertEqual(manifest, "rpm/x86_64/new.rpm\nsofka.asc\n")
+
+    def test_without_a_manifest_nothing_is_removed(self):
+        calls, deleted, _ = self.upload(current=["sofka.asc"], published=["sofka.asc", "rpm/x86_64/old.rpm"])
+        self.assertEqual(deleted, [])
+        self.assertNotIn("delete", [call[1] for call in calls])
 
 
 class DocumentationTest(unittest.TestCase):

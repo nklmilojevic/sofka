@@ -31,6 +31,7 @@ NAMES = {
 }
 PACKAGE_FILES = ("*.deb", "*.rpm", "*.apk", "*.pkg.tar.zst", "*.pkg.tar.zst.sig")
 ARCH_DATABASE = "/arch/*/sofka.*"
+MANIFEST = ".publish-manifest"
 PACKAGE_CACHE = "Cache-Control: public, max-age=86400"
 METADATA_CACHE = "Cache-Control: public, max-age=60"
 
@@ -56,7 +57,7 @@ sudo dnf install sofka""",
 sudo zypper install sofka""",
     "pacman": """curl -fsSL {base}/sofka.asc | sudo pacman-key --add -
 sudo pacman-key --lsign-key packages@sofka.rs
-printf '[sofka]\\nServer = {base}/arch/$arch\\n' | sudo tee -a /etc/pacman.conf
+printf '[sofka]\\nSigLevel = Required\\nServer = {base}/arch/$arch\\n' | sudo tee -a /etc/pacman.conf
 sudo pacman -Syu sofka""",
     "apk": """wget -qO /etc/apk/keys/sofka.rsa.pub {base}/alpine/sofka.rsa.pub
 echo {base}/alpine >> /etc/apk/repositories
@@ -237,15 +238,34 @@ def download(out, releases):
     print(f"Downloaded Linux packages from {', '.join(tags)}")
 
 
+def release_packages(release):
+    """Classify one release's packages; every format and architecture must be present once."""
+    packages = {}
+    for path in sorted(release.iterdir()):
+        if path.is_file() and path.name != "SHA256SUMS":
+            family, arch, version = classify(path.name)
+            if (family, arch) in packages:
+                raise ValueError(f"{release.name} has more than one {family} package for {arch}")
+            packages[family, arch] = version, path
+    expected = {(family, arch) for family, arches in ARCHITECTURES.items() for arch in arches}
+    if missing := sorted(expected - packages.keys()):
+        raise ValueError(f"{release.name} is missing packages: {missing}")
+    if len({version for version, _ in packages.values()}) != 1:
+        raise ValueError(f"{release.name} contains packages of different versions")
+    return packages
+
+
 def layout(packages, tree):
     """Copy packages into the repository tree; return the versions per family."""
     found = {}
-    for path in sorted(packages.rglob("*")):
-        if path.is_file() and path.name != "SHA256SUMS":
-            family, arch, version = classify(path.name)
-            found.setdefault((family, arch), {})[version] = path
-    if not found:
+    releases = sorted({path.parent for path in packages.rglob("*") if path.is_file()})
+    if not releases:
         raise ValueError(f"No packages found in {packages}")
+    for release in releases:
+        for (family, arch), (version, path) in release_packages(release).items():
+            if version in found.setdefault((family, arch), {}):
+                raise ValueError(f"Version {version} appears in more than one release")
+            found[family, arch][version] = path
     versions = {}
     for (family, arch), by_version in sorted(found.items()):
         ordered = sorted(by_version, key=version_key)
@@ -326,6 +346,19 @@ def opensuse_guard(tree, version, base):
             "fi")
 
 
+def unsigned_database_check(prepare, base):
+    """The documented pacman setup must refuse a repository whose database is unsigned."""
+    return "\n".join([
+        'sudo() { "$@"; }', prepare,
+        "setup() {", SETUP["pacman"].format(base=base), "}",
+        "if setup; then",
+        '    echo "pacman accepted an unsigned database" >&2',
+        "    exit 1",
+        "fi",
+        "test ! -e /usr/bin/sofka",
+    ])
+
+
 class QuietHandler(http.server.SimpleHTTPRequestHandler):
     def log_message(self, *args):
         pass
@@ -336,8 +369,14 @@ def verify(tree):
     with tempfile.TemporaryDirectory() as temporary:
         served = Path(temporary) / "repo"
         shutil.copytree(tree, served)
-        server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), functools.partial(QuietHandler, directory=served))
-        base = f"http://127.0.0.1:{server.server_address[1]}"
+        unsigned = Path(temporary) / "unsigned"
+        shutil.copytree(tree / "arch", unsigned / "arch")
+        shutil.copyfile(tree / "sofka.asc", unsigned / "sofka.asc")
+        for signature in unsigned.glob("arch/*/sofka.db.sig"):
+            signature.unlink()
+        server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), functools.partial(QuietHandler, directory=temporary))
+        root = f"http://127.0.0.1:{server.server_address[1]}"
+        base = root + "/repo"
         (served / "rpm/sofka.repo").write_text(RPM_REPO.format(base=base))
         threading.Thread(target=server.serve_forever, daemon=True).start()
         try:
@@ -356,20 +395,36 @@ def verify(tree):
                 steps.append("test ! -e /usr/bin/sofka")
                 print(f"Verifying {snippet} on {image}", flush=True)
                 container(image, "\n".join(step for step in steps if step), network=True)
+                if snippet == "pacman":
+                    print(f"Verifying that pacman rejects an unsigned database on {image}", flush=True)
+                    container(image, unsigned_database_check(prepare, root + "/unsigned"), network=True)
         finally:
             server.shutdown()
     print(f"Verified package repositories for sofka {versions['deb'][-1]}")
 
 
 def upload(tree, bucket):
+    current = {path.relative_to(tree).as_posix() for path in tree.rglob("*") if path.is_file()}
+    published = set(output("rclone", "lsf", "--recursive", "--files-only", bucket).splitlines())
+    # Files the previous publish served stay one more cycle, because clients may
+    # still hold that publish's indexes. Without a manifest, nothing is pruned.
+    previous = published
+    if MANIFEST in published:
+        previous = set(output("rclone", "cat", f"{bucket}/{MANIFEST}").splitlines())
     packages = ["- " + ARCH_DATABASE, *("+ " + pattern for pattern in PACKAGE_FILES), "- *"]
     metadata = ["+ " + ARCH_DATABASE, *("- " + pattern for pattern in PACKAGE_FILES), "+ *"]
     # New packages first, then the indexes that reference them, then prune.
     for rules, cache in ((packages, PACKAGE_CACHE), (metadata, METADATA_CACHE)):
         filters = [argument for rule in rules for argument in ("--filter", rule)]
         run("rclone", "copy", tree, bucket, "--checksum", *filters, "--header-upload", cache)
-    run("rclone", "sync", tree, bucket, "--checksum", "--delete-after")
-    print(f"Uploaded package repositories to {bucket}")
+    stale = sorted(published - current - previous - {MANIFEST})
+    if stale:
+        with tempfile.NamedTemporaryFile("w", suffix=".txt") as listing:
+            listing.write("".join(name + "\n" for name in stale))
+            listing.flush()
+            run("rclone", "delete", bucket, "--files-from-raw", listing.name)
+    run("rclone", "rcat", f"{bucket}/{MANIFEST}", input="".join(name + "\n" for name in sorted(current)), text=True)
+    print(f"Uploaded package repositories to {bucket}; removed {len(stale)} files")
 
 
 def keygen(out):
