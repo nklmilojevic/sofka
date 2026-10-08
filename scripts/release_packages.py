@@ -210,7 +210,8 @@ def check_binary(target, binary):
         raise ValueError("dpkg-shlibdeps returned no runtime dependencies")
     return {
         "deb": {"dependencies": [depends.removeprefix(prefix), "ca-certificates"]},
-        "rpm": {"dependencies": [f"glibc >= {glibc}", "libgcc", "ca-certificates"]},
+        # Fedora names the runtime libgcc and openSUSE libgcc_s1; both provide the soname.
+        "rpm": {"dependencies": [f"glibc >= {glibc}", "libgcc_s.so.1()(64bit)", "ca-certificates"]},
         "archlinux": {"dependencies": [f"glibc>={glibc}", "gcc-libs", "ca-certificates"]},
     }
 
