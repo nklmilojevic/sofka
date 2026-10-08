@@ -19329,6 +19329,7 @@ fn install_provider(app: &mut App) {
     let (provider, warnings) = crate::providers::compile(Some(&cfg));
     assert!(warnings.is_empty(), "{warnings:?}");
     app.log_provider = provider;
+    app.log_provider_configured = true;
 }
 
 #[tokio::test]
@@ -19580,18 +19581,63 @@ async fn provider_logs_keep_a_configured_backend_on_gke() {
     assert!(app.opened_links.is_empty());
 }
 
-#[tokio::test]
-async fn provider_logs_fill_a_link_template() {
-    let (mut app, _rx) = test_app();
+fn install_link(app: &mut App, url: &str) {
     let cfg = crate::config::LogProviderConfig {
         kind: "link".into(),
-        url: "https://logs.example.com/?ns={namespace}&pod={pod}&since={lookback}".into(),
+        url: url.into(),
         lookback: Some("30m".into()),
         ..Default::default()
     };
     let (link, warnings) = crate::providers::compile_link(Some(&cfg));
     assert!(warnings.is_empty(), "{warnings:?}");
     app.log_link = link;
+    app.log_provider_configured = true;
+}
+
+#[tokio::test]
+async fn provider_logs_do_not_fall_back_to_gke_when_the_config_is_invalid() {
+    let (mut app, _rx) = test_app();
+    let cfg = crate::config::LogProviderConfig {
+        kind: "link".into(),
+        ..Default::default()
+    };
+    let (link, warnings) = crate::providers::compile_link(Some(&cfg));
+    assert!(link.is_none() && !warnings.is_empty());
+    app.log_provider_configured = true;
+    apply_gke_deployment(&mut app);
+    app.handle_key(press(KeyCode::Char('L'))).unwrap();
+
+    assert!(app.opened_links.is_empty(), "{:?}", app.opened_links);
+}
+
+#[tokio::test]
+async fn provider_logs_link_a_namespace_row_as_its_own_namespace() {
+    let (mut app, _rx) = test_app();
+    install_link(
+        &mut app,
+        "https://logs.example.com/?ns={namespace}&name={name}",
+    );
+    app.switch_kind("namespaces");
+    apply(
+        &mut app,
+        json!({"apiVersion": "v1", "kind": "Namespace", "metadata": {"name": "prod"}}),
+    );
+    app.table_state.select(Some(0));
+    app.handle_key(press(KeyCode::Char('L'))).unwrap();
+
+    assert_eq!(
+        app.opened_links,
+        ["https://logs.example.com/?ns=prod&name=prod"]
+    );
+}
+
+#[tokio::test]
+async fn provider_logs_fill_a_link_template() {
+    let (mut app, _rx) = test_app();
+    install_link(
+        &mut app,
+        "https://logs.example.com/?ns={namespace}&pod={pod}&since={lookback}",
+    );
     app.switch_kind("pods");
     apply(
         &mut app,

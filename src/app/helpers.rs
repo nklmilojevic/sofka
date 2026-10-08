@@ -617,12 +617,17 @@ pub(super) fn open_in_browser(url: &str) -> bool {
     if std::env::var_os("SSH_CONNECTION").is_some() || std::env::var_os("SSH_TTY").is_some() {
         return false;
     }
-    let opener = if cfg!(target_os = "macos") {
-        "open"
+    let mut command = if cfg!(target_os = "macos") {
+        Command::new("open")
+    } else if cfg!(windows) {
+        // `cmd /c start` would split the URL at `&`.
+        let mut command = Command::new("rundll32");
+        command.arg("url.dll,FileProtocolHandler");
+        command
     } else {
-        "xdg-open"
+        Command::new("xdg-open")
     };
-    Command::new(opener)
+    command
         .arg(url)
         .stdin(Stdio::null())
         .stdout(Stdio::null())

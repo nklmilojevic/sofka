@@ -550,7 +550,9 @@ async fn run_main(args: Args) -> Result<()> {
     for w in &link_warnings {
         eprintln!("warning: {w}");
     }
+    config_warnings.extend(link_warnings);
     app.log_link = log_link;
+    app.log_provider_configured = cfg.providers.logs.is_some();
     let (metrics_provider, metrics_warnings) =
         providers::compile_metrics(cfg.providers.metrics.as_ref());
     for w in &metrics_warnings {

@@ -2500,6 +2500,9 @@ pub struct App {
     /// A `type = "gcp"` or `type = "link"` log provider: `L` opens the
     /// selection in a web log UI instead of the logs view.
     pub log_link: Option<crate::providers::LogLink>,
+    /// Whether the resolved config has a `[providers.logs]` section, valid
+    /// or not. Only an absent section lets `L` detect Cloud Logging on GKE.
+    pub log_provider_configured: bool,
     /// Log UI links `L` built, in place of opening a browser.
     #[cfg(test)]
     pub(super) opened_links: Vec<String>,
@@ -2839,6 +2842,7 @@ impl App {
             }),
             log_provider: None,
             log_link: None,
+            log_provider_configured: false,
             #[cfg(test)]
             opened_links: Vec::new(),
             metrics_provider: None,

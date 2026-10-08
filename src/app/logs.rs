@@ -637,14 +637,14 @@ impl App {
     }
 
     /// The link provider `L` uses: the configured one, else Cloud Logging for
-    /// a GKE cluster when no other log provider is configured.
+    /// a GKE cluster without a `[providers.logs]` section. A section that
+    /// failed to compile still counts, so a broken config never falls back
+    /// to a backend the user did not pick.
     fn active_log_link(&self) -> Option<crate::providers::LogLink> {
-        self.log_link.clone().or_else(|| {
-            self.log_provider
-                .is_none()
-                .then(|| crate::providers::LogLink::detect(&self.cluster.cluster_name))
-                .flatten()
-        })
+        if self.log_provider_configured {
+            return self.log_link.clone();
+        }
+        crate::providers::LogLink::detect(&self.cluster.cluster_name)
     }
 
     /// Open the log UI link for the selected row, or for one container of a
@@ -669,8 +669,13 @@ impl App {
                 return;
             };
             target.resource = self.kind_plural.clone();
-            target.namespace = obj.metadata.namespace.clone().unwrap_or_default();
             target.name = obj.metadata.name.clone().unwrap_or_default();
+            // A namespace row is its own namespace.
+            target.namespace = if self.kind_plural == "namespaces" {
+                target.name.clone()
+            } else {
+                obj.metadata.namespace.clone().unwrap_or_default()
+            };
             target.selector =
                 crate::providers::link_selector(&self.kind_plural, &obj.data).unwrap_or_default();
         }

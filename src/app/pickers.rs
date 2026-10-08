@@ -973,6 +973,7 @@ impl App {
         let (log_link, link_warnings) =
             crate::providers::compile_link(resolved.config.providers.logs.as_ref());
         self.log_link = log_link;
+        self.log_provider_configured = resolved.config.providers.logs.is_some();
         provider_warnings.extend(link_warnings);
         let (metrics_provider, _mw) =
             crate::providers::compile_metrics(resolved.config.providers.metrics.as_ref());
