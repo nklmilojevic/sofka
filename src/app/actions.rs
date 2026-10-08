@@ -1395,27 +1395,53 @@ impl App {
     }
 
     pub(super) fn open_skins(&mut self) {
+        let current = self.active_skin.as_deref().and_then(|active| {
+            self.skin_list
+                .iter()
+                .position(|name| name == active)
+                .or_else(|| {
+                    self.skin_list
+                        .iter()
+                        .position(|name| name.eq_ignore_ascii_case(active))
+                })
+        });
         self.skin_state.select(if self.skin_list.is_empty() {
             None
         } else {
-            Some(0)
+            Some(current.unwrap_or(0))
         });
+        self.skin_preview_origin = Some((self.active_skin.clone(), crate::theme::snapshot()));
         self.mode = Mode::Skins;
     }
 
     pub(super) fn key_skins(&mut self, key: KeyInput) {
         let len = self.skin_list.len();
         match (key.action, key.code) {
-            (Some(Action::Back), _) | (Some(Action::Close), _) => self.mode = Mode::Table,
-            (Some(Action::Down), _) => list_step(&mut self.skin_state, len, true),
-            (Some(Action::Up), _) => list_step(&mut self.skin_state, len, false),
+            (Some(Action::Back), _) | (Some(Action::Close), _) => {
+                if let Some((active, palette)) = self.skin_preview_origin.take() {
+                    crate::theme::set(palette);
+                    self.active_skin = active;
+                }
+                self.mode = Mode::Table;
+            }
+            (Some(Action::Down), _) => {
+                list_step(&mut self.skin_state, len, true);
+                self.preview_selected_skin();
+            }
+            (Some(Action::Up), _) => {
+                list_step(&mut self.skin_state, len, false);
+                self.preview_selected_skin();
+            }
             (Some(Action::PageDown), _) => {
-                list_page(&mut self.skin_state, len, self.picker_page_items, true)
+                list_page(&mut self.skin_state, len, self.picker_page_items, true);
+                self.preview_selected_skin();
             }
             (Some(Action::PageUp), _) => {
-                list_page(&mut self.skin_state, len, self.picker_page_items, false)
+                list_page(&mut self.skin_state, len, self.picker_page_items, false);
+                self.preview_selected_skin();
             }
             (Some(Action::Accept), _) => {
+                self.skin_preview_origin = None;
                 if let Some(name) = self
                     .skin_state
                     .selected()
@@ -1427,6 +1453,24 @@ impl App {
             }
             _ => {}
         }
+    }
+
+    /// Install the highlighted skin while the picker is open, without making
+    /// it the session skin; `esc` restores the palette captured on open.
+    fn preview_selected_skin(&mut self) {
+        let Some(name) = self
+            .skin_state
+            .selected()
+            .and_then(|i| self.skin_list.get(i).cloned())
+        else {
+            return;
+        };
+        if self.active_skin.as_deref() == Some(name.as_str()) {
+            return;
+        }
+        let palette = crate::theme::resolve_skin(Some(&name), &self.skin_colors);
+        crate::theme::set(palette);
+        self.active_skin = Some(name);
     }
 
     pub(super) fn apply_skin(&mut self, name: &str) {

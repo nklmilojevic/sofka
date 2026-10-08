@@ -1827,6 +1827,44 @@ async fn skin_palette_command_opens_picker() {
 }
 
 #[tokio::test]
+async fn skin_picker_previews_selection_and_restores_on_escape() {
+    let (mut app, _rx) = test_app();
+    // Aliases of the default palette, so the live preview writes to the
+    // global palette are value-identical — parallel tests read it.
+    app.skin_list = vec!["catppuccin-mocha".into(), "mocha".into(), "Mocha".into()];
+    app.session_skin = Some("mocha".into());
+    app.active_skin = Some("mocha".into());
+
+    assert!(app.run_palette_command("skin"));
+    assert_eq!(app.mode, Mode::Skins);
+    assert_eq!(
+        app.skin_state.selected(),
+        Some(1),
+        "starts on the active skin"
+    );
+
+    app.handle_key(press(KeyCode::Char('j'))).unwrap();
+    assert_eq!(app.mode, Mode::Skins, "moving keeps the picker open");
+    assert_eq!(app.active_skin.as_deref(), Some("Mocha"));
+    assert_eq!(app.session_skin.as_deref(), Some("mocha"));
+
+    app.handle_key(press(KeyCode::Esc)).unwrap();
+    assert_eq!(app.mode, Mode::Table);
+    assert_eq!(app.active_skin.as_deref(), Some("mocha"));
+    assert_eq!(app.session_skin.as_deref(), Some("mocha"));
+
+    assert!(app.run_palette_command("skin"));
+    assert_eq!(app.skin_state.selected(), Some(1));
+    app.handle_key(press(KeyCode::Char('k'))).unwrap();
+    assert_eq!(app.active_skin.as_deref(), Some("catppuccin-mocha"));
+    app.handle_key(press(KeyCode::Enter)).unwrap();
+    assert_eq!(app.mode, Mode::Table);
+    assert_eq!(app.active_skin.as_deref(), Some("catppuccin-mocha"));
+    assert_eq!(app.session_skin.as_deref(), Some("catppuccin-mocha"));
+    assert!(app.skin_preview_origin.is_none());
+}
+
+#[tokio::test]
 async fn diff_falls_back_to_session_previous_revision() {
     let (mut app, _rx) = test_app();
     app.switch_kind("deployments");

@@ -2316,6 +2316,9 @@ pub struct App {
 
     pub skin_list: Vec<String>,
     pub skin_state: ListState,
+    /// Skin name and palette active when the `:skin` picker opened, restored
+    /// when the picker is dismissed without accepting a preview.
+    pub skin_preview_origin: Option<(Option<String>, crate::theme::Palette)>,
     /// Saved snapshots for the `:snapshots` browser: `(path, display label)`,
     /// newest first. Rebuilt each time the browser opens.
     pub snapshot_list: Vec<(std::path::PathBuf, String)>,
@@ -2728,6 +2731,7 @@ impl App {
                 .map(|name| (*name).to_string())
                 .collect(),
             skin_state: ListState::default(),
+            skin_preview_origin: None,
             snapshot_list: Vec::new(),
             snapshot_state: ListState::default(),
             skin_colors: HashMap::new(),

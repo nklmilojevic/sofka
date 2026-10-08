@@ -2922,7 +2922,7 @@ fn build_help(app: &App, width: usize) -> (Vec<Line<'static>>, String) {
     ));
     lines.push(bind(":events", "browse all events"));
     lines.push(bind(":pf", "view/stop background port-forwards"));
-    lines.push(bind(":skin", "switch color skin live"));
+    lines.push(bind(":skin", "preview and switch color skin"));
     lines.push(bind(
         ":mouse",
         "switch mouse capture on/off for text selection",

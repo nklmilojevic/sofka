@@ -1049,7 +1049,9 @@ pod is rejected; browse through a pod that already mounts the claim instead.
   auto dark/light detection,
   and per-swatch hex overrides. Every semantic color (row status, severity
   badges, headers, borders) is derived from the active palette, so one skin
-  change lands everywhere at once.
+  change lands everywhere at once. The `:skin` picker opens on the active skin
+  and previews each skin as you move; `enter` keeps it, `esc` restores the
+  previous one.
 - **Config file** (TOML or YAML) with per-cluster and per-context overrides and live
   `:reload`. See [Configuration](configuration.md).
 
