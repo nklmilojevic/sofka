@@ -31,12 +31,17 @@ NAMES = {
     "alpine": re.compile(r"sofka_(?P<version>[0-9.]+)_(?P<arch>x86_64|aarch64)\.apk"),
 }
 PACKAGE_FILES = ("*.deb", "*.rpm", "*.apk", "*.pkg.tar.zst", "*.pkg.tar.zst.sig")
-ARCH_DATABASE = "/arch/*/sofka.*"
+# Files clients fetch first; they reference everything else, so they upload last.
+ENTRY_POINTS = ("/deb/dists/*/InRelease", "/deb/dists/*/Release", "/deb/dists/*/Release.gpg",
+                "/rpm/*/repodata/repomd.xml", "/rpm/*/repodata/repomd.xml.asc",
+                "/arch/*/sofka.*", "/alpine/*/APKINDEX.tar.gz")
 MANIFEST = ".publish-manifest.json"
-# Far longer than the metadata cache, so clients holding older indexes can still upgrade.
+# How long a file stays after it leaves the indexes, so clients holding older
+# indexes can still fetch what they reference.
 RETENTION = 7 * 24 * 3600
 PACKAGE_CACHE = "Cache-Control: public, max-age=86400"
-METADATA_CACHE = "Cache-Control: public, max-age=60"
+# Uncached, so the CDN never pairs a new index with an old signature.
+METADATA_CACHE = "Cache-Control: no-cache"
 
 RPM_REPO = """[sofka]
 name=sofka
@@ -410,24 +415,25 @@ def upload(tree, bucket, now=None):
     now = int(time.time()) if now is None else now
     current = {path.relative_to(tree).as_posix() for path in tree.rglob("*") if path.is_file()}
     published = set(output("rclone", "lsf", "--recursive", "--files-only", bucket).splitlines())
-    # The manifest maps each file to when a publish last served it. A file leaves
-    # the bucket only after RETENTION outside the indexes; unknown files start now.
+    # The manifest maps each file the indexes no longer reference to when it left
+    # them, and current files to null. Files it does not know leave from now on.
     recorded = json.loads(output("rclone", "cat", f"{bucket}/{MANIFEST}")) if MANIFEST in published else {}
-    served = {name: recorded.get(name, now) for name in published - {MANIFEST}}
-    served.update(dict.fromkeys(current, now))
-    packages = ["- " + ARCH_DATABASE, *("+ " + pattern for pattern in PACKAGE_FILES), "- *"]
-    metadata = ["+ " + ARCH_DATABASE, *("- " + pattern for pattern in PACKAGE_FILES), "+ *"]
-    # New packages first, then the indexes that reference them, then prune.
-    for rules, cache in ((packages, PACKAGE_CACHE), (metadata, METADATA_CACHE)):
+    removed = {name: recorded.get(name) or now for name in published - current - {MANIFEST}}
+    packages = [*("- " + pattern for pattern in ENTRY_POINTS), *("+ " + pattern for pattern in PACKAGE_FILES), "- *"]
+    referenced = [*("- " + pattern for pattern in ENTRY_POINTS + PACKAGE_FILES), "+ *"]
+    entry_points = [*("+ " + pattern for pattern in ENTRY_POINTS), "- *"]
+    # Packages, then the metadata they appear in, then the entry points that
+    # reference that metadata, so no client sees a link to a missing file.
+    for rules, cache in ((packages, PACKAGE_CACHE), (referenced, METADATA_CACHE), (entry_points, METADATA_CACHE)):
         filters = [argument for rule in rules for argument in ("--filter", rule)]
         run("rclone", "copy", tree, bucket, "--checksum", *filters, "--header-upload", cache)
-    stale = sorted(name for name, last in served.items() if now - last > RETENTION)
+    stale = sorted(name for name, left in removed.items() if now - left > RETENTION)
     if stale:
         with tempfile.NamedTemporaryFile("w", suffix=".txt") as listing:
             listing.write("".join(name + "\n" for name in stale))
             listing.flush()
             run("rclone", "delete", bucket, "--files-from-raw", listing.name)
-    manifest = {name: last for name, last in served.items() if name not in stale}
+    manifest = dict.fromkeys(current) | {name: left for name, left in removed.items() if name not in stale}
     run("rclone", "rcat", f"{bucket}/{MANIFEST}", input=json.dumps(manifest, indent=1, sort_keys=True) + "\n", text=True)
     print(f"Uploaded package repositories to {bucket}; removed {len(stale)} files")
 

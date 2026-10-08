@@ -186,36 +186,45 @@ class UploadTest(unittest.TestCase):
         calls = [call.args for call in mock.call_args_list]
         return calls, deleted, json.loads(mock.call_args_list[-1].kwargs["input"])
 
-    def test_packages_upload_before_metadata(self):
+    def test_packages_then_referenced_metadata_then_entry_points(self):
         calls, _, _ = self.upload(["deb/dists/stable/InRelease"], [])
-        self.assertEqual([call[1] for call in calls], ["copy", "copy", "rcat"])
-        packages, metadata = ([str(argument) for argument in call] for call in calls[:2])
-        self.assertEqual(packages[packages.index("--header-upload") + 1], repos.PACKAGE_CACHE)
-        self.assertEqual(metadata[metadata.index("--header-upload") + 1], repos.METADATA_CACHE)
-        self.assertEqual(packages[packages.index("--filter") + 1], "- /arch/*/sofka.*")
-        self.assertEqual(packages[-3], "- *")
-        self.assertEqual(metadata[metadata.index("--filter") + 1], "+ /arch/*/sofka.*")
-        self.assertIn("- *.deb", metadata)
+        self.assertEqual([call[1] for call in calls], ["copy", "copy", "copy", "rcat"])
+        packages, referenced, entry_points = ([str(argument) for argument in call] for call in calls[:3])
 
-    def test_files_leave_only_after_the_retention_period(self):
+        def rules(command):
+            return [command[index + 1] for index, argument in enumerate(command) if argument == "--filter"]
+
+        self.assertEqual(packages[packages.index("--header-upload") + 1], repos.PACKAGE_CACHE)
+        self.assertEqual(referenced[referenced.index("--header-upload") + 1], repos.METADATA_CACHE)
+        self.assertEqual(entry_points[entry_points.index("--header-upload") + 1], repos.METADATA_CACHE)
+        self.assertEqual(rules(packages)[-1], "- *")
+        self.assertIn("- /rpm/*/repodata/repomd.xml", rules(referenced))
+        self.assertIn("- *.deb", rules(referenced))
+        self.assertEqual(rules(referenced)[-1], "+ *")
+        self.assertEqual(rules(entry_points), [*("+ " + pattern for pattern in repos.ENTRY_POINTS), "- *"])
+
+    def test_retention_starts_when_a_file_leaves_the_indexes(self):
         expired = self.NOW - repos.RETENTION - 1
         recent = self.NOW - repos.RETENTION + 60
         calls, deleted, manifest = self.upload(
             current=["sofka.asc", "rpm/x86_64/new.rpm"],
-            published=["sofka.asc", "rpm/x86_64/expired.rpm", "rpm/x86_64/recent.rpm", "rpm/x86_64/unknown.rpm"],
-            manifest={"sofka.asc": expired, "rpm/x86_64/expired.rpm": expired, "rpm/x86_64/recent.rpm": recent,
-                      "rpm/x86_64/gone.rpm": expired},
+            published=["sofka.asc", "rpm/x86_64/just-dropped.rpm", "rpm/x86_64/expired.rpm",
+                       "rpm/x86_64/recent.rpm", "rpm/x86_64/unknown.rpm"],
+            # just-dropped.rpm was in the indexes at the previous publish, long ago.
+            manifest={"sofka.asc": None, "rpm/x86_64/just-dropped.rpm": None, "rpm/x86_64/expired.rpm": expired,
+                      "rpm/x86_64/recent.rpm": recent, "rpm/x86_64/gone.rpm": expired},
         )
         self.assertEqual(deleted, ["rpm/x86_64/expired.rpm"])
-        self.assertEqual([call[1] for call in calls], ["copy", "copy", "delete", "rcat"])
-        self.assertEqual(manifest, {"sofka.asc": self.NOW, "rpm/x86_64/new.rpm": self.NOW,
-                                    "rpm/x86_64/recent.rpm": recent, "rpm/x86_64/unknown.rpm": self.NOW})
+        self.assertEqual([call[1] for call in calls], ["copy", "copy", "copy", "delete", "rcat"])
+        self.assertEqual(manifest, {"sofka.asc": None, "rpm/x86_64/new.rpm": None,
+                                    "rpm/x86_64/just-dropped.rpm": self.NOW, "rpm/x86_64/recent.rpm": recent,
+                                    "rpm/x86_64/unknown.rpm": self.NOW})
 
     def test_without_a_manifest_nothing_is_removed(self):
         calls, deleted, manifest = self.upload(current=["sofka.asc"], published=["sofka.asc", "rpm/x86_64/old.rpm"])
         self.assertEqual(deleted, [])
         self.assertNotIn("delete", [call[1] for call in calls])
-        self.assertEqual(manifest, {"sofka.asc": self.NOW, "rpm/x86_64/old.rpm": self.NOW})
+        self.assertEqual(manifest, {"sofka.asc": None, "rpm/x86_64/old.rpm": self.NOW})
 
 
 class DocumentationTest(unittest.TestCase):
