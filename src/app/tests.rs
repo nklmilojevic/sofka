@@ -33221,17 +33221,50 @@ async fn configured_half_page_keys_scroll_drain_confirmations() {
 }
 
 #[tokio::test]
-async fn half_page_keys_bound_in_a_text_picker_mode_move_half_a_page() {
+async fn shared_half_page_keys_reach_text_pickers_without_taking_text_keys() {
     let (mut app, _rx) = test_app();
     app.ns_list = (0..30).map(|n| format!("ns{n:02}")).collect();
     app.ns_filter.clear();
     app.mode = Mode::Namespaces;
     app.picker_page_items = 10;
     app.ns_state.select(Some(0));
+    use_keys(&mut app, HALF_PAGE_KEYS);
+    app.handle_key(ctrl(KeyCode::Char('d'))).unwrap();
+    assert_eq!(app.ns_state.selected(), Some(5));
+    assert!(app.ns_filter.is_empty());
+    app.ns_filter = "ns1".into();
+    app.handle_key(ctrl(KeyCode::Char('u'))).unwrap();
+    assert!(app.ns_filter.is_empty(), "ctrl-u still clears the line");
+    assert_eq!(
+        app.keymap.label("namespaces", Action::HalfPageUp),
+        "unbound"
+    );
+
+    app.ns_state.select(Some(0));
     use_keys(
         &mut app,
-        "[keys.namespaces]\nhalf_page_up = 'alt-u'\nhalf_page_down = 'alt-d'\n",
+        "[keys.navigation]\nhalf_page_down = ['%', 'ctrl-n', 'alt-j']\n",
     );
+    app.handle_key(press(KeyCode::Char('%'))).unwrap();
+    assert_eq!(app.ns_filter, "%", "plain keys still type");
+    app.ns_filter.clear();
+    app.ns_state.select(Some(0));
+    app.handle_key(alt(KeyCode::Char('j'))).unwrap();
+    assert_eq!(app.ns_state.selected(), Some(5));
+    assert_eq!(
+        app.keymap.label("copy_picker", Action::HalfPageDown),
+        "alt-j"
+    );
+    assert_eq!(
+        app.keymap.label("table", Action::HalfPageDown),
+        "% / ctrl-n / alt-j"
+    );
+
+    use_keys(
+        &mut app,
+        "[keys.navigation]\nhalf_page_down = 'ctrl-d'\n[keys.table]\ndelete = 'alt-d'\n[keys.namespaces]\nhalf_page_up = 'alt-u'\nhalf_page_down = 'alt-d'\n",
+    );
+    app.ns_state.select(Some(0));
     app.handle_key(alt(KeyCode::Char('d'))).unwrap();
     assert_eq!(app.ns_state.selected(), Some(5));
     app.handle_key(alt(KeyCode::Char('u'))).unwrap();

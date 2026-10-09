@@ -318,8 +318,8 @@ visible list rows. Paging also works while a picker filter is being typed.
 `half_page_down` and `half_page_up` move half a page in every view and picker
 that pages. They have no default keys; bind them in
 [key bindings](keybindings.md#example-ctrlu-and-ctrld-for-half-page-scrolling),
-for example to `ctrl-d` and `ctrl-u`. Pickers with a text filter need the
-binding in their own mode, because `[keys.navigation]` skips text input modes.
+for example to `ctrl-d` and `ctrl-u`. In pickers with a text filter, a shared
+half-page key that types text or edits the line keeps doing that.
 
 ## Text inputs (palette, filters, prompts)
 

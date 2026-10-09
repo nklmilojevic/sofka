@@ -20,18 +20,13 @@ delete = "alt-d"
 `half_page_up` and `half_page_down` move half the page size of the view. They
 are available wherever `page_up` and `page_down` are, and have no default
 bindings. `ctrl-d` normally starts deletion in tables, so the example moves
-deletion to `alt-d`. Deletion still uses confirmation and read-only checks. In
-text inputs, `ctrl-u` still clears the line.
+deletion to `alt-d`. Deletion still uses confirmation and read-only checks.
 
-Like `page_up` and `page_down`, the shared setting does not reach text input
-modes. To half-page in the namespace, context, sort, or copy pickers, bind the
-actions in that mode with keys that do not edit text:
-
-```toml
-[keys.namespaces]
-half_page_up = "alt-u"
-half_page_down = "alt-d"
-```
+In text input modes that page, such as the namespace, context, sort, and copy
+pickers, the shared half-page keys yield to text editing. A key that types text
+or that the mode already uses is skipped there, so in the example `ctrl-d`
+moves half a page and `ctrl-u` still clears the line. A mode setting, such as
+`[keys.namespaces]`, is used as written.
 
 ## Values and scopes
 
@@ -42,7 +37,8 @@ half_page_down = "alt-d"
   disables all keyboard bindings for that action.
 - `[keys.global]` sets `quit`, `compact`, and `plugin_activity` in every mode.
 - `[keys.navigation]` sets shared navigation actions in modes that support them.
-  It does not affect text input modes. The shared actions are `up`, `down`,
+  It does not affect text input modes, except for the half-page actions
+  described above. The shared actions are `up`, `down`,
   `first`, `last`, `page_up`, `page_down`, `half_page_up`, `half_page_down`,
   `left`, `right`, `back`, `close`, `command`, and `help`. Shared `back` settings do not change confirmation
   dialogs. Shared `close` settings do not change the table's `exit` action or
