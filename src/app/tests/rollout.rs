@@ -192,6 +192,17 @@ async fn rollout_history_lists_own_revisions_newest_first() {
 }
 
 #[tokio::test]
+async fn faults_filter_leaves_rollout_history_revisions_visible() {
+    let (mut app, _rx) = deployment_app(json!({}));
+    app.handle_key(ctrl(KeyCode::Char('z'))).unwrap();
+    assert!(app.faults_filter_active());
+    open_history(&mut app);
+    apply_revisions(&mut app);
+    assert!(!app.faults_filter_active());
+    assert_eq!(app.row_count(), 3);
+}
+
+#[tokio::test]
 async fn rollout_history_rejects_other_kinds() {
     let (mut app, _rx) = test_app();
     app.switch_kind("pods");

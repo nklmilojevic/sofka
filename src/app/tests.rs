@@ -21737,9 +21737,65 @@ async fn ctrl_z_filters_workload_faults() {
     );
     apply(&mut app, cronjob("suspended", true, json!({})));
     assert_eq!(row_names(&app), ["last-failed", "suspended"]);
+    // The rows the filter keeps carry the status that tints them.
+    let status = app.spec.header_index("STATUS").unwrap();
+    for (row, expected) in app.rows().iter().zip(["Failed", "Suspended"]) {
+        let (cells, status_idx) = app.spec.cells(row, crate::columns::now_secs());
+        assert_eq!(status_idx, Some(status));
+        assert_eq!(cells[status], expected);
+        assert_ne!(
+            crate::theme::row_color(&cells[status]),
+            crate::theme::blue()
+        );
+    }
     app.handle_key(ctrl(KeyCode::Char('z'))).unwrap();
     assert!(!app.faults_only);
     assert_eq!(row_names(&app).len(), 5);
+}
+
+#[tokio::test]
+async fn ctrl_z_filters_every_controller_kind_and_extensions_group() {
+    let (mut app, _rx) = test_app();
+    for (group, kind, plural) in [
+        ("apps", "StatefulSet", "statefulsets"),
+        ("apps", "DaemonSet", "daemonsets"),
+        ("apps", "ReplicaSet", "replicasets"),
+        ("extensions", "Deployment", "deployments"),
+    ] {
+        app.cluster.unregister_kind("apps", "Deployment");
+        app.cluster.register_kind(group, kind, plural, true);
+        app.switch_kind(&format!("{plural}.{group}"));
+        assert_eq!(app.kind.as_ref().unwrap().ar.group, group);
+        let object = |name: &str, desired: i64, ready: i64| {
+            let mut status = json!({"observedGeneration": 1});
+            if plural == "daemonsets" {
+                status["desiredNumberScheduled"] = json!(desired);
+                status["currentNumberScheduled"] = json!(desired);
+                status["updatedNumberScheduled"] = json!(desired);
+                status["numberReady"] = json!(ready);
+            } else {
+                status["replicas"] = json!(desired);
+                status["updatedReplicas"] = json!(desired);
+                status["readyReplicas"] = json!(ready);
+            }
+            json!({
+                "apiVersion": format!("{group}/v1"), "kind": kind,
+                "metadata": {"name": name, "namespace": "default", "generation": 1},
+                "spec": {"replicas": desired},
+                "status": status
+            })
+        };
+        apply(&mut app, object("ready", 2, 2));
+        apply(&mut app, object("unhealthy", 2, 0));
+        if plural != "daemonsets" {
+            apply(&mut app, object("scaled-down", 0, 0));
+        }
+        if !app.faults_only {
+            app.handle_key(ctrl(KeyCode::Char('z'))).unwrap();
+        }
+        assert!(app.faults_filter_active(), "{group}/{plural}");
+        assert_eq!(row_names(&app), ["unhealthy"], "{group}/{plural}");
+    }
 }
 
 #[tokio::test]

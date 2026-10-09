@@ -83,9 +83,12 @@ impl App {
 
     /// Whether `Ctrl+Z` can filter the current kind.
     pub(super) fn faults_supported(&self) -> bool {
+        // Synthetic views (rollout history over ReplicaSets) list their
+        // backing kind for another purpose; healthy rows there are the point.
         self.kind.as_ref().is_some_and(|kind| {
-            (kind.ar.group.is_empty() && kind.ar.plural == "pods")
-                || crate::columns::has_workload_faults(&kind.ar.group, &kind.ar.plural)
+            kind.ar.plural.eq_ignore_ascii_case(&self.kind_plural)
+                && ((kind.ar.group.is_empty() && kind.ar.plural == "pods")
+                    || crate::columns::has_workload_faults(&kind.ar.group, &kind.ar.plural))
         })
     }
 

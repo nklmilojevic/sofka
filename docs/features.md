@@ -496,6 +496,8 @@ include those conditions. Row filters can search the route paths.
 - **Job execution status** distinguishes pending, running, suspended, failed,
   completing, completed, and terminating jobs. Failed jobs use the error color even when
   no pod is active.
+  CronJobs carry a STATUS column too: `Running`, `Scheduled`, `Suspended`,
+  `Terminating`, or `Failed` when the last scheduled run did not succeed.
 - **Storage deletion status** shows `Terminating` for PVs and PVCs after
   deletion starts, including when a storage protection finalizer keeps the
   object in the API.
