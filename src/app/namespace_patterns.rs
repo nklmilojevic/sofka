@@ -135,6 +135,10 @@ impl App {
         match action {
             NamespacePatternAction::Resource(resource) => {
                 let Some(kind) = self.cluster.resolve(&resource) else {
+                    if workloads::NAMES.contains(&resource.trim().to_lowercase().as_str()) {
+                        self.open_workloads(Some(&pattern));
+                        self.set_flash(format!("namespace: {}", self.namespace_label()));
+                    }
                     return;
                 };
                 if kind.ar.plural == "namespaces" {

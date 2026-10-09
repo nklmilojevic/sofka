@@ -197,19 +197,51 @@ impl App {
         }
     }
 
-    /// Run the next key with the selected row's kind, so it acts on the row.
+    /// Run the next key with the kind of the row it acts on. A key in the
+    /// table starts a new action on the cursor row; a key in a dialog or
+    /// prompt that action opened keeps the kind it started with, even if a
+    /// watch update has since moved the cursor to a row of another kind.
     pub(super) fn focus_workload_row(&mut self) {
         if self.workloads.is_none() {
             return;
         }
-        let kind = self.selected_ref().and_then(|obj| {
-            let plural = plural_of(obj)?;
-            let (group, kind, _) = KINDS.iter().find(|(_, _, p)| *p == plural)?;
-            self.cluster.resolve_in_group(kind, group)
-        });
-        if let Some(kind) = kind {
+        if self.mode == Mode::Table {
+            self.workload_skipped = 0;
+            self.workload_focus = self.selected_ref().and_then(|obj| {
+                let plural = plural_of(obj)?;
+                let (group, kind, _) = KINDS.iter().find(|(_, _, p)| *p == plural)?;
+                self.cluster.resolve_in_group(kind, group)
+            });
+            if let Some(kind) = &self.workload_focus {
+                let prefix = format!("{}/", kind.ar.plural);
+                self.workload_skipped = self
+                    .marked
+                    .iter()
+                    .filter(|key| !key.starts_with(&prefix))
+                    .count();
+            }
+        }
+        if let Some(kind) = self.workload_focus.clone() {
             self.kind_plural = kind.ar.plural.to_lowercase();
             self.kind = Some(kind);
+        }
+    }
+
+    /// Tell a confirmation or prompt raised over mixed marks which marked
+    /// rows it leaves out.
+    pub(super) fn note_skipped_marks(&mut self, before: Mode) {
+        let skipped = std::mem::take(&mut self.workload_skipped);
+        if skipped == 0 || before != Mode::Table {
+            return;
+        }
+        let note = format!(
+            " · skips {skipped} marked row{} of other kinds",
+            if skipped == 1 { "" } else { "s" }
+        );
+        match self.mode {
+            Mode::Confirm => self.confirm_label.push_str(&note),
+            Mode::Prompt => self.prompt_label.push_str(&note),
+            _ => {}
         }
     }
 

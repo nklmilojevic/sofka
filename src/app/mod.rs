@@ -2035,6 +2035,12 @@ pub struct App {
     pub faults_only: bool,
     /// Set while the `:workloads` view is open.
     workloads: Option<workloads::WorkloadsView>,
+    /// The kind of the workloads row the running action started on. Dialogs
+    /// and prompts it opens act on this kind, never on whatever row the
+    /// cursor sits on by the time they are answered.
+    workload_focus: Option<Kind>,
+    /// Marked workloads rows of other kinds the running action leaves out.
+    workload_skipped: usize,
     /// Parsed form of `filter`, refreshed lazily when the string changes so
     /// neither row matching nor rendering reparses it per frame.
     filter_cache: RefCell<FilterCache>,
@@ -2605,6 +2611,8 @@ impl App {
             filter: String::new(),
             faults_only: false,
             workloads: None,
+            workload_focus: None,
+            workload_skipped: 0,
             filter_cache: RefCell::new(FilterCache {
                 raw: String::new(),
                 parsed: crate::filter::parse(""),

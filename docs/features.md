@@ -531,8 +531,7 @@ include those conditions. Row filters can search the route paths.
   and STATUS columns. Keys that act on a row use the row's own kind, so
   `ctrl-d`, `d`, `y`, `l`, `s`, `r`, `⏎`, plugins, and guardrails behave as
   in that kind's own view without drilling into it first. With marks across
-  kinds, an action applies to the marked rows of the cursor row's kind and
-  skips the rest. By default only top-level workloads are listed: pods owned
+  kinds, an action applies to the marked rows of the cursor row's kind; its confirmation says how many marked rows it skips. A dialog or prompt keeps acting on the kind it was opened for, even if a watch update moves the cursor. By default only top-level workloads are listed: pods owned
   by a ReplicaSet, StatefulSet, DaemonSet, or Job and Jobs owned by a CronJob
   are hidden, one `⏎` away from their owner. `O` shows them too. `Ctrl+Z`
   judges each row by its kind's faults rule. Kinds missing from API discovery

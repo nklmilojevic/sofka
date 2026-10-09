@@ -292,6 +292,16 @@ async fn row_actions_use_the_row_kind_and_skip_marks_of_other_kinds() {
         }
         _ => panic!("expected a delete confirmation"),
     }
+    assert!(
+        app.confirm_label
+            .ends_with(" · skips 1 marked row of other kinds"),
+        "{}",
+        app.confirm_label
+    );
+    // A watch update can move the cursor onto the same-named Deployment
+    // while the dialog is open; the answer still deletes the Pod.
+    app.table_state
+        .select(Some(position(&app, "Deployment", "web")));
     app.handle_key(press(KeyCode::Char('y'))).unwrap();
     let (method, path) = requests.recv().await.unwrap();
     assert_eq!(method, http::Method::DELETE);
@@ -311,6 +321,47 @@ async fn row_actions_use_the_row_kind_and_skip_marks_of_other_kinds() {
         app.prompt_label
     );
     assert_eq!(app.kind_plural, "workloads");
+    app.table_state.select(Some(position(&app, "Pod", "web")));
+    app.handle_key(press(KeyCode::Char('3'))).unwrap();
+    app.handle_key(press(KeyCode::Enter)).unwrap();
+    let (method, path) = requests.recv().await.unwrap();
+    assert_eq!(method, http::Method::PATCH);
+    assert_eq!(
+        path,
+        "/apis/apps/v1/namespaces/default/deployments/web/scale"
+    );
+}
+
+#[tokio::test]
+async fn workloads_open_over_a_namespace_pattern() {
+    let (mut app, _rx) = workloads_app();
+    type_resource_query(&mut app, "wk *-crons");
+    app.handle_msg(Msg::NamespacePattern {
+        generation: app.generation,
+        request: app.namespace_request,
+        pattern: "*-crons".into(),
+        action: NamespacePatternAction::Resource("wk".into()),
+        result: Ok(vec!["a-crons".into(), "b-crons".into()]),
+    });
+    assert!(app.workloads_active());
+    assert_eq!(app.namespace, "*-crons");
+    assert_eq!(app.namespace_label(), "*-crons (2 namespaces)");
+    let generation = app.generation;
+    for ns in ["a-crons", "b-crons"] {
+        let mut deployment = deployment("same", 2);
+        deployment["metadata"]["namespace"] = json!(ns);
+        let o = obj(deployment);
+        app.handle_msg(Msg::NamespaceWatch {
+            generation,
+            namespace: format!("deployments/{ns}"),
+            event: Box::new(Msg::Applied {
+                generation,
+                key: crate::app::workloads::key(&o),
+                obj: Box::new(o),
+            }),
+        });
+    }
+    assert_eq!(rows(&app).len(), 2);
 }
 
 #[tokio::test]
@@ -367,7 +418,17 @@ async fn workloads_watches_stamp_each_kind_on_rows_of_the_same_name() {
                 .to_string(),
             )
         } else if query.contains("watch=true") {
-            (200, String::new())
+            // After the list: the Deployment changes and the Pod goes away.
+            let meta = json!({"name": "web", "namespace": "default", "resourceVersion": "2"});
+            let event = match uri.path().rsplit('/').next() {
+                Some("deployments") => Some(json!({"type": "MODIFIED", "object": {
+                    "apiVersion": "apps/v1", "kind": "Deployment", "metadata": meta,
+                    "spec": {"replicas": 5}}})),
+                Some("pods") => Some(json!({"type": "DELETED", "object": {
+                    "apiVersion": "v1", "kind": "Pod", "metadata": meta}})),
+                _ => None,
+            };
+            (200, event.map(|e| format!("{e}\n")).unwrap_or_default())
         } else {
             // List items carry no apiVersion/kind, as a real list response
             // may omit them; the view must stamp the kind itself.
@@ -413,17 +474,29 @@ async fn workloads_watches_stamp_each_kind_on_rows_of_the_same_name() {
     .expect("workloads view never synced");
 
     app.handle_key(press(KeyCode::Char('O'))).unwrap();
-    let mut kinds: Vec<String> = rows(&app).into_iter().map(|(kind, _)| kind).collect();
-    kinds.sort();
+    let kinds = |app: &App| {
+        let mut kinds: Vec<String> = rows(app).into_iter().map(|(kind, _)| kind).collect();
+        kinds.sort();
+        kinds
+    };
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while kinds(&app).contains(&"Pod".to_string()) || ready_of(&app).as_deref() != Some("0/5") {
+            let msg = rx.recv().await.expect("watch channel closed");
+            app.handle_msg(msg);
+        }
+    })
+    .await
+    .expect("live watch events never arrived");
     assert_eq!(
-        kinds,
-        [
-            "CronJob",
-            "DaemonSet",
-            "Deployment",
-            "Job",
-            "Pod",
-            "StatefulSet"
-        ]
+        kinds(&app),
+        ["CronJob", "DaemonSet", "Deployment", "Job", "StatefulSet"]
     );
+}
+
+/// The READY cell of the Deployment row, if there is one.
+fn ready_of(app: &App) -> Option<String> {
+    app.rows()
+        .iter()
+        .find(|o| o.types.as_ref().unwrap().kind == "Deployment")
+        .map(|o| app.spec.cells(o, now_secs()).0[2].clone())
 }

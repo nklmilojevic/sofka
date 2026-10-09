@@ -653,6 +653,7 @@ for those operations.
 | `shell_or_scale`     | `s`                  |
 | `sort`               | `S`                  |
 | `timeline`           | `T`                  |
+| `toggle_owned`       | `O`                  |
 | `uncordon`           | `U`                  |
 | `up`                 | `k`, `up`            |
 | `wide`               | `w`                  |
