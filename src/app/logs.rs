@@ -224,12 +224,16 @@ fn render_record(
     let Ordered::Object(fields) = value else {
         return None;
     };
+    // A repeated key keeps its last value in the header, as before; the
+    // earlier entries stay visible as fields.
     let find = |keys: &[&'static str]| {
         keys.iter().find_map(|&key| {
             fields
                 .iter()
-                .find(|(name, _)| name == key)
-                .map(|(_, value)| (key, value))
+                .enumerate()
+                .rev()
+                .find(|(_, (name, _))| name == key)
+                .map(|(index, (_, value))| (index, value))
         })
     };
     let level = find(RECORD_LEVEL_KEYS);
@@ -268,11 +272,13 @@ fn render_record(
             None => push(&message.to_string()),
         }
     }
-    let used = [time, level, logger, message].map(|field| field.map(|(key, _)| key));
+    let used = [time, level, logger, message].map(|field| field.map(|(index, _)| index));
     let rest = || {
         fields
             .iter()
-            .filter(|(key, _)| !used.contains(&Some(key.as_str())))
+            .enumerate()
+            .filter(|(index, _)| !used.contains(&Some(*index)))
+            .map(|(_, field)| field)
     };
     if message.is_some() && rest().next().is_some() {
         push("›");

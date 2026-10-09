@@ -39390,6 +39390,30 @@ async fn log_json_record_view_keeps_field_order_and_separates_the_message() {
 }
 
 #[tokio::test]
+async fn log_json_record_view_keeps_the_last_repeated_header_key() {
+    let (mut app, _rx) = test_app();
+    app.mode = Mode::Logs;
+    shortcut_log_lines(
+        &mut app,
+        vec![
+            r#"{"level":"info","msg":"starting","msg":"failed"}"#.into(),
+            r#"{"level":"info","level":"error","msg":"boom"}"#.into(),
+            r#"{"time":"2026-09-10T10:00:00Z","time":"2026-09-10T11:00:00Z","msg":"ok"}"#.into(),
+            r#"{"msg":"ok","logger":"a","logger":"b"}"#.into(),
+        ],
+    );
+    app.handle_key(press(KeyCode::Char('J'))).unwrap();
+    assert_eq!(app.logs.json, JsonView::Record);
+    assert_eq!(app.logs.display_line(0), "INFO  failed › msg=starting");
+    assert_eq!(app.logs.display_line(1), "ERROR boom › level=info");
+    assert_eq!(
+        app.logs.display_line(2),
+        "2026-09-10T11:00:00Z ok › time=2026-09-10T10:00:00Z"
+    );
+    assert_eq!(app.logs.display_line(3), "b: ok › logger=a");
+}
+
+#[tokio::test]
 async fn log_json_record_view_does_not_depend_on_the_pretty_cache() {
     let (mut app, _rx) = test_app();
     app.mode = Mode::Logs;
