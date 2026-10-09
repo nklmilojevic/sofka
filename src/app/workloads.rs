@@ -169,6 +169,8 @@ impl App {
                             | Action::Last
                             | Action::PageUp
                             | Action::PageDown
+                            | Action::HalfPageUp
+                            | Action::HalfPageDown
                             | Action::Left
                             | Action::Right
                             | Action::RangeUp

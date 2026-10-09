@@ -618,13 +618,16 @@ impl App {
             (Some(Action::Back), _) | (Some(Action::Close), _) => self.mode = Mode::Table,
             (Some(Action::Down), _) => list_step(&mut self.container_state, len, true),
             (Some(Action::Up), _) => list_step(&mut self.container_state, len, false),
-            (Some(Action::PageDown), _) => {
-                list_page(&mut self.container_state, len, self.picker_page_items, true)
-            }
-            (Some(Action::PageUp), _) => list_page(
+            (Some(a @ (Action::PageDown | Action::HalfPageDown)), _) => list_page(
                 &mut self.container_state,
                 len,
-                self.picker_page_items,
+                a.page_size(self.picker_page_items),
+                true,
+            ),
+            (Some(a @ (Action::PageUp | Action::HalfPageUp)), _) => list_page(
+                &mut self.container_state,
+                len,
+                a.page_size(self.picker_page_items),
                 false,
             ),
             (Some(Action::Accept), _) => {
@@ -1419,12 +1422,22 @@ impl App {
                 list_step(&mut self.skin_state, len, false);
                 self.preview_selected_skin();
             }
-            (Some(Action::PageDown), _) => {
-                list_page(&mut self.skin_state, len, self.picker_page_items, true);
+            (Some(a @ (Action::PageDown | Action::HalfPageDown)), _) => {
+                list_page(
+                    &mut self.skin_state,
+                    len,
+                    a.page_size(self.picker_page_items),
+                    true,
+                );
                 self.preview_selected_skin();
             }
-            (Some(Action::PageUp), _) => {
-                list_page(&mut self.skin_state, len, self.picker_page_items, false);
+            (Some(a @ (Action::PageUp | Action::HalfPageUp)), _) => {
+                list_page(
+                    &mut self.skin_state,
+                    len,
+                    a.page_size(self.picker_page_items),
+                    false,
+                );
                 self.preview_selected_skin();
             }
             (Some(Action::Accept), _) => {
@@ -1780,16 +1793,16 @@ impl App {
             }
             (Some(Action::Down), _) => list_step(&mut self.transfer_menu_state, len, true),
             (Some(Action::Up), _) => list_step(&mut self.transfer_menu_state, len, false),
-            (Some(Action::PageDown), _) => list_page(
+            (Some(a @ (Action::PageDown | Action::HalfPageDown)), _) => list_page(
                 &mut self.transfer_menu_state,
                 len,
-                self.picker_page_items,
+                a.page_size(self.picker_page_items),
                 true,
             ),
-            (Some(Action::PageUp), _) => list_page(
+            (Some(a @ (Action::PageUp | Action::HalfPageUp)), _) => list_page(
                 &mut self.transfer_menu_state,
                 len,
-                self.picker_page_items,
+                a.page_size(self.picker_page_items),
                 false,
             ),
             (Some(Action::Accept), _) => {
@@ -2026,13 +2039,16 @@ impl App {
             (Some(Action::Back), _) | (Some(Action::Close), _) => self.mode = Mode::Table,
             (Some(Action::Down), _) => list_step(&mut self.flux_menu_state, len, true),
             (Some(Action::Up), _) => list_step(&mut self.flux_menu_state, len, false),
-            (Some(Action::PageDown), _) => {
-                list_page(&mut self.flux_menu_state, len, self.picker_page_items, true)
-            }
-            (Some(Action::PageUp), _) => list_page(
+            (Some(a @ (Action::PageDown | Action::HalfPageDown)), _) => list_page(
                 &mut self.flux_menu_state,
                 len,
-                self.picker_page_items,
+                a.page_size(self.picker_page_items),
+                true,
+            ),
+            (Some(a @ (Action::PageUp | Action::HalfPageUp)), _) => list_page(
+                &mut self.flux_menu_state,
+                len,
+                a.page_size(self.picker_page_items),
                 false,
             ),
             (Some(Action::Accept), _) => {

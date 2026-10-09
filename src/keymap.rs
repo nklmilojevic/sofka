@@ -77,6 +77,8 @@ actions! {
     Force => ("force", "force"),
     ForceDelete => ("force_delete", "force delete"),
     Fullscreen => ("fullscreen", "fullscreen"),
+    HalfPageDown => ("half_page_down", "half page down"),
+    HalfPageUp => ("half_page_up", "half page up"),
     Help => ("help", "help"),
     HistoryBack => ("history_back", "history back"),
     HistoryForward => ("history_forward", "history forward"),
@@ -176,6 +178,14 @@ impl Action {
                 "replicationcontrollers",
             ]),
             _ => None,
+        }
+    }
+
+    /// Rows or lines a paging action moves for a full page of `page`.
+    pub fn page_size(self, page: usize) -> usize {
+        match self {
+            Self::HalfPageDown | Self::HalfPageUp => (page / 2).max(1),
+            _ => page,
         }
     }
 
@@ -656,6 +666,8 @@ const NAVIGATION_ACTIONS: &[Action] = &[
     Action::Last,
     Action::PageUp,
     Action::PageDown,
+    Action::HalfPageUp,
+    Action::HalfPageDown,
     Action::Left,
     Action::Right,
     Action::Back,
@@ -680,6 +692,13 @@ impl Default for Keymap {
                 }
                 for &scope in TEXT_SCOPES {
                     bindings.entry(scope).or_default();
+                }
+                // Half-page scrolling is available wherever paging is, unbound.
+                for actions in bindings.values_mut() {
+                    if actions.contains_key(&Action::PageDown) {
+                        actions.insert(Action::HalfPageDown, Vec::new());
+                        actions.insert(Action::HalfPageUp, Vec::new());
+                    }
                 }
                 for (&scope, actions) in &mut bindings {
                     for &(action, chords) in GLOBAL

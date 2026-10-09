@@ -44,6 +44,7 @@ ownership scope are cleared. Startup still uses the configured default resource.
 | `esc`                                                        | go back / pop the view stack / clear filter / clear marks                                                                                                                                        |
 | `j`/`k`, `↓`/`↑`, `g`/`G`                                    | navigate                                                                                                                                                                                         |
 | `ctrl-f` / `ctrl-b`, `PgDn` / `PgUp`                         | page forward / back - one screenful at a time                                                                                                                                                    |
+| `half_page_down` / `half_page_up`                            | half a page forward / back; unbound by default, see [key bindings](keybindings.md#example-ctrlu-and-ctrld-for-half-page-scrolling)                                                               |
 | `S` / `I`                                                    | sort-column picker (fuzzy; ⏎ on the active column inverts) / invert sort direction; saved per kind by default (`remember_sort = false` disables this)                                            |
 | `A`                                                          | sort by `AGE`; press again to invert; uses the sort memory setting                                                                                                                               |
 | `ctrl-e`                                                     | compact mode: collapse the header + footer (for tiled/multiplexed panes)                                                                                                                         |
@@ -313,6 +314,11 @@ See [Views](views.md#navigating-between-kinds) for adding CRD relations.
 namespaces, sort and copy fields, port forwards, containers, set image, skins,
 snapshots, and the action and transfer menus. The page size is the number of
 visible list rows. Paging also works while a picker filter is being typed.
+
+`half_page_down` and `half_page_up` move half a page in every view and picker
+that pages. They have no default keys; bind them in
+[key bindings](keybindings.md#example-ctrlu-and-ctrld-for-half-page-scrolling),
+for example to `ctrl-d` and `ctrl-u`.
 
 ## Text inputs (palette, filters, prompts)
 

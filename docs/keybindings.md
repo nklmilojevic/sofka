@@ -6,22 +6,22 @@ settings, the default bindings remain active. `?` shows the effective bindings
 for each mode. The header and footer show the first binding for each action.
 An action with no binding is shown as `unbound`.
 
-## Example: Ctrl+U and Ctrl+D for paging
+## Example: Ctrl+U and Ctrl+D for half-page scrolling
 
 ```toml
 [keys.navigation]
-page_up = ["pageup", "ctrl-b", "ctrl-u"]
-page_down = ["pagedown", "ctrl-f", "ctrl-d"]
+half_page_up = "ctrl-u"
+half_page_down = "ctrl-d"
 
 [keys.table]
 delete = "alt-d"
 ```
 
-The example retains the listed paging keys and adds `ctrl-u` and `ctrl-d`.
-The page size stays the same as before in each view. `ctrl-d` normally starts
-deletion in tables, so the example moves deletion to `alt-d`. Deletion still
-uses confirmation and read-only checks. In text inputs, `ctrl-u` still clears
-the line.
+`half_page_up` and `half_page_down` move half the page size of the view. They
+are available wherever `page_up` and `page_down` are, and have no default
+bindings. `ctrl-d` normally starts deletion in tables, so the example moves
+deletion to `alt-d`. Deletion still uses confirmation and read-only checks. In
+text inputs, `ctrl-u` still clears the line.
 
 ## Values and scopes
 
@@ -33,8 +33,8 @@ the line.
 - `[keys.global]` sets `quit`, `compact`, and `plugin_activity` in every mode.
 - `[keys.navigation]` sets shared navigation actions in modes that support them.
   It does not affect text input modes. The shared actions are `up`, `down`,
-  `first`, `last`, `page_up`, `page_down`, `left`, `right`, `back`, `close`,
-  `command`, and `help`. Shared `back` settings do not change confirmation
+  `first`, `last`, `page_up`, `page_down`, `half_page_up`, `half_page_down`,
+  `left`, `right`, `back`, `close`, `command`, and `help`. Shared `back` settings do not change confirmation
   dialogs. Shared `close` settings do not change the table's `exit` action or
   the global `quit` action; configure those separately.
 - `[keys.input]` sets `clear_line`, `delete_word`, `backspace`, `back`, and
@@ -291,6 +291,8 @@ for those operations.
 | `edit`           | `e`                           |
 | `filter`         | `/`                           |
 | `first`          | `g`, `home`                   |
+| `half_page_down` | unbound                       |
+| `half_page_up`   | unbound                       |
 | `last`           | `G`, `end`                    |
 | `left`           | `h`, `left`                   |
 | `next_match`     | `n`                           |
@@ -311,6 +313,8 @@ for those operations.
 | `down`           | `j`, `down`                   |
 | `filter`         | `/`                           |
 | `first`          | `g`, `home`                   |
+| `half_page_down` | unbound                       |
+| `half_page_up`   | unbound                       |
 | `last`           | `G`, `end`                    |
 | `left`           | `h`, `left`                   |
 | `next_match`     | `n`                           |
@@ -339,6 +343,8 @@ for those operations.
 | `down`           | `j`, `down`                   |
 | `filter`         | `/`                           |
 | `first`          | `g`, `home`                   |
+| `half_page_down` | unbound                       |
+| `half_page_up`   | unbound                       |
 | `last`           | `G`, `end`                    |
 | `left`           | `h`, `left`                   |
 | `next_match`     | `n`                           |
@@ -434,17 +440,19 @@ for those operations.
 
 ### `[keys.help]`
 
-| Action      | Default bindings              |
-| ----------- | ----------------------------- |
-| `back`      | `esc`                         |
-| `close`     | `q`, `?`                      |
-| `down`      | `j`, `down`                   |
-| `filter`    | `/`                           |
-| `first`     | `g`, `home`                   |
-| `last`      | `G`, `end`                    |
-| `page_down` | `pagedown`, `space`, `ctrl-f` |
-| `page_up`   | `pageup`, `ctrl-b`            |
-| `up`        | `k`, `up`                     |
+| Action           | Default bindings              |
+| ---------------- | ----------------------------- |
+| `back`           | `esc`                         |
+| `close`          | `q`, `?`                      |
+| `down`           | `j`, `down`                   |
+| `filter`         | `/`                           |
+| `first`          | `g`, `home`                   |
+| `half_page_down` | unbound                       |
+| `half_page_up`   | unbound                       |
+| `last`           | `G`, `end`                    |
+| `page_down`      | `pagedown`, `space`, `ctrl-f` |
+| `page_up`        | `pageup`, `ctrl-b`            |
+| `up`             | `k`, `up`                     |
 
 ### `[keys.log_filter]`
 
@@ -456,33 +464,35 @@ for those operations.
 
 ### `[keys.logs]`
 
-| Action       | Default bindings    |
-| ------------ | ------------------- |
-| `anchor_0`   | `0`                 |
-| `anchor_1`   | `1`                 |
-| `anchor_2`   | `2`                 |
-| `anchor_3`   | `3`                 |
-| `anchor_4`   | `4`                 |
-| `anchor_5`   | `5`                 |
-| `back`       | `esc`               |
-| `clear`      | `z`                 |
-| `close`      | `q`                 |
-| `copy`       | `c`                 |
-| `down`       | `j`, `down`         |
-| `filter`     | `/`                 |
-| `first`      | `g`, `home`         |
-| `follow`     | `s`, `f`            |
-| `fullscreen` | `F`                 |
-| `last`       | `G`, `end`          |
-| `lookback`   | `T`                 |
-| `page_down`  | `pagedown`, `space` |
-| `page_up`    | `pageup`            |
-| `save`       | `ctrl-s`            |
-| `stream`     | `x`                 |
-| `json`       | `J`                 |
-| `timestamps` | `t`                 |
-| `up`         | `k`, `up`           |
-| `wrap`       | `w`                 |
+| Action           | Default bindings    |
+| ---------------- | ------------------- |
+| `anchor_0`       | `0`                 |
+| `anchor_1`       | `1`                 |
+| `anchor_2`       | `2`                 |
+| `anchor_3`       | `3`                 |
+| `anchor_4`       | `4`                 |
+| `anchor_5`       | `5`                 |
+| `back`           | `esc`               |
+| `clear`          | `z`                 |
+| `close`          | `q`                 |
+| `copy`           | `c`                 |
+| `down`           | `j`, `down`         |
+| `filter`         | `/`                 |
+| `first`          | `g`, `home`         |
+| `follow`         | `s`, `f`            |
+| `fullscreen`     | `F`                 |
+| `half_page_down` | unbound             |
+| `half_page_up`   | unbound             |
+| `last`           | `G`, `end`          |
+| `lookback`       | `T`                 |
+| `page_down`      | `pagedown`, `space` |
+| `page_up`        | `pageup`            |
+| `save`           | `ctrl-s`            |
+| `stream`         | `x`                 |
+| `json`           | `J`                 |
+| `timestamps`     | `t`                 |
+| `up`             | `k`, `up`           |
+| `wrap`           | `w`                 |
 
 ### `[keys.namespaces]`
 
@@ -627,6 +637,8 @@ for those operations.
 | `filter`             | `/`                  |
 | `first`              | `g`, `home`          |
 | `force_delete`       | `ctrl-k`             |
+| `half_page_down`     | unbound              |
+| `half_page_up`       | unbound              |
 | `history_back`       | `[`                  |
 | `history_forward`    | `]`                  |
 | `inspect`            | `x`                  |

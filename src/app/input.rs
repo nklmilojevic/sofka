@@ -61,6 +61,8 @@ impl App {
                     | Action::Last
                     | Action::PageUp
                     | Action::PageDown
+                    | Action::HalfPageUp
+                    | Action::HalfPageDown
                     | Action::RangeUp
                     | Action::RangeDown
                     | Action::NextMatch
@@ -144,40 +146,44 @@ impl App {
         }
         let drain_page = if self.mode == Mode::Drain {
             match key.action {
-                Some(Action::PageDown) => Some(true),
-                Some(Action::PageUp) => Some(false),
+                Some(a @ (Action::PageDown | Action::HalfPageDown)) => {
+                    Some((true, a.page_size(5) as u16))
+                }
+                Some(a @ (Action::PageUp | Action::HalfPageUp)) => {
+                    Some((false, a.page_size(5) as u16))
+                }
                 _ => None,
             }
         } else if self.drain_confirmation() {
             match key.code {
-                KeyCode::PageDown => Some(true),
-                KeyCode::PageUp => Some(false),
+                KeyCode::PageDown => Some((true, 5)),
+                KeyCode::PageUp => Some((false, 5)),
                 _ => None,
             }
         } else {
             None
         };
-        if let Some(down) = drain_page {
+        if let Some((down, step)) = drain_page {
             self.drain.focus_field = false;
             self.drain.scroll = if down {
-                self.drain.scroll.saturating_add(5)
+                self.drain.scroll.saturating_add(step)
             } else {
-                self.drain.scroll.saturating_sub(5)
+                self.drain.scroll.saturating_sub(step)
             };
             return Ok(());
         }
         if matches!(self.mode, Mode::Confirm | Mode::Prompt) && !self.drain_confirmation() {
             let page = self.popup_viewport.max(1);
             match key.action {
-                Some(Action::PageDown) => {
+                Some(a @ (Action::PageDown | Action::HalfPageDown)) => {
                     self.popup_scroll = self
                         .popup_scroll
-                        .saturating_add(page)
+                        .saturating_add(a.page_size(page))
                         .min(self.popup_max_scroll);
                     return Ok(());
                 }
-                Some(Action::PageUp) => {
-                    self.popup_scroll = self.popup_scroll.saturating_sub(page);
+                Some(a @ (Action::PageUp | Action::HalfPageUp)) => {
+                    self.popup_scroll = self.popup_scroll.saturating_sub(a.page_size(page));
                     return Ok(());
                 }
                 _ => {}
@@ -416,6 +422,8 @@ impl App {
             }
             (Some(Action::PageDown), _) => self.move_page(1),
             (Some(Action::PageUp), _) => self.move_page(-1),
+            (Some(Action::HalfPageDown), _) => self.move_half_page(1),
+            (Some(Action::HalfPageUp), _) => self.move_half_page(-1),
             // Move the viewport; keep NAMESPACE/NAME in place.
             (Some(Action::Right), _) => self.scroll_columns(1),
             (Some(Action::Left), _) => self.scroll_columns(-1),
@@ -1350,8 +1358,12 @@ impl App {
             (Some(Action::Up), _) => target.scroll_by(-1),
             (Some(Action::Left), _) => target.scroll_h(-5),
             (Some(Action::Right), _) => target.scroll_h(5),
-            (Some(Action::PageDown), _) => target.scroll_by(20),
-            (Some(Action::PageUp), _) => target.scroll_by(-20),
+            (Some(a @ (Action::PageDown | Action::HalfPageDown)), _) => {
+                target.scroll_by(a.page_size(20) as i32)
+            }
+            (Some(a @ (Action::PageUp | Action::HalfPageUp)), _) => {
+                target.scroll_by(-(a.page_size(20) as i32))
+            }
             (Some(Action::First), _) => {
                 target.scroll = 0;
                 target.hscroll = 0;
@@ -1514,13 +1526,13 @@ impl App {
                 self.logs.follow = false;
                 self.logs.view.scroll = cur.saturating_sub(1);
             }
-            (Some(Action::PageDown), _) => {
+            (Some(a @ (Action::PageDown | Action::HalfPageDown)), _) => {
                 self.logs.follow = false;
-                self.logs.view.scroll = cur.saturating_add(page).min(max);
+                self.logs.view.scroll = cur.saturating_add(a.page_size(page)).min(max);
             }
-            (Some(Action::PageUp), _) => {
+            (Some(a @ (Action::PageUp | Action::HalfPageUp)), _) => {
                 self.logs.follow = false;
-                self.logs.view.scroll = cur.saturating_sub(page);
+                self.logs.view.scroll = cur.saturating_sub(a.page_size(page));
             }
             (Some(Action::First), _) => {
                 self.logs.follow = false;
@@ -1584,13 +1596,17 @@ impl App {
             (Some(Action::Up), _) => {
                 self.help_scroll = self.help_scroll.saturating_sub(1);
             }
-            (Some(Action::PageDown), _) => {
+            (Some(a @ (Action::PageDown | Action::HalfPageDown)), _) => {
                 self.help_scroll = self
                     .help_scroll
-                    .saturating_add(page)
+                    .saturating_add(a.page_size(page.into()) as u16)
                     .min(self.help_max_scroll);
             }
-            (Some(Action::PageUp), _) => self.help_scroll = self.help_scroll.saturating_sub(page),
+            (Some(a @ (Action::PageUp | Action::HalfPageUp)), _) => {
+                self.help_scroll = self
+                    .help_scroll
+                    .saturating_sub(a.page_size(page.into()) as u16)
+            }
             (Some(Action::First), _) => self.help_scroll = 0,
             (Some(Action::Last), _) => self.help_scroll = self.help_max_scroll,
             _ => {}

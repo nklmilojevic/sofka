@@ -134,12 +134,18 @@ impl App {
             (Some(Action::Back), _) | (Some(Action::Close), _) => self.mode = Mode::Table,
             (Some(Action::Down), _) => list_step(&mut self.snapshot_state, len, true),
             (Some(Action::Up), _) => list_step(&mut self.snapshot_state, len, false),
-            (Some(Action::PageDown), _) => {
-                list_page(&mut self.snapshot_state, len, self.picker_page_items, true)
-            }
-            (Some(Action::PageUp), _) => {
-                list_page(&mut self.snapshot_state, len, self.picker_page_items, false)
-            }
+            (Some(a @ (Action::PageDown | Action::HalfPageDown)), _) => list_page(
+                &mut self.snapshot_state,
+                len,
+                a.page_size(self.picker_page_items),
+                true,
+            ),
+            (Some(a @ (Action::PageUp | Action::HalfPageUp)), _) => list_page(
+                &mut self.snapshot_state,
+                len,
+                a.page_size(self.picker_page_items),
+                false,
+            ),
             (Some(Action::Accept), _) => self.open_selected_snapshot(),
             (Some(Action::Delete), _) => self.delete_selected_snapshot(),
             _ => {}

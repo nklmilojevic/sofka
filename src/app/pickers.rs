@@ -283,16 +283,16 @@ impl App {
             }
             (Some(Action::Down), _) => list_step(&mut self.sort_picker_state, len, true),
             (Some(Action::Up), _) => list_step(&mut self.sort_picker_state, len, false),
-            (Some(Action::PageDown), _) => list_page(
+            (Some(a @ (Action::PageDown | Action::HalfPageDown)), _) => list_page(
                 &mut self.sort_picker_state,
                 len,
-                self.picker_page_items,
+                a.page_size(self.picker_page_items),
                 true,
             ),
-            (Some(Action::PageUp), _) => list_page(
+            (Some(a @ (Action::PageUp | Action::HalfPageUp)), _) => list_page(
                 &mut self.sort_picker_state,
                 len,
-                self.picker_page_items,
+                a.page_size(self.picker_page_items),
                 false,
             ),
             (Some(Action::Accept), _) => {
@@ -440,16 +440,16 @@ impl App {
             }
             (Some(Action::Down), _) => list_step(&mut self.copy_picker_state, len, true),
             (Some(Action::Up), _) => list_step(&mut self.copy_picker_state, len, false),
-            (Some(Action::PageDown), _) => list_page(
+            (Some(a @ (Action::PageDown | Action::HalfPageDown)), _) => list_page(
                 &mut self.copy_picker_state,
                 len,
-                self.picker_page_items,
+                a.page_size(self.picker_page_items),
                 true,
             ),
-            (Some(Action::PageUp), _) => list_page(
+            (Some(a @ (Action::PageUp | Action::HalfPageUp)), _) => list_page(
                 &mut self.copy_picker_state,
                 len,
-                self.picker_page_items,
+                a.page_size(self.picker_page_items),
                 false,
             ),
             (Some(Action::Accept), _) => {
@@ -539,12 +539,18 @@ impl App {
             }
             (Some(Action::Down), _) => list_step(&mut self.ns_state, len, true),
             (Some(Action::Up), _) => list_step(&mut self.ns_state, len, false),
-            (Some(Action::PageDown), _) => {
-                list_page(&mut self.ns_state, len, self.picker_page_items, true)
-            }
-            (Some(Action::PageUp), _) => {
-                list_page(&mut self.ns_state, len, self.picker_page_items, false)
-            }
+            (Some(a @ (Action::PageDown | Action::HalfPageDown)), _) => list_page(
+                &mut self.ns_state,
+                len,
+                a.page_size(self.picker_page_items),
+                true,
+            ),
+            (Some(a @ (Action::PageUp | Action::HalfPageUp)), _) => list_page(
+                &mut self.ns_state,
+                len,
+                a.page_size(self.picker_page_items),
+                false,
+            ),
             (Some(Action::Accept), _) => {
                 let filtered = self.filtered_namespaces();
                 let has_real_match = filtered.iter().any(|n| n != "<all>");
@@ -712,12 +718,18 @@ impl App {
                 (Some(Action::Accept), _) => self.switch_selected_context(),
                 (Some(Action::Down), _) => list_step(&mut self.ctx_state, len, true),
                 (Some(Action::Up), _) => list_step(&mut self.ctx_state, len, false),
-                (Some(Action::PageDown), _) => {
-                    list_page(&mut self.ctx_state, len, self.picker_page_items, true)
-                }
-                (Some(Action::PageUp), _) => {
-                    list_page(&mut self.ctx_state, len, self.picker_page_items, false)
-                }
+                (Some(a @ (Action::PageDown | Action::HalfPageDown)), _) => list_page(
+                    &mut self.ctx_state,
+                    len,
+                    a.page_size(self.picker_page_items),
+                    true,
+                ),
+                (Some(a @ (Action::PageUp | Action::HalfPageUp)), _) => list_page(
+                    &mut self.ctx_state,
+                    len,
+                    a.page_size(self.picker_page_items),
+                    false,
+                ),
                 (Some(Action::Backspace), _) => {
                     self.ctx_filter.pop();
                     self.select_best_context_match();
@@ -754,12 +766,18 @@ impl App {
             }
             (Some(Action::Down), _) => list_step(&mut self.ctx_state, len, true),
             (Some(Action::Up), _) => list_step(&mut self.ctx_state, len, false),
-            (Some(Action::PageDown), _) => {
-                list_page(&mut self.ctx_state, len, self.picker_page_items, true)
-            }
-            (Some(Action::PageUp), _) => {
-                list_page(&mut self.ctx_state, len, self.picker_page_items, false)
-            }
+            (Some(a @ (Action::PageDown | Action::HalfPageDown)), _) => list_page(
+                &mut self.ctx_state,
+                len,
+                a.page_size(self.picker_page_items),
+                true,
+            ),
+            (Some(a @ (Action::PageUp | Action::HalfPageUp)), _) => list_page(
+                &mut self.ctx_state,
+                len,
+                a.page_size(self.picker_page_items),
+                false,
+            ),
             (Some(Action::Accept), _) => self.switch_selected_context(),
             (None, KeyCode::Char(c)) => {
                 self.ctx_filtering = true;

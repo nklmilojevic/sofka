@@ -33083,6 +33083,107 @@ async fn configured_paging_preserves_view_behavior_and_text_input() {
     assert_eq!(app.mode, Mode::Prompt);
 }
 
+const HALF_PAGE_KEYS: &str = r#"
+[keys.navigation]
+half_page_up = "ctrl-u"
+half_page_down = "ctrl-d"
+[keys.table]
+delete = "alt-d"
+"#;
+
+#[tokio::test]
+async fn half_page_actions_are_unbound_by_default() {
+    let (mut app, _rx) = test_app();
+    app.switch_kind("pods");
+    apply(
+        &mut app,
+        json!({"apiVersion":"v1", "kind":"Pod",
+        "metadata":{"name":"p0", "namespace":"default"}}),
+    );
+    app.table_state.select(Some(0));
+    assert_eq!(app.keymap.label("table", Action::HalfPageDown), "unbound");
+    assert_eq!(app.keymap.label("logs", Action::HalfPageUp), "unbound");
+    app.handle_key(ctrl(KeyCode::Char('d'))).unwrap();
+    assert_eq!(app.mode, Mode::Confirm);
+    assert!(matches!(
+        app.confirm_action,
+        Some(ConfirmAction::Delete { force: false, .. })
+    ));
+}
+
+#[tokio::test]
+async fn configured_half_page_keys_move_half_a_page_in_tables_and_pickers() {
+    let (mut app, _rx) = test_app();
+    app.switch_kind("pods");
+    for n in 0..25 {
+        apply(
+            &mut app,
+            json!({"apiVersion":"v1", "kind":"Pod",
+            "metadata":{"name":format!("p{n:02}"), "namespace":"default"}}),
+        );
+    }
+    app.table_state.select(Some(0));
+    app.table_page_rows = 8;
+    use_keys(&mut app, HALF_PAGE_KEYS);
+    app.handle_key(ctrl(KeyCode::Char('d'))).unwrap();
+    assert_eq!(app.table_state.selected(), Some(4));
+    assert_eq!(app.mode, Mode::Table);
+    assert!(app.confirm_action.is_none());
+    app.handle_key(press(KeyCode::PageDown)).unwrap();
+    assert_eq!(app.table_state.selected(), Some(12));
+    app.handle_key(ctrl(KeyCode::Char('u'))).unwrap();
+    assert_eq!(app.table_state.selected(), Some(8));
+
+    app.mode = Mode::Snapshots;
+    app.snapshot_list = (0..30)
+        .map(|n| (std::path::PathBuf::from(n.to_string()), n.to_string()))
+        .collect();
+    app.snapshot_state.select(Some(0));
+    app.picker_page_items = 10;
+    app.handle_key(ctrl(KeyCode::Char('d'))).unwrap();
+    assert_eq!(app.snapshot_state.selected(), Some(5));
+    app.handle_key(ctrl(KeyCode::Char('u'))).unwrap();
+    assert_eq!(app.snapshot_state.selected(), Some(0));
+}
+
+#[tokio::test]
+async fn configured_half_page_keys_scroll_half_a_page_in_text_views() {
+    let (mut app, _rx) = test_app();
+    use_keys(&mut app, HALF_PAGE_KEYS);
+    for mode in [Mode::Detail, Mode::Diff, Mode::Events] {
+        app.mode = mode;
+        app.detail = Scrollable {
+            lines: (0..100).map(|n| n.to_string()).collect(),
+            ..Default::default()
+        };
+        app.handle_key(ctrl(KeyCode::Char('d'))).unwrap();
+        assert_eq!(app.detail.scroll, 10, "{mode:?}");
+        app.handle_key(ctrl(KeyCode::Char('u'))).unwrap();
+        assert_eq!(app.detail.scroll, 0, "{mode:?}");
+    }
+    app.mode = Mode::Logs;
+    app.logs.viewport_h = 9;
+    app.logs.viewport_rows = 100;
+    app.logs.follow = true;
+    app.handle_key(ctrl(KeyCode::Char('d'))).unwrap();
+    assert_eq!(app.logs.view.scroll, 4);
+    assert!(!app.logs.follow);
+    app.handle_key(ctrl(KeyCode::Char('u'))).unwrap();
+    assert_eq!(app.logs.view.scroll, 0);
+    app.mode = Mode::Help;
+    app.help_viewport_h = 9;
+    app.help_max_scroll = 100;
+    app.handle_key(ctrl(KeyCode::Char('d'))).unwrap();
+    assert_eq!(app.help_scroll, 4);
+    app.handle_key(ctrl(KeyCode::Char('u'))).unwrap();
+    assert_eq!(app.help_scroll, 0);
+    app.mode = Mode::Prompt;
+    app.prompt_input = "keep text editing".into();
+    app.handle_key(ctrl(KeyCode::Char('u'))).unwrap();
+    assert!(app.prompt_input.is_empty());
+    assert_eq!(app.mode, Mode::Prompt);
+}
+
 #[tokio::test]
 async fn released_keys_reach_bookmarks_and_wheel_uses_actions() {
     use crossterm::event::{MouseEvent, MouseEventKind};

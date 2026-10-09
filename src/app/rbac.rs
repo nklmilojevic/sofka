@@ -215,18 +215,22 @@ impl App {
             Some(Action::Last) if subjects => self.rbac.selection.select(len.checked_sub(1)),
             Some(Action::Down) => self.rbac.document.scroll_by(1),
             Some(Action::Up) => self.rbac.document.scroll_by(-1),
-            Some(Action::PageDown) if subjects => {
-                for _ in 0..10 {
+            Some(a @ (Action::PageDown | Action::HalfPageDown)) if subjects => {
+                for _ in 0..a.page_size(10) {
                     list_step(&mut self.rbac.selection, len, true);
                 }
             }
-            Some(Action::PageUp) if subjects => {
-                for _ in 0..10 {
+            Some(a @ (Action::PageUp | Action::HalfPageUp)) if subjects => {
+                for _ in 0..a.page_size(10) {
                     list_step(&mut self.rbac.selection, len, false);
                 }
             }
-            Some(Action::PageDown) => self.rbac.document.scroll_by(10),
-            Some(Action::PageUp) => self.rbac.document.scroll_by(-10),
+            Some(a @ (Action::PageDown | Action::HalfPageDown)) => {
+                self.rbac.document.scroll_by(a.page_size(10) as i32)
+            }
+            Some(a @ (Action::PageUp | Action::HalfPageUp)) => {
+                self.rbac.document.scroll_by(-(a.page_size(10) as i32))
+            }
             Some(Action::First) => self.rbac.document.scroll_by(i32::MIN),
             Some(Action::Last) => self.rbac.document.scroll_to_bottom(),
             _ => {}

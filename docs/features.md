@@ -353,6 +353,10 @@ include those conditions. Row filters can search the route paths.
 - **Picker paging** - `PgDn` and `PgUp` move one visible page through every
   list picker, including `:ctx` and `:ns`, and keep working while a picker
   filter is being typed.
+- **Half-page scrolling** - `half_page_down` and `half_page_up` move half a
+  page in tables, document views, logs, help, and pickers. They are unbound by
+  default; see [key bindings](keybindings.md) to map them, for example to
+  `ctrl-d` and `ctrl-u`.
 - **Filtering** (`/`) with matched-character highlighting: contiguous text
   (`"text"` keeps spaces), `a|b` for either name, `~text` fuzzy match, `/re/`
   regular expression (all case-insensitive except fuzzy's smart case), `!text`

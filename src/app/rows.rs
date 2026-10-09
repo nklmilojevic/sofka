@@ -1452,6 +1452,11 @@ impl App {
         let page = self.table_page_rows.max(1) as i32;
         self.move_selection(pages.saturating_mul(page));
     }
+
+    pub(super) fn move_half_page(&mut self, pages: i32) {
+        let half = Action::HalfPageDown.page_size(self.table_page_rows) as i32;
+        self.move_selection(pages.saturating_mul(half));
+    }
 }
 
 fn pod_has_faults(o: &DynamicObject) -> bool {

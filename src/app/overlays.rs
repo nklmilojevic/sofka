@@ -8,13 +8,16 @@ impl App {
             (Some(Action::Back), _) | (Some(Action::Close), _) => self.mode = Mode::Table,
             (Some(Action::Down), _) => list_step(&mut self.container_state, len, true),
             (Some(Action::Up), _) => list_step(&mut self.container_state, len, false),
-            (Some(Action::PageDown), _) => {
-                list_page(&mut self.container_state, len, self.picker_page_items, true)
-            }
-            (Some(Action::PageUp), _) => list_page(
+            (Some(a @ (Action::PageDown | Action::HalfPageDown)), _) => list_page(
                 &mut self.container_state,
                 len,
-                self.picker_page_items,
+                a.page_size(self.picker_page_items),
+                true,
+            ),
+            (Some(a @ (Action::PageUp | Action::HalfPageUp)), _) => list_page(
+                &mut self.container_state,
+                len,
+                a.page_size(self.picker_page_items),
                 false,
             ),
             (Some(Action::Logs), _) => {
@@ -495,13 +498,16 @@ impl App {
             (Some(Action::Back), _) | (Some(Action::Close), _) => self.mode = Mode::Table,
             (Some(Action::Down), _) => list_step(&mut self.pf_picker_state, len, true),
             (Some(Action::Up), _) => list_step(&mut self.pf_picker_state, len, false),
-            (Some(Action::PageDown), _) => {
-                list_page(&mut self.pf_picker_state, len, self.picker_page_items, true)
-            }
-            (Some(Action::PageUp), _) => list_page(
+            (Some(a @ (Action::PageDown | Action::HalfPageDown)), _) => list_page(
                 &mut self.pf_picker_state,
                 len,
-                self.picker_page_items,
+                a.page_size(self.picker_page_items),
+                true,
+            ),
+            (Some(a @ (Action::PageUp | Action::HalfPageUp)), _) => list_page(
+                &mut self.pf_picker_state,
+                len,
+                a.page_size(self.picker_page_items),
                 false,
             ),
             (Some(Action::Accept | Action::Edit), _) => {
