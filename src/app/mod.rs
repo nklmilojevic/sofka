@@ -781,6 +781,7 @@ impl PaletteAction {
                 | PaletteAction::Diff
                 | PaletteAction::RolloutHistory
                 | PaletteAction::Notify
+                | PaletteAction::ProviderLogs
         )
     }
 }

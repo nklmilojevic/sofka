@@ -596,6 +596,17 @@ async fn palette_commands_and_timeline_follow_the_selected_row() {
         ["NAME", "KIND", "READY", "STATUS", "AGE"]
     );
 
+    // `:vlogs` opens the selected Pod's provider logs.
+    type_resource_query(&mut app, "vlogs");
+    assert_eq!(app.mode, Mode::Logs, "{}", app.flash);
+    assert!(
+        app.logs.view.title.starts_with("web — victorialogs"),
+        "{}",
+        app.logs.view.title
+    );
+    app.handle_key(press(KeyCode::Esc)).unwrap();
+    assert_eq!(app.kind_plural, "workloads");
+
     // A row command from the palette acts on the selected Deployment.
     app.table_state
         .select(Some(position(&app, "Deployment", "web")));
