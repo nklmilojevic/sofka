@@ -11378,6 +11378,73 @@ async fn previous_logs_ignore_a_default_container_that_does_not_exist() {
 }
 
 #[tokio::test]
+async fn bundle_logs_follow_the_default_container_annotation() {
+    for (annotation, expected) in [("app", "app"), ("gone", "istio-proxy")] {
+        let (mut app, mut rx) = app_with_pod();
+        apply(
+            &mut app,
+            json!({"apiVersion":"v1", "kind":"Pod",
+            "metadata":{"name":"a", "namespace":"default", "annotations":{
+                "kubectl.kubernetes.io/default-container":annotation}},
+            "spec":{"containers":[{"name":"istio-proxy"},{"name":"app"}]}}),
+        );
+        let log_queries = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen = Arc::clone(&log_queries);
+        app.cluster.client = kube::Client::new(
+            tower::service_fn(move |request: http::Request<kube::client::Body>| {
+                let is_log = request.uri().path() == "/api/v1/namespaces/default/pods/a/log";
+                if is_log {
+                    seen.lock()
+                        .unwrap()
+                        .push(request.uri().query().unwrap_or_default().to_string());
+                }
+                let (status, body) = if is_log {
+                    (200, "log line".to_string())
+                } else {
+                    (
+                        404,
+                        json!({"kind": "Status", "apiVersion": "v1",
+                        "status": "Failure", "reason": "NotFound",
+                        "message": "unused test request", "code": 404})
+                        .to_string(),
+                    )
+                };
+                async move {
+                    Ok::<_, std::convert::Infallible>(
+                        http::Response::builder()
+                            .status(status)
+                            .body(http_body_util::Full::new(hyper::body::Bytes::from(body)))
+                            .unwrap(),
+                    )
+                }
+            }),
+            "default",
+        );
+        for key in ":bundle".chars() {
+            app.handle_key(press(KeyCode::Char(key))).unwrap();
+        }
+        app.handle_key(press(KeyCode::Enter)).unwrap();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if let Msg::Bundle { .. } = rx.recv().await.expect("bundle must finish") {
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("bundle must finish");
+        let queries = log_queries.lock().unwrap();
+        assert_eq!(queries.len(), 1, "{queries:?}");
+        assert!(
+            queries[0]
+                .split('&')
+                .any(|param| param == format!("container={expected}")),
+            "{annotation}: {queries:?}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn marked_pod_logs_do_not_change_previous_or_provider_selection() {
     let (mut app, _rx) = marked_logs_app();
     app.handle_key(press(KeyCode::Char('p'))).unwrap();
