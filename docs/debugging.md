@@ -104,7 +104,8 @@ otherwise. Any other value is reported in `:config` and treated as `raw`.
 Record view shows each structured log record (zap, slog, logrus, pino) on one row:
 time, level, message, then the other fields as `key=value`. It reads the time from
 `time`, `ts`, `timestamp`, or `@timestamp`, the level from `level`, `lvl`, or
-`severity`, and the message from `msg` or `message`. Epoch times become RFC 3339.
+`severity`, and the message from `msg` or `message`. A `logger` name (zap, logr)
+is shown before the message as `logger: message`. Epoch times become RFC 3339.
 Values with control characters, and strings that read as another JSON type
 (`"true"`, `"3"`, `"{}"`), are shown as quoted JSON strings, so a record stays on
 one row. Records without a level or message field stay raw. The row color comes

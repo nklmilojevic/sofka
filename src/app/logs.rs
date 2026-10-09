@@ -161,9 +161,12 @@ impl JsonView {
 const RECORD_TIME_KEYS: &[&str] = &["time", "ts", "timestamp", "@timestamp"];
 const RECORD_LEVEL_KEYS: &[&str] = &["level", "lvl", "severity"];
 const RECORD_MESSAGE_KEYS: &[&str] = &["msg", "message"];
+/// Only `logger` (zap, logr): `name` is the reconciled object in
+/// controller-runtime logs, and `component` is often a plain field.
+const RECORD_LOGGER_KEYS: &[&str] = &["logger"];
 
 /// One-line rendering of a structured log record (zap, slog, logrus, pino):
-/// `time LEVEL message key=value ...`, with the severity of its level if it
+/// `time LEVEL logger: message key=value ...`, with the severity of its level if it
 /// has one. `None` when the value is not an object with a level or message
 /// field.
 fn render_record(
@@ -194,13 +197,23 @@ fn render_record(
     if let Some(name) = &level_name {
         push(&format!("{:<5}", record_text(name)));
     }
+    // A logger without a message stays a field, so it is not shown as one.
+    let logger = message
+        .and(find(RECORD_LOGGER_KEYS))
+        .filter(|(_, logger)| logger.as_str().is_some_and(|name| !name.is_empty()));
+    if let Some((_, logger)) = logger {
+        push(&format!(
+            "{}:",
+            record_text(logger.as_str().unwrap_or_default())
+        ));
+    }
     if let Some((_, message)) = message {
         match message.as_str() {
             Some(text) => push(&record_text(text)),
             None => push(&message.to_string()),
         }
     }
-    let used = [time, level, message].map(|field| field.map(|(key, _)| key));
+    let used = [time, level, logger, message].map(|field| field.map(|(key, _)| key));
     for (key, value) in fields {
         if used.contains(&Some(key.as_str())) {
             continue;
