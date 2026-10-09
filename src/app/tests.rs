@@ -33185,6 +33185,61 @@ async fn configured_half_page_keys_scroll_half_a_page_in_text_views() {
 }
 
 #[tokio::test]
+async fn configured_half_page_keys_scroll_drain_confirmations() {
+    let (mut app, _rx, _api) = drain_app(DrainApiState::default());
+    use_keys(
+        &mut app,
+        &format!("{HALF_PAGE_KEYS}[keys.prompt]\nhalf_page_up = 'f7'\nhalf_page_down = 'f8'\n"),
+    );
+    drain_open(&mut app);
+    app.handle_key(press(KeyCode::Enter)).unwrap();
+    assert_eq!(app.mode, Mode::Confirm);
+    app.handle_key(ctrl(KeyCode::Char('d'))).unwrap();
+    assert_eq!(app.drain.scroll, 2);
+    app.handle_key(press(KeyCode::PageDown)).unwrap();
+    assert_eq!(app.drain.scroll, 7);
+    app.handle_key(ctrl(KeyCode::Char('u'))).unwrap();
+    assert_eq!(app.drain.scroll, 5);
+    assert_eq!(app.mode, Mode::Confirm);
+    app.handle_key(press(KeyCode::Esc)).unwrap();
+
+    app.guardrails = vec![crate::config::Guardrail {
+        actions: vec!["drain".into()],
+        confirmation: Some("type-resource-name".into()),
+        ..Default::default()
+    }];
+    drain_open(&mut app);
+    app.handle_key(press(KeyCode::Enter)).unwrap();
+    assert_eq!(app.mode, Mode::Prompt);
+    assert!(app.drain_confirmation());
+    let start = app.drain.scroll;
+    app.handle_key(press(KeyCode::F(8))).unwrap();
+    assert_eq!(app.drain.scroll, start + 2);
+    app.handle_key(press(KeyCode::F(7))).unwrap();
+    assert_eq!(app.drain.scroll, start);
+    assert!(app.prompt_input.is_empty());
+}
+
+#[tokio::test]
+async fn half_page_keys_bound_in_a_text_picker_mode_move_half_a_page() {
+    let (mut app, _rx) = test_app();
+    app.ns_list = (0..30).map(|n| format!("ns{n:02}")).collect();
+    app.ns_filter.clear();
+    app.mode = Mode::Namespaces;
+    app.picker_page_items = 10;
+    app.ns_state.select(Some(0));
+    use_keys(
+        &mut app,
+        "[keys.namespaces]\nhalf_page_up = 'alt-u'\nhalf_page_down = 'alt-d'\n",
+    );
+    app.handle_key(alt(KeyCode::Char('d'))).unwrap();
+    assert_eq!(app.ns_state.selected(), Some(5));
+    app.handle_key(alt(KeyCode::Char('u'))).unwrap();
+    assert_eq!(app.ns_state.selected(), Some(0));
+    assert!(app.ns_filter.is_empty());
+}
+
+#[tokio::test]
 async fn released_keys_reach_bookmarks_and_wheel_uses_actions() {
     use crossterm::event::{MouseEvent, MouseEventKind};
     let (mut app, _rx) = test_app();

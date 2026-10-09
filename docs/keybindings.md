@@ -23,6 +23,16 @@ bindings. `ctrl-d` normally starts deletion in tables, so the example moves
 deletion to `alt-d`. Deletion still uses confirmation and read-only checks. In
 text inputs, `ctrl-u` still clears the line.
 
+Like `page_up` and `page_down`, the shared setting does not reach text input
+modes. To half-page in the namespace, context, sort, or copy pickers, bind the
+actions in that mode with keys that do not edit text:
+
+```toml
+[keys.namespaces]
+half_page_up = "alt-u"
+half_page_down = "alt-d"
+```
+
 ## Values and scopes
 
 - A string sets one key combination. An array sets multiple combinations.

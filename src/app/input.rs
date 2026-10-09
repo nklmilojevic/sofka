@@ -155,9 +155,11 @@ impl App {
                 _ => None,
             }
         } else if self.drain_confirmation() {
-            match key.code {
-                KeyCode::PageDown => Some((true, 5)),
-                KeyCode::PageUp => Some((false, 5)),
+            match (key.action, key.code) {
+                (Some(Action::HalfPageDown), _) => Some((true, 2)),
+                (Some(Action::HalfPageUp), _) => Some((false, 2)),
+                (_, KeyCode::PageDown) => Some((true, 5)),
+                (_, KeyCode::PageUp) => Some((false, 5)),
                 _ => None,
             }
         } else {
