@@ -39498,4 +39498,41 @@ async fn unbound_ctrl_and_alt_chords_do_not_type_into_text_inputs() {
     app.mode = Mode::DocFilter;
     typed(&mut app);
     assert_eq!(app.detail.filter, "a");
+
+    let (mut app, _rx) = test_app();
+    app.switch_kind("services");
+    apply(
+        &mut app,
+        json!({"apiVersion": "v1", "kind": "Service",
+               "metadata": {"name": "web", "namespace": "default"},
+               "spec": {"type": "ClusterIP", "clusterIP": "10.96.13.5",
+                        "ports": [{"port": 80, "protocol": "TCP"}]}}),
+    );
+    app.table_state.select(Some(0));
+    app.handle_key(press(KeyCode::Char('S'))).unwrap();
+    assert_eq!(app.mode, Mode::SortPicker);
+    typed(&mut app);
+    assert_eq!(app.sort_picker_filter, "a");
+    app.handle_key(press(KeyCode::Esc)).unwrap();
+    app.handle_key(press(KeyCode::Esc)).unwrap();
+    assert_eq!(app.mode, Mode::Table);
+    app.handle_key(press(KeyCode::Char('Y'))).unwrap();
+    assert_eq!(app.mode, Mode::CopyPicker);
+    typed(&mut app);
+    assert_eq!(app.copy_picker_filter, "a");
+
+    app.mode = Mode::Contexts;
+    app.handle_msg(Msg::Contexts {
+        generation: app.generation,
+        list: vec!["alpha".into(), "beta".into()],
+    });
+    app.handle_key(ctrl(KeyCode::Char('x'))).unwrap();
+    app.handle_key(alt(KeyCode::Char('x'))).unwrap();
+    assert!(!app.ctx_filtering, "chords do not start a context filter");
+    assert!(app.ctx_filter.is_empty());
+    typed(&mut app);
+    assert!(app.ctx_filtering);
+    assert_eq!(app.ctx_filter, "a");
+    typed(&mut app);
+    assert_eq!(app.ctx_filter, "aa");
 }
