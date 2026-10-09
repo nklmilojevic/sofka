@@ -222,6 +222,8 @@ impl App {
                     name: t.name.clone(),
                     uid: None,
                     containers: vec![],
+                    default: None,
+                    all_containers: false,
                 },
                 format!("{} — logs", t.name),
             ),

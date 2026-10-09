@@ -11444,6 +11444,212 @@ async fn bundle_logs_follow_the_default_container_annotation() {
     }
 }
 
+/// A pod client whose log endpoint answers `from-<container>` and records
+/// the container each log request asked for.
+fn container_log_client(pod: Value, requested: Arc<std::sync::Mutex<Vec<String>>>) -> kube::Client {
+    kube::Client::new(
+        tower::service_fn(move |request: http::Request<kube::client::Body>| {
+            let query = request.uri().query().unwrap_or_default();
+            let body = if request.uri().path().ends_with("/log") {
+                let container = query
+                    .split('&')
+                    .find_map(|param| param.strip_prefix("container="))
+                    .unwrap_or_default()
+                    .to_owned();
+                let line = format!("from-{container}\n");
+                requested.lock().unwrap().push(container);
+                open_body(line)
+            } else if query.contains("watch=true") {
+                open_body("")
+            } else {
+                closed_body(
+                    json!({"apiVersion": "v1", "kind": "PodList",
+                        "metadata": {"resourceVersion": "1"}, "items": [pod]})
+                    .to_string(),
+                )
+            };
+            async move { Ok::<_, std::convert::Infallible>(http::Response::new(body)) }
+        }),
+        "default",
+    )
+}
+
+async fn wait_for_log_lines(app: &mut App, rx: &mut Receiver<Msg>, count: usize) {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while app.logs.view.lines.len() < count {
+            app.handle_msg(rx.recv().await.unwrap());
+        }
+    })
+    .await
+    .expect("log streams must report");
+}
+
+fn sorted_log_lines(app: &App) -> Vec<String> {
+    let mut lines: Vec<String> = app.logs.view.lines.iter().cloned().collect();
+    lines.sort();
+    lines
+}
+
+#[tokio::test]
+async fn pod_logs_stream_the_annotated_container_and_a_toggles_all() {
+    let (mut app, mut rx) = test_app();
+    app.switch_kind("pods");
+    let pod = json!({"apiVersion": "v1", "kind": "Pod",
+        "metadata": {"name": "web", "namespace": "default", "annotations": {
+            "kubectl.kubernetes.io/default-container": "app"}},
+        "spec": {"containers": [{"name": "istio-proxy"}, {"name": "app"}]}});
+    apply(&mut app, pod.clone());
+    app.table_state.select(Some(0));
+    let requested = Arc::new(std::sync::Mutex::new(Vec::new()));
+    app.cluster.client = container_log_client(pod, requested.clone());
+
+    app.handle_key(press(KeyCode::Char('l'))).unwrap();
+    assert_eq!(app.logs.view.title, "web:app — logs");
+    wait_for_log_lines(&mut app, &mut rx, 1).await;
+    assert_eq!(sorted_log_lines(&app), ["from-app"]);
+
+    app.handle_key(press(KeyCode::Char('a'))).unwrap();
+    assert_eq!(app.logs.view.title, "web — logs");
+    assert_eq!(app.flash, "logs: all containers");
+    wait_for_log_lines(&mut app, &mut rx, 2).await;
+    assert_eq!(
+        sorted_log_lines(&app),
+        ["[app] from-app", "[istio-proxy] from-istio-proxy"]
+    );
+
+    app.handle_key(press(KeyCode::Char('a'))).unwrap();
+    assert_eq!(app.logs.view.title, "web:app — logs");
+    wait_for_log_lines(&mut app, &mut rx, 1).await;
+    assert_eq!(sorted_log_lines(&app), ["from-app"]);
+
+    let mut requested = requested.lock().unwrap().clone();
+    requested.sort();
+    assert_eq!(requested, ["app", "app", "app", "istio-proxy"]);
+}
+
+#[tokio::test]
+async fn switching_containers_on_a_stopped_log_stream_waits_for_resume() {
+    let (mut app, mut rx) = test_app();
+    app.switch_kind("pods");
+    let pod = json!({"apiVersion": "v1", "kind": "Pod",
+        "metadata": {"name": "web", "namespace": "default", "annotations": {
+            "kubectl.kubernetes.io/default-container": "app"}},
+        "spec": {"containers": [{"name": "istio-proxy"}, {"name": "app"}]}});
+    apply(&mut app, pod.clone());
+    app.table_state.select(Some(0));
+    app.cluster.client = container_log_client(pod, Default::default());
+    app.handle_key(press(KeyCode::Char('l'))).unwrap();
+    wait_for_log_lines(&mut app, &mut rx, 1).await;
+
+    app.handle_key(press(KeyCode::Char('x'))).unwrap();
+    let generation = app.log_gen;
+    app.handle_key(press(KeyCode::Char('a'))).unwrap();
+    assert!(app.logs.stopped);
+    assert!(app.log_tasks.is_empty());
+    assert_eq!(app.log_gen, generation);
+    assert_eq!(app.logs.view.title, "web — logs");
+
+    app.handle_key(press(KeyCode::Char('x'))).unwrap();
+    assert!(!app.logs.stopped);
+    wait_for_log_lines(&mut app, &mut rx, 2).await;
+    assert_eq!(
+        sorted_log_lines(&app),
+        ["[app] from-app", "[istio-proxy] from-istio-proxy"]
+    );
+}
+
+#[tokio::test]
+async fn pod_logs_without_a_valid_annotation_stream_every_container() {
+    for annotation in [None, Some("gone")] {
+        let (mut app, mut rx) = test_app();
+        app.switch_kind("pods");
+        let mut pod = json!({"apiVersion": "v1", "kind": "Pod",
+            "metadata": {"name": "web", "namespace": "default"},
+            "spec": {"containers": [{"name": "istio-proxy"}, {"name": "app"}]}});
+        if let Some(name) = annotation {
+            pod["metadata"]["annotations"] =
+                json!({"kubectl.kubernetes.io/default-container": name});
+        }
+        apply(&mut app, pod.clone());
+        app.table_state.select(Some(0));
+        app.cluster.client = container_log_client(pod, Default::default());
+
+        app.handle_key(press(KeyCode::Char('l'))).unwrap();
+        assert_eq!(app.logs.view.title, "web — logs");
+        wait_for_log_lines(&mut app, &mut rx, 2).await;
+        assert_eq!(
+            sorted_log_lines(&app),
+            ["[app] from-app", "[istio-proxy] from-istio-proxy"],
+            "{annotation:?}"
+        );
+
+        let generation = app.log_gen;
+        app.handle_key(press(KeyCode::Char('a'))).unwrap();
+        assert!(app.flash_err, "{annotation:?}");
+        assert_eq!(app.flash, "no default container to switch from");
+        assert_eq!(app.log_gen, generation, "{annotation:?}");
+    }
+}
+
+fn sidecar_pod(app: &mut App, annotation: Option<&str>) {
+    app.switch_kind("pods");
+    let mut pod = json!({"apiVersion": "v1", "kind": "Pod",
+        "metadata": {"name": "p", "namespace": "default"},
+        "spec": {"containers": [{"name": "istio-proxy"}, {"name": "app"}, {"name": "worker"}],
+                 "initContainers": [{"name": "setup"}]}});
+    if let Some(name) = annotation {
+        pod["metadata"]["annotations"] = json!({"kubectl.kubernetes.io/default-container": name});
+    }
+    apply(app, pod);
+    app.table_state.select(Some(0));
+}
+
+#[tokio::test]
+async fn attach_pins_the_default_container() {
+    for (annotation, expected) in [(Some("app"), "app"), (None, "istio-proxy")] {
+        let (mut app, _rx) = test_app();
+        sidecar_pod(&mut app, annotation);
+        app.handle_key(press(KeyCode::Char('a'))).unwrap();
+        let Some(Suspend::Shell(argv)) = app.pending.take() else {
+            panic!("expected a pending attach command");
+        };
+        let attach = argv.iter().position(|a| a == "attach").unwrap();
+        assert_eq!(
+            argv[attach..],
+            ["attach", "-it", "-n", "default", "p", "-c", expected]
+        );
+    }
+}
+
+#[tokio::test]
+async fn pod_row_transfer_names_the_default_container() {
+    let (mut app, _rx) = test_app();
+    sidecar_pod(&mut app, Some("app"));
+    app.handle_key(press(KeyCode::Char('t'))).unwrap();
+    assert_eq!(app.mode, Mode::TransferMenu);
+    app.handle_key(press(KeyCode::Enter)).unwrap();
+    assert_eq!(app.prompt_label, "Download from p:app — remote path:");
+    assert!(matches!(
+        &app.prompt_kind,
+        Some(PromptKind::Transfer { container: Some(c), .. }) if c == "app"
+    ));
+}
+
+#[tokio::test]
+async fn container_picker_lists_and_selects_the_default_container_first() {
+    for (annotation, expected) in [
+        (Some("worker"), ["worker", "app", "istio-proxy", "setup"]),
+        (None, ["istio-proxy", "app", "setup", "worker"]),
+    ] {
+        let (mut app, _rx) = test_app();
+        sidecar_pod(&mut app, annotation);
+        app.handle_key(press(KeyCode::Enter)).unwrap();
+        assert_eq!(app.mode, Mode::Containers);
+        assert_eq!(app.container_list, expected);
+        assert_eq!(app.container_state.selected(), Some(0));
+    }
+}
+
 #[tokio::test]
 async fn marked_pod_logs_do_not_change_previous_or_provider_selection() {
     let (mut app, _rx) = marked_logs_app();
@@ -20113,6 +20319,8 @@ async fn logs_time_anchors_restream_kubelet_logs() {
         name: "web".into(),
         uid: None,
         containers: vec![],
+        default: None,
+        all_containers: false,
     });
 
     // No anchor: the config decides (default = tail, no since).
@@ -20680,6 +20888,8 @@ async fn launching_logs_invalidates_the_previous_buffers_index() {
             name: "new".into(),
             uid: None,
             containers: Vec::new(),
+            default: None,
+            all_containers: false,
         },
         "new".into(),
     );

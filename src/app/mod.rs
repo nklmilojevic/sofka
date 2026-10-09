@@ -486,12 +486,15 @@ struct PodLogTarget {
 enum LogSource {
     /// The marked pods captured when the log view opens.
     Pods(Vec<PodLogTarget>),
-    /// Every container of one pod.
+    /// One pod: only its annotated default container until `a` switches to
+    /// every container; every container when the pod has no annotation.
     Pod {
         ns: String,
         name: String,
         uid: Option<String>,
         containers: Vec<String>,
+        default: Option<String>,
+        all_containers: bool,
     },
     /// All pods matching a label selector (aggregated workload logs).
     Selector { ns: String, labels: String },

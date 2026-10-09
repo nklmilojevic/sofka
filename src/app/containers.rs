@@ -155,6 +155,11 @@ impl App {
         self.container_details = container_details_of(obj);
         self.container_list = self.container_details.keys().cloned().collect();
         self.container_list.sort();
+        if let Some(default) = default_container(obj)
+            && let Some(i) = self.container_list.iter().position(|n| *n == default)
+        {
+            self.container_list[..=i].rotate_right(1);
+        }
         self.container_resources = container_resources_of(obj).into_iter().collect();
         self.container_qos = qos_class(obj);
         self.container_state

@@ -472,6 +472,7 @@ for those operations.
 
 | Action           | Default bindings    |
 | ---------------- | ------------------- |
+| `all_containers` | `a`                 |
 | `anchor_0`       | `0`                 |
 | `anchor_1`       | `1`                 |
 | `anchor_2`       | `2`                 |

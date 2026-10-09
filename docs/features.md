@@ -146,7 +146,10 @@ include those conditions. Row filters can search the route paths.
   show its type, full image reference, declared ports, and configured startup,
   readiness, and liveness probes. Images and ports wrap to fit the popup.
   Probe labels show configuration, not the current probe result.
-  Regular, init, native sidecar, and ephemeral containers are included. Pod watch
+  Regular, init, native sidecar, and ephemeral containers are included. The
+  pod's default container (the `kubectl.kubernetes.io/default-container`
+  annotation, else the first container) is listed first and selected when the
+  picker opens; the rest are sorted by name. Pod watch
   updates refresh the details and keep the selected container by name. Missing
   status values show `-` or `Unknown`. If the selected container disappears,
   its selection clears. Name, state, and restarts have priority on narrow
@@ -782,7 +785,8 @@ include those conditions. Row filters can search the route paths.
   indicator column next to the row name. See [Saved forwards](plugins.md#saved-forwards).
 - **File transfer** (`t` on a pod, or `t` in the container picker for one
   container) - download from or upload to a pod via `kubectl cp`, off-thread
-  with a completion flash. Uploads are gated by the `transfer` guardrail and
+  with a completion flash. `t` on a pod uses its default container and names it
+  in the menu and prompts. Uploads are gated by the `transfer` guardrail and
   read-only mode.
 - **PVC explore** (`x` on a PVC, or `:pvc-explore`) - a two-pane browser over a
   volume's contents, with `s` for a shell inside it. See
@@ -794,7 +798,10 @@ include those conditions. Row filters can search the route paths.
   [Debug containers and pods](debugging.md#debug-containers-and-pods).
 - **Logs** (`l`) - combined logs for marked pods, per-container on a pod, or aggregated across all matching
   pods on a workload/service, with filtering, previous-container logs, and
-  configurable tail/buffer/lookback. Press `T` to enter a duration or `tail`
+  configurable tail/buffer/lookback. A pod with a
+  `kubectl.kubernetes.io/default-container` annotation shows only that
+  container, as kubectl does; `a` switches between it and every container.
+  Press `T` to enter a duration or `tail`
   for the current kubelet log view. Lines with timestamps are sorted by time.
   Press `t` to show or hide timestamps without changing log order or restarting
   streams. If a container is waiting to start, sofka
