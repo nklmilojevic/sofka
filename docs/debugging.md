@@ -111,6 +111,13 @@ Values with control characters, and strings that read as another JSON type
 one row. Records without a level or message field stay raw. The row color comes
 from the record's level.
 
+Set `record_time_format` in `[logs]` to a strftime format to shorten record
+times, for example `"%b %d %H:%M:%S%.3f"` for `Oct 08 15:00:20.444`. It applies
+to RFC 3339 strings and epoch numbers; other time strings stay as written.
+`record_time_zone` picks `utc` (the default) or `local`. Without a format, times
+keep their RFC 3339 text. An invalid format or zone is reported in `:config` and
+the default is used. A reload re-renders buffered records.
+
 Only individual JSON objects and arrays are formatted. Other text stays unchanged.
 Source labels and timestamps stay with their record. Filters and severity selection
 use the original record and show all its formatted rows when it matches.
@@ -165,6 +172,8 @@ buffer = 5000      # max lines kept while following (oldest dropped)
 since = "1h"       # optional: only logs newer than this, within the tail limit
 fullscreen = false # open log views fullscreen (F toggles per session)
 json_view = "raw"  # raw, record, or pretty: the JSON view a session starts in
+record_time_format = "%b %d %H:%M:%S%.3f" # optional: strftime for record view times
+record_time_zone = "utc"                  # utc or local
 ```
 
 Press `T` to enter a positive duration such as `90s`, `30m`, `24h`, or `2d`.

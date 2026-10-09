@@ -354,6 +354,8 @@ pub struct FleetConfig {
 /// since = "1h"       # optional: only logs newer than this, within the tail limit
 /// fullscreen = false # open log views fullscreen (F toggles; k9s fullScreenLogs)
 /// json_view = "raw"  # how JSON lines start: raw, record, or pretty (J cycles)
+/// record_time_format = "%b %d %H:%M:%S%.3f" # optional: strftime for record times
+/// record_time_zone = "utc"                  # utc or local
 /// ```
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
@@ -373,6 +375,12 @@ pub struct LogsConfig {
     /// different value is entered: `raw`, `record`, or `pretty`. `J` cycles
     /// from there. Validated by [`logs_warnings`].
     pub json_view: String,
+    /// strftime format for record view times that are RFC 3339 strings or
+    /// epoch numbers. Unset keeps the RFC 3339 text. Validated by
+    /// [`logs_warnings`].
+    pub record_time_format: Option<String>,
+    /// Zone `record_time_format` renders in: `utc` or `local`.
+    pub record_time_zone: String,
 }
 
 impl Default for LogsConfig {
@@ -383,6 +391,8 @@ impl Default for LogsConfig {
             since: None,
             fullscreen: false,
             json_view: "raw".into(),
+            record_time_format: None,
+            record_time_zone: "utc".into(),
         }
     }
 }
@@ -390,14 +400,38 @@ impl Default for LogsConfig {
 /// The `[logs] json_view` values, in `J` order.
 pub const JSON_VIEWS: &[&str] = &["raw", "record", "pretty"];
 
+/// Formats a sample time, so a directive jiff does not support is reported
+/// at load instead of on every record.
+pub fn check_record_time_format(format: &str) -> Result<(), jiff::Error> {
+    let sample = jiff::Timestamp::UNIX_EPOCH.to_zoned(jiff::tz::TimeZone::UTC);
+    jiff::fmt::strtime::format(format, &sample).map(drop)
+}
+
+/// The `[logs] record_time_zone` values.
+pub const RECORD_TIME_ZONES: &[&str] = &["utc", "local"];
+
 pub fn logs_warnings(cfg: &LogsConfig) -> Vec<String> {
-    if JSON_VIEWS.contains(&cfg.json_view.as_str()) {
-        return Vec::new();
+    let mut warnings = Vec::new();
+    if !JSON_VIEWS.contains(&cfg.json_view.as_str()) {
+        warnings.push(format!(
+            "logs: json_view {:?} is not one of raw, record, pretty; using raw",
+            cfg.json_view
+        ));
     }
-    vec![format!(
-        "logs: json_view {:?} is not one of raw, record, pretty; using raw",
-        cfg.json_view
-    )]
+    if let Some(format) = &cfg.record_time_format
+        && let Err(err) = check_record_time_format(format)
+    {
+        warnings.push(format!(
+            "logs: record_time_format {format:?} is invalid ({err}); using RFC 3339"
+        ));
+    }
+    if !RECORD_TIME_ZONES.contains(&cfg.record_time_zone.as_str()) {
+        warnings.push(format!(
+            "logs: record_time_zone {:?} is not one of utc, local; using utc",
+            cfg.record_time_zone
+        ));
+    }
+    warnings
 }
 
 /// Optional action history on disk. Changes take effect on restart.
