@@ -38838,7 +38838,7 @@ async fn log_json_shortcut_renders_structured_records_on_one_row() {
     assert_eq!(app.flash, "JSON view: record");
     assert_eq!(
         app.logs.display_line(0),
-        "[ns/pod:app] 2025-09-10T10:00:00.25Z INFO  Reconciling controller=x logger=ctrl"
+        "[ns/pod:app] 2025-09-10T10:00:00.25Z INFO  ctrl: Reconciling controller=x"
     );
     assert_eq!(
         app.logs.display_line(1),
@@ -38907,6 +38907,32 @@ async fn log_json_shortcut_renders_structured_records_on_one_row() {
     assert_eq!(app.logs.json, JsonView::Raw);
     assert_eq!(app.flash, "JSON view: raw");
     assert_eq!(app.logs.display_line(1), app.logs.view.lines[1]);
+}
+
+#[tokio::test]
+async fn log_json_record_view_puts_the_logger_before_the_message() {
+    let (mut app, _rx) = test_app();
+    app.mode = Mode::Logs;
+    shortcut_log_lines(
+        &mut app,
+        vec![
+            r#"{"level":"info","msg":"Starting workers","logger":"controller","name":"web","namespace":"prod"}"#.into(),
+            r#"{"level":"info","logger":"setup"}"#.into(),
+            r#"{"level":"info","msg":"ok","logger":{"id":1}}"#.into(),
+            r#"{"level":"info","msg":"ok","logger":""}"#.into(),
+            r#"{"level":"info","msg":"ok","logger":"a\nb"}"#.into(),
+        ],
+    );
+    app.handle_key(press(KeyCode::Char('J'))).unwrap();
+    assert_eq!(app.logs.json, JsonView::Record);
+    assert_eq!(
+        app.logs.display_line(0),
+        "INFO  controller: Starting workers name=web namespace=prod"
+    );
+    assert_eq!(app.logs.display_line(1), "INFO  logger=setup");
+    assert_eq!(app.logs.display_line(2), r#"INFO  ok logger={"id":1}"#);
+    assert_eq!(app.logs.display_line(3), r#"INFO  ok logger="""#);
+    assert_eq!(app.logs.display_line(4), r#"INFO  "a\nb": ok"#);
 }
 
 #[tokio::test]
