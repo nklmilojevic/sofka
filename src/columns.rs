@@ -1337,23 +1337,88 @@ fn col_secret_data<'a>(ctx: &CellContext<'a>) -> Cow<'a, str> {
 }
 
 fn col_job_status<'a>(ctx: &CellContext<'a>) -> Cow<'a, str> {
-    let d = ctx.data;
-    if ctx.obj.metadata.deletion_timestamp.is_some() {
-        "Terminating".into()
+    job_status(ctx.obj).into()
+}
+
+fn job_status(obj: &DynamicObject) -> &'static str {
+    let d = &obj.data;
+    if obj.metadata.deletion_timestamp.is_some() {
+        "Terminating"
     } else if condition_is(d, "Failed", "True") || condition_is(d, "FailureTarget", "True") {
-        "Failed".into()
+        "Failed"
     } else if condition_is(d, "Complete", "True") {
-        "Completed".into()
+        "Completed"
     } else if condition_is(d, "SuccessCriteriaMet", "True") {
-        "Completing".into()
+        "Completing"
     } else if d.pointer("/spec/suspend").and_then(Value::as_bool) == Some(true)
         || condition_is(d, "Suspended", "True")
     {
-        "Suspended".into()
+        "Suspended"
     } else if iget(d, &["status", "active"]) > 0 {
-        "Running".into()
+        "Running"
     } else {
-        "Pending".into()
+        "Pending"
+    }
+}
+
+/// Whether [`workload_faulted`] judges this kind.
+pub fn has_workload_faults(group: &str, plural: &str) -> bool {
+    matches!(
+        (group, plural),
+        (
+            "apps",
+            "deployments" | "statefulsets" | "daemonsets" | "replicasets"
+        ) | ("batch", "jobs" | "cronjobs")
+    )
+}
+
+/// Whether a workload needs attention, for the `Ctrl+Z` faults filter:
+/// a controller that is not fully ready, a Job that has not run cleanly,
+/// or a CronJob that is suspended or whose last run did not succeed.
+/// `None` for kinds the filter does not cover; pods have their own rules.
+pub fn workload_faulted(group: &str, plural: &str, obj: &DynamicObject) -> Option<bool> {
+    let d = &obj.data;
+    let counts = match (group, plural) {
+        ("apps", "deployments") => WorkloadCounts::deployment(d),
+        ("apps", "statefulsets") => WorkloadCounts::statefulset(d),
+        ("apps", "daemonsets") => WorkloadCounts::daemonset(d),
+        ("apps", "replicasets") => WorkloadCounts::replicaset(d),
+        ("batch", "jobs") => {
+            return Some(!matches!(
+                job_status(obj),
+                "Running" | "Completing" | "Completed"
+            ));
+        }
+        ("batch", "cronjobs") => return Some(cronjob_faulted(obj)),
+        _ => return None,
+    };
+    Some(
+        obj.metadata.deletion_timestamp.is_some()
+            || !matches!(
+                workload_status(obj, counts).as_str(),
+                "Ready" | "ScaledDown"
+            ),
+    )
+}
+
+/// A CronJob is faulted when it is suspended, terminating, or its last
+/// scheduled run finished without succeeding. A run still active is not
+/// judged yet.
+fn cronjob_faulted(obj: &DynamicObject) -> bool {
+    let d = &obj.data;
+    if obj.metadata.deletion_timestamp.is_some() || bget(d, &["spec", "suspend"]) {
+        return true;
+    }
+    if count_arr(d, &["status", "active"]) > 0 {
+        return false;
+    }
+    match (
+        timestamp_secs(d, &["status", "lastScheduleTime"]),
+        timestamp_secs(d, &["status", "lastSuccessfulTime"]),
+    ) {
+        (Some(scheduled), Some(succeeded)) => succeeded < scheduled,
+        (Some(_), None) => true,
+        (None, _) => false,
     }
 }
 

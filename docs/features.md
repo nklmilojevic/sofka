@@ -368,14 +368,23 @@ include those conditions. Row filters can search the route paths.
   clears. Palette queries combine scope and filtering:
   `:pods -n prod --context west /-l app=api status=Running`.
   See [filter grammar and selectors](filtering.md).
-- **Toggle faults** (`Ctrl+Z`, pods only) shows pending, failed, unknown,
-  terminating, and running pods that are not ready. Completed pods are hidden.
+- **Toggle faults** (`Ctrl+Z`) shows only what needs attention:
+  - Pods: pending, failed, unknown, terminating, and running pods that are
+    not ready. Completed pods are hidden.
+  - Deployments, StatefulSets, DaemonSets, and ReplicaSets: every STATUS
+    other than `Ready` and `ScaledDown`.
+  - Jobs: failed, pending, suspended, and terminating jobs.
+  - CronJobs: suspended or terminating, or the last scheduled run finished
+    without succeeding.
+
   The table title shows `[faults]` while the filter is on. It works with the
   text filter and current namespace or drill scope. Press `Ctrl+Z` again to
-  turn it off. The setting stays on for pod views during the session and does
-  not filter other resource types. Configured `Ctrl+Z` bookmark, workspace,
-  and matching plugin actions take precedence. Live updates keep the selected
-  pod selected. If it leaves the list or its UID changes, selection is cleared.
+  turn it off. The setting stays on for these views during the session and
+  does not filter other resource types. Configured `Ctrl+Z` bookmark,
+  workspace, and matching plugin actions take precedence. Live updates keep
+  the selected row selected. If it leaves the list or its UID changes,
+  selection is cleared.
+
 - **Global fuzzy find** (`:find <text>`) - search object names across the common
   kinds (workloads, pods, services, config, ingresses, jobs, storage, nodes,
   namespaces, Flux objects) in every namespace at once, concurrently. Results

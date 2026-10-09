@@ -151,7 +151,16 @@ impl Action {
     /// its key goes to bookmarks, workspaces, and plugins first.
     pub fn kinds(self) -> Option<&'static [&'static str]> {
         match self {
-            Self::Faults | Self::Attach | Self::PreviousLogs => Some(&["pods"]),
+            Self::Attach | Self::PreviousLogs => Some(&["pods"]),
+            Self::Faults => Some(&[
+                "pods",
+                "deployments",
+                "statefulsets",
+                "daemonsets",
+                "replicasets",
+                "jobs",
+                "cronjobs",
+            ]),
             Self::PortForward => Some(&["pods", "services"]),
             Self::Inspect => Some(&["secrets", "persistentvolumeclaims"]),
             Self::Cordon | Self::Uncordon | Self::Drain => Some(&["nodes"]),

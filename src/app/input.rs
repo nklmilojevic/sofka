@@ -367,7 +367,7 @@ impl App {
             (Some(Action::Delete), _) => self.request_delete(false),
             (Some(Action::ForceDelete), _) => self.request_delete(true),
             (Some(Action::Refresh), _) => self.refresh_namespace_selection(),
-            (Some(Action::Faults), _) if self.kind_plural == "pods" => {
+            (Some(Action::Faults), _) if self.faults_supported() => {
                 if !self.try_bookmark_key(key.event())
                     && !self.try_workspace_key(key.event())
                     && !self.try_plugin_key(key.event())

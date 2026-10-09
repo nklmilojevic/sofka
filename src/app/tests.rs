@@ -21651,6 +21651,98 @@ async fn ctrl_z_filters_pod_faults() {
 }
 
 #[tokio::test]
+async fn ctrl_z_filters_workload_faults() {
+    let (mut app, _rx) = test_app();
+    app.switch_kind("deployments");
+    let deployment = |name: &str, replicas: i64, ready: i64| {
+        json!({
+            "apiVersion": "apps/v1", "kind": "Deployment",
+            "metadata": {"name": name, "namespace": "default", "generation": 1},
+            "spec": {"replicas": replicas},
+            "status": {"observedGeneration": 1, "replicas": replicas,
+                       "updatedReplicas": replicas, "readyReplicas": ready}
+        })
+    };
+    apply(&mut app, deployment("ready", 2, 2));
+    apply(&mut app, deployment("scaled-down", 0, 0));
+    apply(&mut app, deployment("degraded", 3, 1));
+    apply(&mut app, deployment("unavailable", 1, 0));
+    app.handle_key(ctrl(KeyCode::Char('z'))).unwrap();
+    assert!(app.faults_filter_active());
+    assert_eq!(row_names(&app), ["degraded", "unavailable"]);
+
+    app.switch_kind("jobs");
+    let job = |name: &str, status: Value| {
+        json!({
+            "apiVersion": "batch/v1", "kind": "Job",
+            "metadata": {"name": name, "namespace": "default"},
+            "status": status
+        })
+    };
+    apply(&mut app, job("running", json!({"active": 1})));
+    apply(
+        &mut app,
+        job(
+            "complete",
+            json!({"conditions": [{"type": "Complete", "status": "True"}]}),
+        ),
+    );
+    apply(
+        &mut app,
+        job(
+            "failed",
+            json!({"conditions": [{"type": "Failed", "status": "True"}]}),
+        ),
+    );
+    apply(&mut app, job("pending", json!({})));
+    assert!(app.faults_filter_active());
+    assert_eq!(row_names(&app), ["failed", "pending"]);
+
+    app.switch_kind("cronjobs");
+    let cronjob = |name: &str, suspend: bool, status: Value| {
+        json!({
+            "apiVersion": "batch/v1", "kind": "CronJob",
+            "metadata": {"name": name, "namespace": "default"},
+            "spec": {"schedule": "* * * * *", "suspend": suspend},
+            "status": status
+        })
+    };
+    apply(&mut app, cronjob("never-ran", false, json!({})));
+    apply(
+        &mut app,
+        cronjob(
+            "succeeded",
+            false,
+            json!({"lastScheduleTime": "2026-10-09T10:00:00Z",
+                   "lastSuccessfulTime": "2026-10-09T10:00:30Z"}),
+        ),
+    );
+    apply(
+        &mut app,
+        cronjob(
+            "last-failed",
+            false,
+            json!({"lastScheduleTime": "2026-10-09T10:00:00Z",
+                   "lastSuccessfulTime": "2026-10-09T09:00:30Z"}),
+        ),
+    );
+    apply(
+        &mut app,
+        cronjob(
+            "running",
+            false,
+            json!({"lastScheduleTime": "2026-10-09T10:00:00Z",
+                   "active": [{"name": "running-1"}]}),
+        ),
+    );
+    apply(&mut app, cronjob("suspended", true, json!({})));
+    assert_eq!(row_names(&app), ["last-failed", "suspended"]);
+    app.handle_key(ctrl(KeyCode::Char('z'))).unwrap();
+    assert!(!app.faults_only);
+    assert_eq!(row_names(&app).len(), 5);
+}
+
+#[tokio::test]
 async fn faults_filter_combines_with_text_and_tracks_watch_updates() {
     let (mut app, _rx) = test_app();
     app.switch_kind("pods");
