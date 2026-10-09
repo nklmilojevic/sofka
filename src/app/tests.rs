@@ -29,6 +29,7 @@ mod server_table;
 mod synchronized_output;
 mod update;
 mod watch_status;
+mod workloads;
 
 fn obj(v: serde_json::Value) -> DynamicObject {
     serde_json::from_value(v).unwrap()

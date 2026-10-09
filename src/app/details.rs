@@ -18,7 +18,7 @@ impl App {
             _ => Mode::Table,
         };
         // Remember the selected row so we can land back on it.
-        self.return_selection = self.selected_ref().map(row_key);
+        self.return_selection = self.selected_ref().map(|o| self.key_of(o));
     }
 
     /// Re-select the row remembered by [`set_return_mode`], by identity, so the
@@ -27,7 +27,7 @@ impl App {
         let Some(key) = self.return_selection.take() else {
             return;
         };
-        if let Some(i) = self.rows().iter().position(|o| row_key(o) == key) {
+        if let Some(i) = self.rows().iter().position(|o| self.key_of(o) == key) {
             self.table_state.select(Some(i));
         }
     }
@@ -267,8 +267,8 @@ impl App {
                 (yaml, "last-applied")
             }
             None => {
-                let key = row_key(&obj);
-                let Some(prev) = self.prev_revisions.get(&self.kind_plural, &key) else {
+                let key = self.key_of(&obj);
+                let Some(prev) = self.prev_revisions.get(self.view_plural(), &key) else {
                     self.flash_warn(
                         "nothing to diff: no last-applied annotation, \
                          and no change seen this session",

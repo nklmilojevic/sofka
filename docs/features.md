@@ -328,7 +328,7 @@ include those conditions. Row filters can search the route paths.
   view history.
 - **Command palette** (`:`) - fuzzy search over the full resource catalog, your
   saved bookmarks and workspaces, and the built-in commands (`ctx`, `helm`,
-  `pulse`, `xray`, `explain`, `timeline`, `gitops`, `argocd`, `adjacent`, `users`, `groups`, `policy`, `can-i`, `journal`,
+  `workloads`, `pulse`, `xray`, `explain`, `timeline`, `gitops`, `argocd`, `adjacent`, `users`, `groups`, `policy`, `can-i`, `journal`,
   `debug`,
   `debug-clean`, `bundle`, `bundle-save`, `snapshot`, `snapshots`, `diff`,
   `events`, `pf`, `notify`, `find`, `vlogs`, `rightsize`, `fleet`, `skin`,
@@ -524,6 +524,17 @@ include those conditions. Row filters can search the route paths.
   of every state change the watch saw: generation bumps, replica and readiness
   changes, pod phase, restarts, waiting reasons, condition flips. Computed from
   the watch stream, bounded, never written to disk.
+- **Workloads view** (`:workloads [ns]`, `:wk`) - Deployments, StatefulSets,
+  DaemonSets, CronJobs, Jobs, and Pods in one live table with KIND, READY,
+  and STATUS columns. Keys that act on a row use the row's own kind, so
+  `ctrl-d`, `d`, `y`, `l`, `s`, `r`, `⏎`, plugins, and guardrails behave as
+  in that kind's own view without drilling into it first. With marks across
+  kinds, an action applies to the marked rows of the cursor row's kind and
+  skips the rest. By default only top-level workloads are listed: pods owned
+  by a ReplicaSet, StatefulSet, DaemonSet, or Job and Jobs owned by a CronJob
+  are hidden, one `⏎` away from their owner. `O` shows them too. `Ctrl+Z`
+  judges each row by its kind's faults rule. Kinds missing from API discovery
+  are skipped.
 - **Pulse dashboard** (`:pulse`) - cluster-health tiles, refreshed every 5s.
 - **Xray tree** (`:xray`) - a hierarchical view from the current kind down
   through owner references to pods and containers.

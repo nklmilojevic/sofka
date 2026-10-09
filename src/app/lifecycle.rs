@@ -75,7 +75,8 @@ impl App {
     /// `all`/`*` as the namespace selects all namespaces.
     pub fn switch_kind_ns(&mut self, input: &str, ns: Option<&str>) {
         if let Some(ns) = ns.filter(|ns| namespace_patterns::is_pattern(&normalize_ns(ns)))
-            && self.cluster.resolve(input).is_some()
+            && (self.cluster.resolve(input).is_some()
+                || workloads::NAMES.contains(&input.trim().to_lowercase().as_str()))
         {
             self.resolve_namespace_pattern(
                 normalize_ns(ns),
@@ -112,6 +113,9 @@ impl App {
                 self.record_history();
                 self.start_watch();
             }
+            None if workloads::NAMES.contains(&input.trim().to_lowercase().as_str()) => {
+                self.open_workloads(ns);
+            }
             None => {
                 self.flash = format!("No resource matches '{}'", input.trim());
                 self.flash_err = true;
@@ -126,6 +130,7 @@ impl App {
     /// view always starts with its first row selected.
     pub(super) fn set_root_view(&mut self, kind: Kind) {
         self.stack.clear();
+        self.workloads = None;
         self.argocd_return = None;
         self.kind_plural = kind.ar.plural.to_lowercase();
         self.kind = Some(kind);
@@ -148,6 +153,7 @@ impl App {
             return;
         };
         self.stack.clear();
+        self.workloads = None;
         self.kind = Some(secrets);
         self.kind_plural = "helm".into();
         self.labels = Some("owner=helm".into());
@@ -288,6 +294,20 @@ impl App {
         let Some(entry) = self.history.get(self.history_pos).cloned() else {
             return;
         };
+        if entry.kind_plural == workloads::VIEW && self.cluster.resolve(workloads::VIEW).is_none() {
+            self.namespace = entry.namespace;
+            self.set_workloads_root(workloads::WorkloadsView::default());
+            self.filter = entry.filter;
+            self.flash = format!(
+                "history {}/{}: workloads in {}",
+                self.history_pos + 1,
+                self.history.len(),
+                self.namespace_label()
+            );
+            self.flash_err = false;
+            self.start_watch();
+            return;
+        }
         let Some(kind) = self.cluster.resolve(&entry.kind_plural) else {
             self.flash_warn(&format!("cannot resolve '{}' anymore", entry.kind_plural));
             return;
@@ -311,6 +331,7 @@ impl App {
         if self.kind.is_none() {
             return;
         }
+        self.restore_workloads_identity();
         self.stack.push(Frame {
             kind: self.kind.clone(),
             kind_plural: self.kind_plural.clone(),
@@ -322,6 +343,7 @@ impl App {
             filter: self.filter.clone(),
             scope_label: self.scope_label.clone(),
             selected: self.table_state.selected(),
+            workloads: self.workloads.take(),
         });
     }
 
@@ -335,6 +357,7 @@ impl App {
         self.rollout_managed = f.rollout_managed;
         self.filter = f.filter;
         self.scope_label = f.scope_label;
+        self.workloads = f.workloads;
         self.reset_sort();
         self.table_state.select(f.selected.or(Some(0)));
     }
@@ -346,6 +369,41 @@ impl App {
             true
         } else {
             false
+        }
+    }
+
+    /// Fold one watched object into the store. `partition` names the watch
+    /// it came from when the view runs several.
+    fn apply_watched(&mut self, partition: Option<&str>, key: String, obj: DynamicObject) {
+        // Record state changes against the previous version before it's
+        // overwritten (session-local timeline), and keep that version
+        // for the session diff (`:diff` on objects with no
+        // last-applied annotation).
+        let prev = self.store.latest_in(partition, &key);
+        self.timeline
+            .observe(&self.kind_plural, &key, prev.map(Arc::as_ref), &obj);
+        if let Some(prev) = prev
+            && prev.metadata.resource_version != obj.metadata.resource_version
+        {
+            // An `Arc` bump, not a deep copy of the object's whole
+            // JSON body — this runs on every changed watch event.
+            self.prev_revisions
+                .insert(&self.kind_plural, &key, Arc::clone(prev));
+        }
+        match self.store.apply_in(partition, key.clone(), obj) {
+            StoreMutation::Inserted => self.invalidate_row(&key),
+            StoreMutation::Updated => self.invalidate_row_contents(&key),
+            StoreMutation::Buffered | StoreMutation::Removed | StoreMutation::Unchanged => {}
+        }
+    }
+
+    fn delete_watched(&mut self, partition: Option<&str>, key: &str) {
+        self.timeline.observe_delete(&self.kind_plural, key);
+        if let Some(obj) = self.store.latest_in(partition, key) {
+            self.server_table.remove(key, obj.metadata.uid.as_deref());
+        }
+        if self.store.remove_in(partition, key) == StoreMutation::Removed {
+            self.invalidate_row(key);
         }
     }
 
@@ -361,6 +419,7 @@ impl App {
         }
         self.namespace_request += 1;
         self.namespace_errors.clear();
+        self.restore_workloads_identity();
         let Some(kind) = self.kind.clone() else {
             return;
         };
@@ -413,7 +472,7 @@ impl App {
         if let Some(cached) = self.view_cache.get(&key) {
             self.store.seed(cached.clone());
         }
-        if self.namespace_is_pattern() && kind.namespaced {
+        if self.namespace_is_pattern() && kind.namespaced && self.workloads.is_none() {
             self.store.set_namespaces(&self.watch_namespaces());
         }
         self.watch_key = Some(key);
@@ -432,7 +491,11 @@ impl App {
         self.apply_remembered_sort();
         self.apply_view_sort();
         self.maybe_fetch_printer_columns(&kind);
-        self.start_namespace_watches(&kind, watch_labels, watch_fields);
+        if self.workloads.is_some() {
+            self.start_workload_watches(watch_labels, watch_fields);
+        } else {
+            self.start_namespace_watches(&kind, watch_labels, watch_fields);
+        }
 
         if self.metrics_columns() {
             self.spawn_metrics_poll();
@@ -1037,7 +1100,7 @@ impl App {
             );
         let selected_pod = if preserve_selection {
             self.selected_ref()
-                .map(|o| (crate::store::row_key(o), o.metadata.uid.clone()))
+                .map(|o| (self.key_of(o), o.metadata.uid.clone()))
         } else {
             None
         };
@@ -1093,6 +1156,10 @@ impl App {
                         );
                     }
                 }
+                Msg::Applied { key, obj, .. } => {
+                    self.apply_watched(Some(&namespace), key, *obj);
+                }
+                Msg::Deleted { key, .. } => self.delete_watched(Some(&namespace), &key),
                 event => self.handle_msg(event),
             },
             Msg::Reset { generation } if generation == self.generation => {
@@ -1113,37 +1180,9 @@ impl App {
                 generation,
                 key,
                 obj,
-            } if generation == self.generation => {
-                // Record state changes against the previous version before it's
-                // overwritten (session-local timeline), and keep that version
-                // for the session diff (`:diff` on objects with no
-                // last-applied annotation).
-                let prev = self.store.latest(&key);
-                self.timeline
-                    .observe(&self.kind_plural, &key, prev.map(Arc::as_ref), &obj);
-                if let Some(prev) = prev
-                    && prev.metadata.resource_version != obj.metadata.resource_version
-                {
-                    // An `Arc` bump, not a deep copy of the object's whole
-                    // JSON body — this runs on every changed watch event.
-                    self.prev_revisions
-                        .insert(&self.kind_plural, &key, Arc::clone(prev));
-                }
-                match self.store.apply(key.clone(), *obj) {
-                    StoreMutation::Inserted => self.invalidate_row(&key),
-                    StoreMutation::Updated => self.invalidate_row_contents(&key),
-                    StoreMutation::Buffered | StoreMutation::Removed | StoreMutation::Unchanged => {
-                    }
-                }
-            }
+            } if generation == self.generation => self.apply_watched(None, key, *obj),
             Msg::Deleted { generation, key } if generation == self.generation => {
-                self.timeline.observe_delete(&self.kind_plural, &key);
-                if let Some(obj) = self.store.latest(&key) {
-                    self.server_table.remove(&key, obj.metadata.uid.as_deref());
-                }
-                if self.store.remove(&key) == StoreMutation::Removed {
-                    self.invalidate_row(&key);
-                }
+                self.delete_watched(None, &key);
             }
             Msg::Synced { generation } if generation == self.generation => {
                 if self.store.finish_sync() {

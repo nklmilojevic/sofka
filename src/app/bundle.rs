@@ -25,8 +25,8 @@ impl App {
         };
 
         // In-memory pieces gathered on the main thread.
-        let rk = row_key(&obj);
-        let plural = self.kind_plural.clone();
+        let rk = self.key_of(&obj);
+        let plural = self.view_plural().to_string();
         let timeline: Vec<String> = self
             .timeline
             .entries(&plural, &rk)

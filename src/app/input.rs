@@ -67,7 +67,11 @@ impl App {
                     | Action::PreviousMatch
             )
         );
+        if self.acts_on_row(&key) {
+            self.focus_workload_row();
+        }
         let result = self.handle_key_inner(key);
+        self.restore_workloads_identity();
         if self.mode != input_mode {
             self.popup_scroll = 0;
             self.popup_max_scroll = 0;
@@ -376,6 +380,9 @@ impl App {
                     self.invalidate_rows();
                     self.table_state.select(Some(0));
                 }
+            }
+            (Some(Action::ToggleOwned), _) if self.workloads_active() => {
+                self.toggle_workloads_owned();
             }
             (Some(Action::Filter), _) => self.mode = Mode::Filter,
             (Some(Action::Exit), _) => self.should_quit = true,
@@ -834,6 +841,7 @@ impl App {
             PaletteAction::ProviderLogs => self.open_provider_logs(),
             PaletteAction::Skin => self.open_skins(),
             PaletteAction::Helm => self.open_helm_releases(),
+            PaletteAction::Workloads => self.open_workloads(None),
             PaletteAction::Notify => self.toggle_notify(),
             PaletteAction::Reload => self.reload_config(),
             PaletteAction::ConfigInfo => self.open_config_info(),
@@ -883,6 +891,15 @@ impl App {
             } else {
                 self.start_find(&rest);
             }
+            return true;
+        }
+        // `:workloads [ns]` opens the mixed workloads table.
+        let mut parts = cmd.split_whitespace();
+        if let Some(first) = parts.next()
+            && workloads::NAMES.contains(&first.to_ascii_lowercase().as_str())
+            && self.cluster.resolve(first).is_none()
+        {
+            self.switch_kind_ns(first, parts.next());
             return true;
         }
         if let Some(args) = cmd.strip_prefix("policy ") {

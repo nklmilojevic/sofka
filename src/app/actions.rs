@@ -82,7 +82,7 @@ impl App {
         } else {
             self.rows()
                 .into_iter()
-                .filter(|o| self.marked.contains(&row_key(o)))
+                .filter(|o| self.marked.contains(&self.key_of(o)) && self.in_row_focus(o))
                 .cloned()
                 .collect()
         }

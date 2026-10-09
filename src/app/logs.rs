@@ -519,7 +519,7 @@ impl App {
             let pods: Vec<_> = self
                 .rows()
                 .into_iter()
-                .filter(|obj| self.marked.contains(&row_key(obj)))
+                .filter(|obj| self.marked.contains(&self.key_of(obj)) && self.in_row_focus(obj))
                 .map(|obj| PodLogTarget {
                     ns: obj.metadata.namespace.clone().unwrap_or_default(),
                     name: obj.metadata.name.clone().unwrap_or_default(),

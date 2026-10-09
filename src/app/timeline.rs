@@ -14,8 +14,8 @@ impl App {
             self.flash_warn("no selection for timeline");
             return;
         };
-        let rk = row_key(obj);
-        let plural = self.kind_plural.clone();
+        let rk = self.key_of(obj);
+        let plural = self.view_plural().to_string();
         self.set_return_mode();
         let n = self
             .timeline

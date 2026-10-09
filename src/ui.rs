@@ -1430,7 +1430,7 @@ fn draw_table(frame: &mut Frame, app: &mut App, area: Rect) {
     let rows: Vec<Vec<RenderCell>> = visible_objects
         .iter()
         .map(|obj| {
-            let row_key = crate::store::row_key(obj);
+            let row_key = app.key_of(obj);
             let marked_row = !app.marked.is_empty() && app.marked.contains(&row_key);
             let pf_ns = obj.metadata.namespace.as_deref().unwrap_or_default();
             let pf_name = obj.metadata.name.as_deref().unwrap_or_default();
@@ -2911,6 +2911,10 @@ fn build_help(app: &App, width: usize) -> (Vec<Line<'static>>, String) {
     lines.push(bind(
         ":fleet",
         "cross-context health dashboard for configured contexts",
+    ));
+    lines.push(bind(
+        ":workloads [ns] · :wk",
+        "deployments, statefulsets, daemonsets, cronjobs, jobs and pods in one table",
     ));
     lines.push(bind(
         ":xray · :diff",

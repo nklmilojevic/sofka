@@ -692,17 +692,24 @@ impl Store {
     }
 
     pub fn set_namespaces(&mut self, namespaces: &[String]) {
-        self.namespace_ready = namespaces.iter().map(|ns| (ns.clone(), false)).collect();
-        self.namespace_keys = namespaces
+        self.set_partitions(namespaces, |_, obj| obj.metadata.namespace.clone());
+    }
+
+    /// Split the store into independently synced partitions, one per watch.
+    /// `partition_of` assigns the rows already shown (a seeded snapshot) to
+    /// their partition, so each partition's sync can replace its own rows.
+    pub fn set_partitions(
+        &mut self,
+        partitions: &[String],
+        partition_of: impl Fn(&str, &DynamicObject) -> Option<String>,
+    ) {
+        self.namespace_ready = partitions.iter().map(|p| (p.clone(), false)).collect();
+        self.namespace_keys = partitions
             .iter()
-            .map(|ns| (ns.clone(), HashSet::new()))
+            .map(|p| (p.clone(), HashSet::new()))
             .collect();
         for (key, obj) in &self.items {
-            if let Some(keys) = obj
-                .metadata
-                .namespace
-                .as_ref()
-                .and_then(|ns| self.namespace_keys.get_mut(ns))
+            if let Some(keys) = partition_of(key, obj).and_then(|p| self.namespace_keys.get_mut(&p))
             {
                 keys.insert(key.clone());
             }
@@ -742,15 +749,22 @@ impl Store {
     }
 
     pub fn apply(&mut self, key: String, obj: DynamicObject) -> StoreMutation {
+        self.apply_in(None, key, obj)
+    }
+
+    /// [`Self::apply`] for a row from the watch behind `partition`; `None`
+    /// takes the partition from the object's namespace.
+    pub fn apply_in(
+        &mut self,
+        partition: Option<&str>,
+        key: String,
+        obj: DynamicObject,
+    ) -> StoreMutation {
         self.version += 1;
         let key: RowKey = key.into();
         let obj = Arc::new(obj);
-        if let Some(pending) = obj
-            .metadata
-            .namespace
-            .as_ref()
-            .and_then(|ns| self.namespace_pending.get_mut(ns))
-        {
+        let partition = partition.or(obj.metadata.namespace.as_deref());
+        if let Some(pending) = partition.and_then(|p| self.namespace_pending.get_mut(p)) {
             pending.insert(key, obj);
             return StoreMutation::Buffered;
         }
@@ -760,12 +774,7 @@ impl Store {
                 StoreMutation::Buffered
             }
             None => {
-                if let Some(keys) = obj
-                    .metadata
-                    .namespace
-                    .as_ref()
-                    .and_then(|ns| self.namespace_keys.get_mut(ns))
-                {
+                if let Some(keys) = partition.and_then(|p| self.namespace_keys.get_mut(p)) {
                     keys.insert(key.clone());
                 }
                 match self.items.insert(key, obj) {
@@ -777,11 +786,15 @@ impl Store {
     }
 
     pub fn remove(&mut self, key: &str) -> StoreMutation {
+        self.remove_in(None, key)
+    }
+
+    /// [`Self::remove`] for a row from the watch behind `partition`; `None`
+    /// takes the partition from the key's namespace.
+    pub fn remove_in(&mut self, partition: Option<&str>, key: &str) -> StoreMutation {
         self.version += 1;
-        if let Some(pending) = key
-            .split_once('/')
-            .and_then(|(ns, _)| self.namespace_pending.get_mut(ns))
-        {
+        let partition = partition.or_else(|| key.split_once('/').map(|(ns, _)| ns));
+        if let Some(pending) = partition.and_then(|p| self.namespace_pending.get_mut(p)) {
             pending.remove(key);
             return StoreMutation::Buffered;
         }
@@ -791,10 +804,7 @@ impl Store {
                 StoreMutation::Buffered
             }
             None => {
-                if let Some(keys) = key
-                    .split_once('/')
-                    .and_then(|(ns, _)| self.namespace_keys.get_mut(ns))
-                {
+                if let Some(keys) = partition.and_then(|p| self.namespace_keys.get_mut(p)) {
                     keys.remove(key);
                 }
                 match self.items.remove(key) {
@@ -810,8 +820,14 @@ impl Store {
     /// timeline diffs, where [`Self::get`]'s stale visible copy would be wrong
     /// if the same object came through the buffer twice.
     pub fn latest(&self, key: &str) -> Option<&Arc<DynamicObject>> {
-        key.split_once('/')
-            .and_then(|(ns, _)| self.namespace_pending.get(ns))
+        self.latest_in(None, key)
+    }
+
+    /// [`Self::latest`] for a row from the watch behind `partition`.
+    pub fn latest_in(&self, partition: Option<&str>, key: &str) -> Option<&Arc<DynamicObject>> {
+        partition
+            .or_else(|| key.split_once('/').map(|(ns, _)| ns))
+            .and_then(|p| self.namespace_pending.get(p))
             .and_then(|p| p.get(key))
             .or_else(|| {
                 self.pending

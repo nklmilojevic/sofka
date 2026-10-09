@@ -60,6 +60,7 @@ actions! {
     Exit => ("exit", "quit from table"),
     Explain => ("explain", "explain"),
     Faults => ("faults", "faults"),
+    ToggleOwned => ("toggle_owned", "show owned pods and jobs in workloads"),
     FavoriteNamespace1 => ("favorite_namespace_1", "select configured favourite namespace 1"),
     FavoriteNamespace2 => ("favorite_namespace_2", "select configured favourite namespace 2"),
     FavoriteNamespace3 => ("favorite_namespace_3", "select configured favourite namespace 3"),
@@ -153,6 +154,7 @@ impl Action {
         match self {
             Self::Attach | Self::PreviousLogs => Some(&["pods"]),
             Self::Faults => Some(&[
+                "workloads",
                 "pods",
                 "deployments",
                 "statefulsets",
@@ -164,6 +166,7 @@ impl Action {
             Self::PortForward => Some(&["pods", "services"]),
             Self::Inspect => Some(&["secrets", "persistentvolumeclaims"]),
             Self::Cordon | Self::Uncordon | Self::Drain => Some(&["nodes"]),
+            Self::ToggleOwned => Some(&["workloads"]),
             Self::SetImage => Some(&[
                 "pods",
                 "deployments",
@@ -606,6 +609,7 @@ const DEFAULTS: &[(&str, Action, &[&str])] = &[
     ("table", Action::Sort, &["S"]),
     ("table", Action::SortAge, &["A"]),
     ("table", Action::Timeline, &["T"]),
+    ("table", Action::ToggleOwned, &["O"]),
     ("table", Action::Uncordon, &["U"]),
     ("table", Action::Up, &["k", "up"]),
     ("table", Action::Wide, &["w"]),

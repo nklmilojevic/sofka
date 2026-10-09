@@ -1005,6 +1005,7 @@ impl App {
         self.history_pos = 0;
         self.kind = None;
         self.kind_plural.clear();
+        self.workloads = None;
         self.labels = None;
         self.fields = None;
         self.owner = None;

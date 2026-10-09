@@ -60,7 +60,7 @@ impl App {
         let rows = objs
             .iter()
             .map(|obj| {
-                let rk = row_key(obj);
+                let rk = self.key_of(obj);
                 let mut cells: Vec<String> = Vec::with_capacity(headers.len());
                 if show_ns {
                     cells.push(obj.metadata.namespace.clone().unwrap_or_default());

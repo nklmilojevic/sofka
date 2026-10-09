@@ -755,6 +755,7 @@ enum PaletteAction {
     ProviderLogs,
     Skin,
     Helm,
+    Workloads,
     Notify,
     Reload,
     ConfigInfo,
@@ -777,6 +778,10 @@ const PALETTE_COMMANDS: &[PaletteCommand] = &[
     PaletteCommand {
         action: PaletteAction::Helm,
         names: &["helm", "hm"],
+    },
+    PaletteCommand {
+        action: PaletteAction::Workloads,
+        names: workloads::NAMES,
     },
     PaletteCommand {
         action: PaletteAction::Pulse,
@@ -1920,6 +1925,7 @@ struct Frame {
     filter: String,
     scope_label: Option<String>,
     selected: Option<usize>,
+    workloads: Option<workloads::WorkloadsView>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2027,6 +2033,8 @@ pub struct App {
     pub col_scroll_max: usize,
     pub filter: String,
     pub faults_only: bool,
+    /// Set while the `:workloads` view is open.
+    workloads: Option<workloads::WorkloadsView>,
     /// Parsed form of `filter`, refreshed lazily when the string changes so
     /// neither row matching nor rendering reparses it per frame.
     filter_cache: RefCell<FilterCache>,
@@ -2596,6 +2604,7 @@ impl App {
             col_scroll_max: 0,
             filter: String::new(),
             faults_only: false,
+            workloads: None,
             filter_cache: RefCell::new(FilterCache {
                 raw: String::new(),
                 parsed: crate::filter::parse(""),
@@ -2972,6 +2981,7 @@ mod snapshot;
 mod timeline;
 mod transfer;
 mod update;
+mod workloads;
 mod workspaces;
 
 use helpers::*;

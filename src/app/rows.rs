@@ -83,19 +83,29 @@ impl App {
 
     /// Whether `Ctrl+Z` can filter the current kind.
     pub(super) fn faults_supported(&self) -> bool {
-        self.kind.as_ref().is_some_and(|kind| {
-            (kind.ar.group.is_empty() && kind.ar.plural == "pods")
-                || crate::columns::has_workload_faults(&kind.ar.group, &kind.ar.plural)
-        })
+        self.workloads_active()
+            || self.kind.as_ref().is_some_and(|kind| {
+                (kind.ar.group.is_empty() && kind.ar.plural == "pods")
+                    || crate::columns::has_workload_faults(&kind.ar.group, &kind.ar.plural)
+            })
     }
 
     fn row_has_faults(&self, o: &DynamicObject) -> bool {
-        match &self.kind {
-            Some(kind) if kind.ar.group.is_empty() && kind.ar.plural == "pods" => pod_has_faults(o),
-            Some(kind) => {
-                crate::columns::workload_faulted(&kind.ar.group, &kind.ar.plural, o).unwrap_or(true)
+        let (group, plural) = if self.workloads_active() {
+            match workloads::group_plural(o) {
+                Some(kind) => kind,
+                None => return true,
             }
-            None => true,
+        } else {
+            match &self.kind {
+                Some(kind) => (kind.ar.group.as_str(), kind.ar.plural.as_str()),
+                None => return true,
+            }
+        };
+        if group.is_empty() && plural == "pods" {
+            pod_has_faults(o)
+        } else {
+            crate::columns::workload_faulted(group, plural, o).unwrap_or(true)
         }
     }
 
@@ -602,7 +612,7 @@ impl App {
             {
                 continue;
             }
-            if !self.in_owner_scope(o) {
+            if !self.in_owner_scope(o) || !self.workload_row_visible(o) {
                 continue;
             }
             if !self.matches_filter_cached(o, k, &parsed, cells, now) {
@@ -644,16 +654,21 @@ impl App {
             entries.push((primary, tie, k));
         }
         let desc = self.sort_desc && sort_header.is_some();
-        // Unstable: the `(namespace, name)` fallback below is a total order
-        // for a Kubernetes object set, so stability buys nothing here — and a
-        // stable sort allocates an n/2 scratch buffer on every rebuild.
+        // Unstable: the `(namespace, name, key)` fallback below is a total
+        // order, so stability buys nothing here — and a stable sort allocates
+        // an n/2 scratch buffer on every rebuild. The key only breaks ties in
+        // the workloads view, where several kinds share a namespace/name.
         entries.sort_unstable_by(|a, b| {
             let mut ord = a.0.cmp_to(&b.0);
             if desc {
                 ord = ord.reverse();
             }
             // Ties always fall back to namespace/name ascending.
-            ord.then_with(|| natural_cmp(a.1.0, b.1.0).then_with(|| natural_cmp(a.1.1, b.1.1)))
+            ord.then_with(|| {
+                natural_cmp(a.1.0, b.1.0)
+                    .then_with(|| natural_cmp(a.1.1, b.1.1))
+                    .then_with(|| a.2.cmp(b.2))
+            })
         });
         cache.keys = entries.into_iter().map(|(_, _, k)| k.clone()).collect();
         cache.dirty = false;
@@ -815,7 +830,7 @@ impl App {
             // Shares `cell_entry` with the filter pass, so a row rendered for
             // filtering is already warm for the renderer (and vice versa) and
             // there is one place that decides what "stale" means.
-            let key = row_key(obj);
+            let key = self.key_of(obj);
             let key = self
                 .store
                 .key(&key)
@@ -1296,7 +1311,7 @@ impl App {
         let Some(obj) = self.selected_ref() else {
             return;
         };
-        let key = row_key(obj);
+        let key = self.key_of(obj);
         if self.marked.remove(&key) {
             if self.mark_anchor.as_ref() == Some(&key) {
                 self.mark_anchor = None;
@@ -1315,7 +1330,7 @@ impl App {
     /// Mark every visible row from the last SPACE mark to the cursor (ctrl-space).
     /// Without a marked anchor in the current rows, only the cursor row is marked.
     pub(super) fn mark_range(&mut self) {
-        let keys: Vec<String> = self.rows().iter().map(|obj| row_key(obj)).collect();
+        let keys: Vec<String> = self.rows().iter().map(|obj| self.key_of(obj)).collect();
         let Some(current) = self
             .table_state
             .selected()
@@ -1349,7 +1364,7 @@ impl App {
         }
         self.rows()
             .iter()
-            .filter(|o| self.marked.contains(&row_key(o)))
+            .filter(|o| self.marked.contains(&self.key_of(o)) && self.in_row_focus(o))
             .map(|o| to_pair(o))
             .collect()
     }
@@ -1370,7 +1385,7 @@ impl App {
         }
         self.rows()
             .iter()
-            .filter(|o| self.marked.contains(&row_key(o)))
+            .filter(|o| self.marked.contains(&self.key_of(o)) && self.in_row_focus(o))
             .map(|o| to_pair(o))
             .collect()
     }
@@ -1387,7 +1402,7 @@ impl App {
         let rows: Vec<_> = self
             .rows()
             .iter()
-            .map(|obj| (row_key(obj), obj.metadata.uid.clone()))
+            .map(|obj| (self.key_of(obj), obj.metadata.uid.clone()))
             .collect();
         if rows.is_empty() {
             self.range_selection = None;
