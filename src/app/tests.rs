@@ -39526,13 +39526,21 @@ async fn unbound_ctrl_and_alt_chords_do_not_type_into_text_inputs() {
         generation: app.generation,
         list: vec!["alpha".into(), "beta".into()],
     });
+    let selected = app.ctx_state.selected();
     app.handle_key(ctrl(KeyCode::Char('x'))).unwrap();
     app.handle_key(alt(KeyCode::Char('x'))).unwrap();
     assert!(!app.ctx_filtering, "chords do not start a context filter");
     assert!(app.ctx_filter.is_empty());
+    assert_eq!(app.ctx_state.selected(), selected);
     typed(&mut app);
     assert!(app.ctx_filtering);
     assert_eq!(app.ctx_filter, "a");
-    typed(&mut app);
-    assert_eq!(app.ctx_filter, "aa");
+    let selected = app.ctx_state.selected();
+    app.handle_key(ctrl(KeyCode::Char('x'))).unwrap();
+    app.handle_key(alt(KeyCode::Char('x'))).unwrap();
+    assert!(app.ctx_filtering);
+    assert_eq!(app.ctx_filter, "a");
+    assert_eq!(app.ctx_state.selected(), selected);
+    app.handle_key(press(KeyCode::Char('l'))).unwrap();
+    assert_eq!(app.ctx_filter, "al");
 }
