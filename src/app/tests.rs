@@ -39054,7 +39054,7 @@ async fn log_json_view_starts_from_config_and_follows_context_overrides() {
     assert!(
         app.logs
             .display_line(0)
-            .starts_with("INFO  ready port=8080"),
+            .starts_with("INFO  ready › port=8080"),
         "{}",
         app.logs.display_line(0)
     );
@@ -39077,7 +39077,7 @@ async fn log_json_view_starts_from_config_and_follows_context_overrides() {
     assert!(
         app.logs
             .display_line(0)
-            .starts_with("INFO  ready port=8080")
+            .starts_with("INFO  ready › port=8080")
     );
 
     // A context with a different value switches to it, buffered lines too.
@@ -39270,15 +39270,15 @@ async fn log_json_shortcut_renders_structured_records_on_one_row() {
     assert_eq!(app.flash, "JSON view: record");
     assert_eq!(
         app.logs.display_line(0),
-        "[ns/pod:app] 2025-09-10T10:00:00.25Z INFO  ctrl: Reconciling controller=x"
+        "[ns/pod:app] 2025-09-10T10:00:00.25Z INFO  ctrl: Reconciling › controller=x"
     );
     assert_eq!(
         app.logs.display_line(1),
-        r#"2026-09-10T10:00:00Z WARN  slow request n=3 path="/api v1""#
+        r#"2026-09-10T10:00:00Z WARN  slow request › path="/api v1" n=3"#
     );
     assert_eq!(
         app.logs.display_line(2),
-        r#"2025-09-10T10:00:00Z ERROR boom err={"type":"Error"}"#
+        r#"2025-09-10T10:00:00Z ERROR boom › err={"type":"Error"}"#
     );
     assert_eq!(app.logs.display_line(3), app.logs.view.lines[3]);
     assert_eq!(app.logs.display_line(4), "plain text");
@@ -39286,11 +39286,11 @@ async fn log_json_shortcut_renders_structured_records_on_one_row() {
     assert_eq!(app.logs.display_line(6), r#"ERROR "panic\nat main.go:1""#);
     assert_eq!(
         app.logs.display_line(7),
-        r#""2026\n[other] fake" "IN\u001bFO" ok "k\ney"=1"#
+        r#""2026\n[other] fake" "IN\u001bFO" ok › "k\ney"=1"#
     );
     assert_eq!(
         app.logs.display_line(8),
-        r#"ok count="3" data="{}" flag="true" name=web real=true"#
+        r#"ok › flag="true" count="3" data="{}" real=true name=web"#
     );
     assert_eq!(app.logs.display_line(9), "WARN  stall");
     assert_eq!(
@@ -39359,12 +39359,34 @@ async fn log_json_record_view_puts_the_logger_before_the_message() {
     assert_eq!(app.logs.json, JsonView::Record);
     assert_eq!(
         app.logs.display_line(0),
-        "INFO  controller: Starting workers name=web namespace=prod"
+        "INFO  controller: Starting workers › name=web namespace=prod"
     );
     assert_eq!(app.logs.display_line(1), "INFO  logger=setup");
-    assert_eq!(app.logs.display_line(2), r#"INFO  ok logger={"id":1}"#);
-    assert_eq!(app.logs.display_line(3), r#"INFO  ok logger="""#);
+    assert_eq!(app.logs.display_line(2), r#"INFO  ok › logger={"id":1}"#);
+    assert_eq!(app.logs.display_line(3), r#"INFO  ok › logger="""#);
     assert_eq!(app.logs.display_line(4), r#"INFO  "a\nb": ok"#);
+}
+
+#[tokio::test]
+async fn log_json_record_view_keeps_field_order_and_separates_the_message() {
+    let (mut app, _rx) = test_app();
+    app.mode = Mode::Logs;
+    shortcut_log_lines(
+        &mut app,
+        vec![
+            r#"{"zeta":1,"level":"info","msg":"Reconciled","object":{"name":"web","kind":"Lease"},"alpha":[2,1],"worker count":3,"a=b":4,"say \"hi\"":5}"#.into(),
+            r#"{"level":"info","msg":"alone"}"#.into(),
+            r#"{"level":"info","zeta":1,"alpha":2}"#.into(),
+        ],
+    );
+    app.handle_key(press(KeyCode::Char('J'))).unwrap();
+    assert_eq!(app.logs.json, JsonView::Record);
+    assert_eq!(
+        app.logs.display_line(0),
+        r#"INFO  Reconciled › zeta=1 object={"name":"web","kind":"Lease"} alpha=[2,1] "worker count"=3 "a=b"=4 "say \"hi\""=5"#
+    );
+    assert_eq!(app.logs.display_line(1), "INFO  alone");
+    assert_eq!(app.logs.display_line(2), "INFO  zeta=1 alpha=2");
 }
 
 #[tokio::test]
@@ -39372,10 +39394,10 @@ async fn log_json_record_view_does_not_depend_on_the_pretty_cache() {
     let (mut app, _rx) = test_app();
     app.mode = Mode::Logs;
     let line = r#"{"msg":"hi","a":{"b":[1,2,3]}}"#;
-    app.logs.json_budget = line.len() + 20;
+    app.logs.json_budget = line.len() + 30;
     shortcut_log_lines(&mut app, vec![line.into()]);
     app.handle_key(press(KeyCode::Char('J'))).unwrap();
-    assert_eq!(app.logs.display_line(0), r#"hi a={"b":[1,2,3]}"#);
+    assert_eq!(app.logs.display_line(0), r#"hi › a={"b":[1,2,3]}"#);
     app.handle_key(press(KeyCode::Char('J'))).unwrap();
     assert_eq!(app.logs.json, JsonView::Pretty);
     assert_eq!(app.logs.display_line(0), line);

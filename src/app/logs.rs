@@ -99,7 +99,9 @@ impl LogLineMeta {
         // The input and parser depth limits also bound the temporary output.
         // Each view is charged on its own, so an indented form that does not
         // fit cannot keep a short record row raw.
-        let record = render_record(&value, time);
+        let record = serde_json::from_str(payload)
+            .ok()
+            .and_then(|ordered| render_record(&ordered, time));
         let record_severity = record.as_ref().and_then(|(_, severity)| *severity);
         let record = record.and_then(|(text, _)| cache(text));
         let pretty = serde_json::to_string_pretty(&value)
@@ -216,13 +218,19 @@ const RECORD_LOGGER_KEYS: &[&str] = &["logger"];
 /// has one. `None` when the value is not an object with a level or message
 /// field.
 fn render_record(
-    value: &serde_json::Value,
+    value: &Ordered,
     format: &RecordTime,
 ) -> Option<(String, Option<crate::logfilter::Severity>)> {
-    let fields = value.as_object()?;
+    let Ordered::Object(fields) = value else {
+        return None;
+    };
     let find = |keys: &[&'static str]| {
-        keys.iter()
-            .find_map(|&key| fields.get(key).map(|value| (key, value)))
+        keys.iter().find_map(|&key| {
+            fields
+                .iter()
+                .find(|(name, _)| name == key)
+                .map(|(_, value)| (key, value))
+        })
     };
     let level = find(RECORD_LEVEL_KEYS);
     let message = find(RECORD_MESSAGE_KEYS);
@@ -261,14 +269,28 @@ fn render_record(
         }
     }
     let used = [time, level, logger, message].map(|field| field.map(|(key, _)| key));
-    for (key, value) in fields {
-        if used.contains(&Some(key.as_str())) {
-            continue;
-        }
-        push(&format!("{}={}", record_text(key), record_value(value)));
+    let rest = || {
+        fields
+            .iter()
+            .filter(|(key, _)| !used.contains(&Some(key.as_str())))
+    };
+    if message.is_some() && rest().next().is_some() {
+        push("›");
+    }
+    for (key, value) in rest() {
+        push(&format!("{}={}", record_key(key), record_value(value)));
     }
     let severity = level_name.map(|name| crate::logfilter::parse_level(&name.to_ascii_lowercase()));
     Some((out, severity))
+}
+
+/// Keys that would read as several tokens, or break `key=value`, are quoted.
+fn record_key(key: &str) -> std::borrow::Cow<'_, str> {
+    if key.contains(|c: char| c.is_whitespace() || matches!(c, '=' | '"')) {
+        serde_json::Value::from(key).to_string().into()
+    } else {
+        record_text(key)
+    }
 }
 
 /// Text with control characters (a multi-line stack trace, terminal escapes)
@@ -284,7 +306,7 @@ fn record_text(text: &str) -> std::borrow::Cow<'_, str> {
 /// Epoch numbers (zap seconds, pino milliseconds) become RFC 3339; strings
 /// are kept as the application wrote them. With a configured format, both
 /// use it when they hold a valid time.
-fn record_time(time: &serde_json::Value, format: &RecordTime) -> String {
+fn record_time(time: &Ordered, format: &RecordTime) -> String {
     let Some(number) = time.as_f64() else {
         let Some(text) = time.as_str() else {
             return time.to_string();
@@ -310,7 +332,7 @@ fn record_time(time: &serde_json::Value, format: &RecordTime) -> String {
 }
 
 /// Level names in upper case; pino's numeric levels mapped to their names.
-fn record_level(level: &serde_json::Value) -> String {
+fn record_level(level: &Ordered) -> String {
     match level.as_u64() {
         Some(10) => "TRACE".into(),
         Some(20) => "DEBUG".into(),
@@ -327,7 +349,7 @@ fn record_level(level: &serde_json::Value) -> String {
 /// Bare strings stay bare. Strings that would be ambiguous in `key=value`
 /// form or read as another JSON type (`"true"`, `"3"`, `"{}"`), and every
 /// other JSON value, use compact JSON.
-fn record_value(value: &serde_json::Value) -> String {
+fn record_value(value: &Ordered) -> String {
     match value.as_str() {
         Some(text)
             if !text.is_empty()
@@ -340,6 +362,126 @@ fn record_value(value: &serde_json::Value) -> String {
             text.to_owned()
         }
         _ => value.to_string(),
+    }
+}
+
+/// A JSON value that keeps object fields in the order the application wrote
+/// them. `serde_json::Value` sorts them, and `preserve_order` would change key
+/// order everywhere sofka handles JSON.
+enum Ordered {
+    Object(Vec<(String, Ordered)>),
+    Array(Vec<Ordered>),
+    Scalar(serde_json::Value),
+}
+
+impl Ordered {
+    fn scalar(&self) -> Option<&serde_json::Value> {
+        match self {
+            Self::Scalar(value) => Some(value),
+            _ => None,
+        }
+    }
+
+    fn as_str(&self) -> Option<&str> {
+        self.scalar()?.as_str()
+    }
+
+    fn as_u64(&self) -> Option<u64> {
+        self.scalar()?.as_u64()
+    }
+
+    fn as_f64(&self) -> Option<f64> {
+        self.scalar()?.as_f64()
+    }
+}
+
+/// Compact JSON.
+impl std::fmt::Display for Ordered {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&serde_json::to_string(self).map_err(|_| std::fmt::Error)?)
+    }
+}
+
+impl serde::Serialize for Ordered {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::{SerializeMap, SerializeSeq};
+        match self {
+            Self::Object(fields) => {
+                let mut map = serializer.serialize_map(Some(fields.len()))?;
+                for (key, value) in fields {
+                    map.serialize_entry(key, value)?;
+                }
+                map.end()
+            }
+            Self::Array(items) => {
+                let mut seq = serializer.serialize_seq(Some(items.len()))?;
+                for item in items {
+                    seq.serialize_element(item)?;
+                }
+                seq.end()
+            }
+            Self::Scalar(value) => value.serialize(serializer),
+        }
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for Ordered {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct Visit;
+        impl<'de> serde::de::Visitor<'de> for Visit {
+            type Value = Ordered;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("a JSON value")
+            }
+
+            fn visit_bool<E>(self, v: bool) -> Result<Ordered, E> {
+                Ok(Ordered::Scalar(v.into()))
+            }
+
+            fn visit_i64<E>(self, v: i64) -> Result<Ordered, E> {
+                Ok(Ordered::Scalar(v.into()))
+            }
+
+            fn visit_u64<E>(self, v: u64) -> Result<Ordered, E> {
+                Ok(Ordered::Scalar(v.into()))
+            }
+
+            fn visit_f64<E>(self, v: f64) -> Result<Ordered, E> {
+                Ok(Ordered::Scalar(v.into()))
+            }
+
+            fn visit_str<E>(self, v: &str) -> Result<Ordered, E> {
+                Ok(Ordered::Scalar(v.into()))
+            }
+
+            fn visit_unit<E>(self) -> Result<Ordered, E> {
+                Ok(Ordered::Scalar(serde_json::Value::Null))
+            }
+
+            fn visit_seq<A: serde::de::SeqAccess<'de>>(
+                self,
+                mut seq: A,
+            ) -> Result<Ordered, A::Error> {
+                let mut items = Vec::new();
+                while let Some(item) = seq.next_element()? {
+                    items.push(item);
+                }
+                Ok(Ordered::Array(items))
+            }
+
+            fn visit_map<A: serde::de::MapAccess<'de>>(
+                self,
+                mut map: A,
+            ) -> Result<Ordered, A::Error> {
+                let mut fields = Vec::new();
+                while let Some(entry) = map.next_entry()? {
+                    fields.push(entry);
+                }
+                Ok(Ordered::Object(fields))
+            }
+        }
+        deserializer.deserialize_any(Visit)
     }
 }
 
