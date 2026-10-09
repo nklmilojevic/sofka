@@ -490,8 +490,7 @@ impl App {
         };
         let name = obj.metadata.name.clone().unwrap_or_default();
         let ns = obj.metadata.namespace.clone().unwrap_or_default();
-        let containers = container_names(obj);
-        let container = containers.into_iter().next();
+        let container = default_container(obj);
         self.launch_logs(
             LogSource::Single {
                 ns,
@@ -819,23 +818,8 @@ impl App {
         if self.deny_readonly() {
             return;
         }
-        let container = container.or_else(|| {
-            let obj = self.store.get(&format!("{ns}/{pod}"))?;
-            let containers = obj.data.pointer("/spec/containers")?.as_array()?;
-            let default = obj
-                .metadata
-                .annotations
-                .as_ref()
-                .and_then(|a| a.get("kubectl.kubernetes.io/default-container"));
-            default
-                .filter(|name| {
-                    containers
-                        .iter()
-                        .any(|c| c["name"].as_str() == Some(name.as_str()))
-                })
-                .cloned()
-                .or_else(|| containers.first()?.get("name")?.as_str().map(str::to_owned))
-        });
+        let container =
+            container.or_else(|| default_container(self.store.get(&format!("{ns}/{pod}"))?));
         self.shell_target = Some(ShellTarget {
             ns: ns.clone(),
             pod: pod.clone(),

@@ -369,6 +369,26 @@ pub(super) fn label_selector(obj: &DynamicObject, field: &str) -> Option<String>
     (!parts.is_empty()).then(|| parts.join(","))
 }
 
+/// The container kubectl would pick for `logs`/`exec`: the
+/// `kubectl.kubernetes.io/default-container` annotation when it names a
+/// container in the spec, otherwise the first container.
+pub(super) fn default_container(obj: &DynamicObject) -> Option<String> {
+    let containers = obj.data.pointer("/spec/containers")?.as_array()?;
+    let annotated = obj
+        .metadata
+        .annotations
+        .as_ref()
+        .and_then(|a| a.get("kubectl.kubernetes.io/default-container"))
+        .filter(|name| {
+            containers
+                .iter()
+                .any(|c| c["name"].as_str() == Some(name.as_str()))
+        });
+    annotated
+        .cloned()
+        .or_else(|| containers.first()?.get("name")?.as_str().map(str::to_owned))
+}
+
 pub(super) fn container_names(obj: &DynamicObject) -> Vec<String> {
     let mut names = Vec::new();
     for key in ["containers", "initContainers", "ephemeralContainers"] {

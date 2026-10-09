@@ -109,13 +109,13 @@ impl App {
                 _ => None,
             };
 
-            // Bounded logs for the first container of up to `max_pods` pods.
+            // Bounded logs for the default container of up to `max_pods` pods.
             let mut log_blocks: Vec<(String, Vec<String>)> = Vec::new();
             if log_lines > 0 {
                 for pod in gathered.pods.iter().take(max_pods) {
                     let pname = pod.metadata.name.clone().unwrap_or_default();
                     let pns = pod.metadata.namespace.clone().unwrap_or(ns.clone());
-                    let container = first_container(pod);
+                    let container = default_container(pod);
                     let api: Api<k8s_openapi::api::core::v1::Pod> =
                         Api::namespaced(client.clone(), &pns);
                     let lp = LogParams {
@@ -296,12 +296,4 @@ fn render_findings(findings: &[crate::explain::Finding]) -> Vec<String> {
         .iter()
         .map(|f| format!("{}{}", "  ".repeat(f.indent as usize), f.text))
         .collect()
-}
-
-/// The name of a pod's first (non-init) container, for a default log target.
-fn first_container(pod: &DynamicObject) -> Option<String> {
-    pod.data
-        .pointer("/spec/containers/0/name")
-        .and_then(Value::as_str)
-        .map(String::from)
 }

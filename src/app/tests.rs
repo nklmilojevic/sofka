@@ -11346,6 +11346,38 @@ async fn marked_pod_logs_skip_stale_and_hidden_marks() {
 }
 
 #[tokio::test]
+async fn previous_logs_follow_the_default_container_annotation() {
+    let (mut app, _rx) = app_with_pod();
+    apply(
+        &mut app,
+        json!({"apiVersion":"v1", "kind":"Pod",
+        "metadata":{"name":"a", "namespace":"default", "annotations":{
+            "kubectl.kubernetes.io/default-container":"app"}},
+        "spec":{"containers":[{"name":"istio-proxy"},{"name":"app"}]}}),
+    );
+    app.handle_key(press(KeyCode::Char('p'))).unwrap();
+    assert!(matches!(&app.logs.source, Some(LogSource::Single {
+        container: Some(c), previous: true, ..
+    }) if c == "app"));
+}
+
+#[tokio::test]
+async fn previous_logs_ignore_a_default_container_that_does_not_exist() {
+    let (mut app, _rx) = app_with_pod();
+    apply(
+        &mut app,
+        json!({"apiVersion":"v1", "kind":"Pod",
+        "metadata":{"name":"a", "namespace":"default", "annotations":{
+            "kubectl.kubernetes.io/default-container":"gone"}},
+        "spec":{"containers":[{"name":"web"},{"name":"worker"}]}}),
+    );
+    app.handle_key(press(KeyCode::Char('p'))).unwrap();
+    assert!(matches!(&app.logs.source, Some(LogSource::Single {
+        container: Some(c), previous: true, ..
+    }) if c == "web"));
+}
+
+#[tokio::test]
 async fn marked_pod_logs_do_not_change_previous_or_provider_selection() {
     let (mut app, _rx) = marked_logs_app();
     app.handle_key(press(KeyCode::Char('p'))).unwrap();
