@@ -1333,6 +1333,7 @@ pub struct LogsView {
     pub timestamps: bool,
     pub json: logs::JsonView,
     json_budget: usize,
+    record_time: logs::RecordTime,
     pub stopped: bool,
     /// Fullscreen (`F`, k9s): the pane takes the whole frame with no header,
     /// borders, or status line, so terminal text selection copies clean lines.
@@ -1373,6 +1374,7 @@ impl Default for LogsView {
             timestamps: false,
             json: logs::JsonView::Raw,
             json_budget: logs::JSON_CACHE_LIMIT,
+            record_time: logs::RecordTime::default(),
             stopped: false,
             fullscreen: false,
             since_anchor: None,

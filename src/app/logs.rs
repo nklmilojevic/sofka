@@ -43,7 +43,7 @@ pub(super) const JSON_CACHE_LIMIT: usize = 8 * 1024 * 1024;
 const JSON_RECORD_LIMIT: usize = 4096;
 
 impl LogLineMeta {
-    fn format_json(&mut self, line: &str, budget: &mut usize) {
+    fn format_json(&mut self, line: &str, budget: &mut usize, time: &RecordTime) {
         if self.checked_json {
             return;
         }
@@ -99,7 +99,7 @@ impl LogLineMeta {
         // The input and parser depth limits also bound the temporary output.
         // Each view is charged on its own, so an indented form that does not
         // fit cannot keep a short record row raw.
-        let record = render_record(&value);
+        let record = render_record(&value, time);
         let record_severity = record.as_ref().and_then(|(_, severity)| *severity);
         let record = record.and_then(|(text, _)| cache(text));
         let pretty = serde_json::to_string_pretty(&value)
@@ -108,6 +108,18 @@ impl LogLineMeta {
         self.record_severity = record_severity;
         self.record = record;
         self.pretty = pretty;
+    }
+
+    /// Drop the cached JSON forms so the next [`Self::format_json`] renders
+    /// the line again. Returns the budget they held.
+    fn clear_json(&mut self) -> usize {
+        let charge = self.json_charge;
+        self.pretty = None;
+        self.record = None;
+        self.record_severity = None;
+        self.checked_json = false;
+        self.json_charge = 0;
+        charge
     }
 
     pub(super) fn display(&self, view: JsonView) -> Option<&str> {
@@ -158,6 +170,40 @@ impl JsonView {
     }
 }
 
+/// How record view shows times that are RFC 3339 strings or epoch numbers:
+/// `[logs] record_time_format` in `record_time_zone`. Without a format, epoch
+/// numbers become RFC 3339 and strings stay as the application wrote them.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct RecordTime {
+    format: Option<String>,
+    local: bool,
+}
+
+impl RecordTime {
+    /// An invalid format or zone falls back to the default, which
+    /// `config::logs_warnings` reports.
+    pub fn from_config(cfg: &crate::config::LogsConfig) -> Self {
+        Self {
+            format: cfg
+                .record_time_format
+                .clone()
+                .filter(|format| crate::config::check_record_time_format(format).is_ok()),
+            local: cfg.record_time_zone == "local",
+        }
+    }
+
+    fn render(&self, time: jiff::Timestamp) -> Option<String> {
+        let format = self.format.as_deref()?;
+        let zone = if self.local {
+            jiff::tz::TimeZone::system()
+        } else {
+            jiff::tz::TimeZone::UTC
+        };
+        let text = jiff::fmt::strtime::format(format, &time.to_zoned(zone)).ok()?;
+        Some(record_text(&text).into_owned())
+    }
+}
+
 const RECORD_TIME_KEYS: &[&str] = &["time", "ts", "timestamp", "@timestamp"];
 const RECORD_LEVEL_KEYS: &[&str] = &["level", "lvl", "severity"];
 const RECORD_MESSAGE_KEYS: &[&str] = &["msg", "message"];
@@ -168,6 +214,7 @@ const RECORD_MESSAGE_KEYS: &[&str] = &["msg", "message"];
 /// field.
 fn render_record(
     value: &serde_json::Value,
+    format: &RecordTime,
 ) -> Option<(String, Option<crate::logfilter::Severity>)> {
     let fields = value.as_object()?;
     let find = |keys: &[&'static str]| {
@@ -188,7 +235,7 @@ fn render_record(
         out.push_str(part);
     };
     if let Some((_, time)) = time {
-        push(&record_time(time));
+        push(&record_time(time, format));
     }
     let level_name = level.map(|(_, level)| record_level(level));
     if let Some(name) = &level_name {
@@ -222,20 +269,28 @@ fn record_text(text: &str) -> std::borrow::Cow<'_, str> {
 }
 
 /// Epoch numbers (zap seconds, pino milliseconds) become RFC 3339; strings
-/// are kept as the application wrote them.
-fn record_time(time: &serde_json::Value) -> String {
+/// are kept as the application wrote them. With a configured format, both
+/// use it when they hold a valid time.
+fn record_time(time: &serde_json::Value, format: &RecordTime) -> String {
     let Some(number) = time.as_f64() else {
-        return time
-            .as_str()
-            .map_or_else(|| time.to_string(), |text| record_text(text).into_owned());
+        let Some(text) = time.as_str() else {
+            return time.to_string();
+        };
+        return text
+            .parse()
+            .ok()
+            .and_then(|time| format.render(time))
+            .unwrap_or_else(|| record_text(text).into_owned());
     };
     let micros = if number.abs() >= 1e11 {
         number * 1e3
     } else {
         number * 1e6
     };
-    k8s_openapi::jiff::Timestamp::from_microsecond(micros.round() as i64)
-        .map_or_else(|_| time.to_string(), |time| time.to_string())
+    jiff::Timestamp::from_microsecond(micros.round() as i64).map_or_else(
+        |_| time.to_string(),
+        |time| format.render(time).unwrap_or_else(|| time.to_string()),
+    )
 }
 
 /// Level names in upper case; pino's numeric levels mapped to their names.
@@ -316,11 +371,30 @@ impl LogsView {
         if self.json == view {
             return;
         }
+        self.rerender(|logs| logs.json = view);
+    }
+
+    /// Render buffered records again with a new time format, keeping the
+    /// line in view.
+    pub(super) fn set_record_time(&mut self, time: RecordTime) {
+        if self.record_time == time {
+            return;
+        }
+        self.rerender(|logs| {
+            logs.record_time = time;
+            for meta in &mut logs.line_meta {
+                logs.json_budget += meta.clear_json();
+            }
+            logs.json_budget = logs.json_budget.min(JSON_CACHE_LIMIT);
+        });
+    }
+
+    fn rerender(&mut self, change: impl FnOnce(&mut Self)) {
         let scroll = self.view.scroll;
         let shown = self
             .refresh_index(self.last_wrap_width)
             .first_at_row(scroll);
-        self.json = view;
+        change(self);
         self.prepare_json();
         self.view.revision = self.view.revision.wrapping_add(1);
         let width = self.last_wrap_width;
@@ -340,7 +414,7 @@ impl LogsView {
         self.line_meta
             .resize_with(self.view.lines.len(), LogLineMeta::default);
         for (line, meta) in self.view.lines.iter().zip(self.line_meta.iter_mut()) {
-            meta.format_json(line, &mut self.json_budget);
+            meta.format_json(line, &mut self.json_budget, &self.record_time);
         }
     }
 
@@ -354,7 +428,7 @@ impl LogsView {
             line.replace_range(*start..start + timestamp.len(), "");
         }
         if self.json != JsonView::Raw {
-            meta.format_json(&line, &mut self.json_budget);
+            meta.format_json(&line, &mut self.json_budget, &self.record_time);
         }
         // Equal timestamps keep their arrival order. Missing timestamps use
         // the newest known time, or the arrival time if no time is known.
@@ -469,6 +543,7 @@ impl App {
         if cfg.json_view != self.logs_cfg.json_view {
             self.logs.set_json(JsonView::from_config(&cfg.json_view));
         }
+        self.logs.set_record_time(RecordTime::from_config(&cfg));
         self.logs_cfg = cfg;
     }
 
