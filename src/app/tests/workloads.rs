@@ -298,6 +298,16 @@ async fn row_actions_use_the_row_kind_and_skip_marks_of_other_kinds() {
         "{}",
         app.confirm_label
     );
+    // Toggling force and cascade rebuilds the label; the note stays.
+    for key in ['f', 'c', 'f', 'c'] {
+        app.handle_key(press(KeyCode::Char(key))).unwrap();
+        assert!(
+            app.confirm_label
+                .ends_with(" · skips 1 marked row of other kinds"),
+            "after {key}: {}",
+            app.confirm_label
+        );
+    }
     // A watch update can move the cursor onto the same-named Deployment
     // while the dialog is open; the answer still deletes the Pod.
     app.table_state
@@ -311,9 +321,22 @@ async fn row_actions_use_the_row_kind_and_skip_marks_of_other_kinds() {
     }
     assert_eq!(app.kind_plural, "workloads");
 
+    // Scale is kind-specific: with both marked again, only the Deployment
+    // is scaled and the prompt says the Pod is skipped.
+    assert!(app.marked.is_empty());
+    for (kind, name) in [("Pod", "web"), ("Deployment", "web")] {
+        app.table_state.select(Some(position(&app, kind, name)));
+        app.handle_key(press(KeyCode::Char(' '))).unwrap();
+    }
     app.table_state
         .select(Some(position(&app, "Deployment", "web")));
     app.handle_key(press(KeyCode::Char('s'))).unwrap();
+    assert!(
+        app.prompt_label
+            .ends_with(" · skips 1 marked row of other kinds"),
+        "{}",
+        app.prompt_label
+    );
     assert_eq!(app.mode, Mode::Prompt);
     assert!(
         app.prompt_label.contains("Scale web"),
@@ -406,54 +429,64 @@ async fn workloads_watches_stamp_each_kind_on_rows_of_the_same_name() {
     use hyper::body::{Bytes, Frame};
     use std::convert::Infallible;
 
-    let service = tower::service_fn(|request: http::Request<kube::client::Body>| async move {
-        let uri = request.uri().clone();
-        let query = uri.query().unwrap_or("");
-        let (status, body) = if query.contains("sendInitialEvents") {
-            (
-                400,
-                json!({"apiVersion": "v1", "kind": "Status", "status": "Failure",
+    // Watch events wait for the test to open this gate, so the rows of the
+    // initial lists can be checked before anything changes them.
+    let (open_gate, gate) = tokio::sync::watch::channel(false);
+    let service = tower::service_fn(move |request: http::Request<kube::client::Body>| {
+        let mut gate = gate.clone();
+        async move {
+            let uri = request.uri().clone();
+            let query = uri.query().unwrap_or("");
+            let (status, body) = if query.contains("sendInitialEvents") {
+                (
+                    400,
+                    json!({"apiVersion": "v1", "kind": "Status", "status": "Failure",
                        "reason": "BadRequest", "code": 400,
                        "message": "sendInitialEvents is not supported"})
-                .to_string(),
-            )
-        } else if query.contains("watch=true") {
-            // After the list: the Deployment changes and the Pod goes away.
-            let meta = json!({"name": "web", "namespace": "default", "resourceVersion": "2"});
-            let event = match uri.path().rsplit('/').next() {
-                Some("deployments") => Some(json!({"type": "MODIFIED", "object": {
+                    .to_string(),
+                )
+            } else if query.contains("watch=true") {
+                // After the list: the Deployment changes and the Pod goes away.
+                let meta = json!({"name": "web", "namespace": "default", "resourceVersion": "2"});
+                let event = match uri.path().rsplit('/').next() {
+                    Some("deployments") => Some(json!({"type": "MODIFIED", "object": {
                     "apiVersion": "apps/v1", "kind": "Deployment", "metadata": meta,
                     "spec": {"replicas": 5}}})),
-                Some("pods") => Some(json!({"type": "DELETED", "object": {
+                    Some("pods") => Some(json!({"type": "DELETED", "object": {
                     "apiVersion": "v1", "kind": "Pod", "metadata": meta}})),
-                _ => None,
-            };
-            (200, event.map(|e| format!("{e}\n")).unwrap_or_default())
-        } else {
-            // List items carry no apiVersion/kind, as a real list response
-            // may omit them; the view must stamp the kind itself.
-            let item = json!({"metadata": {"name": "web", "namespace": "default",
+                    _ => None,
+                };
+                (200, event.map(|e| format!("{e}\n")).unwrap_or_default())
+            } else {
+                // List items carry no apiVersion/kind, as a real list response
+                // may omit them; the view must stamp the kind itself.
+                let item = json!({"metadata": {"name": "web", "namespace": "default",
                                            "resourceVersion": "1"}});
-            (
-                200,
-                json!({"apiVersion": "v1", "kind": "List",
+                (
+                    200,
+                    json!({"apiVersion": "v1", "kind": "List",
                        "metadata": {"resourceVersion": "1"}, "items": [item]})
-                .to_string(),
+                    .to_string(),
+                )
+            };
+            let watch = query.contains("watch=true") && status == 200;
+            let frames = if watch {
+                stream::once(async move {
+                    let _ = gate.wait_for(|open| *open).await;
+                    Ok::<_, Infallible>(Frame::data(Bytes::from(body)))
+                })
+                .chain(stream::pending())
+                .boxed()
+            } else {
+                stream::iter([Ok::<_, Infallible>(Frame::data(Bytes::from(body)))]).boxed()
+            };
+            Ok::<_, Infallible>(
+                http::Response::builder()
+                    .status(status)
+                    .body(http_body_util::StreamBody::new(frames))
+                    .unwrap(),
             )
-        };
-        let watch = query.contains("watch=true") && status == 200;
-        let frames = stream::iter([Ok::<_, Infallible>(Frame::data(Bytes::from(body)))]);
-        let frames = if watch {
-            frames.chain(stream::pending()).boxed()
-        } else {
-            frames.boxed()
-        };
-        Ok::<_, Infallible>(
-            http::Response::builder()
-                .status(status)
-                .body(http_body_util::StreamBody::new(frames))
-                .unwrap(),
-        )
+        }
     });
     let (mut app, mut rx) = test_app();
     app.cluster.client = kube::Client::new(service, "default");
@@ -479,6 +512,21 @@ async fn workloads_watches_stamp_each_kind_on_rows_of_the_same_name() {
         kinds.sort();
         kinds
     };
+    // Every kind's list returned an object named `web`; none overwrote
+    // another.
+    assert_eq!(
+        kinds(&app),
+        [
+            "CronJob",
+            "DaemonSet",
+            "Deployment",
+            "Job",
+            "Pod",
+            "StatefulSet"
+        ]
+    );
+    assert_eq!(ready_of(&app).as_deref(), Some("0/1"));
+    open_gate.send(true).unwrap();
     tokio::time::timeout(Duration::from_secs(5), async {
         while kinds(&app).contains(&"Pod".to_string()) || ready_of(&app).as_deref() != Some("0/5") {
             let msg = rx.recv().await.expect("watch channel closed");
@@ -499,4 +547,52 @@ fn ready_of(app: &App) -> Option<String> {
         .iter()
         .find(|o| o.types.as_ref().unwrap().kind == "Deployment")
         .map(|o| app.spec.cells(o, now_secs()).0[2].clone())
+}
+
+#[tokio::test]
+async fn palette_commands_and_timeline_follow_the_selected_row() {
+    let (mut app, _rx) = workloads_app();
+    app.cluster
+        .register_kind("apps", "ReplicaSet", "replicasets", true);
+    seed(&mut app);
+    let position = |app: &App, kind: &str, name: &str| {
+        app.rows()
+            .iter()
+            .position(|o| {
+                o.types.as_ref().unwrap().kind == kind && o.metadata.name.as_deref() == Some(name)
+            })
+            .unwrap()
+    };
+
+    // The timeline records a Pod's phase change under the view, judged as
+    // a Pod.
+    let mut running = pod("web", None);
+    running["metadata"]["resourceVersion"] = json!("1");
+    running["status"]["phase"] = json!("Pending");
+    apply_workload(&mut app, running.clone());
+    running["metadata"]["resourceVersion"] = json!("2");
+    running["status"]["phase"] = json!("Running");
+    apply_workload(&mut app, running);
+    app.table_state.select(Some(position(&app, "Pod", "web")));
+    app.handle_key(press(KeyCode::Char('T'))).unwrap();
+    assert_eq!(app.mode, Mode::Timeline);
+    let entries = app
+        .timeline
+        .entries("workloads", "pods/default/web")
+        .expect("pod history");
+    assert!(
+        entries.iter().any(|e| e.text.contains("Running")),
+        "{entries:?}"
+    );
+    app.handle_key(press(KeyCode::Esc)).unwrap();
+    assert_eq!(app.kind_plural, "workloads");
+
+    // A row command from the palette acts on the selected Deployment.
+    app.table_state
+        .select(Some(position(&app, "Deployment", "web")));
+    type_resource_query(&mut app, "rollout-history");
+    assert_eq!(app.kind_plural, crate::rollout::VIEW, "{}", app.flash);
+    app.handle_key(press(KeyCode::Esc)).unwrap();
+    assert!(app.workloads_active());
+    assert_eq!(app.kind_plural, "workloads");
 }

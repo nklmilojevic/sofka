@@ -2041,6 +2041,8 @@ pub struct App {
     workload_focus: Option<Kind>,
     /// Marked workloads rows of other kinds the running action leaves out.
     workload_skipped: usize,
+    /// Appended to the delete confirmation each time it is rebuilt.
+    confirm_note: String,
     /// Parsed form of `filter`, refreshed lazily when the string changes so
     /// neither row matching nor rendering reparses it per frame.
     filter_cache: RefCell<FilterCache>,
@@ -2613,6 +2615,7 @@ impl App {
             workloads: None,
             workload_focus: None,
             workload_skipped: 0,
+            confirm_note: String::new(),
             filter_cache: RefCell::new(FilterCache {
                 raw: String::new(),
                 parsed: crate::filter::parse(""),

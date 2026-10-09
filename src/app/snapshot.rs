@@ -21,7 +21,7 @@ impl App {
             context: self.cluster.context.clone(),
             cluster: self.cluster.cluster_name.clone(),
             namespace: self.namespace.clone(),
-            resource: self.kind_plural.clone(),
+            resource: self.view_plural().to_string(),
             filter: self.filter.clone(),
             columns,
             rows,
@@ -69,7 +69,7 @@ impl App {
                     let helm_updated = cache.helm_updated(&rk);
                     for (i, cell) in base_cells.iter().enumerate() {
                         match self.live_cell(obj, i).or_else(|| {
-                            spec.volatile_cached(obj, &self.kind_plural, i, now, helm_updated)
+                            spec.volatile_cached(obj, self.view_plural(), i, now, helm_updated)
                         }) {
                             Some(v) => cells.push(v),
                             None => cells.push(cell.to_string()),

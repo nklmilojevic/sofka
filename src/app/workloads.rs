@@ -100,6 +100,16 @@ impl App {
         }
     }
 
+    /// The kind a watched row belongs to: the view's own, or for a
+    /// workloads row the plural its key starts with.
+    pub(super) fn watched_plural<'a>(&'a self, key: &'a str) -> &'a str {
+        if self.workloads.is_some() {
+            key.split_once('/').map_or(key, |(plural, _)| plural)
+        } else {
+            &self.kind_plural
+        }
+    }
+
     /// The store key of `obj` in the current view.
     pub(crate) fn key_of(&self, obj: &DynamicObject) -> String {
         if self.workloads.is_some() {
@@ -186,8 +196,11 @@ impl App {
                             | Action::Help
                     )
             }),
-            Mode::Command
-            | Mode::Filter
+            // A palette command can act on the selected row (`:notify`,
+            // `:rollout-history`, palette plugins); a view switch restores
+            // the view's identity itself when it starts the new watch.
+            Mode::Command => key.action == Some(Action::Accept),
+            Mode::Filter
             | Mode::Help
             | Mode::Namespaces
             | Mode::Contexts
@@ -198,14 +211,15 @@ impl App {
     }
 
     /// Run the next key with the kind of the row it acts on. A key in the
-    /// table starts a new action on the cursor row; a key in a dialog or
+    /// table or palette starts a new action on the cursor row; a key in a dialog or
     /// prompt that action opened keeps the kind it started with, even if a
     /// watch update has since moved the cursor to a row of another kind.
     pub(super) fn focus_workload_row(&mut self) {
         if self.workloads.is_none() {
             return;
         }
-        if self.mode == Mode::Table {
+        // The table and the palette start a new action on the cursor row.
+        if matches!(self.mode, Mode::Table | Mode::Command) {
             self.workload_skipped = 0;
             self.workload_focus = self.selected_ref().and_then(|obj| {
                 let plural = plural_of(obj)?;
@@ -231,15 +245,24 @@ impl App {
     /// rows it leaves out.
     pub(super) fn note_skipped_marks(&mut self, before: Mode) {
         let skipped = std::mem::take(&mut self.workload_skipped);
-        if skipped == 0 || before != Mode::Table {
+        if before != Mode::Table {
             return;
         }
-        let note = format!(
-            " · skips {skipped} marked row{} of other kinds",
-            if skipped == 1 { "" } else { "s" }
-        );
+        let note = if skipped == 0 {
+            String::new()
+        } else {
+            format!(
+                " · skips {skipped} marked row{} of other kinds",
+                if skipped == 1 { "" } else { "s" }
+            )
+        };
         match self.mode {
-            Mode::Confirm => self.confirm_label.push_str(&note),
+            Mode::Confirm => {
+                self.confirm_label.push_str(&note);
+                // Kept for the dialog's lifetime: toggling force or cascade
+                // rebuilds the label.
+                self.confirm_note = note;
+            }
             Mode::Prompt => self.prompt_label.push_str(&note),
             _ => {}
         }

@@ -247,6 +247,7 @@ impl App {
                         cascade,
                         managed.as_deref(),
                     );
+                    self.confirm_label.push_str(&self.confirm_note);
                 }
             }
             (Some(Action::Cascade), _) => {
@@ -270,6 +271,7 @@ impl App {
                         cascade,
                         managed.as_deref(),
                     );
+                    self.confirm_label.push_str(&self.confirm_note);
                 }
             }
             (Some(Action::Back), _) => {

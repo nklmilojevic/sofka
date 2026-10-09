@@ -88,8 +88,22 @@ impl Timeline {
         prev: Option<&DynamicObject>,
         new: &DynamicObject,
     ) {
+        self.observe_as(plural, plural, rk, prev, new);
+    }
+
+    /// [`Self::observe`] for a row filed under `view` whose own kind is
+    /// `plural`, as in the workloads view: the history is kept under the
+    /// view, the changes worth recording come from the row's kind.
+    pub fn observe_as(
+        &mut self,
+        view: &str,
+        plural: &str,
+        rk: &str,
+        prev: Option<&DynamicObject>,
+        new: &DynamicObject,
+    ) {
         let now = Self::now();
-        let key = tkey(plural, rk);
+        let key = tkey(view, rk);
         let first_ever = self.seen.insert(key.clone());
         match prev {
             // First sight (initial list / post-relist). Record a creation only
@@ -115,9 +129,14 @@ impl Timeline {
 
     /// Record a deletion.
     pub fn observe_delete(&mut self, plural: &str, rk: &str) {
+        self.observe_delete_as(plural, plural, rk);
+    }
+
+    /// [`Self::observe_delete`] for a row filed under `view`.
+    pub fn observe_delete_as(&mut self, view: &str, plural: &str, rk: &str) {
         let now = Self::now();
         self.push(
-            &tkey(plural, rk),
+            &tkey(view, rk),
             now,
             Level::Bad,
             format!("{} deleted", singular(plural)),

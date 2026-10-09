@@ -26,10 +26,10 @@ impl App {
 
         // In-memory pieces gathered on the main thread.
         let rk = self.key_of(&obj);
-        let plural = self.view_plural().to_string();
+        let plural = self.kind_plural.clone();
         let timeline: Vec<String> = self
             .timeline
-            .entries(&plural, &rk)
+            .entries(self.view_plural(), &rk)
             .map(|entries| {
                 entries
                     .iter()

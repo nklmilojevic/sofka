@@ -238,9 +238,10 @@ impl App {
     // ----- view history (`[` / `]`) ---------------------------------------
 
     pub(super) fn save_history_filter(&mut self) {
+        let view = self.view_plural().to_string();
         if self.stack.is_empty()
             && let Some(entry) = self.history.get_mut(self.history_pos)
-            && entry.kind_plural == self.kind_plural
+            && entry.kind_plural == view
             && entry.namespace == self.namespace
         {
             entry.filter = self.filter.clone();
@@ -380,8 +381,9 @@ impl App {
         // for the session diff (`:diff` on objects with no
         // last-applied annotation).
         let prev = self.store.latest_in(partition, &key);
+        let kind = self.watched_plural(&key).to_string();
         self.timeline
-            .observe(&self.kind_plural, &key, prev.map(Arc::as_ref), &obj);
+            .observe_as(&self.kind_plural, &kind, &key, prev.map(Arc::as_ref), &obj);
         if let Some(prev) = prev
             && prev.metadata.resource_version != obj.metadata.resource_version
         {
@@ -398,7 +400,9 @@ impl App {
     }
 
     fn delete_watched(&mut self, partition: Option<&str>, key: &str) {
-        self.timeline.observe_delete(&self.kind_plural, key);
+        let kind = self.watched_plural(key).to_string();
+        self.timeline
+            .observe_delete_as(&self.kind_plural, &kind, key);
         if let Some(obj) = self.store.latest_in(partition, key) {
             self.server_table.remove(key, obj.metadata.uid.as_deref());
         }
