@@ -276,6 +276,9 @@ fn record_time(time: &serde_json::Value, format: &RecordTime) -> String {
         let Some(text) = time.as_str() else {
             return time.to_string();
         };
+        if format.format.is_none() {
+            return record_text(text).into_owned();
+        }
         return text
             .parse()
             .ok()

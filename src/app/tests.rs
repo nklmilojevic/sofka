@@ -38893,6 +38893,50 @@ async fn log_record_time_format_follows_config_and_reload() {
 }
 
 #[tokio::test]
+async fn log_record_time_format_reload_keeps_the_paused_line_in_view() {
+    use ratatui::{Terminal, backend::TestBackend};
+    let dir = std::env::temp_dir().join(format!("sofka-record-time-scroll-{}", std::process::id()));
+    write_config(&dir, "[logs]\nrecord_time_format = \"%H:%M\"\n");
+    let (mut app, _rx) = test_app();
+    app.config = crate::config::ConfigLoader::from_dir(Some(dir.clone()));
+    land_context(&mut app, "dev");
+    app.mode = Mode::Logs;
+    app.compact = true;
+    shortcut_log_lines(
+        &mut app,
+        (0..30)
+            .map(|i| {
+                format!(
+                    r#"{{"time":"2026-10-08T15:00:{i:02}Z","level":"info","msg":"record {i} with a long message"}}"#
+                )
+            })
+            .collect(),
+    );
+    app.handle_key(press(KeyCode::Char('J'))).unwrap();
+    app.handle_key(press(KeyCode::Char('w'))).unwrap();
+    let mut terminal = Terminal::new(TestBackend::new(24, 12)).unwrap();
+    terminal.draw(|f| crate::ui::draw(f, &mut app)).unwrap();
+    app.handle_key(press(KeyCode::Home)).unwrap();
+    app.handle_key(press(KeyCode::PageDown)).unwrap();
+    terminal.draw(|f| crate::ui::draw(f, &mut app)).unwrap();
+    assert!(!app.logs.follow);
+    let shown = app.logs.index.first_at_row(app.logs.view.scroll);
+    let rows = app.logs.viewport_rows;
+
+    // A longer format adds wrapped rows above the paused line.
+    write_config(
+        &dir,
+        "[logs]\nrecord_time_format = \"%A %d %B %Y %H:%M:%S%.9f\"\n",
+    );
+    palette(&mut app, "reload");
+    app.mode = Mode::Logs;
+    terminal.draw(|f| crate::ui::draw(f, &mut app)).unwrap();
+    assert!(app.logs.viewport_rows > rows);
+    assert_eq!(app.logs.index.first_at_row(app.logs.view.scroll), shown);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[tokio::test]
 async fn log_json_shortcut_renders_structured_records_on_one_row() {
     use ratatui::{Terminal, backend::TestBackend};
     let (mut app, _rx) = test_app();
