@@ -82,13 +82,13 @@ ownership scope are cleared. Startup still uses the configured default resource.
 | `:skin`                                                      | pick a color skin with live preview; `esc` restores the previous skin (`:skin gruvbox-dark` applies directly)                                                                                    |
 | `:reload` / `:config` / `:info`                              | reload config from disk · config sources + warnings · runtime diagnostics                                                                                                                        |
 | `:check-update`                                              | check for a newer sofka release and show the upgrade command                                                                                                                                     |
-| `l` / `p`                                                    | logs (marked pods, or current row; workload = all matching pods) / previous-container logs                                                                                                       |
+| `l` / `p`                                                    | logs (marked pods, or current row; a pod with a `kubectl.kubernetes.io/default-container` annotation shows that container; workload = all matching pods) / previous-container logs               |
 | `L` / `:vlogs`                                               | VictoriaLogs history for the selection (pod, container, workload, service, namespace), or its Cloud Logging / log UI link                                                                        |
 | `c`                                                          | copy resource name to clipboard                                                                                                                                                                  |
 | `Y`                                                          | copy any cell of the selected row: picker over the displayed columns (type to match a column name or value), `⏎` copies                                                                          |
 | `e`                                                          | edit in `$EDITOR` (`kubectl edit`)                                                                                                                                                               |
 | `s`                                                          | shell into pod / shell into a PVC's volume / scale a resource with a discovered scale subresource (context-dependent)                                                                            |
-| `a`                                                          | attach to pod                                                                                                                                                                                    |
+| `a`                                                          | attach to the pod's default container (`kubectl.kubernetes.io/default-container`, else the first one)                                                                                            |
 | `:debug`                                                     | pod: ephemeral debug container (`d` in the picker targets one) · node: privileged debug pod (previewed + confirmed)                                                                              |
 | `:debug-clean`                                               | delete the node debugger pods launched this session                                                                                                                                              |
 | `:pvc-explore` / `:pvc-clean`                                | browse the selected PVC (also `:pvc-browse`; see below) · delete helper pods a previous session left behind (also `:pvc-cleanup`)                                                                |
@@ -172,6 +172,7 @@ point instead. See [PVC explore](features.md#pvc-explore).
 
 `/` filter (substring · `/regex/` · `!invert`) · `s`/`f` autoscroll · `w` wrap ·
 `J` JSON view (raw/record/pretty) · `Ctrl+Z` warning/error filter · `m` visual marker · `t` timestamps · `x` stop/resume stream · `z` clear buffer · `c` copy buffer ·
+`a` default/all containers (pods with a default-container annotation) ·
 `ctrl-s` save to file · `F` fullscreen (no chrome, clean text selection) ·
 `0`–`5` time anchors (tail · 1m · 5m · 15m · 30m · 1h) · `T` custom lookback (`s`/`m`/`h`/`d`, or `tail` for kubelet logs)
 (VictoriaLogs views) · `esc` back. The newest line anchors to the bottom of the

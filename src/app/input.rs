@@ -1401,6 +1401,10 @@ impl App {
             self.save_logs();
             return;
         }
+        if key.action == Some(Action::AllContainers) {
+            self.toggle_all_containers();
+            return;
+        }
         match (key.action, key.code) {
             // k9s: `s` toggles autoscroll/follow (we also accept `f`).
             (Some(Action::Follow), _) => {

@@ -1437,8 +1437,10 @@ impl App {
                 title,
                 source,
                 findings,
+                pods,
             } if generation == self.generation && request == self.explain_request => {
                 self.explain_claim = None;
+                self.explain_pods = pods;
                 self.explain_task = None;
                 if let Some(source) = source {
                     if let Some(report) = self.explain_refresh_source.as_mut() {

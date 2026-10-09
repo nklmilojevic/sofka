@@ -184,7 +184,9 @@ initial lines. Previous-container logs keep their full history.
 In the view, `/` filters with a case-insensitive substring, a `/regex/`, or a
 leading `!` to invert (keep lines that don't match). A malformed regex is flagged
 instead of hiding everything. `z` clears the on-screen buffer while the live
-stream keeps appending. A pod streams every container's logs at once. Full keymap:
+stream keeps appending. A pod streams every container's logs at once, unless a
+`kubectl.kubernetes.io/default-container` annotation names one: then only that
+container streams and `a` switches to every container and back. Full keymap:
 [Logs view](keys.md#logs-view).
 
 For history that outlives the pod, use [VictoriaLogs](providers.md#log-provider-victorialogs).

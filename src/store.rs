@@ -25,6 +25,7 @@ pub enum RefreshContent {
     Explain {
         source: Box<DynamicObject>,
         findings: Vec<crate::explain::Finding>,
+        pods: Vec<DynamicObject>,
     },
 }
 
@@ -142,6 +143,8 @@ pub enum Msg {
         title: String,
         source: Option<Box<DynamicObject>>,
         findings: Vec<crate::explain::Finding>,
+        /// The pods the findings point at, so `l` can resolve containers.
+        pods: Vec<DynamicObject>,
     },
     /// Current source data for an adjacent lookup.
     AdjacentSource {
@@ -555,6 +558,8 @@ pub struct XrayItem {
     pub status: String,
     /// Set when this row is a container leaf (its pod is `name`).
     pub container: Option<String>,
+    /// The pod behind a pod row, so `l` can resolve its containers.
+    pub pod: Option<Box<DynamicObject>>,
 }
 
 /// Stable identity for a resource row.

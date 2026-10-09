@@ -275,8 +275,12 @@ impl App {
         };
         let name = obj.metadata.name.clone().unwrap_or_default();
         let ns = obj.metadata.namespace.clone().unwrap_or_default();
+        let container = default_container(obj);
         let mut argv = self.kubectl_base();
         argv.extend(["attach".into(), "-it".into(), "-n".into(), ns, name]);
+        if let Some(c) = container {
+            argv.extend(["-c".into(), c]);
+        }
         self.pending = Some(Suspend::Shell(argv));
     }
 
@@ -1759,16 +1763,17 @@ impl App {
         );
     }
 
-    /// `t` on a pod row: open the file-transfer menu for the selected pod.
-    /// No container pin — `kubectl cp` targets the pod's default container;
-    /// the container picker's `t` transfers to/from a specific one.
+    /// `t` on a pod row: open the file-transfer menu for the selected pod,
+    /// pinned to its default container; the container picker's `t` picks
+    /// another one.
     pub(super) fn request_transfer(&mut self) {
         let Some(obj) = self.selected_ref() else {
             return;
         };
         let name = obj.metadata.name.clone().unwrap_or_default();
         let ns = obj.metadata.namespace.clone().unwrap_or_default();
-        self.open_transfer_menu(ns, name, None);
+        let container = default_container(obj);
+        self.open_transfer_menu(ns, name, container);
     }
 
     /// Open the download/upload choice for `pod`. A menu rather than a prompt

@@ -285,6 +285,29 @@ fn record_value(value: &serde_json::Value) -> String {
     }
 }
 
+fn pod_logs_title(pod: &str, container: Option<&str>) -> String {
+    match container {
+        Some(c) => format!("{pod}:{c} — logs"),
+        None => format!("{pod} — logs"),
+    }
+}
+
+/// Logs for one pod: its annotated default container, else every container.
+pub(super) fn pod_log_source(obj: &DynamicObject) -> (LogSource, String) {
+    let name = obj.metadata.name.clone().unwrap_or_default();
+    let default = annotated_container(obj);
+    let title = pod_logs_title(&name, default.as_deref());
+    let source = LogSource::Pod {
+        ns: obj.metadata.namespace.clone().unwrap_or_default(),
+        name,
+        uid: obj.metadata.uid.clone(),
+        containers: container_names(obj),
+        default,
+        all_containers: false,
+    };
+    (source, title)
+}
+
 pub(super) fn display_height(line: &str, width: usize) -> usize {
     line.split('\n')
         .map(|part| {
@@ -525,7 +548,8 @@ impl App {
             .drain_front(self.logs.view.lines.len().saturating_sub(cap));
     }
 
-    /// Logs for marked pods or the current selection. Stream every container. For
+    /// Logs for marked pods or the current selection. A pod streams its
+    /// annotated default container, else every container. For
     /// workloads/services: list matching pods and aggregate all their logs.
     pub(super) fn open_logs(&mut self) {
         if self.kind_plural == "pods" && !self.marked.is_empty() {
@@ -556,16 +580,8 @@ impl App {
 
         match self.kind_plural.as_str() {
             "pods" => {
-                let containers = container_names(obj);
-                self.launch_logs(
-                    LogSource::Pod {
-                        ns,
-                        name: name.clone(),
-                        uid: obj.metadata.uid.clone(),
-                        containers,
-                    },
-                    format!("{name} — logs"),
-                );
+                let (source, title) = pod_log_source(obj);
+                self.launch_logs(source, title);
             }
             "deployments" | "statefulsets" | "daemonsets" | "replicasets" | "jobs" => {
                 match label_selector(obj, "matchLabels") {
@@ -855,6 +871,33 @@ impl App {
         self.restart_log_stream();
     }
 
+    /// `a`: switch a pod's log view between its annotated default container
+    /// and every container, keeping filter and follow state. A stopped
+    /// stream picks up the switch when it resumes.
+    pub(super) fn toggle_all_containers(&mut self) {
+        let Some(LogSource::Pod {
+            name,
+            default: Some(default),
+            all_containers,
+            ..
+        }) = &mut self.logs.source
+        else {
+            self.flash_warn("no default container to switch from");
+            return;
+        };
+        *all_containers = !*all_containers;
+        let shown = (!*all_containers).then_some(default.as_str());
+        self.logs.view.title = pod_logs_title(name, shown);
+        self.flash = match shown {
+            Some(c) => format!("logs: container {c}"),
+            None => "logs: all containers".into(),
+        };
+        self.flash_err = false;
+        if !self.logs.stopped {
+            self.retail_logs();
+        }
+    }
+
     /// Bump the log generation, abort old log tasks, and spawn fresh ones for
     /// the current source. Independent of the view watch.
     pub(super) fn restart_log_stream(&mut self) {
@@ -911,7 +954,13 @@ impl App {
                 name,
                 uid,
                 containers,
+                default,
+                all_containers,
             }) => {
+                let containers = match default {
+                    Some(c) if !all_containers => vec![c],
+                    _ => containers,
+                };
                 if containers.is_empty() {
                     // Unknown container set (e.g. from xray) — stream the default.
                     let instance = log_follow::Instance::Named(uid);

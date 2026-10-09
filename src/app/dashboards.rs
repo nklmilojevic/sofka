@@ -259,15 +259,12 @@ impl App {
                                 item.container.unwrap_or_default()
                             ),
                         ),
-                        "pod" => self.launch_logs(
-                            LogSource::Pod {
-                                ns: item.ns,
-                                name: item.name.clone(),
-                                uid: None,
-                                containers: vec![],
-                            },
-                            format!("{} — logs", item.name),
-                        ),
+                        "pod" => {
+                            if let Some(pod) = item.pod {
+                                let (source, title) = logs::pod_log_source(&pod);
+                                self.launch_logs(source, title);
+                            }
+                        }
                         _ => self.flash_warn("logs available on pods/containers"),
                     }
                 }

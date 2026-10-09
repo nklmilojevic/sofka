@@ -24,6 +24,7 @@ impl App {
         let name = obj.metadata.name.clone().unwrap_or_default();
         self.explain_title = format!("{name} — explain");
         self.explain_items.clear();
+        self.explain_pods.clear();
         self.explain_state.select(None);
         self.explain_selection_lost = false;
         self.cancel_gitops_request();
@@ -75,12 +76,14 @@ impl App {
             let refresh::RefreshView::Explain { pods, events } = &source.view else {
                 return;
             };
-            let gathered = gather_explain(&source, pods.as_deref(), events.as_deref())
-                .await
-                .map(|(source, mut findings, warning)| {
-                    prepend_warn_finding(&mut findings, warning);
-                    (source, findings)
-                });
+            let (gathered, pods) =
+                match gather_explain(&source, pods.as_deref(), events.as_deref()).await {
+                    Ok(mut explained) => {
+                        prepend_warn_finding(&mut explained.findings, explained.warning);
+                        (Ok((explained.source, explained.findings)), explained.pods)
+                    }
+                    Err(error) => (Err(error), Vec::new()),
+                };
             let (source, findings) = report_result(gathered);
             let _ = tx
                 .send(Msg::Explain {
@@ -90,6 +93,7 @@ impl App {
                     title,
                     source,
                     findings,
+                    pods,
                 })
                 .await;
         }));
@@ -216,15 +220,28 @@ impl App {
     /// the object being explained.
     fn explain_logs(&mut self) {
         match self.selected_target() {
-            Some(t) if t.plural == "pods" => self.launch_logs(
-                LogSource::Pod {
-                    ns: t.namespace.unwrap_or_default(),
-                    name: t.name.clone(),
-                    uid: None,
-                    containers: vec![],
-                },
-                format!("{} — logs", t.name),
-            ),
+            Some(t) if t.plural == "pods" => {
+                let ns = t.namespace.unwrap_or_default();
+                let pod = self.explain_pods.iter().find(|p| {
+                    p.metadata.name.as_deref() == Some(t.name.as_str())
+                        && p.metadata.namespace.as_deref().unwrap_or_default() == ns
+                });
+                let (source, title) = match pod {
+                    Some(pod) => logs::pod_log_source(pod),
+                    None => (
+                        LogSource::Pod {
+                            ns,
+                            name: t.name.clone(),
+                            uid: None,
+                            containers: vec![],
+                            default: None,
+                            all_containers: false,
+                        },
+                        format!("{} — logs", t.name),
+                    ),
+                };
+                self.launch_logs(source, title);
+            }
             _ => self.open_logs(),
         }
     }
@@ -461,11 +478,20 @@ pub(super) fn filter_events(
         .collect()
 }
 
+/// The result of one explain gather: the re-read object, its findings, the
+/// pods the findings can point at, and a warning when evidence is partial.
+pub(super) struct Explained {
+    pub(super) source: DynamicObject,
+    pub(super) findings: Vec<crate::explain::Finding>,
+    pub(super) pods: Vec<DynamicObject>,
+    pub(super) warning: Option<String>,
+}
+
 pub(super) async fn gather_explain(
     source: &refresh::RefreshSource,
     pods_kind: Option<&Kind>,
     events_kind: Option<&Kind>,
-) -> Result<(DynamicObject, Vec<crate::explain::Finding>, Option<String>), String> {
+) -> Result<Explained, String> {
     let obj = source.read().await?;
     let plural = source.kind.ar.plural.as_str();
     let mut warning = None;
@@ -479,5 +505,10 @@ pub(super) async fn gather_explain(
     )
     .await;
     let findings = crate::explain::explain(&gathered.evidence(&source.kind.ar.kind, plural, &obj));
-    Ok((obj, findings, warning))
+    Ok(Explained {
+        source: obj,
+        findings,
+        pods: gathered.pods,
+        warning,
+    })
 }
