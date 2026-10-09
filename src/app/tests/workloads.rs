@@ -587,6 +587,15 @@ async fn palette_commands_and_timeline_follow_the_selected_row() {
     app.handle_key(press(KeyCode::Esc)).unwrap();
     assert_eq!(app.kind_plural, "workloads");
 
+    // A view command keeps the view's identity, whatever row is selected.
+    app.table_state.select(Some(position(&app, "Pod", "web")));
+    type_resource_query(&mut app, "reload");
+    assert_eq!(app.kind_plural, "workloads");
+    assert_eq!(
+        app.display_headers()[..5],
+        ["NAME", "KIND", "READY", "STATUS", "AGE"]
+    );
+
     // A row command from the palette acts on the selected Deployment.
     app.table_state
         .select(Some(position(&app, "Deployment", "web")));

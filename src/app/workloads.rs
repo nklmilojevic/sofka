@@ -196,11 +196,11 @@ impl App {
                             | Action::Help
                     )
             }),
-            // A palette command can act on the selected row (`:notify`,
-            // `:rollout-history`, palette plugins); a view switch restores
-            // the view's identity itself when it starts the new watch.
-            Mode::Command => key.action == Some(Action::Accept),
-            Mode::Filter
+            // Palette commands that act on the selected row focus it
+            // themselves (`run_action`, palette plugins); the rest, such as
+            // `:reload`, act on the view.
+            Mode::Command
+            | Mode::Filter
             | Mode::Help
             | Mode::Namespaces
             | Mode::Contexts

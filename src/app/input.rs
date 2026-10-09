@@ -798,6 +798,9 @@ impl App {
             return;
         }
         self.stop_plugins();
+        if action.acts_on_row() {
+            self.focus_workload_row();
+        }
         match action {
             PaletteAction::PluginActivity => unreachable!(),
             PaletteAction::Quit => self.should_quit = true,
@@ -950,6 +953,7 @@ impl App {
                     .find(|p| p.palette.as_deref() == Some(name))
                     .cloned();
                 if let Some(plugin) = plugin {
+                    self.focus_workload_row();
                     if !plugin.scopes.is_empty() && !plugin.scopes.contains(&self.kind_plural) {
                         self.flash_warn("plugin does not apply to this resource kind");
                     } else {

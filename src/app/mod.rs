@@ -762,6 +762,29 @@ enum PaletteAction {
     PluginActivity,
 }
 
+impl PaletteAction {
+    /// Commands that act on the selected row, and so in the workloads view
+    /// run with that row's kind.
+    fn acts_on_row(self) -> bool {
+        matches!(
+            self,
+            PaletteAction::Xray
+                | PaletteAction::Explain
+                | PaletteAction::Timeline
+                | PaletteAction::Gitops
+                | PaletteAction::Argocd
+                | PaletteAction::Adjacent
+                | PaletteAction::Debug
+                | PaletteAction::Bundle
+                | PaletteAction::BundleSave
+                | PaletteAction::Rightsize
+                | PaletteAction::Diff
+                | PaletteAction::RolloutHistory
+                | PaletteAction::Notify
+        )
+    }
+}
+
 const PALETTE_COMMANDS: &[PaletteCommand] = &[
     PaletteCommand {
         action: PaletteAction::Mouse,
