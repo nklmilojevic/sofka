@@ -187,19 +187,15 @@ pub(super) fn restarted(
 fn container_status<'a>(pod: &'a Pod, container: Option<&str>) -> Option<&'a ContainerStatus> {
     let name = match container {
         Some(name) => name,
-        None => pod
-            .metadata
-            .annotations
-            .as_ref()
-            .and_then(|a| a.get("kubectl.kubernetes.io/default-container"))
-            .map(String::as_str)
-            .or_else(|| {
-                pod.spec
-                    .as_ref()?
-                    .containers
-                    .first()
-                    .map(|c| c.name.as_str())
-            })?,
+        None => {
+            let containers = &pod.spec.as_ref()?.containers;
+            pod.metadata
+                .annotations
+                .as_ref()
+                .and_then(|a| a.get("kubectl.kubernetes.io/default-container"))
+                .filter(|name| containers.iter().any(|c| c.name == **name))
+                .or_else(|| containers.first().map(|c| &c.name))?
+        }
     };
     let status = pod.status.as_ref()?;
     status
@@ -930,6 +926,24 @@ mod tests {
             stream_end(Some(&before), None, false, &mut None, &mut None, connected),
             StreamEnd::Resume
         );
+    }
+
+    #[test]
+    fn restart_check_ignores_an_annotation_naming_no_container() {
+        let annotated = |container: &str| {
+            pod(json!({"metadata": {"name": "web", "annotations": {
+                    "kubectl.kubernetes.io/default-container": container}},
+                "spec": {"containers": [{"name": "app"}, {"name": "side"}]},
+                "status": {"phase": "Running", "containerStatuses": [
+                    {"name": "app", "restartCount": 2, "image": "", "imageID": "", "ready": true},
+                    {"name": "side", "restartCount": 5, "image": "", "imageID": "", "ready": true}]}}))
+        };
+        let mut known = None;
+        restarted(Some(&annotated("side")), None, &mut known);
+        assert_eq!(known, Some(5));
+        let mut known = None;
+        restarted(Some(&annotated("gone")), None, &mut known);
+        assert_eq!(known, Some(2));
     }
 
     #[test]

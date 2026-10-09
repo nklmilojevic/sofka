@@ -279,6 +279,22 @@ fn pod_logs_title(pod: &str, container: Option<&str>) -> String {
     }
 }
 
+/// Logs for one pod: its annotated default container, else every container.
+pub(super) fn pod_log_source(obj: &DynamicObject) -> (LogSource, String) {
+    let name = obj.metadata.name.clone().unwrap_or_default();
+    let default = annotated_container(obj);
+    let title = pod_logs_title(&name, default.as_deref());
+    let source = LogSource::Pod {
+        ns: obj.metadata.namespace.clone().unwrap_or_default(),
+        name,
+        uid: obj.metadata.uid.clone(),
+        containers: container_names(obj),
+        default,
+        all_containers: false,
+    };
+    (source, title)
+}
+
 pub(super) fn display_height(line: &str, width: usize) -> usize {
     line.split('\n')
         .map(|part| {
@@ -551,19 +567,8 @@ impl App {
 
         match self.kind_plural.as_str() {
             "pods" => {
-                let default = annotated_container(obj);
-                let title = pod_logs_title(&name, default.as_deref());
-                self.launch_logs(
-                    LogSource::Pod {
-                        ns,
-                        name,
-                        uid: obj.metadata.uid.clone(),
-                        containers: container_names(obj),
-                        default,
-                        all_containers: false,
-                    },
-                    title,
-                );
+                let (source, title) = pod_log_source(obj);
+                self.launch_logs(source, title);
             }
             "deployments" | "statefulsets" | "daemonsets" | "replicasets" | "jobs" => {
                 match label_selector(obj, "matchLabels") {

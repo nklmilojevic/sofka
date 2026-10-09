@@ -866,6 +866,7 @@ pub(super) fn emit_xray(
         ns: ns.clone(),
         status: xray_status(kind, obj),
         container: None,
+        pod: (kind == "pod").then(|| Box::new(obj.clone())),
     });
 
     if let Some(uid) = &obj.metadata.uid
@@ -886,6 +887,7 @@ pub(super) fn emit_xray(
                 ns: ns.clone(),
                 status: String::new(),
                 container: Some(c),
+                pod: None,
             });
         }
     }

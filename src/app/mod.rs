@@ -2409,6 +2409,9 @@ pub struct App {
     /// Findings from the explain-unhealthy view, and the row cursor over them
     /// (used to jump to the evidence behind a line).
     pub explain_items: Vec<crate::explain::Finding>,
+    /// Pods gathered with the findings, so `l` on a pod finding can stream
+    /// its default container.
+    explain_pods: Vec<DynamicObject>,
     pub explain_state: ListState,
     explain_selection_lost: bool,
     pub explain_title: String,
@@ -2808,6 +2811,7 @@ impl App {
             xray_items: Vec::new(),
             xray_state: ListState::default(),
             explain_items: Vec::new(),
+            explain_pods: Vec::new(),
             explain_state: ListState::default(),
             explain_selection_lost: false,
             explain_title: String::new(),

@@ -6483,6 +6483,7 @@ async fn explain_findings_clear_the_progress_flash() {
         claim,
         title: "explain — web".into(),
         source: None,
+        pods: Vec::new(),
         findings: Vec::new(),
     });
 
@@ -6546,6 +6547,7 @@ async fn a_finished_report_only_clears_its_own_status_claim() {
         claim: explain_claim,
         title: "explain — web".into(),
         source: None,
+        pods: Vec::new(),
         findings: Vec::new(),
     });
     assert_eq!(app.mode, Mode::Detail);
@@ -11556,6 +11558,99 @@ async fn switching_containers_on_a_stopped_log_stream_waits_for_resume() {
         sorted_log_lines(&app),
         ["[app] from-app", "[istio-proxy] from-istio-proxy"]
     );
+}
+
+fn annotated_sidecar_pod() -> Value {
+    json!({"apiVersion": "v1", "kind": "Pod",
+        "metadata": {"name": "web", "namespace": "default", "uid": "web-uid", "annotations": {
+            "kubectl.kubernetes.io/default-container": "app"}},
+        "spec": {"containers": [{"name": "istio-proxy"}, {"name": "app"}]}})
+}
+
+/// `l` has opened the annotated pod's logs: only `app` streams, and `a`
+/// switches to every container.
+async fn assert_annotated_logs_toggle(
+    app: &mut App,
+    rx: &mut Receiver<Msg>,
+    requested: &std::sync::Mutex<Vec<String>>,
+) {
+    assert_eq!(app.logs.view.title, "web:app — logs");
+    wait_for_log_lines(app, rx, 1).await;
+    assert_eq!(sorted_log_lines(app), ["from-app"]);
+
+    app.handle_key(press(KeyCode::Char('a'))).unwrap();
+    assert_eq!(app.logs.view.title, "web — logs");
+    wait_for_log_lines(app, rx, 2).await;
+    assert_eq!(
+        sorted_log_lines(app),
+        ["[app] from-app", "[istio-proxy] from-istio-proxy"]
+    );
+    let mut requested = requested.lock().unwrap().clone();
+    requested.sort();
+    assert_eq!(requested, ["app", "app", "istio-proxy"]);
+}
+
+#[tokio::test]
+async fn xray_pod_logs_stream_the_annotated_container_and_a_toggles_all() {
+    let (mut app, mut rx) = test_app();
+    app.switch_kind("pods");
+    let pod = annotated_sidecar_pod();
+    apply(&mut app, pod.clone());
+    app.handle_key(press(KeyCode::Char(':'))).unwrap();
+    for ch in "xray".chars() {
+        app.handle_key(press(KeyCode::Char(ch))).unwrap();
+    }
+    app.handle_key(press(KeyCode::Enter)).unwrap();
+    assert_eq!(app.mode, Mode::Xray);
+    let mut items = Vec::new();
+    emit_xray("pod", &obj(pod.clone()), 0, &HashMap::new(), &mut items);
+    let generation = app.generation;
+    let claim = current_claim(&app);
+    app.handle_msg(Msg::XrayData {
+        generation,
+        claim,
+        items,
+        warn: None,
+    });
+    let requested = Arc::new(std::sync::Mutex::new(Vec::new()));
+    app.cluster.client = container_log_client(pod, requested.clone());
+
+    app.handle_key(press(KeyCode::Char('l'))).unwrap();
+    assert_annotated_logs_toggle(&mut app, &mut rx, &requested).await;
+}
+
+#[tokio::test]
+async fn explain_pod_finding_logs_stream_the_annotated_container_and_a_toggles_all() {
+    let (mut app, mut rx) = test_app();
+    app.switch_kind("pods");
+    let pod = annotated_sidecar_pod();
+    apply(&mut app, pod.clone());
+    app.handle_key(press(KeyCode::Home)).unwrap();
+    app.handle_key(press(KeyCode::Char('X'))).unwrap();
+    assert_eq!(app.mode, Mode::Explain);
+    app.handle_msg(Msg::Explain {
+        generation: app.generation,
+        claim: current_claim(&app),
+        title: app.explain_title.clone(),
+        request: app.explain_request,
+        source: None,
+        pods: vec![obj(pod.clone())],
+        findings: vec![crate::explain::Finding {
+            indent: 1,
+            level: crate::explain::Level::Critical,
+            text: "Pod/web  0/2  CrashLoopBackOff".into(),
+            target: Some(crate::explain::Target {
+                plural: "pods".into(),
+                namespace: Some("default".into()),
+                name: "web".into(),
+            }),
+        }],
+    });
+    let requested = Arc::new(std::sync::Mutex::new(Vec::new()));
+    app.cluster.client = container_log_client(pod, requested.clone());
+
+    app.handle_key(press(KeyCode::Char('l'))).unwrap();
+    assert_annotated_logs_toggle(&mut app, &mut rx, &requested).await;
 }
 
 #[tokio::test]
@@ -25714,6 +25809,7 @@ fn explain_selected_with_pure_evidence(app: &mut App) {
         title: app.explain_title.clone(),
         request: app.explain_request,
         source: None,
+        pods: Vec::new(),
         findings,
     });
 }
@@ -25980,6 +26076,7 @@ async fn a_new_report_at_the_scrolled_position_shows_its_finding_from_the_top() 
             title: app.explain_title.clone(),
             request: app.explain_request,
             source: None,
+            pods: Vec::new(),
             findings: vec![crate::explain::Finding {
                 indent: 0,
                 level: crate::explain::Level::Critical,
@@ -29849,6 +29946,7 @@ async fn palette_navigation_cancels_pending_health_reports() {
                         claim,
                         title: "cancelled report".into(),
                         source: None,
+                        pods: Vec::new(),
                         findings: Vec::new(),
                     }
                 };
@@ -35536,6 +35634,7 @@ async fn explain_refresh_rejects_old_manual_results_and_stops_in_evidence_views(
         generation,
         result: Ok(crate::store::RefreshContent::Explain {
             source: Box::new(obj(root)),
+            pods: Vec::new(),
             findings: vec![],
         }),
     });

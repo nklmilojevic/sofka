@@ -48,14 +48,15 @@ impl RefreshSource {
 
     async fn refresh(&self) -> Result<RefreshContent, String> {
         if let RefreshView::Explain { pods, events } = &self.view {
-            let (source, findings, warning) =
+            let explained =
                 explain::gather_explain(self, pods.as_deref(), events.as_deref()).await?;
-            if let Some(warning) = warning {
+            if let Some(warning) = explained.warning {
                 return Err(warning);
             }
             return Ok(RefreshContent::Explain {
-                source: Box::new(source),
-                findings,
+                source: Box::new(explained.source),
+                findings: explained.findings,
+                pods: explained.pods,
             });
         }
         if matches!(self.view, RefreshView::NativeDescribe) {
@@ -365,7 +366,12 @@ impl App {
                 }
                 self.detail.replace_lines(lines.into());
             }
-            RefreshContent::Explain { source, findings } => {
+            RefreshContent::Explain {
+                source,
+                findings,
+                pods,
+            } => {
+                self.explain_pods = pods;
                 if let Some(report) = self.explain_refresh_source.as_mut() {
                     report.object = *source.clone();
                 }
