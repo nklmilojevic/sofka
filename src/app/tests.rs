@@ -39458,3 +39458,44 @@ async fn explain_without_a_pods_kind_does_not_claim_a_claim_is_unused() {
     );
     assert!(!texts.iter().any(|t| t.contains("and no pod does")));
 }
+
+#[tokio::test]
+async fn unbound_ctrl_and_alt_chords_do_not_type_into_text_inputs() {
+    let typed = |app: &mut App| {
+        app.handle_key(ctrl(KeyCode::Char('x'))).unwrap();
+        app.handle_key(alt(KeyCode::Char('x'))).unwrap();
+        app.handle_key(press(KeyCode::Char('a'))).unwrap();
+    };
+    let (mut app, _rx) = test_app();
+    app.handle_key(press(KeyCode::Char('/'))).unwrap();
+    assert_eq!(app.mode, Mode::Filter);
+    typed(&mut app);
+    assert_eq!(app.filter, "a");
+    app.handle_key(press(KeyCode::Esc)).unwrap();
+
+    app.handle_key(press(KeyCode::Char(':'))).unwrap();
+    assert_eq!(app.mode, Mode::Command);
+    typed(&mut app);
+    assert_eq!(app.command, "a");
+    app.handle_key(press(KeyCode::Esc)).unwrap();
+
+    app.ns_list = vec!["alpha".into(), "beta".into()];
+    app.ns_filter.clear();
+    app.mode = Mode::Namespaces;
+    typed(&mut app);
+    assert_eq!(app.ns_filter, "a");
+
+    app.mode = Mode::Prompt;
+    app.prompt_input.clear();
+    typed(&mut app);
+    assert_eq!(app.prompt_input, "a");
+
+    app.mode = Mode::LogFilter;
+    typed(&mut app);
+    assert_eq!(app.logs.filter, "a");
+
+    app.doc_filter_return = Mode::Detail;
+    app.mode = Mode::DocFilter;
+    typed(&mut app);
+    assert_eq!(app.detail.filter, "a");
+}

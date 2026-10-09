@@ -586,7 +586,7 @@ impl App {
                 self.command.pop();
                 self.update_suggestions();
             }
-            (None, KeyCode::Char(c)) => {
+            (None, KeyCode::Char(c)) if key.is_text() => {
                 self.command.push(c);
                 self.update_suggestions();
             }
@@ -1261,7 +1261,7 @@ impl App {
             (Some(Action::Backspace), _) => {
                 self.filter.pop();
             }
-            (None, KeyCode::Char(c)) => self.filter.push(c),
+            (None, KeyCode::Char(c)) if key.is_text() => self.filter.push(c),
             _ => {}
         }
         self.invalidate_rows();
@@ -1552,7 +1552,7 @@ impl App {
                 f.pop();
                 self.logs.set_filter(f);
             }
-            (None, KeyCode::Char(c)) => {
+            (None, KeyCode::Char(c)) if key.is_text() => {
                 let mut f = self.logs.filter.clone();
                 f.push(c);
                 self.logs.set_filter(f);
@@ -1620,7 +1620,7 @@ impl App {
             (Some(Action::Backspace), _) => {
                 self.doc_filter_mut().pop();
             }
-            (None, KeyCode::Char(c)) => {
+            (None, KeyCode::Char(c)) if key.is_text() => {
                 self.doc_filter_mut().push(c);
             }
             _ => {}

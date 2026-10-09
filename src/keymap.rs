@@ -210,6 +210,11 @@ impl KeyInput {
     pub fn event(self) -> KeyEvent {
         KeyEvent::new(self.code, self.modifiers)
     }
+    /// Whether a character key is typed text rather than a Ctrl or Alt chord.
+    /// Ctrl+Alt together is AltGr on some terminals and stays text.
+    pub fn is_text(self) -> bool {
+        self.modifiers.contains(KeyModifiers::CONTROL) == self.modifiers.contains(KeyModifiers::ALT)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

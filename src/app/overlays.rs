@@ -481,7 +481,7 @@ impl App {
             (Some(Action::Backspace), _) => {
                 self.prompt_input.pop();
             }
-            (None, KeyCode::Char(c)) => self.prompt_input.push(c),
+            (None, KeyCode::Char(c)) if key.is_text() => self.prompt_input.push(c),
             _ => {}
         }
     }
