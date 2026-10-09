@@ -209,6 +209,7 @@ const JOB_COLUMNS: &[Column] = &[
 
 const CRONJOB_COLUMNS: &[Column] = &[
     column("NAME", col_name),
+    status_column("STATUS", col_cronjob_status),
     column("SCHEDULE", col_cronjob_schedule),
     column("SUSPEND", col_cronjob_suspend),
     column("ACTIVE", col_cronjob_active),
@@ -1377,9 +1378,10 @@ pub fn has_workload_faults(group: &str, plural: &str) -> bool {
     matches!(
         (group, plural),
         (
-            "apps",
-            "deployments" | "statefulsets" | "daemonsets" | "replicasets"
-        ) | ("batch", "jobs" | "cronjobs")
+            "apps" | "extensions",
+            "deployments" | "daemonsets" | "replicasets"
+        ) | ("apps", "statefulsets")
+            | ("batch", "jobs" | "cronjobs")
     )
 }
 
@@ -1390,10 +1392,10 @@ pub fn has_workload_faults(group: &str, plural: &str) -> bool {
 pub fn workload_faulted(group: &str, plural: &str, obj: &DynamicObject) -> Option<bool> {
     let d = &obj.data;
     let counts = match (group, plural) {
-        ("apps", "deployments") => WorkloadCounts::deployment(d),
+        ("apps" | "extensions", "deployments") => WorkloadCounts::deployment(d),
         ("apps", "statefulsets") => WorkloadCounts::statefulset(d),
-        ("apps", "daemonsets") => WorkloadCounts::daemonset(d),
-        ("apps", "replicasets") => WorkloadCounts::replicaset(d),
+        ("apps" | "extensions", "daemonsets") => WorkloadCounts::daemonset(d),
+        ("apps" | "extensions", "replicasets") => WorkloadCounts::replicaset(d),
         ("batch", "jobs") => {
             return Some(!matches!(
                 job_status(obj),
@@ -1416,13 +1418,11 @@ pub fn workload_faulted(group: &str, plural: &str, obj: &DynamicObject) -> Optio
 /// scheduled run finished without succeeding. A run still active is not
 /// judged yet.
 fn cronjob_faulted(obj: &DynamicObject) -> bool {
-    let d = &obj.data;
-    if obj.metadata.deletion_timestamp.is_some() || bget(d, &["spec", "suspend"]) {
-        return true;
-    }
-    if count_arr(d, &["status", "active"]) > 0 {
-        return false;
-    }
+    matches!(cronjob_status(obj), "Terminating" | "Suspended" | "Failed")
+}
+
+/// The last scheduled run finished without a success after it.
+fn cronjob_last_run_failed(d: &Value) -> bool {
     match (
         timestamp_secs(d, &["status", "lastScheduleTime"]),
         timestamp_secs(d, &["status", "lastSuccessfulTime"]),
@@ -1480,8 +1480,12 @@ fn col_workload_status<'a>(ctx: &CellContext<'a>) -> Cow<'a, str> {
     }
 }
 
-/// A CronJob's state for the workloads view, which has no SUSPEND or
-/// ACTIVE column to read it from.
+fn col_cronjob_status<'a>(ctx: &CellContext<'a>) -> Cow<'a, str> {
+    Cow::Borrowed(cronjob_status(ctx.obj))
+}
+
+/// A CronJob's state, from the same evidence as its faults rule, so a row
+/// the faults filter keeps is never tinted healthy.
 fn cronjob_status(obj: &DynamicObject) -> &'static str {
     let d = &obj.data;
     if obj.metadata.deletion_timestamp.is_some() {
@@ -1490,7 +1494,7 @@ fn cronjob_status(obj: &DynamicObject) -> &'static str {
         "Suspended"
     } else if count_arr(d, &["status", "active"]) > 0 {
         "Running"
-    } else if cronjob_faulted(obj) {
+    } else if cronjob_last_run_failed(d) {
         "Failed"
     } else {
         "Scheduled"
@@ -3385,6 +3389,7 @@ mod tests {
             headers("batch", "cronjobs"),
             vec![
                 "NAME",
+                "STATUS",
                 "SCHEDULE",
                 "SUSPEND",
                 "ACTIVE",
@@ -3392,10 +3397,11 @@ mod tests {
                 "AGE"
             ]
         );
-        assert_eq!(cells[1], "*/15 * * * *");
-        assert_eq!(cells[2], "false");
-        assert_eq!(cells[3], "1");
-        assert_eq!(cells[4], "<none>");
+        assert_eq!(cells[1], "Running");
+        assert_eq!(cells[2], "*/15 * * * *");
+        assert_eq!(cells[3], "false");
+        assert_eq!(cells[4], "1");
+        assert_eq!(cells[5], "<none>");
     }
 
     #[test]
