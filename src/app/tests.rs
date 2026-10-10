@@ -39302,7 +39302,7 @@ async fn log_json_shortcut_renders_structured_records_on_one_row() {
     );
     assert_eq!(
         app.logs.display_line(2),
-        r#"2025-09-10T10:00:00Z ERROR boom › err={"type":"Error"}"#
+        "2025-09-10T10:00:00Z ERROR boom › err.type=Error"
     );
     assert_eq!(app.logs.display_line(3), app.logs.view.lines[3]);
     assert_eq!(app.logs.display_line(4), "plain text");
@@ -39386,7 +39386,7 @@ async fn log_json_record_view_puts_the_logger_before_the_message() {
         "INFO  controller: Starting workers › name=web namespace=prod"
     );
     assert_eq!(app.logs.display_line(1), "INFO  logger=setup");
-    assert_eq!(app.logs.display_line(2), r#"INFO  ok › logger={"id":1}"#);
+    assert_eq!(app.logs.display_line(2), "INFO  ok › logger.id=1");
     assert_eq!(app.logs.display_line(3), r#"INFO  ok › logger="""#);
     assert_eq!(app.logs.display_line(4), r#"INFO  "a\nb": ok"#);
 }
@@ -39407,10 +39407,125 @@ async fn log_json_record_view_keeps_field_order_and_separates_the_message() {
     assert_eq!(app.logs.json, JsonView::Record);
     assert_eq!(
         app.logs.display_line(0),
-        r#"INFO  Reconciled › zeta=1 object={"name":"web","kind":"Lease"} alpha=[2,1] "worker count"=3 "a=b"=4 "say \"hi\""=5"#
+        r#"INFO  Reconciled › zeta=1 object.name=web object.kind=Lease alpha=[2,1] "worker count"=3 "a=b"=4 "say \"hi\""=5"#
     );
     assert_eq!(app.logs.display_line(1), "INFO  alone");
     assert_eq!(app.logs.display_line(2), "INFO  zeta=1 alpha=2");
+}
+
+#[tokio::test]
+async fn log_json_record_view_flattens_nested_objects_into_dotted_keys() {
+    let (mut app, _rx) = test_app();
+    app.mode = Mode::Logs;
+    let wide = (0..65)
+        .map(|i| format!(r#""f{i}":{i}"#))
+        .collect::<Vec<_>>()
+        .join(",");
+    shortcut_log_lines(
+        &mut app,
+        vec![
+            r#"{"level":"info","msg":"Lease held","object":{"kind":"Lease","meta":{"name":"web","labels":{"app":"web"}}},"after":1}"#.into(),
+            r#"{"level":"info","msg":"deep","a":{"b":{"c":{"d":{"e":{"f":1}}}}}}"#.into(),
+            r#"{"level":"info","msg":"empty","a":{},"b":[{"c":1}],"worker pool":{"max size":2}}"#.into(),
+            format!(r#"{{"level":"info","msg":"wide","wide":{{{wide}}},"small":{{"x":1}}}}"#),
+        ],
+    );
+    app.handle_key(press(KeyCode::Char('J'))).unwrap();
+    assert_eq!(app.logs.json, JsonView::Record);
+    assert_eq!(
+        app.logs.display_line(0),
+        "INFO  Lease held › object.kind=Lease object.meta.name=web object.meta.labels.app=web after=1"
+    );
+    assert_eq!(
+        app.logs.display_line(1),
+        r#"INFO  deep › a.b.c.d.e={"f":1}"#
+    );
+    assert_eq!(
+        app.logs.display_line(2),
+        r#"INFO  empty › a={} b=[{"c":1}] "worker pool"."max size"=2"#
+    );
+    let wide_row = app.logs.display_line(3);
+    assert!(
+        wide_row.starts_with(r#"INFO  wide › wide={"f0":0,"#),
+        "{wide_row}"
+    );
+    assert!(wide_row.ends_with(r#""f64":64} small.x=1"#), "{wide_row}");
+    assert_eq!(app.logs.refresh_index(0).total_rows(), 4);
+}
+
+#[tokio::test]
+async fn log_json_record_view_quotes_dotted_keys_only_when_ambiguous() {
+    let (mut app, _rx) = test_app();
+    app.mode = Mode::Logs;
+    shortcut_log_lines(
+        &mut app,
+        vec![
+            r#"{"level":"info","msg":"dots","a.b":1,"a":{"b":2},"http.method":"GET","c.d":3,"c.d":4,"x":{"y.z":5},"x.y":{"z":6}}"#.into(),
+            r#"{"level":"info","msg":"plain","http.method":"GET","k8s":{"io/name":"web"}}"#.into(),
+        ],
+    );
+    app.handle_key(press(KeyCode::Char('J'))).unwrap();
+    assert_eq!(app.logs.json, JsonView::Record);
+    assert_eq!(
+        app.logs.display_line(0),
+        r#"INFO  dots › "a.b"=1 a.b=2 http.method=GET c.d=3 c.d=4 x."y.z"=5 "x.y".z=6"#
+    );
+    assert_eq!(
+        app.logs.display_line(1),
+        "INFO  plain › http.method=GET k8s.io/name=web"
+    );
+}
+
+#[tokio::test]
+async fn log_json_record_view_shares_the_flatten_limit_across_a_record() {
+    let (mut app, _rx) = test_app();
+    app.mode = Mode::Logs;
+    let object = |prefix: &str, n: usize| {
+        let fields = (0..n)
+            .map(|i| format!(r#""{prefix}{i}":{i}"#))
+            .collect::<Vec<_>>()
+            .join(",");
+        format!("{{{fields}}}")
+    };
+    shortcut_log_lines(
+        &mut app,
+        vec![
+            // 30 + 30 fit, the third 30 does not, and 4 more reach exactly 64.
+            format!(
+                r#"{{"level":"info","msg":"siblings","a":{},"b":{},"c":{},"d":{}}}"#,
+                object("a", 30),
+                object("b", 30),
+                object("c", 30),
+                object("d", 4)
+            ),
+            // The nested object takes 1 + 60, leaving 3 for later siblings.
+            format!(
+                r#"{{"level":"info","msg":"nested","outer":{{"inner":{}}},"next":{},"last":{}}}"#,
+                object("i", 60),
+                object("n", 4),
+                object("l", 3)
+            ),
+        ],
+    );
+    app.handle_key(press(KeyCode::Char('J'))).unwrap();
+    assert_eq!(app.logs.json, JsonView::Record);
+    let siblings = app.logs.display_line(0);
+    assert!(siblings.contains(" a.a29=29 b.b0=0 "), "{siblings}");
+    assert!(siblings.contains(r#" c={"c0":0,"#), "{siblings}");
+    assert!(
+        siblings.ends_with(" d.d0=0 d.d1=1 d.d2=2 d.d3=3"),
+        "{siblings}"
+    );
+    let nested = app.logs.display_line(1);
+    assert!(nested.contains(" outer.inner.i59=59 "), "{nested}");
+    assert!(
+        nested.contains(r#" next={"n0":0,"n1":1,"n2":2,"n3":3} "#),
+        "{nested}"
+    );
+    assert!(
+        nested.ends_with(" last.l0=0 last.l1=1 last.l2=2"),
+        "{nested}"
+    );
 }
 
 #[tokio::test]
@@ -39597,7 +39712,7 @@ async fn log_json_record_view_does_not_depend_on_the_pretty_cache() {
     app.logs.json_budget = line.len() + 30 + 4 * std::mem::size_of::<crate::app::RecordSpan>();
     shortcut_log_lines(&mut app, vec![line.into()]);
     app.handle_key(press(KeyCode::Char('J'))).unwrap();
-    assert_eq!(app.logs.display_line(0), r#"hi › a={"b":[1,2,3]}"#);
+    assert_eq!(app.logs.display_line(0), "hi › a.b=[1,2,3]");
     app.handle_key(press(KeyCode::Char('J'))).unwrap();
     assert_eq!(app.logs.json, JsonView::Pretty);
     assert_eq!(app.logs.display_line(0), line);

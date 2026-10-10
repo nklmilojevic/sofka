@@ -269,7 +269,85 @@ impl RecordRow {
         self.text.push_str(part);
         self.parts.push((start..self.text.len(), kind));
     }
+
+    /// `key=value` for each field, with nested objects flattened into dotted
+    /// keys (`object.kind=Lease`) in their original order. A key segment
+    /// that contains a dot is quoted when its path would read the same as
+    /// another field's (`"a.b"=1 a.b=2`); otherwise `http.method` stays bare.
+    fn push_fields<'a>(&mut self, fields: impl Iterator<Item = &'a (String, Ordered)>) {
+        let mut leaves = Vec::new();
+        let mut left = RECORD_FLATTEN_FIELDS;
+        for (key, value) in fields {
+            record_leaves(vec![key.as_str()], value, 1, &mut left, &mut leaves);
+        }
+        let mut paths: std::collections::HashMap<String, &[&str]> = Default::default();
+        let mut ambiguous = std::collections::HashSet::new();
+        for (path, _) in &leaves {
+            let joined = path.join(".");
+            match paths.get(&joined) {
+                Some(other) if *other != path.as_slice() => {
+                    ambiguous.insert(joined);
+                }
+                Some(_) => {}
+                None => {
+                    paths.insert(joined, path);
+                }
+            }
+        }
+        for (path, value) in &leaves {
+            let quote = ambiguous.contains(&path.join("."));
+            let key = path
+                .iter()
+                .map(|segment| {
+                    if quote && segment.contains('.') {
+                        serde_json::Value::from(*segment).to_string().into()
+                    } else {
+                        record_key(segment)
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join(".");
+            self.push(&format!("{key}="), RecordPart::Key);
+            let (text, kind) = record_value(value);
+            let start = self.text.len();
+            self.text.push_str(&text);
+            self.parts.push((start..self.text.len(), kind));
+        }
+    }
 }
+
+/// The fields a record row shows for `value` at `path`: a nested object
+/// becomes one field per leaf. Objects deeper than [`RECORD_FLATTEN_DEPTH`],
+/// or past the [`RECORD_FLATTEN_FIELDS`] a record may flatten, stay one
+/// compact JSON field; so do empty objects and arrays.
+fn record_leaves<'a>(
+    path: Vec<&'a str>,
+    value: &'a Ordered,
+    depth: usize,
+    left: &mut usize,
+    out: &mut Vec<(Vec<&'a str>, &'a Ordered)>,
+) {
+    if let Ordered::Object(fields) = value
+        && !fields.is_empty()
+        && depth <= RECORD_FLATTEN_DEPTH
+        && fields.len() <= *left
+    {
+        *left -= fields.len();
+        for (name, value) in fields {
+            let mut path = path.clone();
+            path.push(name);
+            record_leaves(path, value, depth + 1, left, out);
+        }
+        return;
+    }
+    out.push((path, value));
+}
+
+/// How many levels of nested objects record view flattens into dotted keys.
+const RECORD_FLATTEN_DEPTH: usize = 4;
+/// How many fields of nested objects one record row flattens; the rest stay
+/// compact JSON so a large object cannot crowd out the other fields.
+const RECORD_FLATTEN_FIELDS: usize = 64;
 
 /// One-line rendering of a structured log record (zap, slog, logrus, pino):
 /// `time LEVEL logger: message › key=value ...`, with the severity of its
@@ -342,13 +420,7 @@ fn render_record(value: &Ordered, format: &RecordTime) -> Option<RecordRow> {
     if message.is_some() && rest().next().is_some() {
         row.push("›", RecordPart::Separator);
     }
-    for (key, value) in rest() {
-        row.push(&format!("{}=", record_key(key)), RecordPart::Key);
-        let (text, kind) = record_value(value);
-        let start = row.text.len();
-        row.text.push_str(&text);
-        row.parts.push((start..row.text.len(), kind));
-    }
+    row.push_fields(rest());
     row.severity = level_name.map(|name| crate::logfilter::parse_level(&name.to_ascii_lowercase()));
     Some(row)
 }

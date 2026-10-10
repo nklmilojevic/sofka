@@ -822,7 +822,8 @@ include those conditions. Row filters can search the route paths.
   log view opens. Copy and save use the filtered lines.
 - **JSON log display** (`J` in logs) cycles raw, record, and indented JSON. Record
   view shows each structured log record on one row: time, level, message, then
-  `key=value` fields in the order the application wrote them, with the level,
+  `key=value` fields in the order the application wrote them, nested objects
+  as dotted keys, with the level,
   message, keys, and values styled apart. The setting stays active for the session. Filters and application copy/save use raw records.
   See [Log controls](debugging.md#log-controls) for limits.
 - **Log markers** (`m` in logs) add visual separators at the buffer tail.
