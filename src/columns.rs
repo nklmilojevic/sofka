@@ -2550,7 +2550,10 @@ fn humanize_byte_counts(text: &str) -> Option<String> {
     let mut i = 0;
     while i < bytes.len() {
         if !bytes[i].is_ascii_digit()
-            || (i > 0 && (bytes[i - 1].is_ascii_alphanumeric() || bytes[i - 1] == b'.'))
+            || text[..i]
+                .chars()
+                .next_back()
+                .is_some_and(|c| is_word_char(c) || c == '.')
         {
             i += 1;
             continue;
@@ -2560,7 +2563,7 @@ fn humanize_byte_counts(text: &str) -> Option<String> {
             i += 1;
         }
         let end = i + SUFFIX.len();
-        if !text[i..].starts_with(SUFFIX) || bytes.get(end).is_some_and(u8::is_ascii_alphanumeric) {
+        if !text[i..].starts_with(SUFFIX) || text[end..].chars().next().is_some_and(is_word_char) {
             continue;
         }
         let Ok(count) = text[start..i].parse::<u64>() else {
@@ -2584,6 +2587,10 @@ fn humanize_byte_counts(text: &str) -> Option<String> {
         out.push_str(&text[copied..]);
         out
     })
+}
+
+fn is_word_char(c: char) -> bool {
+    c.is_alphanumeric() || c == '_'
 }
 
 fn event_count(d: &Value) -> i64 {
@@ -3505,6 +3512,14 @@ mod tests {
         assert_eq!(humanize_byte_counts("x80474558 bytes"), None);
         assert_eq!(humanize_byte_counts("80474558 bytesize"), None);
         assert_eq!(humanize_byte_counts("80474558 Bytes"), None);
+        assert_eq!(humanize_byte_counts("café2048 bytes"), None);
+        assert_eq!(humanize_byte_counts("buffer_2048 bytes"), None);
+        assert_eq!(humanize_byte_counts("2048 bytes_suffix"), None);
+        assert_eq!(humanize_byte_counts("2048 bytesé"), None);
+        assert_eq!(
+            humanize_byte_counts("é 2048 bytes é").as_deref(),
+            Some("é 2.0 KiB é")
+        );
         assert_eq!(humanize_byte_counts("99999999999999999999 bytes"), None);
         assert_eq!(humanize_byte_counts("no counts here"), None);
     }
