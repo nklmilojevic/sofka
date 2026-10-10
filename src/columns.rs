@@ -2574,7 +2574,7 @@ fn humanize_byte_counts(text: &str) -> Option<String> {
         }
         let mut value = count as f64 / 1024.0;
         let mut unit = 0;
-        while value >= 1024.0 && unit + 1 < UNITS.len() {
+        while (value * 10.0).round() >= 10240.0 && unit + 1 < UNITS.len() {
             value /= 1024.0;
             unit += 1;
         }
@@ -3506,6 +3506,14 @@ mod tests {
         assert_eq!(
             humanize_byte_counts("2048 bytes then 3221225472 bytes").as_deref(),
             Some("2.0 KiB then 3.0 GiB")
+        );
+        assert_eq!(
+            humanize_byte_counts("1048575 bytes then 1073741823 bytes").as_deref(),
+            Some("1.0 MiB then 1.0 GiB")
+        );
+        assert_eq!(
+            humanize_byte_counts("1048524 bytes").as_deref(),
+            Some("1023.9 KiB")
         );
         assert_eq!(humanize_byte_counts("wrote 512 bytes"), None);
         assert_eq!(humanize_byte_counts("v1.80474558 bytes"), None);
