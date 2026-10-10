@@ -37162,6 +37162,38 @@ async fn log_warnings_shortcut_filters_formats_and_restores_buffer() {
 }
 
 #[tokio::test]
+async fn log_filter_matches_visible_text_not_color_codes() {
+    let (mut app, _rx) = test_app();
+    app.mode = Mode::Logs;
+    let lines = [
+        "\x1b[1mfoo\x1b[0m bar",
+        "\x1b[32mplain visible\x1b[0m",
+        "no color here",
+    ];
+    shortcut_log_lines(&mut app, lines.iter().map(|s| (*s).into()).collect());
+    for (filter, expected) in [
+        ("foo bar", vec![lines[0]]),
+        ("32m", vec![]),
+        ("/^plain/", vec![lines[1]]),
+        ("!foo", vec![lines[1], lines[2]]),
+    ] {
+        app.handle_key(press(KeyCode::Char('/'))).unwrap();
+        for c in filter.chars() {
+            app.handle_key(press(KeyCode::Char(c))).unwrap();
+        }
+        app.handle_key(press(KeyCode::Enter)).unwrap();
+        assert_eq!(
+            app.filtered_log_text(),
+            expected.join("\n"),
+            "filter {filter:?}"
+        );
+        app.handle_key(press(KeyCode::Char('/'))).unwrap();
+        app.handle_key(press(KeyCode::Esc)).unwrap();
+        assert!(app.logs.filter.is_empty());
+    }
+}
+
+#[tokio::test]
 async fn log_warnings_shortcut_combines_filters_and_tracks_appends() {
     let (mut app, _rx) = test_app();
     app.mode = Mode::Logs;

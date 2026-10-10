@@ -255,6 +255,9 @@ impl LogMatcher {
         if matches!(self.kind, Kind::BadRegex) {
             return false;
         }
+        // Match the text the view shows, not its color codes.
+        let line = crate::ui::strip_ansi_if_present(line);
+        let line = line.as_ref();
         let base = match &self.kind {
             Kind::All => true,
             Kind::Substr(s) => s.matches(line),
