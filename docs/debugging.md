@@ -106,8 +106,11 @@ time, level, message, then the other fields as `key=value`. It reads the time fr
 `time`, `ts`, `timestamp`, or `@timestamp`, the level from `level`, `lvl`, or
 `severity`, and the message from `msg` or `message`. A `logger` name (zap, logr)
 is shown before the message as `logger: message`. Epoch times become RFC 3339.
-Fields keep the order the application wrote them, nested objects included, and a
-`›` separates the message from them. Keys with whitespace, `=`, or `"` are
+Fields keep the order the application wrote them, and a `›` separates the
+message from them. Nested objects are flattened into dotted keys in their
+original order (`object.kind=Lease`), up to four levels deep and 64 nested
+fields per record. Deeper or larger objects, empty objects, and arrays stay
+compact JSON. Keys with whitespace, `=`, or `"` are
 quoted (`"worker count"=1`). Values with control characters, and strings that read as another JSON type
 (`"true"`, `"3"`, `"{}"`), are shown as quoted JSON strings, so a record stays on
 one row. Records without a level or message field stay raw.

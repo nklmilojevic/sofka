@@ -269,7 +269,41 @@ impl RecordRow {
         self.text.push_str(part);
         self.parts.push((start..self.text.len(), kind));
     }
+
+    /// `key=value`, with a nested object flattened into dotted keys
+    /// (`object.kind=Lease`) in its original order. Objects deeper than
+    /// [`RECORD_FLATTEN_DEPTH`], or past the [`RECORD_FLATTEN_FIELDS`] a record
+    /// may flatten, stay compact JSON; so do empty objects and arrays.
+    fn push_field(&mut self, key: &str, value: &Ordered, depth: usize, left: &mut usize) {
+        if let Ordered::Object(fields) = value
+            && !fields.is_empty()
+            && depth <= RECORD_FLATTEN_DEPTH
+            && fields.len() <= *left
+        {
+            *left -= fields.len();
+            for (name, value) in fields {
+                self.push_field(
+                    &format!("{key}.{}", record_key(name)),
+                    value,
+                    depth + 1,
+                    left,
+                );
+            }
+            return;
+        }
+        self.push(&format!("{key}="), RecordPart::Key);
+        let (text, kind) = record_value(value);
+        let start = self.text.len();
+        self.text.push_str(&text);
+        self.parts.push((start..self.text.len(), kind));
+    }
 }
+
+/// How many levels of nested objects record view flattens into dotted keys.
+const RECORD_FLATTEN_DEPTH: usize = 4;
+/// How many fields of nested objects one record row flattens; the rest stay
+/// compact JSON so a large object cannot crowd out the other fields.
+const RECORD_FLATTEN_FIELDS: usize = 64;
 
 /// One-line rendering of a structured log record (zap, slog, logrus, pino):
 /// `time LEVEL logger: message › key=value ...`, with the severity of its
@@ -342,12 +376,9 @@ fn render_record(value: &Ordered, format: &RecordTime) -> Option<RecordRow> {
     if message.is_some() && rest().next().is_some() {
         row.push("›", RecordPart::Separator);
     }
+    let mut flatten = RECORD_FLATTEN_FIELDS;
     for (key, value) in rest() {
-        row.push(&format!("{}=", record_key(key)), RecordPart::Key);
-        let (text, kind) = record_value(value);
-        let start = row.text.len();
-        row.text.push_str(&text);
-        row.parts.push((start..row.text.len(), kind));
+        row.push_field(&record_key(key), value, 1, &mut flatten);
     }
     row.severity = level_name.map(|name| crate::logfilter::parse_level(&name.to_ascii_lowercase()));
     Some(row)

@@ -39278,7 +39278,7 @@ async fn log_json_shortcut_renders_structured_records_on_one_row() {
     );
     assert_eq!(
         app.logs.display_line(2),
-        r#"2025-09-10T10:00:00Z ERROR boom › err={"type":"Error"}"#
+        "2025-09-10T10:00:00Z ERROR boom › err.type=Error"
     );
     assert_eq!(app.logs.display_line(3), app.logs.view.lines[3]);
     assert_eq!(app.logs.display_line(4), "plain text");
@@ -39362,7 +39362,7 @@ async fn log_json_record_view_puts_the_logger_before_the_message() {
         "INFO  controller: Starting workers › name=web namespace=prod"
     );
     assert_eq!(app.logs.display_line(1), "INFO  logger=setup");
-    assert_eq!(app.logs.display_line(2), r#"INFO  ok › logger={"id":1}"#);
+    assert_eq!(app.logs.display_line(2), "INFO  ok › logger.id=1");
     assert_eq!(app.logs.display_line(3), r#"INFO  ok › logger="""#);
     assert_eq!(app.logs.display_line(4), r#"INFO  "a\nb": ok"#);
 }
@@ -39383,10 +39383,50 @@ async fn log_json_record_view_keeps_field_order_and_separates_the_message() {
     assert_eq!(app.logs.json, JsonView::Record);
     assert_eq!(
         app.logs.display_line(0),
-        r#"INFO  Reconciled › zeta=1 object={"name":"web","kind":"Lease"} alpha=[2,1] "worker count"=3 "a=b"=4 "say \"hi\""=5"#
+        r#"INFO  Reconciled › zeta=1 object.name=web object.kind=Lease alpha=[2,1] "worker count"=3 "a=b"=4 "say \"hi\""=5"#
     );
     assert_eq!(app.logs.display_line(1), "INFO  alone");
     assert_eq!(app.logs.display_line(2), "INFO  zeta=1 alpha=2");
+}
+
+#[tokio::test]
+async fn log_json_record_view_flattens_nested_objects_into_dotted_keys() {
+    let (mut app, _rx) = test_app();
+    app.mode = Mode::Logs;
+    let wide = (0..65)
+        .map(|i| format!(r#""f{i}":{i}"#))
+        .collect::<Vec<_>>()
+        .join(",");
+    shortcut_log_lines(
+        &mut app,
+        vec![
+            r#"{"level":"info","msg":"Lease held","object":{"kind":"Lease","meta":{"name":"web","labels":{"app":"web"}}},"after":1}"#.into(),
+            r#"{"level":"info","msg":"deep","a":{"b":{"c":{"d":{"e":{"f":1}}}}}}"#.into(),
+            r#"{"level":"info","msg":"empty","a":{},"b":[{"c":1}],"worker pool":{"max size":2}}"#.into(),
+            format!(r#"{{"level":"info","msg":"wide","wide":{{{wide}}},"small":{{"x":1}}}}"#),
+        ],
+    );
+    app.handle_key(press(KeyCode::Char('J'))).unwrap();
+    assert_eq!(app.logs.json, JsonView::Record);
+    assert_eq!(
+        app.logs.display_line(0),
+        "INFO  Lease held › object.kind=Lease object.meta.name=web object.meta.labels.app=web after=1"
+    );
+    assert_eq!(
+        app.logs.display_line(1),
+        r#"INFO  deep › a.b.c.d.e={"f":1}"#
+    );
+    assert_eq!(
+        app.logs.display_line(2),
+        r#"INFO  empty › a={} b=[{"c":1}] "worker pool"."max size"=2"#
+    );
+    let wide_row = app.logs.display_line(3);
+    assert!(
+        wide_row.starts_with(r#"INFO  wide › wide={"f0":0,"#),
+        "{wide_row}"
+    );
+    assert!(wide_row.ends_with(r#""f64":64} small.x=1"#), "{wide_row}");
+    assert_eq!(app.logs.refresh_index(0).total_rows(), 4);
 }
 
 #[tokio::test]
@@ -39573,7 +39613,7 @@ async fn log_json_record_view_does_not_depend_on_the_pretty_cache() {
     app.logs.json_budget = line.len() + 30 + 4 * std::mem::size_of::<crate::app::RecordSpan>();
     shortcut_log_lines(&mut app, vec![line.into()]);
     app.handle_key(press(KeyCode::Char('J'))).unwrap();
-    assert_eq!(app.logs.display_line(0), r#"hi › a={"b":[1,2,3]}"#);
+    assert_eq!(app.logs.display_line(0), "hi › a.b=[1,2,3]");
     app.handle_key(press(KeyCode::Char('J'))).unwrap();
     assert_eq!(app.logs.json, JsonView::Pretty);
     assert_eq!(app.logs.display_line(0), line);
