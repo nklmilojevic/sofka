@@ -2772,7 +2772,7 @@ pub fn fmt_mem(bytes: i64) -> String {
         return "-".into();
     }
     let mi = bytes as f64 / (1024.0 * 1024.0);
-    if mi >= 1024.0 {
+    if mi.round() >= 1024.0 {
         format!("{:.1}Gi", mi / 1024.0)
     } else {
         format!("{:.0}Mi", mi)
@@ -2828,6 +2828,13 @@ mod tests {
         assert_eq!(parse_mem_bytes("1Mi"), 1024 * 1024);
         assert_eq!(parse_mem_bytes("1Gi"), 1024 * 1024 * 1024);
         assert_eq!(fmt_mem(parse_mem_bytes("512Mi")), "512Mi");
+    }
+
+    #[test]
+    fn fmt_mem_promotes_to_gi_when_mi_rounds_to_1024() {
+        assert_eq!(fmt_mem(1024 * 1024 * 1024 - 1), "1.0Gi");
+        assert_eq!(fmt_mem(1_073_293_248), "1.0Gi");
+        assert_eq!(fmt_mem(1_073_217_535), "1023Mi");
     }
 
     #[test]
