@@ -2527,11 +2527,63 @@ fn event_message(d: &Value) -> Cow<'_, str> {
     let message = sget(d, &["message"])
         .or_else(|| sget(d, &["note"]))
         .unwrap_or_default();
-    if message.contains(['\n', '\r']) {
+    let message = if message.contains(['\n', '\r']) {
         Cow::Owned(message.replace(['\n', '\r'], " "))
     } else {
         Cow::Borrowed(message)
+    };
+    match humanize_byte_counts(&message) {
+        Some(humanized) => Cow::Owned(humanized),
+        None => message,
     }
+}
+
+/// Rewrite every standalone `<digits> bytes` in `text` into a binary unit
+/// scaled to the value (`80474558 bytes` → `76.7 MiB`). Counts below 1 KiB
+/// stay as they are. Returns `None` when nothing changed.
+fn humanize_byte_counts(text: &str) -> Option<String> {
+    const SUFFIX: &str = " bytes";
+    const UNITS: [&str; 5] = ["KiB", "MiB", "GiB", "TiB", "PiB"];
+    let bytes = text.as_bytes();
+    let mut out = String::new();
+    let mut copied = 0;
+    let mut i = 0;
+    while i < bytes.len() {
+        if !bytes[i].is_ascii_digit()
+            || (i > 0 && (bytes[i - 1].is_ascii_alphanumeric() || bytes[i - 1] == b'.'))
+        {
+            i += 1;
+            continue;
+        }
+        let start = i;
+        while i < bytes.len() && bytes[i].is_ascii_digit() {
+            i += 1;
+        }
+        let end = i + SUFFIX.len();
+        if !text[i..].starts_with(SUFFIX) || bytes.get(end).is_some_and(u8::is_ascii_alphanumeric) {
+            continue;
+        }
+        let Ok(count) = text[start..i].parse::<u64>() else {
+            continue;
+        };
+        if count < 1024 {
+            continue;
+        }
+        let mut value = count as f64 / 1024.0;
+        let mut unit = 0;
+        while value >= 1024.0 && unit + 1 < UNITS.len() {
+            value /= 1024.0;
+            unit += 1;
+        }
+        out.push_str(&text[copied..start]);
+        out.push_str(&format!("{value:.1} {}", UNITS[unit]));
+        copied = end;
+        i = end;
+    }
+    (copied > 0).then(|| {
+        out.push_str(&text[copied..]);
+        out
+    })
 }
 
 fn event_count(d: &Value) -> i64 {
@@ -3436,6 +3488,25 @@ mod tests {
         assert_eq!(cells[5], "Back-off restarting failed container");
         assert_eq!(cells[6], "7");
         assert_eq!(status_idx, None);
+    }
+
+    #[test]
+    fn humanize_byte_counts_scales_each_value() {
+        assert_eq!(
+            humanize_byte_counts("Image size: 80474558 bytes.").as_deref(),
+            Some("Image size: 76.7 MiB.")
+        );
+        assert_eq!(
+            humanize_byte_counts("2048 bytes then 3221225472 bytes").as_deref(),
+            Some("2.0 KiB then 3.0 GiB")
+        );
+        assert_eq!(humanize_byte_counts("wrote 512 bytes"), None);
+        assert_eq!(humanize_byte_counts("v1.80474558 bytes"), None);
+        assert_eq!(humanize_byte_counts("x80474558 bytes"), None);
+        assert_eq!(humanize_byte_counts("80474558 bytesize"), None);
+        assert_eq!(humanize_byte_counts("80474558 Bytes"), None);
+        assert_eq!(humanize_byte_counts("99999999999999999999 bytes"), None);
+        assert_eq!(humanize_byte_counts("no counts here"), None);
     }
 
     #[test]
