@@ -37162,6 +37162,22 @@ async fn log_warnings_shortcut_filters_formats_and_restores_buffer() {
 }
 
 #[tokio::test]
+async fn log_warnings_shortcut_reads_numeric_json_levels() {
+    let (mut app, _rx) = test_app();
+    app.mode = Mode::Logs;
+    let lines = [
+        r#"{"level":30,"time":1700000000000,"msg":"hello"}"#,
+        r#"{"level":40,"time":1700000001000,"msg":"slow"}"#,
+        r#"{"level":50,"time":1700000002000,"msg":"boom"}"#,
+        r#"{"level":60,"time":1700000003000,"msg":"down"}"#,
+        r#"{"level":20,"time":1700000004000,"msg":"detail"}"#,
+    ];
+    shortcut_log_lines(&mut app, lines.iter().map(|s| (*s).into()).collect());
+    app.handle_key(ctrl(KeyCode::Char('z'))).unwrap();
+    assert_eq!(app.filtered_log_text(), lines[1..4].join("\n"));
+}
+
+#[tokio::test]
 async fn log_warnings_shortcut_combines_filters_and_tracks_appends() {
     let (mut app, _rx) = test_app();
     app.mode = Mode::Logs;

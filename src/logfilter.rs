@@ -32,6 +32,9 @@ pub fn severity(line: &str) -> Severity {
     if let Some(level) = json_field(&l, "level").or_else(|| json_field(&l, "severity")) {
         return parse_level(level);
     }
+    if let Some(level) = json_number_field(&l, "level") {
+        return numeric_level(level);
+    }
     // Skip source labels and timestamps before checking the klog level.
     let body = log_body(&line);
     if klog_level(body, 'e') || klog_level(body, 'f') {
@@ -108,6 +111,30 @@ fn json_field<'a>(l: &'a str, key: &str) -> Option<&'a str> {
     let rest = rest.strip_prefix('"')?;
     let end = rest.find('"')?;
     Some(&rest[..end])
+}
+
+/// Read a JSON integer field's value, e.g. pino's `"level":50`. Input is
+/// expected already lowercased.
+fn json_number_field(l: &str, key: &str) -> Option<u64> {
+    let pat = format!("\"{key}\"");
+    let i = l.find(&pat)?;
+    let rest = l[i + pat.len()..].trim_start();
+    let rest = rest.strip_prefix(':')?.trim_start();
+    let end = rest
+        .find(|c: char| !c.is_ascii_digit())
+        .unwrap_or(rest.len());
+    rest[..end].parse().ok()
+}
+
+/// pino and bunyan write levels as numbers: 10 trace, 20 debug, 30 info,
+/// 40 warn, 50 error, 60 fatal.
+fn numeric_level(level: u64) -> Severity {
+    match level {
+        10 | 20 => Severity::Debug,
+        40 => Severity::Warning,
+        50 | 60 => Severity::Error,
+        _ => Severity::Other,
+    }
 }
 
 fn log_body(mut line: &str) -> &str {
