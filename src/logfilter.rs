@@ -267,6 +267,9 @@ impl LogMatcher {
     }
 
     fn is_match(&self, line: &str) -> bool {
+        if matches!(self.kind, Kind::All) {
+            return true;
+        }
         // Match the text the view shows, not its color codes.
         let line = crate::ui::strip_ansi_if_present(line);
         let line = line.as_ref();

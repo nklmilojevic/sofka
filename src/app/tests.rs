@@ -37239,6 +37239,17 @@ async fn log_filter_finds_record_rows_and_raw_json() {
             "filter {filter:?}"
         );
     }
+    // Indented JSON puts a space after each colon, which only the pretty view
+    // shows.
+    assert_eq!(filtered(&mut app, r#""level": 50"#), "");
+    app.handle_key(press(KeyCode::Char('J'))).unwrap();
+    assert_eq!(app.logs.json, crate::app::JsonView::Pretty);
+    assert_eq!(filtered(&mut app, r#""level": 50"#), lines[0]);
+    assert_eq!(filtered(&mut app, r#""method": "GET""#), lines[0]);
+    assert_eq!(
+        filtered(&mut app, r#"!"level": 50"#),
+        [lines[1], lines[2]].join("\n")
+    );
 }
 
 #[tokio::test]
