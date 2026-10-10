@@ -126,9 +126,15 @@ fn log_body(mut line: &str) -> &str {
 
 /// Check for a klog level marker at the start of the message.
 fn klog_level(line: &str, level: char) -> bool {
-    let mut it = line.chars();
-    it.next().is_some_and(|c| c.eq_ignore_ascii_case(&level))
-        && it.next().is_some_and(|c| c.is_ascii_digit())
+    // `E0627 12:00:00`: level, MMDD, space, HH:MM:SS.
+    let b = line.as_bytes();
+    b.len() >= 14
+        && (b[0] as char).eq_ignore_ascii_case(&level)
+        && b[1..5].iter().all(u8::is_ascii_digit)
+        && b[5] == b' '
+        && [6, 7, 9, 10, 12, 13].iter().all(|&i| b[i].is_ascii_digit())
+        && b[8] == b':'
+        && b[11] == b':'
 }
 
 /// A compiled log filter. Cheap to query per line; build once when the filter
