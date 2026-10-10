@@ -115,24 +115,48 @@ fn json_field<'a>(l: &'a str, key: &str) -> Option<&'a str> {
 
 /// The top-level `level` (or `severity`) of a JSON log line: a string such as
 /// `"warn"`, or a whole number as pino writes it. Nested fields are ignored
-/// and a repeated key keeps its last value, as in record view.
+/// and a repeated key keeps its last value, as in record view. The line is
+/// scanned without building a value, so a long record costs one pass.
 fn json_level(body: &str) -> Option<Severity> {
-    if !body.starts_with('{') || body.len() > JSON_LEVEL_LINE_LIMIT {
+    use serde::Deserializer as _;
+    struct Levels;
+    impl<'de> serde::de::Visitor<'de> for Levels {
+        type Value = (Option<serde_json::Value>, Option<serde_json::Value>);
+
+        fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("a JSON object")
+        }
+
+        fn visit_map<A: serde::de::MapAccess<'de>>(
+            self,
+            mut map: A,
+        ) -> Result<Self::Value, A::Error> {
+            let (mut level, mut severity) = (None, None);
+            while let Some(key) = map.next_key::<std::borrow::Cow<str>>()? {
+                if key.eq_ignore_ascii_case("level") {
+                    level = Some(map.next_value()?);
+                } else if key.eq_ignore_ascii_case("severity") {
+                    severity = Some(map.next_value()?);
+                } else {
+                    map.next_value::<serde::de::IgnoredAny>()?;
+                }
+            }
+            Ok((level, severity))
+        }
+    }
+    let body = body.trim_start();
+    if !body.starts_with('{') {
         return None;
     }
-    let value = serde_json::Deserializer::from_str(&body.to_ascii_lowercase())
-        .into_iter::<serde_json::Value>()
-        .next()?
+    let (level, severity) = serde_json::Deserializer::from_str(body)
+        .deserialize_map(Levels)
         .ok()?;
-    match value.get("level").or_else(|| value.get("severity"))? {
-        serde_json::Value::String(level) => Some(parse_level(level)),
+    match level.or(severity)? {
+        serde_json::Value::String(level) => Some(parse_level(&level.to_ascii_lowercase())),
         serde_json::Value::Number(level) => level.as_u64().map(numeric_level),
         _ => None,
     }
 }
-
-/// Longer lines skip the JSON parse and fall back to the text scan.
-const JSON_LEVEL_LINE_LIMIT: usize = 64 * 1024;
 
 /// pino and bunyan write levels as numbers: 10 trace, 20 debug, 30 info,
 /// 40 warn, 50 error, 60 fatal.
@@ -334,6 +358,14 @@ mod tests {
         assert_eq!(sev(r#"{"level":50e0,"msg":"ok"}"#), Severity::Other);
         // Source labels in front of the JSON are skipped.
         assert_eq!(sev(r#"[api] {"level":50,"msg":"x"}"#), Severity::Error);
+        // Leading whitespace does not hide the level.
+        assert_eq!(sev(r#"  {"level":50,"msg":"x"}"#), Severity::Error);
+        assert_eq!(sev("\t{\"level\":40,\"msg\":\"x\"}"), Severity::Warning);
+        // Neither does a long record.
+        let long = format!(r#"{{"level":50,"msg":"{}"}}"#, "x".repeat(200_000));
+        assert_eq!(sev(&long), Severity::Error);
+        let long = format!(r#"{{"msg":"{}","level":"warn"}}"#, "x".repeat(200_000));
+        assert_eq!(sev(&long), Severity::Warning);
     }
 
     #[test]
