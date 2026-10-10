@@ -250,21 +250,32 @@ impl LogMatcher {
 
     /// Whether `line` passes the filter.
     pub fn matches(&self, line: &str) -> bool {
+        self.matches_shown(line, None)
+    }
+
+    /// Whether a line passes the filter, by its original text or by the text
+    /// the view shows in its place (a record row). A negated filter hides the
+    /// line if either form matches.
+    pub fn matches_shown(&self, line: &str, shown: Option<&str>) -> bool {
         // A broken regex hides everything (and `is_error` lets the UI explain),
         // regardless of negation — negating a typo shouldn't reveal the buffer.
         if matches!(self.kind, Kind::BadRegex) {
             return false;
         }
+        let base = self.is_match(line) || shown.is_some_and(|shown| self.is_match(shown));
+        base ^ self.negate
+    }
+
+    fn is_match(&self, line: &str) -> bool {
         // Match the text the view shows, not its color codes.
         let line = crate::ui::strip_ansi_if_present(line);
         let line = line.as_ref();
-        let base = match &self.kind {
+        match &self.kind {
             Kind::All => true,
             Kind::Substr(s) => s.matches(line),
             Kind::Regex(re) => re.is_match(line),
             Kind::BadRegex => false,
-        };
-        base ^ self.negate
+        }
     }
 
     /// True when the filter is a `/…/` regex that didn't compile.

@@ -786,7 +786,7 @@ impl LogsView {
                 .partition_point(|m| m.sort_time <= meta.sort_time)
         };
         if index < self.view.lines.len() {
-            if !self.follow && self.matches(&line) {
+            if !self.follow && self.matches(&line, Some(&meta)) {
                 self.refresh_index(self.last_wrap_width);
                 let mut marker_index = 0;
                 if let Some(shown) = self.index.shown.iter().position(|entry| match entry {
