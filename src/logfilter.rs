@@ -27,16 +27,16 @@ pub fn is_warning_or_error(line: &str) -> bool {
 pub fn severity(line: &str) -> Severity {
     let line = crate::ui::strip_ansi_if_present(line);
     let l = line.to_ascii_lowercase();
+    let body = log_body(&line);
     // Structured logs: read the level field directly (authoritative; a later
     // "…error…" in the message can't override it).
+    if let Some(severity) = json_level(body) {
+        return severity;
+    }
     if let Some(level) = json_field(&l, "level").or_else(|| json_field(&l, "severity")) {
         return parse_level(level);
     }
-    if let Some(level) = json_number_field(&l, "level") {
-        return numeric_level(level);
-    }
-    // Skip source labels and timestamps before checking the klog level.
-    let body = log_body(&line);
+    // Source labels and timestamps are skipped before the klog level.
     if klog_level(body, 'e') || klog_level(body, 'f') {
         return Severity::Error;
     }
@@ -113,18 +113,26 @@ fn json_field<'a>(l: &'a str, key: &str) -> Option<&'a str> {
     Some(&rest[..end])
 }
 
-/// Read a JSON integer field's value, e.g. pino's `"level":50`. Input is
-/// expected already lowercased.
-fn json_number_field(l: &str, key: &str) -> Option<u64> {
-    let pat = format!("\"{key}\"");
-    let i = l.find(&pat)?;
-    let rest = l[i + pat.len()..].trim_start();
-    let rest = rest.strip_prefix(':')?.trim_start();
-    let end = rest
-        .find(|c: char| !c.is_ascii_digit())
-        .unwrap_or(rest.len());
-    rest[..end].parse().ok()
+/// The top-level `level` (or `severity`) of a JSON log line: a string such as
+/// `"warn"`, or a whole number as pino writes it. Nested fields are ignored
+/// and a repeated key keeps its last value, as in record view.
+fn json_level(body: &str) -> Option<Severity> {
+    if !body.starts_with('{') || body.len() > JSON_LEVEL_LINE_LIMIT {
+        return None;
+    }
+    let value = serde_json::Deserializer::from_str(&body.to_ascii_lowercase())
+        .into_iter::<serde_json::Value>()
+        .next()?
+        .ok()?;
+    match value.get("level").or_else(|| value.get("severity"))? {
+        serde_json::Value::String(level) => Some(parse_level(level)),
+        serde_json::Value::Number(level) => level.as_u64().map(numeric_level),
+        _ => None,
+    }
 }
+
+/// Longer lines skip the JSON parse and fall back to the text scan.
+const JSON_LEVEL_LINE_LIMIT: usize = 64 * 1024;
 
 /// pino and bunyan write levels as numbers: 10 trace, 20 debug, 30 info,
 /// 40 warn, 50 error, 60 fatal.
@@ -300,6 +308,33 @@ impl LogMatcher {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn numeric_levels_follow_the_top_level_field() {
+        let sev = |line: &str| severity(line);
+        assert_eq!(sev(r#"{"level":10,"msg":"x"}"#), Severity::Debug);
+        assert_eq!(sev(r#"{"level":20,"msg":"x"}"#), Severity::Debug);
+        assert_eq!(sev(r#"{"level":30,"msg":"x"}"#), Severity::Other);
+        assert_eq!(sev(r#"{"level":40,"msg":"x"}"#), Severity::Warning);
+        assert_eq!(sev(r#"{"level":50,"msg":"x"}"#), Severity::Error);
+        assert_eq!(sev(r#"{"level":60,"msg":"x"}"#), Severity::Error);
+        // A nested level is not the record's level.
+        assert_eq!(
+            sev(r#"{"context":{"level":50},"level":30,"msg":"ok"}"#),
+            Severity::Other
+        );
+        assert_eq!(
+            sev(r#"{"context":{"level":20},"level":"warn","msg":"x"}"#),
+            Severity::Warning
+        );
+        // A repeated key keeps its last value, as record view does.
+        assert_eq!(sev(r#"{"level":30,"level":50,"msg":"x"}"#), Severity::Error);
+        // Only whole numbers are levels.
+        assert_eq!(sev(r#"{"level":50.5,"msg":"ok"}"#), Severity::Other);
+        assert_eq!(sev(r#"{"level":50e0,"msg":"ok"}"#), Severity::Other);
+        // Source labels in front of the JSON are skipped.
+        assert_eq!(sev(r#"[api] {"level":50,"msg":"x"}"#), Severity::Error);
+    }
 
     #[test]
     fn empty_matches_everything() {

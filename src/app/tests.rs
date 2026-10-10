@@ -37171,10 +37171,14 @@ async fn log_warnings_shortcut_reads_numeric_json_levels() {
         r#"{"level":50,"time":1700000002000,"msg":"boom"}"#,
         r#"{"level":60,"time":1700000003000,"msg":"down"}"#,
         r#"{"level":20,"time":1700000004000,"msg":"detail"}"#,
+        r#"{"context":{"level":50},"level":30,"msg":"ok"}"#,
+        r#"{"context":{"level":20},"level":"warn","msg":"slow"}"#,
+        r#"{"level":50.5,"msg":"ok"}"#,
     ];
     shortcut_log_lines(&mut app, lines.iter().map(|s| (*s).into()).collect());
     app.handle_key(ctrl(KeyCode::Char('z'))).unwrap();
-    assert_eq!(app.filtered_log_text(), lines[1..4].join("\n"));
+    let expected = [lines[1], lines[2], lines[3], lines[6]];
+    assert_eq!(app.filtered_log_text(), expected.join("\n"));
 }
 
 #[tokio::test]
