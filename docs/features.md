@@ -280,6 +280,9 @@ include those conditions. Row filters can search the route paths.
 - **Event timing** - LAST-SEEN shows the most recent reported occurrence for
   core and events.k8s.io Events. It advances with time and sorts by occurrence
   timestamp. AGE continues to show object creation age.
+- **Event sizes** - the events MESSAGE column shows byte counts such as
+  `80474558 bytes` in binary units scaled to the value, like `76.7 MiB`. Counts
+  under 1 KiB stay as they are. Describe and YAML keep the original message.
 - **Service endpoints** include ExternalName targets, configured external IPs,
   load balancer addresses, and NodePort values such as `80:30080/TCP`.
 - **Pod health** shows init progress and failure reasons, Pod reasons such as

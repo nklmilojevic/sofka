@@ -31077,6 +31077,30 @@ async fn quoted_filter_folds_unicode_column_text() {
 }
 
 #[tokio::test]
+async fn event_message_column_humanizes_byte_counts() {
+    let (mut app, _rx) = test_app();
+    app.switch_kind("events");
+    for (name, message) in [
+        (
+            "pulled",
+            "Successfully pulled image \"nginx\" in 1.2s. Image size: 80474558 bytes.",
+        ),
+        ("small", "Wrote 512 bytes."),
+    ] {
+        apply(
+            &mut app,
+            json!({"apiVersion": "v1", "kind": "Event",
+            "metadata": {"name": name, "namespace": "default"},
+            "message": message}),
+        );
+    }
+    type_filter(&mut app, "\"Image size: 76.7 MiB.\"");
+    assert_eq!(row_names(&app), ["pulled"]);
+    retype_filter(&mut app, "\"512 bytes\"");
+    assert_eq!(row_names(&app), ["small"]);
+}
+
+#[tokio::test]
 async fn boolean_groups_preserve_literal_and_regex_terms() {
     let (mut app, _rx) = test_app();
     app.switch_kind("pods");
