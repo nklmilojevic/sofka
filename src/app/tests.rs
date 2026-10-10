@@ -39430,6 +39430,81 @@ async fn log_json_record_view_flattens_nested_objects_into_dotted_keys() {
 }
 
 #[tokio::test]
+async fn log_json_record_view_quotes_dotted_keys_only_when_ambiguous() {
+    let (mut app, _rx) = test_app();
+    app.mode = Mode::Logs;
+    shortcut_log_lines(
+        &mut app,
+        vec![
+            r#"{"level":"info","msg":"dots","a.b":1,"a":{"b":2},"http.method":"GET","c.d":3,"c.d":4,"x":{"y.z":5},"x.y":{"z":6}}"#.into(),
+            r#"{"level":"info","msg":"plain","http.method":"GET","k8s":{"io/name":"web"}}"#.into(),
+        ],
+    );
+    app.handle_key(press(KeyCode::Char('J'))).unwrap();
+    assert_eq!(app.logs.json, JsonView::Record);
+    assert_eq!(
+        app.logs.display_line(0),
+        r#"INFO  dots › "a.b"=1 a.b=2 http.method=GET c.d=3 c.d=4 x."y.z"=5 "x.y".z=6"#
+    );
+    assert_eq!(
+        app.logs.display_line(1),
+        "INFO  plain › http.method=GET k8s.io/name=web"
+    );
+}
+
+#[tokio::test]
+async fn log_json_record_view_shares_the_flatten_limit_across_a_record() {
+    let (mut app, _rx) = test_app();
+    app.mode = Mode::Logs;
+    let object = |prefix: &str, n: usize| {
+        let fields = (0..n)
+            .map(|i| format!(r#""{prefix}{i}":{i}"#))
+            .collect::<Vec<_>>()
+            .join(",");
+        format!("{{{fields}}}")
+    };
+    shortcut_log_lines(
+        &mut app,
+        vec![
+            // 30 + 30 fit, the third 30 does not, and 4 more reach exactly 64.
+            format!(
+                r#"{{"level":"info","msg":"siblings","a":{},"b":{},"c":{},"d":{}}}"#,
+                object("a", 30),
+                object("b", 30),
+                object("c", 30),
+                object("d", 4)
+            ),
+            // The nested object takes 1 + 60, leaving 3 for later siblings.
+            format!(
+                r#"{{"level":"info","msg":"nested","outer":{{"inner":{}}},"next":{},"last":{}}}"#,
+                object("i", 60),
+                object("n", 4),
+                object("l", 3)
+            ),
+        ],
+    );
+    app.handle_key(press(KeyCode::Char('J'))).unwrap();
+    assert_eq!(app.logs.json, JsonView::Record);
+    let siblings = app.logs.display_line(0);
+    assert!(siblings.contains(" a.a29=29 b.b0=0 "), "{siblings}");
+    assert!(siblings.contains(r#" c={"c0":0,"#), "{siblings}");
+    assert!(
+        siblings.ends_with(" d.d0=0 d.d1=1 d.d2=2 d.d3=3"),
+        "{siblings}"
+    );
+    let nested = app.logs.display_line(1);
+    assert!(nested.contains(" outer.inner.i59=59 "), "{nested}");
+    assert!(
+        nested.contains(r#" next={"n0":0,"n1":1,"n2":2,"n3":3} "#),
+        "{nested}"
+    );
+    assert!(
+        nested.ends_with(" last.l0=0 last.l1=1 last.l2=2"),
+        "{nested}"
+    );
+}
+
+#[tokio::test]
 async fn log_json_record_view_keeps_the_last_repeated_header_key() {
     let (mut app, _rx) = test_app();
     app.mode = Mode::Logs;

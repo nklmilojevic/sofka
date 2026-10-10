@@ -110,7 +110,8 @@ Fields keep the order the application wrote them, and a `›` separates the
 message from them. Nested objects are flattened into dotted keys in their
 original order (`object.kind=Lease`), up to four levels deep and 64 nested
 fields per record. Deeper or larger objects, empty objects, and arrays stay
-compact JSON. Keys with whitespace, `=`, or `"` are
+compact JSON. A key that contains a dot is quoted when it would read the same as a
+flattened path (`"a.b"=1 a.b=2`). Keys with whitespace, `=`, or `"` are
 quoted (`"worker count"=1`). Values with control characters, and strings that read as another JSON type
 (`"true"`, `"3"`, `"{}"`), are shown as quoted JSON strings, so a record stays on
 one row. Records without a level or message field stay raw.
