@@ -106,7 +106,9 @@ time, level, message, then the other fields as `key=value`. It reads the time fr
 `time`, `ts`, `timestamp`, or `@timestamp`, the level from `level`, `lvl`, or
 `severity`, and the message from `msg` or `message`. A `logger` name (zap, logr)
 is shown before the message as `logger: message`. Epoch times become RFC 3339.
-Values with control characters, and strings that read as another JSON type
+Fields keep the order the application wrote them, nested objects included, and a
+`›` separates the message from them. Keys with whitespace, `=`, or `"` are
+quoted (`"worker count"=1`). Values with control characters, and strings that read as another JSON type
 (`"true"`, `"3"`, `"{}"`), are shown as quoted JSON strings, so a record stays on
 one row. Records without a level or message field stay raw. The row color comes
 from the record's level.
