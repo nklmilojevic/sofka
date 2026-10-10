@@ -39518,6 +39518,53 @@ async fn log_json_record_view_styles_each_part_of_the_row() {
 }
 
 #[tokio::test]
+async fn log_search_highlight_maps_lowercase_matches_back_to_the_original_text() {
+    use ratatui::{Terminal, backend::TestBackend};
+    let (mut app, _rx) = test_app();
+    app.mode = Mode::Logs;
+    app.compact = true;
+    // Lowercasing keeps this row's byte length (the Kelvin sign shrinks, each
+    // dotted capital I grows), but not its character boundaries.
+    shortcut_log_lines(
+        &mut app,
+        vec![
+            "{\"level\":\"info\",\"msg\":\"[\u{212a}] \u{130}\u{130}\",\"id\":1}".into(),
+            "\u{212a}\u{130}\u{130} idle".into(),
+        ],
+    );
+    app.handle_key(press(KeyCode::Char('J'))).unwrap();
+    assert_eq!(
+        app.logs.display_line(0),
+        "INFO  [\u{212a}] \u{130}\u{130} › id=1"
+    );
+    app.handle_key(press(KeyCode::Char('/'))).unwrap();
+    app.handle_key(press(KeyCode::Char('i'))).unwrap();
+    app.handle_key(press(KeyCode::Enter)).unwrap();
+    assert_eq!(app.logs.refresh_index(0).matched_lines(), 2);
+    let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+    terminal.draw(|f| crate::ui::draw(f, &mut app)).unwrap();
+    let buffer = terminal.backend().buffer();
+    let highlighted = |text: &str| {
+        (0..buffer.area.height)
+            .find_map(|y| {
+                let row: Vec<_> = (0..buffer.area.width).map(|x| &buffer[(x, y)]).collect();
+                let line: String = row.iter().map(|cell| cell.symbol()).collect();
+                line.contains(text).then(|| {
+                    row.iter()
+                        .filter(|cell| cell.bg == crate::theme::yellow())
+                        .map(|cell| cell.symbol())
+                        .collect::<String>()
+                })
+            })
+            .unwrap()
+    };
+    // `İ` lowercases to `i` plus a combining dot, so `i` matches only inside
+    // its lowercase form and is not highlighted there; `INFO` and `id` are.
+    assert_eq!(highlighted("› id=1"), "Ii");
+    assert_eq!(highlighted(" idle"), "i");
+}
+
+#[tokio::test]
 async fn log_json_record_view_does_not_depend_on_the_pretty_cache() {
     let (mut app, _rx) = test_app();
     app.mode = Mode::Logs;

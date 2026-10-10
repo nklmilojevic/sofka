@@ -107,8 +107,9 @@ impl LogLineMeta {
             .ok()
             .and_then(|ordered| render_record(&ordered, time));
         let record_severity = record.as_ref().and_then(|row| row.severity);
-        let record = record.and_then(|row| {
-            let parts = row.parts.len() * std::mem::size_of::<RecordSpan>();
+        let record = record.and_then(|mut row| {
+            row.parts.shrink_to_fit();
+            let parts = row.parts.capacity() * std::mem::size_of::<RecordSpan>();
             let body_len = row.text.len();
             Some((cache(row.text, parts)?, (row.parts, body_len)))
         });

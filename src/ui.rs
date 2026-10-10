@@ -2388,18 +2388,7 @@ fn styled_spans(
     if at < text.len() {
         runs.push((at..text.len(), plain));
     }
-    // Lowercasing is not always length-preserving; skip highlighting rather
-    // than slice mid-character, as `push_highlighted` does.
-    let hay = text.to_lowercase();
-    let pat = needle.to_lowercase();
-    let mut matches = Vec::new();
-    if !pat.is_empty() && hay.len() == text.len() {
-        let mut from = 0;
-        while let Some(pos) = hay[from..].find(&pat) {
-            matches.push(from + pos..from + pos + pat.len());
-            from += pos + pat.len();
-        }
-    }
+    let matches = match_ranges(text, needle);
     let hl = Style::default()
         .bg(theme::yellow())
         .fg(theme::crust())
@@ -2551,25 +2540,12 @@ fn push_highlighted(spans: &mut Vec<Span<'static>>, text: &str, needle: &str, ba
         }
         return;
     }
-    // Lowercasing is not always length-preserving (e.g. Turkish İ, German ß),
-    // so match on the same string we slice to keep byte offsets valid and avoid
-    // panicking on a non-char-boundary index for multi-byte log lines.
-    let hay = text.to_lowercase();
-    let pat = needle.to_lowercase();
-    if text.len() != hay.len() {
-        // Offsets from `hay` wouldn't be valid in `text`; skip highlighting
-        // rather than risk slicing mid-character.
-        spans.push(Span::styled(text.to_string(), base));
-        return;
-    }
     let hl = Style::default()
         .bg(theme::yellow())
         .fg(theme::crust())
         .add_modifier(Modifier::BOLD);
     let mut idx = 0;
-    while let Some(pos) = hay[idx..].find(&pat) {
-        let start = idx + pos;
-        let end = start + pat.len();
+    for std::ops::Range { start, end } in match_ranges(text, needle) {
         if start > idx {
             spans.push(Span::styled(text[idx..start].to_string(), base));
         }
@@ -2579,6 +2555,45 @@ fn push_highlighted(spans: &mut Vec<Span<'static>>, text: &str, needle: &str, ba
     if idx < text.len() {
         spans.push(Span::styled(text[idx..].to_string(), base));
     }
+}
+
+/// Byte ranges in `text` of case-insensitive, non-overlapping matches of
+/// `needle`. Lowercasing changes byte lengths per character (`K` shrinks, `İ`
+/// grows), so matching runs on a lowercased copy that maps each character
+/// back to its offset in `text`. A match that starts or ends inside one
+/// character's lowercase form is skipped rather than sliced mid-character.
+fn match_ranges(text: &str, needle: &str) -> Vec<std::ops::Range<usize>> {
+    let pat: String = needle.chars().flat_map(char::to_lowercase).collect();
+    if pat.is_empty() {
+        return Vec::new();
+    }
+    let mut hay = String::with_capacity(text.len());
+    // (offset in `hay`, offset in `text`) at each character start.
+    let mut starts = Vec::with_capacity(text.len() + 1);
+    for (at, c) in text.char_indices() {
+        starts.push((hay.len(), at));
+        hay.extend(c.to_lowercase());
+    }
+    starts.push((hay.len(), text.len()));
+    let original = |at: usize| {
+        starts
+            .binary_search_by_key(&at, |&(hay, _)| hay)
+            .ok()
+            .map(|i| starts[i].1)
+    };
+    let mut matches = Vec::new();
+    let mut from = 0;
+    while let Some(pos) = hay[from..].find(&pat) {
+        let start = from + pos;
+        let end = start + pat.len();
+        if let (Some(text_start), Some(text_end)) = (original(start), original(end)) {
+            matches.push(text_start..text_end);
+            from = end;
+        } else {
+            from = start + hay[start..].chars().next().map_or(1, char::len_utf8);
+        }
+    }
+    matches
 }
 
 /// A run of text sharing one style, extracted from an ANSI-coded string.
