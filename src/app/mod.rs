@@ -3003,7 +3003,7 @@ mod journal;
 mod lifecycle;
 mod log_follow;
 mod logs;
-pub use logs::JsonView;
+pub use logs::{JsonView, RecordPart, RecordSpan};
 mod metrics_history;
 mod mouse;
 mod namespace_patterns;

@@ -5,6 +5,10 @@ pub(super) struct LogLineMeta {
     sort_time: Option<i128>,
     pub(super) pretty: Option<String>,
     record: Option<String>,
+    /// Styled parts of the record row, relative to where its body starts:
+    /// the source and `--timestamps` prefixes come before it.
+    record_parts: Vec<RecordSpan>,
+    record_body_len: usize,
     record_severity: Option<crate::logfilter::Severity>,
     checked_json: bool,
     pub(super) json_charge: usize,
@@ -87,8 +91,8 @@ impl LogLineMeta {
             .timestamp
             .as_ref()
             .map_or(0, |(_, timestamp)| timestamp.len());
-        let mut cache = |text: String| {
-            let charge = text.len() + time_end + timestamp_reserve;
+        let mut cache = |text: String, extra: usize| {
+            let charge = text.len() + time_end + timestamp_reserve + extra;
             if charge > *budget {
                 return None;
             }
@@ -102,13 +106,19 @@ impl LogLineMeta {
         let record = serde_json::from_str(payload)
             .ok()
             .and_then(|ordered| render_record(&ordered, time));
-        let record_severity = record.as_ref().and_then(|(_, severity)| *severity);
-        let record = record.and_then(|(text, _)| cache(text));
+        let record_severity = record.as_ref().and_then(|row| row.severity);
+        let record = record.and_then(|row| {
+            let parts = row.parts.len() * std::mem::size_of::<RecordSpan>();
+            let body_len = row.text.len();
+            Some((cache(row.text, parts)?, (row.parts, body_len)))
+        });
+        let (record, record_parts) = record.unzip();
         let pretty = serde_json::to_string_pretty(&value)
             .ok()
-            .and_then(&mut cache);
+            .and_then(|text| cache(text, 0));
         self.record_severity = record_severity;
         self.record = record;
+        (self.record_parts, self.record_body_len) = record_parts.unwrap_or_default();
         self.pretty = pretty;
     }
 
@@ -118,6 +128,8 @@ impl LogLineMeta {
         let charge = self.json_charge;
         self.pretty = None;
         self.record = None;
+        self.record_parts = Vec::new();
+        self.record_body_len = 0;
         self.record_severity = None;
         self.checked_json = false;
         self.json_charge = 0;
@@ -213,14 +225,56 @@ const RECORD_MESSAGE_KEYS: &[&str] = &["msg", "message"];
 /// controller-runtime logs, and `component` is often a plain field.
 const RECORD_LOGGER_KEYS: &[&str] = &["logger"];
 
+/// What a part of a record row shows. The theme maps each kind to a style;
+/// the cached row text stays plain, so search and the severity filter read it
+/// as before.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RecordPart {
+    Time,
+    Level,
+    Logger,
+    Message,
+    Separator,
+    /// A field key and its `=`.
+    Key,
+    /// A bare string value.
+    Text,
+    /// A string value that needs quotes.
+    Quoted,
+    Number,
+    Bool,
+    Null,
+    /// An array or object as compact JSON.
+    Json,
+}
+
+/// The byte range of a styled part of a record row, and its kind.
+pub type RecordSpan = (std::ops::Range<usize>, RecordPart);
+
+/// A rendered record row: its plain text, the byte range of each styled part
+/// within it, and the severity of its level.
+struct RecordRow {
+    text: String,
+    parts: Vec<RecordSpan>,
+    severity: Option<crate::logfilter::Severity>,
+}
+
+impl RecordRow {
+    fn push(&mut self, part: &str, kind: RecordPart) {
+        if !self.text.is_empty() {
+            self.text.push(' ');
+        }
+        let start = self.text.len();
+        self.text.push_str(part);
+        self.parts.push((start..self.text.len(), kind));
+    }
+}
+
 /// One-line rendering of a structured log record (zap, slog, logrus, pino):
-/// `time LEVEL logger: message key=value ...`, with the severity of its level if it
-/// has one. `None` when the value is not an object with a level or message
-/// field.
-fn render_record(
-    value: &Ordered,
-    format: &RecordTime,
-) -> Option<(String, Option<crate::logfilter::Severity>)> {
+/// `time LEVEL logger: message › key=value ...`, with the severity of its
+/// level if it has one. `None` when the value is not an object with a level or
+/// message field.
+fn render_record(value: &Ordered, format: &RecordTime) -> Option<RecordRow> {
     let Ordered::Object(fields) = value else {
         return None;
     };
@@ -242,34 +296,38 @@ fn render_record(
         return None;
     }
     let time = find(RECORD_TIME_KEYS);
-    let mut out = String::new();
-    let mut push = |part: &str| {
-        if !out.is_empty() {
-            out.push(' ');
-        }
-        out.push_str(part);
+    let mut row = RecordRow {
+        text: String::new(),
+        parts: Vec::new(),
+        severity: None,
     };
     if let Some((_, time)) = time {
-        push(&record_time(time, format));
+        row.push(&record_time(time, format), RecordPart::Time);
     }
     let level_name = level.map(|(_, level)| record_level(level));
     if let Some(name) = &level_name {
-        push(&format!("{:<5}", record_text(name)));
+        let name = record_text(name);
+        row.push(&name, RecordPart::Level);
+        // The padding keeps messages aligned but is not part of the level.
+        row.text.extend(std::iter::repeat_n(
+            ' ',
+            5usize.saturating_sub(name.chars().count()),
+        ));
     }
     // A logger without a message stays a field, so it is not shown as one.
     let logger = message
         .and(find(RECORD_LOGGER_KEYS))
         .filter(|(_, logger)| logger.as_str().is_some_and(|name| !name.is_empty()));
     if let Some((_, logger)) = logger {
-        push(&format!(
-            "{}:",
-            record_text(logger.as_str().unwrap_or_default())
-        ));
+        row.push(
+            &format!("{}:", record_text(logger.as_str().unwrap_or_default())),
+            RecordPart::Logger,
+        );
     }
     if let Some((_, message)) = message {
         match message.as_str() {
-            Some(text) => push(&record_text(text)),
-            None => push(&message.to_string()),
+            Some(text) => row.push(&record_text(text), RecordPart::Message),
+            None => row.push(&message.to_string(), RecordPart::Message),
         }
     }
     let used = [time, level, logger, message].map(|field| field.map(|(index, _)| index));
@@ -281,13 +339,17 @@ fn render_record(
             .map(|(_, field)| field)
     };
     if message.is_some() && rest().next().is_some() {
-        push("›");
+        row.push("›", RecordPart::Separator);
     }
     for (key, value) in rest() {
-        push(&format!("{}={}", record_key(key), record_value(value)));
+        row.push(&format!("{}=", record_key(key)), RecordPart::Key);
+        let (text, kind) = record_value(value);
+        let start = row.text.len();
+        row.text.push_str(&text);
+        row.parts.push((start..row.text.len(), kind));
     }
-    let severity = level_name.map(|name| crate::logfilter::parse_level(&name.to_ascii_lowercase()));
-    Some((out, severity))
+    row.severity = level_name.map(|name| crate::logfilter::parse_level(&name.to_ascii_lowercase()));
+    Some(row)
 }
 
 /// Keys that would read as several tokens, or break `key=value`, are quoted.
@@ -355,7 +417,14 @@ fn record_level(level: &Ordered) -> String {
 /// Bare strings stay bare. Strings that would be ambiguous in `key=value`
 /// form or read as another JSON type (`"true"`, `"3"`, `"{}"`), and every
 /// other JSON value, use compact JSON.
-fn record_value(value: &Ordered) -> String {
+fn record_value(value: &Ordered) -> (String, RecordPart) {
+    let kind = match value {
+        Ordered::Object(_) | Ordered::Array(_) => RecordPart::Json,
+        Ordered::Scalar(serde_json::Value::Bool(_)) => RecordPart::Bool,
+        Ordered::Scalar(serde_json::Value::Number(_)) => RecordPart::Number,
+        Ordered::Scalar(serde_json::Value::Null) => RecordPart::Null,
+        Ordered::Scalar(_) => RecordPart::Quoted,
+    };
     match value.as_str() {
         Some(text)
             if !text.is_empty()
@@ -365,9 +434,9 @@ fn record_value(value: &Ordered) -> String {
                     .chars()
                     .any(|c| c.is_whitespace() || c.is_control() || matches!(c, '"' | '=')) =>
         {
-            text.to_owned()
+            (text.to_owned(), RecordPart::Text)
         }
-        _ => value.to_string(),
+        _ => (value.to_string(), kind),
     }
 }
 
@@ -548,6 +617,20 @@ impl LogsView {
             meta.record_severity
                 .unwrap_or_else(|| crate::logfilter::severity(&self.view.lines[i])),
         )
+    }
+
+    /// Styled parts of the record row shown for line `i`, with the byte
+    /// offset in [`Self::display_line`] where the record body starts.
+    pub fn record_parts(&self, i: usize) -> Option<(usize, &[RecordSpan])> {
+        if self.json != JsonView::Record {
+            return None;
+        }
+        let meta = self.line_meta.get(i)?;
+        let record = meta.record.as_ref()?;
+        Some((
+            record.len().checked_sub(meta.record_body_len)?,
+            &meta.record_parts,
+        ))
     }
 
     pub(super) fn toggle_json(&mut self) {

@@ -110,8 +110,13 @@ Fields keep the order the application wrote them, nested objects included, and a
 `›` separates the message from them. Keys with whitespace, `=`, or `"` are
 quoted (`"worker count"=1`). Values with control characters, and strings that read as another JSON type
 (`"true"`, `"3"`, `"{}"`), are shown as quoted JSON strings, so a record stays on
-one row. Records without a level or message field stay raw. The row color comes
-from the record's level.
+one row. Records without a level or message field stay raw.
+
+Each part of a record row has its own style: the message is bright, keys, the
+time, and the `›` are dim, and the level token takes its level's color. Values
+are colored by type: numbers, booleans, `null`, and quoted strings. WARN and
+ERROR rows also tint the message, logger, and values in the level's color.
+Search highlights matches across a key and its value (`n=3`).
 
 Set `record_time_format` in `[logs]` to a strftime format to shorten record
 times, for example `"%b %d %H:%M:%S%.3f"` for `Oct 08 15:00:20.444`. It applies

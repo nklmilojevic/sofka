@@ -39414,11 +39414,116 @@ async fn log_json_record_view_keeps_the_last_repeated_header_key() {
 }
 
 #[tokio::test]
+async fn log_json_record_view_styles_each_part_of_the_row() {
+    use crate::theme;
+    use ratatui::{Terminal, backend::TestBackend, style::Modifier};
+    let (mut app, _rx) = test_app();
+    app.mode = Mode::Logs;
+    app.compact = true;
+    shortcut_log_lines(
+        &mut app,
+        vec![
+            r#"[app] {"time":"2026-09-10T10:00:00Z","level":"debug","logger":"ctrl","msg":"Synced","ok":true,"n":3,"gone":null,"path":"/a b","id":"x1","tags":[1]}"#.into(),
+            r#"{"level":"warn","msg":"Slow","n":3,"ok":false}"#.into(),
+            r#"{"level":"trace","msg":"Tick"}"#.into(),
+            r#"{"level":"info","msg":"Up"}"#.into(),
+            r#"{"level":"info","msg":"Set n=3","n":3,"m":1}"#.into(),
+        ],
+    );
+    app.handle_key(press(KeyCode::Char('J'))).unwrap();
+    assert_eq!(app.logs.json, JsonView::Record);
+    assert_eq!(
+        app.logs.display_line(0),
+        r#"[app] 2026-09-10T10:00:00Z DEBUG ctrl: Synced › ok=true n=3 gone=null path="/a b" id=x1 tags=[1]"#
+    );
+    let mut terminal = Terminal::new(TestBackend::new(140, 24)).unwrap();
+    let draw = |terminal: &mut Terminal<TestBackend>, app: &mut App| {
+        terminal.draw(|f| crate::ui::draw(f, app)).unwrap();
+        terminal.backend().buffer().clone()
+    };
+    let buffer = draw(&mut terminal, &mut app);
+    let cell = |buffer: &ratatui::buffer::Buffer, line: &str, word: &str| {
+        (0..buffer.area.height)
+            .find_map(|y| {
+                let row: String = (0..buffer.area.width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect();
+                if !row.contains(line) {
+                    return None;
+                }
+                let x = row.find(word)?;
+                let x = row[..x].chars().count() as u16;
+                Some(buffer[(x, y)].clone())
+            })
+            .unwrap_or_else(|| panic!("{word} not on the {line} row"))
+    };
+    let fg = |line: &str, word: &str| cell(&buffer, line, word).fg;
+    assert_eq!(fg("Synced", "2026-09-10"), theme::overlay1());
+    assert_eq!(fg("Synced", "DEBUG"), theme::blue());
+    assert!(
+        cell(&buffer, "Synced", "DEBUG")
+            .modifier
+            .contains(Modifier::BOLD)
+    );
+    assert_eq!(fg("Synced", "ctrl:"), theme::teal());
+    assert_eq!(fg("Synced", "Synced"), theme::text());
+    assert!(
+        cell(&buffer, "Synced", "Synced")
+            .modifier
+            .contains(Modifier::BOLD)
+    );
+    assert_eq!(fg("Synced", "›"), theme::overlay1());
+    assert_eq!(fg("Synced", "ok="), theme::overlay1());
+    assert_eq!(fg("Synced", "true"), theme::mauve());
+    assert_eq!(fg("Synced", "n=3"), theme::overlay1());
+    assert_eq!(fg("Synced", "3 gone"), theme::peach());
+    assert_eq!(fg("Synced", "null"), theme::overlay1());
+    assert_eq!(fg("Synced", "\"/a b\""), theme::green());
+    assert_eq!(fg("Synced", "x1"), theme::text());
+    assert_eq!(fg("Synced", "[1]"), theme::text());
+    // WARN tints the message and values; keys and the separator stay dim.
+    assert_eq!(fg("Slow", "WARN"), theme::peach());
+    assert_eq!(fg("Slow", "Slow"), theme::peach());
+    assert_eq!(fg("Slow", "n="), theme::overlay1());
+    assert_eq!(fg("Slow", "false"), theme::peach());
+    assert_eq!(fg("Tick", "TRACE"), theme::overlay1());
+    assert_eq!(fg("Tick", "Tick"), theme::text());
+    assert_eq!(fg("Up", "INFO"), theme::green());
+
+    // A match across a key and its value is highlighted as one.
+    app.handle_key(press(KeyCode::Char('/'))).unwrap();
+    for c in "n=3".chars() {
+        app.handle_key(press(KeyCode::Char(c))).unwrap();
+    }
+    app.handle_key(press(KeyCode::Enter)).unwrap();
+    let buffer = draw(&mut terminal, &mut app);
+    let y = (0..buffer.area.height)
+        .find(|&y| {
+            (0..buffer.area.width)
+                .map(|x| buffer[(x, y)].symbol())
+                .collect::<String>()
+                .contains("Set n=3")
+        })
+        .unwrap();
+    let row: Vec<_> = (0..buffer.area.width)
+        .map(|x| buffer[(x, y)].clone())
+        .collect();
+    let text: String = row.iter().map(|cell| cell.symbol()).collect();
+    let field = text[..text.find("› n=3").unwrap()].chars().count() + 2;
+    let highlighted: Vec<bool> = row[field - 1..field + 5]
+        .iter()
+        .map(|cell| cell.bg == theme::yellow())
+        .collect();
+    assert_eq!(highlighted, [false, true, true, true, false, false]);
+}
+
+#[tokio::test]
 async fn log_json_record_view_does_not_depend_on_the_pretty_cache() {
     let (mut app, _rx) = test_app();
     app.mode = Mode::Logs;
     let line = r#"{"msg":"hi","a":{"b":[1,2,3]}}"#;
-    app.logs.json_budget = line.len() + 30;
+    // The record row and its four styled parts fit; the indented form does not.
+    app.logs.json_budget = line.len() + 30 + 4 * std::mem::size_of::<crate::app::RecordSpan>();
     shortcut_log_lines(&mut app, vec![line.into()]);
     app.handle_key(press(KeyCode::Char('J'))).unwrap();
     assert_eq!(app.logs.display_line(0), r#"hi › a={"b":[1,2,3]}"#);

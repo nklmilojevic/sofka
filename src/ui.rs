@@ -2080,17 +2080,23 @@ fn draw_logs(frame: &mut Frame, app: &mut App, area: Rect) {
                 continue;
             };
             let l = app.logs.display_line(buf_idx);
-            let record_color = app.logs.record_severity(buf_idx).map(severity_color);
+            let severity = app.logs.record_severity(buf_idx);
+            let record = app.logs.record_parts(buf_idx).zip(severity);
             let mut offset = 0;
             for part in l.split('\n') {
                 if row + offset >= scroll + inner_h {
                     break;
                 }
-                let line = render_log_line_in(
-                    part,
-                    highlight,
-                    record_color.unwrap_or_else(|| log_level_color(part)),
-                );
+                let line = match record {
+                    Some(((body, parts), severity)) if part.len() == l.len() => {
+                        render_record_line(part, body, parts, highlight, severity)
+                    }
+                    _ => render_log_line_in(
+                        part,
+                        highlight,
+                        severity.map_or_else(|| log_level_color(part), severity_color),
+                    ),
+                };
                 let parts = if wrap {
                     wrap_line(line, inner_w)
                 } else {
@@ -2287,6 +2293,133 @@ fn render_log_line_in(line: &str, needle: &str, base: Color) -> Line<'static> {
     //    falling back to the severity color, with search matches on top.
     spans.extend(render_body(rest, needle, base));
     Line::from(spans)
+}
+
+/// A record view row: the source and timestamp prefixes as on raw lines, then
+/// each part of the record in its kind's style. WARN and ERROR rows tint the
+/// message, logger and values; the structure (time, keys, separator) stays
+/// dim. Search matches are highlighted across part boundaries, so `n=3`
+/// matches a key and its value.
+fn render_record_line(
+    line: &str,
+    body: usize,
+    parts: &[crate::app::RecordSpan],
+    needle: &str,
+    severity: crate::logfilter::Severity,
+) -> Line<'static> {
+    use crate::app::RecordPart;
+    let mut styled = Vec::with_capacity(parts.len() + 2);
+    let prefix = &line[..body.min(line.len())];
+    let mut start = 0;
+    if let Some((end, color)) = source_prefix(prefix) {
+        styled.push((
+            0..end,
+            Style::default().fg(color).add_modifier(Modifier::BOLD),
+        ));
+        start = end;
+    }
+    if let Some(len) = leading_timestamp(&prefix[start..]) {
+        styled.push((start..start + len, theme::dim()));
+    }
+    let tint = match severity {
+        crate::logfilter::Severity::Error => Some(theme::red()),
+        crate::logfilter::Severity::Warning => Some(theme::peach()),
+        _ => None,
+    };
+    let fg = |color: Color| Style::default().fg(tint.unwrap_or(color));
+    for (range, kind) in parts {
+        let range = body + range.start..body + range.end;
+        let Some(text) = line.get(range.clone()) else {
+            continue;
+        };
+        let style = match kind {
+            RecordPart::Time | RecordPart::Separator | RecordPart::Key | RecordPart::Null => {
+                theme::dim()
+            }
+            RecordPart::Level => record_level_style(text),
+            RecordPart::Logger => fg(theme::teal()),
+            RecordPart::Message => fg(theme::text()).add_modifier(Modifier::BOLD),
+            RecordPart::Text | RecordPart::Json => fg(theme::text()),
+            RecordPart::Quoted => fg(theme::green()),
+            RecordPart::Number => fg(theme::peach()),
+            RecordPart::Bool => fg(theme::mauve()),
+        };
+        styled.push((range, style));
+    }
+    Line::from(styled_spans(line, &styled, needle))
+}
+
+/// The level token in its own color: ERROR red, WARN peach, INFO green, DEBUG
+/// blue and TRACE dim.
+fn record_level_style(level: &str) -> Style {
+    let level = level.to_ascii_lowercase();
+    let color = match crate::logfilter::parse_level(&level) {
+        crate::logfilter::Severity::Error => theme::red(),
+        crate::logfilter::Severity::Warning => theme::peach(),
+        crate::logfilter::Severity::Debug if level.starts_with("trace") => theme::overlay1(),
+        crate::logfilter::Severity::Debug => theme::blue(),
+        crate::logfilter::Severity::Other if level.starts_with("info") => theme::green(),
+        crate::logfilter::Severity::Other => theme::text(),
+    };
+    Style::default().fg(color).add_modifier(Modifier::BOLD)
+}
+
+/// Spans for `text` from sorted, non-overlapping styled byte ranges; the gaps
+/// between them use the default text color. Case-insensitive matches of
+/// `needle` are highlighted on top, even where they cross a range boundary.
+fn styled_spans(
+    text: &str,
+    styled: &[(std::ops::Range<usize>, Style)],
+    needle: &str,
+) -> Vec<Span<'static>> {
+    let plain = Style::default().fg(theme::text());
+    let mut runs = Vec::with_capacity(styled.len() * 2 + 1);
+    let mut at = 0;
+    for (range, style) in styled {
+        if range.start < at || range.end > text.len() {
+            continue;
+        }
+        if range.start > at {
+            runs.push((at..range.start, plain));
+        }
+        runs.push((range.clone(), *style));
+        at = range.end;
+    }
+    if at < text.len() {
+        runs.push((at..text.len(), plain));
+    }
+    // Lowercasing is not always length-preserving; skip highlighting rather
+    // than slice mid-character, as `push_highlighted` does.
+    let hay = text.to_lowercase();
+    let pat = needle.to_lowercase();
+    let mut matches = Vec::new();
+    if !pat.is_empty() && hay.len() == text.len() {
+        let mut from = 0;
+        while let Some(pos) = hay[from..].find(&pat) {
+            matches.push(from + pos..from + pos + pat.len());
+            from += pos + pat.len();
+        }
+    }
+    let hl = Style::default()
+        .bg(theme::yellow())
+        .fg(theme::crust())
+        .add_modifier(Modifier::BOLD);
+    let mut spans = Vec::with_capacity(runs.len() + matches.len() * 2);
+    let mut matches = matches.into_iter().peekable();
+    for (range, style) in runs {
+        let mut at = range.start;
+        while at < range.end {
+            while matches.next_if(|m| m.end <= at).is_some() {}
+            let (end, style) = match matches.peek() {
+                Some(m) if m.start <= at => (m.end.min(range.end), hl),
+                Some(m) => (m.start.min(range.end), style),
+                None => (range.end, style),
+            };
+            spans.push(Span::styled(text[at..end].to_string(), style));
+            at = end;
+        }
+    }
+    spans
 }
 
 #[cfg(test)]
