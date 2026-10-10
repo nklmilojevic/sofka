@@ -20854,7 +20854,7 @@ fn naive_log_index(logs: &LogsView, wrap_width: usize) -> (Vec<u32>, usize) {
         .lines
         .iter()
         .enumerate()
-        .filter(|(_, l)| logs.matches(l))
+        .filter(|(i, l)| logs.matches(l, logs.line_meta.get(*i)))
         .map(|(i, _)| i as u32)
         .collect();
     let total = if wrap_width > 0 {
@@ -37159,6 +37159,97 @@ async fn log_warnings_shortcut_filters_formats_and_restores_buffer() {
     app.handle_key(ctrl(KeyCode::Char('z'))).unwrap();
     assert_eq!(app.logs.refresh_index(0).matched_lines(), lines.len());
     assert_eq!(app.filtered_log_text(), lines.join("\n"));
+}
+
+#[tokio::test]
+async fn log_filter_matches_visible_text_not_color_codes() {
+    let (mut app, _rx) = test_app();
+    app.mode = Mode::Logs;
+    let lines = [
+        "\x1b[1mfoo\x1b[0m bar",
+        "\x1b[32mplain visible\x1b[0m",
+        "no color here",
+    ];
+    shortcut_log_lines(&mut app, lines.iter().map(|s| (*s).into()).collect());
+    for (filter, expected) in [
+        ("foo bar", vec![lines[0]]),
+        ("32m", vec![]),
+        ("/^plain/", vec![lines[1]]),
+        ("!foo", vec![lines[1], lines[2]]),
+    ] {
+        app.handle_key(press(KeyCode::Char('/'))).unwrap();
+        for c in filter.chars() {
+            app.handle_key(press(KeyCode::Char(c))).unwrap();
+        }
+        app.handle_key(press(KeyCode::Enter)).unwrap();
+        assert_eq!(
+            app.filtered_log_text(),
+            expected.join("\n"),
+            "filter {filter:?}"
+        );
+        app.handle_key(press(KeyCode::Char('/'))).unwrap();
+        app.handle_key(press(KeyCode::Esc)).unwrap();
+        assert!(app.logs.filter.is_empty());
+    }
+}
+
+#[tokio::test]
+async fn log_filter_finds_record_rows_and_raw_json() {
+    let (mut app, _rx) = test_app();
+    app.mode = Mode::Logs;
+    let lines = [
+        r#"{"level":50,"time":1700000000000,"msg":"boom","http":{"method":"GET"}}"#,
+        r#"{"level":30,"time":1700000001000,"msg":"hello"}"#,
+        "plain text line",
+    ];
+    shortcut_log_lines(&mut app, lines.iter().map(|s| (*s).into()).collect());
+    let filtered = |app: &mut App, filter: &str| {
+        app.handle_key(press(KeyCode::Char('/'))).unwrap();
+        for c in filter.chars() {
+            app.handle_key(press(KeyCode::Char(c))).unwrap();
+        }
+        app.handle_key(press(KeyCode::Enter)).unwrap();
+        let text = app.filtered_log_text();
+        app.handle_key(press(KeyCode::Char('/'))).unwrap();
+        app.handle_key(press(KeyCode::Esc)).unwrap();
+        text
+    };
+    // Raw view shows the raw JSON only, so only the raw text is searched.
+    assert_eq!(filtered(&mut app, "ERROR"), "");
+    app.handle_key(press(KeyCode::Char('J'))).unwrap();
+    assert_eq!(app.logs.json, crate::app::JsonView::Record);
+    for (filter, expected) in [
+        // What the row shows.
+        ("ERROR", vec![lines[0]]),
+        ("http.method=GET", vec![lines[0]]),
+        ("INFO", vec![lines[1]]),
+        // What the raw line holds and the row does not.
+        (r#""level":50"#, vec![lines[0]]),
+        ("1700000000000", vec![lines[0]]),
+        // Both, and lines without a record row.
+        ("boom", vec![lines[0]]),
+        ("plain", vec![lines[2]]),
+        // A negated filter hides a line when either form matches.
+        ("!ERROR", vec![lines[1], lines[2]]),
+        (r#"!"level":50"#, vec![lines[1], lines[2]]),
+    ] {
+        assert_eq!(
+            filtered(&mut app, filter),
+            expected.join("\n"),
+            "filter {filter:?}"
+        );
+    }
+    // Indented JSON puts a space after each colon, which only the pretty view
+    // shows.
+    assert_eq!(filtered(&mut app, r#""level": 50"#), "");
+    app.handle_key(press(KeyCode::Char('J'))).unwrap();
+    assert_eq!(app.logs.json, crate::app::JsonView::Pretty);
+    assert_eq!(filtered(&mut app, r#""level": 50"#), lines[0]);
+    assert_eq!(filtered(&mut app, r#""method": "GET""#), lines[0]);
+    assert_eq!(
+        filtered(&mut app, r#"!"level": 50"#),
+        [lines[1], lines[2]].join("\n")
+    );
 }
 
 #[tokio::test]
