@@ -10,6 +10,23 @@ Add Sofka to your flake inputs:
 inputs.sofka.url = "github:nklmilojevic/sofka";
 ```
 
+CI builds every commit on `main` and every release for Linux and macOS and
+pushes the result to the `nkl-sofka` Cachix cache. Add it to your Nix settings
+to substitute Sofka instead of compiling it:
+
+```nix
+nix.settings = {
+  extra-substituters = [ "https://nkl-sofka.cachix.org" ];
+  extra-trusted-public-keys = [ "nkl-sofka.cachix.org-1:hLg9frFNJynrxe7SSBb/p6pbawlpZmG10bw+wLsTufw=" ];
+};
+```
+
+The cache only matches builds against the Sofka flake's own nixpkgs. Do not set
+`inputs.sofka.inputs.nixpkgs.follows`. With it, the package builds against your
+nixpkgs and compiles locally. Outside Home Manager, use
+`inputs.sofka.packages.${system}.sofka`, not the overlay. The overlay always
+builds against your nixpkgs.
+
 Add the module to your Home Manager configuration. Here, `inputs` is the input
 set from your flake outputs function. You can pass it to Home Manager through
 `extraSpecialArgs = { inherit inputs; };`.
