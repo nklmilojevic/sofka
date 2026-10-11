@@ -130,8 +130,11 @@ keep their RFC 3339 text. An invalid format or zone is reported in `:config` and
 the default is used. A reload re-renders buffered records.
 
 Only individual JSON objects and arrays are formatted. Other text stays unchanged.
-Source labels and timestamps stay with their record. Filters and severity selection
-use the original record and show all its formatted rows when it matches.
+Source labels and timestamps stay with their record. The `/` filter matches a
+record by its original text or by the formatted row shown for it, so both
+`"level":50` and `ERROR` find it; a leading `!` hides a record when either
+matches. Color codes are ignored when matching. Severity selection uses the
+original record. A matching record shows all its formatted rows.
 Application copy/save keeps its existing raw output. Terminal selection copies the
 displayed text. Configure the key with `json` in `[keys.logs]`.
 

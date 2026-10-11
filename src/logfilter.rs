@@ -27,13 +27,21 @@ pub fn is_warning_or_error(line: &str) -> bool {
 pub fn severity(line: &str) -> Severity {
     let line = crate::ui::strip_ansi_if_present(line);
     let l = line.to_ascii_lowercase();
+    let body = log_body(&line);
     // Structured logs: read the level field directly (authoritative; a later
     // "…error…" in the message can't override it).
-    if let Some(level) = json_field(&l, "level").or_else(|| json_field(&l, "severity")) {
+    let structured = json_level(body);
+    if let Some(Some(severity)) = structured {
+        return severity;
+    }
+    // A JSON object without a usable top-level level keeps the text scan
+    // (`"msg":"request error: …"`), but a nested level is not its level.
+    if structured.is_none()
+        && let Some(level) = json_field(&l, "level").or_else(|| json_field(&l, "severity"))
+    {
         return parse_level(level);
     }
-    // Skip source labels and timestamps before checking the klog level.
-    let body = log_body(&line);
+    // Source labels and timestamps are skipped before the klog level.
     if klog_level(body, 'e') || klog_level(body, 'f') {
         return Severity::Error;
     }
@@ -108,6 +116,121 @@ fn json_field<'a>(l: &'a str, key: &str) -> Option<&'a str> {
     let rest = rest.strip_prefix('"')?;
     let end = rest.find('"')?;
     Some(&rest[..end])
+}
+
+/// The top-level `level` (or `severity`) of a JSON log line: a string such as
+/// `"warn"`, or a whole number as pino writes it. Nested fields are ignored
+/// and a repeated key keeps its last value, as in record view. The line is
+/// scanned without building a value, so a long record costs one pass. `None`
+/// means the body is not a single JSON object; `Some(None)` means it is one
+/// without a usable level.
+fn json_level(body: &str) -> Option<Option<Severity>> {
+    use serde::Deserializer as _;
+    struct Levels;
+    impl<'de> serde::de::Visitor<'de> for Levels {
+        type Value = (Option<Level>, Option<Level>);
+
+        fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("a JSON object")
+        }
+
+        fn visit_map<A: serde::de::MapAccess<'de>>(
+            self,
+            mut map: A,
+        ) -> Result<Self::Value, A::Error> {
+            let (mut level, mut severity) = (None, None);
+            while let Some(key) = map.next_key::<std::borrow::Cow<str>>()? {
+                if key.eq_ignore_ascii_case("level") {
+                    level = Some(map.next_value()?);
+                } else if key.eq_ignore_ascii_case("severity") {
+                    severity = Some(map.next_value()?);
+                } else {
+                    map.next_value::<serde::de::IgnoredAny>()?;
+                }
+            }
+            Ok((level, severity))
+        }
+    }
+    let body = body.trim_start();
+    if !body.starts_with('{') {
+        return None;
+    }
+    let mut deserializer = serde_json::Deserializer::from_str(body);
+    let (level, severity) = (&mut deserializer).deserialize_map(Levels).ok()?;
+    deserializer.end().ok()?;
+    Some(level.or(severity).and_then(|level| level.0))
+}
+
+/// A `level` or `severity` value. Only a string or a whole number is a level;
+/// any other value is skipped without being built.
+struct Level(Option<Severity>);
+
+impl<'de> serde::Deserialize<'de> for Level {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct Visitor;
+        impl<'de> serde::de::Visitor<'de> for Visitor {
+            type Value = Level;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("a log level")
+            }
+
+            fn visit_str<E>(self, level: &str) -> Result<Level, E> {
+                Ok(Level(Some(parse_level(&level.to_ascii_lowercase()))))
+            }
+
+            fn visit_u64<E>(self, level: u64) -> Result<Level, E> {
+                Ok(Level(Some(numeric_level(level))))
+            }
+
+            fn visit_i64<E>(self, _: i64) -> Result<Level, E> {
+                Ok(Level(None))
+            }
+
+            fn visit_f64<E>(self, _: f64) -> Result<Level, E> {
+                Ok(Level(None))
+            }
+
+            fn visit_bool<E>(self, _: bool) -> Result<Level, E> {
+                Ok(Level(None))
+            }
+
+            fn visit_unit<E>(self) -> Result<Level, E> {
+                Ok(Level(None))
+            }
+
+            fn visit_seq<A: serde::de::SeqAccess<'de>>(
+                self,
+                mut seq: A,
+            ) -> Result<Level, A::Error> {
+                while seq.next_element::<serde::de::IgnoredAny>()?.is_some() {}
+                Ok(Level(None))
+            }
+
+            fn visit_map<A: serde::de::MapAccess<'de>>(
+                self,
+                mut map: A,
+            ) -> Result<Level, A::Error> {
+                while map
+                    .next_entry::<serde::de::IgnoredAny, serde::de::IgnoredAny>()?
+                    .is_some()
+                {}
+                Ok(Level(None))
+            }
+        }
+        deserializer.deserialize_any(Visitor)
+    }
+}
+
+/// pino and bunyan write levels as numbers: 10 trace, 20 debug, 30 info,
+/// 40 warn, 50 error, 60 fatal.
+fn numeric_level(level: u64) -> Severity {
+    match level {
+        10 | 20 => Severity::Debug,
+        40 => Severity::Warning,
+        50 | 60 => Severity::Error,
+        _ => Severity::Other,
+    }
 }
 
 fn log_body(mut line: &str) -> &str {
@@ -256,18 +379,35 @@ impl LogMatcher {
 
     /// Whether `line` passes the filter.
     pub fn matches(&self, line: &str) -> bool {
+        self.matches_shown(line, None)
+    }
+
+    /// Whether a line passes the filter, by its original text or by the text
+    /// the view shows in its place (a record row). A negated filter hides the
+    /// line if either form matches.
+    pub fn matches_shown(&self, line: &str, shown: Option<&str>) -> bool {
         // A broken regex hides everything (and `is_error` lets the UI explain),
         // regardless of negation — negating a typo shouldn't reveal the buffer.
         if matches!(self.kind, Kind::BadRegex) {
             return false;
         }
-        let base = match &self.kind {
+        let base = self.is_match(line) || shown.is_some_and(|shown| self.is_match(shown));
+        base ^ self.negate
+    }
+
+    fn is_match(&self, line: &str) -> bool {
+        if matches!(self.kind, Kind::All) {
+            return true;
+        }
+        // Match the text the view shows, not its color codes.
+        let line = crate::ui::strip_ansi_if_present(line);
+        let line = line.as_ref();
+        match &self.kind {
             Kind::All => true,
             Kind::Substr(s) => s.matches(line),
             Kind::Regex(re) => re.is_match(line),
             Kind::BadRegex => false,
-        };
-        base ^ self.negate
+        }
     }
 
     /// True when the filter is a `/…/` regex that didn't compile.
@@ -279,6 +419,67 @@ impl LogMatcher {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn numeric_levels_follow_the_top_level_field() {
+        let sev = |line: &str| severity(line);
+        assert_eq!(sev(r#"{"level":10,"msg":"x"}"#), Severity::Debug);
+        assert_eq!(sev(r#"{"level":20,"msg":"x"}"#), Severity::Debug);
+        assert_eq!(sev(r#"{"level":30,"msg":"x"}"#), Severity::Other);
+        assert_eq!(sev(r#"{"level":40,"msg":"x"}"#), Severity::Warning);
+        assert_eq!(sev(r#"{"level":50,"msg":"x"}"#), Severity::Error);
+        assert_eq!(sev(r#"{"level":60,"msg":"x"}"#), Severity::Error);
+        // A nested level is not the record's level.
+        assert_eq!(
+            sev(r#"{"context":{"level":50},"level":30,"msg":"ok"}"#),
+            Severity::Other
+        );
+        assert_eq!(
+            sev(r#"{"context":{"level":20},"level":"warn","msg":"x"}"#),
+            Severity::Warning
+        );
+        // A repeated key keeps its last value, as record view does.
+        assert_eq!(sev(r#"{"level":30,"level":50,"msg":"x"}"#), Severity::Error);
+        // Only whole numbers are levels.
+        assert_eq!(sev(r#"{"level":50.5,"msg":"ok"}"#), Severity::Other);
+        assert_eq!(sev(r#"{"level":50e0,"msg":"ok"}"#), Severity::Other);
+        // A nested level is not used when the top-level one is missing or
+        // unusable, but the text still is.
+        assert_eq!(
+            sev(r#"{"context":{"level":"error"},"level":null,"msg":"ok"}"#),
+            Severity::Other
+        );
+        assert_eq!(
+            sev(r#"{"context":{"level":"error"},"msg":"ok"}"#),
+            Severity::Other
+        );
+        assert_eq!(sev(r#"{"msg":"request error: timeout"}"#), Severity::Error);
+        // Any other value is not a level, and the text scan still runs.
+        assert_eq!(sev(r#"{"level":-50,"msg":"ok"}"#), Severity::Other);
+        assert_eq!(sev(r#"{"level":true,"msg":"ok"}"#), Severity::Other);
+        assert_eq!(
+            sev(r#"{"level":{"name":"error"},"msg":"ok"}"#),
+            Severity::Other
+        );
+        assert_eq!(
+            sev(r#"{"level":["error"],"msg":"request error: x"}"#),
+            Severity::Error
+        );
+        let deep = format!(r#"{{"level":[{}],"msg":"ok"}}"#, "0,".repeat(200_000) + "0");
+        assert_eq!(sev(&deep), Severity::Other);
+        // Text after the object makes the line plain text.
+        assert_eq!(sev(r#"{"level":30} WARN failed"#), Severity::Warning);
+        // Source labels in front of the JSON are skipped.
+        assert_eq!(sev(r#"[api] {"level":50,"msg":"x"}"#), Severity::Error);
+        // Leading whitespace does not hide the level.
+        assert_eq!(sev(r#"  {"level":50,"msg":"x"}"#), Severity::Error);
+        assert_eq!(sev("\t{\"level\":40,\"msg\":\"x\"}"), Severity::Warning);
+        // Neither does a long record.
+        let long = format!(r#"{{"level":50,"msg":"{}"}}"#, "x".repeat(200_000));
+        assert_eq!(sev(&long), Severity::Error);
+        let long = format!(r#"{{"msg":"{}","level":"warn"}}"#, "x".repeat(200_000));
+        assert_eq!(sev(&long), Severity::Warning);
+    }
 
     #[test]
     fn empty_matches_everything() {

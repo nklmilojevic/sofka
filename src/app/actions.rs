@@ -416,7 +416,9 @@ impl App {
             .view
             .lines
             .iter()
-            .filter(|l| self.logs.matches(l))
+            .enumerate()
+            .filter(|(i, l)| self.logs.matches(l, self.logs.line_meta.get(*i)))
+            .map(|(_, l)| l)
             .cloned()
             .collect::<Vec<_>>()
             .join("\n")

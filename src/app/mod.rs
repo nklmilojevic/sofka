@@ -1446,7 +1446,7 @@ impl LogsView {
                 .iter()
                 .take(count)
                 .enumerate()
-                .filter(|(_, line)| self.matches(line))
+                .filter(|(i, line)| self.matches(line, self.line_meta.get(*i)))
                 .map(|(i, _)| logs::display_height(self.display_line(i), self.last_wrap_width))
                 .sum();
             self.view.scroll = self.view.scroll.saturating_sub(rows + removed_markers);
@@ -1473,8 +1473,9 @@ impl LogsView {
     }
 
     /// Whether the line passes both active filters.
-    pub fn matches(&self, line: &str) -> bool {
-        self.matcher.matches(line)
+    fn matches(&self, line: &str, meta: Option<&logs::LogLineMeta>) -> bool {
+        self.matcher
+            .matches_shown(line, meta.and_then(|meta| meta.display(self.json)))
             && (!self.warnings_only || crate::logfilter::is_warning_or_error(line))
     }
 
@@ -1529,7 +1530,8 @@ impl LogsView {
             let Some(line) = view.lines.get(i) else {
                 break;
             };
-            if !matcher.matches(line)
+            let shown = line_meta.get(i).and_then(|m| m.display(*json));
+            if !matcher.matches_shown(line, shown)
                 || (*warnings_only && !crate::logfilter::is_warning_or_error(line))
             {
                 continue;
