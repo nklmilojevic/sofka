@@ -37169,12 +37169,15 @@ async fn log_warnings_shortcut_ignores_lines_that_only_look_like_klog() {
         "E2E suite finished, all passed",
         "F1 score=0.93",
         "W3C trace context ok",
+        "E9999 99:99:99 routine completed",
+        "E1332 12:00:00 routine completed",
+        "W0627 24:00:00 routine completed",
         "E0627 12:00:00.123456 1 controller.go:1] failed",
         "W0627 12:00:00.123456 1 warnings.go:1] deprecated",
     ];
     shortcut_log_lines(&mut app, lines.iter().map(|s| (*s).into()).collect());
     app.handle_key(ctrl(KeyCode::Char('z'))).unwrap();
-    assert_eq!(app.filtered_log_text(), lines[3..].join("\n"));
+    assert_eq!(app.filtered_log_text(), lines[6..].join("\n"));
 }
 
 #[tokio::test]
