@@ -128,7 +128,7 @@ fn json_level(body: &str) -> Option<Option<Severity>> {
     use serde::Deserializer as _;
     struct Levels;
     impl<'de> serde::de::Visitor<'de> for Levels {
-        type Value = (Option<serde_json::Value>, Option<serde_json::Value>);
+        type Value = (Option<Level>, Option<Level>);
 
         fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
             f.write_str("a JSON object")
@@ -158,11 +158,68 @@ fn json_level(body: &str) -> Option<Option<Severity>> {
     let mut deserializer = serde_json::Deserializer::from_str(body);
     let (level, severity) = (&mut deserializer).deserialize_map(Levels).ok()?;
     deserializer.end().ok()?;
-    Some(match level.or(severity) {
-        Some(serde_json::Value::String(level)) => Some(parse_level(&level.to_ascii_lowercase())),
-        Some(serde_json::Value::Number(level)) => level.as_u64().map(numeric_level),
-        _ => None,
-    })
+    Some(level.or(severity).and_then(|level| level.0))
+}
+
+/// A `level` or `severity` value. Only a string or a whole number is a level;
+/// any other value is skipped without being built.
+struct Level(Option<Severity>);
+
+impl<'de> serde::Deserialize<'de> for Level {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct Visitor;
+        impl<'de> serde::de::Visitor<'de> for Visitor {
+            type Value = Level;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("a log level")
+            }
+
+            fn visit_str<E>(self, level: &str) -> Result<Level, E> {
+                Ok(Level(Some(parse_level(&level.to_ascii_lowercase()))))
+            }
+
+            fn visit_u64<E>(self, level: u64) -> Result<Level, E> {
+                Ok(Level(Some(numeric_level(level))))
+            }
+
+            fn visit_i64<E>(self, _: i64) -> Result<Level, E> {
+                Ok(Level(None))
+            }
+
+            fn visit_f64<E>(self, _: f64) -> Result<Level, E> {
+                Ok(Level(None))
+            }
+
+            fn visit_bool<E>(self, _: bool) -> Result<Level, E> {
+                Ok(Level(None))
+            }
+
+            fn visit_unit<E>(self) -> Result<Level, E> {
+                Ok(Level(None))
+            }
+
+            fn visit_seq<A: serde::de::SeqAccess<'de>>(
+                self,
+                mut seq: A,
+            ) -> Result<Level, A::Error> {
+                while seq.next_element::<serde::de::IgnoredAny>()?.is_some() {}
+                Ok(Level(None))
+            }
+
+            fn visit_map<A: serde::de::MapAccess<'de>>(
+                self,
+                mut map: A,
+            ) -> Result<Level, A::Error> {
+                while map
+                    .next_entry::<serde::de::IgnoredAny, serde::de::IgnoredAny>()?
+                    .is_some()
+                {}
+                Ok(Level(None))
+            }
+        }
+        deserializer.deserialize_any(Visitor)
+    }
 }
 
 /// pino and bunyan write levels as numbers: 10 trace, 20 debug, 30 info,
@@ -391,6 +448,19 @@ mod tests {
             Severity::Other
         );
         assert_eq!(sev(r#"{"msg":"request error: timeout"}"#), Severity::Error);
+        // Any other value is not a level, and the text scan still runs.
+        assert_eq!(sev(r#"{"level":-50,"msg":"ok"}"#), Severity::Other);
+        assert_eq!(sev(r#"{"level":true,"msg":"ok"}"#), Severity::Other);
+        assert_eq!(
+            sev(r#"{"level":{"name":"error"},"msg":"ok"}"#),
+            Severity::Other
+        );
+        assert_eq!(
+            sev(r#"{"level":["error"],"msg":"request error: x"}"#),
+            Severity::Error
+        );
+        let deep = format!(r#"{{"level":[{}],"msg":"ok"}}"#, "0,".repeat(200_000) + "0");
+        assert_eq!(sev(&deep), Severity::Other);
         // Text after the object makes the line plain text.
         assert_eq!(sev(r#"{"level":30} WARN failed"#), Severity::Warning);
         // Source labels in front of the JSON are skipped.
