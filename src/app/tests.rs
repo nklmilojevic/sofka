@@ -37174,10 +37174,13 @@ async fn log_warnings_shortcut_reads_numeric_json_levels() {
         r#"{"context":{"level":50},"level":30,"msg":"ok"}"#,
         r#"{"context":{"level":20},"level":"warn","msg":"slow"}"#,
         r#"{"level":50.5,"msg":"ok"}"#,
+        r#"{"context":{"level":"error"},"level":null,"msg":"ok"}"#,
+        r#"{"context":{"level":"error"},"msg":"ok"}"#,
+        r#"{"level":30} WARN failed"#,
     ];
     shortcut_log_lines(&mut app, lines.iter().map(|s| (*s).into()).collect());
     app.handle_key(ctrl(KeyCode::Char('z'))).unwrap();
-    let expected = [lines[1], lines[2], lines[3], lines[6]];
+    let expected = [lines[1], lines[2], lines[3], lines[6], lines[10]];
     assert_eq!(app.filtered_log_text(), expected.join("\n"));
 }
 

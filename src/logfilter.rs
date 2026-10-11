@@ -30,10 +30,15 @@ pub fn severity(line: &str) -> Severity {
     let body = log_body(&line);
     // Structured logs: read the level field directly (authoritative; a later
     // "…error…" in the message can't override it).
-    if let Some(severity) = json_level(body) {
+    let structured = json_level(body);
+    if let Some(Some(severity)) = structured {
         return severity;
     }
-    if let Some(level) = json_field(&l, "level").or_else(|| json_field(&l, "severity")) {
+    // A JSON object without a usable top-level level keeps the text scan
+    // (`"msg":"request error: …"`), but a nested level is not its level.
+    if structured.is_none()
+        && let Some(level) = json_field(&l, "level").or_else(|| json_field(&l, "severity"))
+    {
         return parse_level(level);
     }
     // Source labels and timestamps are skipped before the klog level.
@@ -116,8 +121,10 @@ fn json_field<'a>(l: &'a str, key: &str) -> Option<&'a str> {
 /// The top-level `level` (or `severity`) of a JSON log line: a string such as
 /// `"warn"`, or a whole number as pino writes it. Nested fields are ignored
 /// and a repeated key keeps its last value, as in record view. The line is
-/// scanned without building a value, so a long record costs one pass.
-fn json_level(body: &str) -> Option<Severity> {
+/// scanned without building a value, so a long record costs one pass. `None`
+/// means the body is not a single JSON object; `Some(None)` means it is one
+/// without a usable level.
+fn json_level(body: &str) -> Option<Option<Severity>> {
     use serde::Deserializer as _;
     struct Levels;
     impl<'de> serde::de::Visitor<'de> for Levels {
@@ -148,14 +155,14 @@ fn json_level(body: &str) -> Option<Severity> {
     if !body.starts_with('{') {
         return None;
     }
-    let (level, severity) = serde_json::Deserializer::from_str(body)
-        .deserialize_map(Levels)
-        .ok()?;
-    match level.or(severity)? {
-        serde_json::Value::String(level) => Some(parse_level(&level.to_ascii_lowercase())),
-        serde_json::Value::Number(level) => level.as_u64().map(numeric_level),
+    let mut deserializer = serde_json::Deserializer::from_str(body);
+    let (level, severity) = (&mut deserializer).deserialize_map(Levels).ok()?;
+    deserializer.end().ok()?;
+    Some(match level.or(severity) {
+        Some(serde_json::Value::String(level)) => Some(parse_level(&level.to_ascii_lowercase())),
+        Some(serde_json::Value::Number(level)) => level.as_u64().map(numeric_level),
         _ => None,
-    }
+    })
 }
 
 /// pino and bunyan write levels as numbers: 10 trace, 20 debug, 30 info,
@@ -373,6 +380,19 @@ mod tests {
         // Only whole numbers are levels.
         assert_eq!(sev(r#"{"level":50.5,"msg":"ok"}"#), Severity::Other);
         assert_eq!(sev(r#"{"level":50e0,"msg":"ok"}"#), Severity::Other);
+        // A nested level is not used when the top-level one is missing or
+        // unusable, but the text still is.
+        assert_eq!(
+            sev(r#"{"context":{"level":"error"},"level":null,"msg":"ok"}"#),
+            Severity::Other
+        );
+        assert_eq!(
+            sev(r#"{"context":{"level":"error"},"msg":"ok"}"#),
+            Severity::Other
+        );
+        assert_eq!(sev(r#"{"msg":"request error: timeout"}"#), Severity::Error);
+        // Text after the object makes the line plain text.
+        assert_eq!(sev(r#"{"level":30} WARN failed"#), Severity::Warning);
         // Source labels in front of the JSON are skipped.
         assert_eq!(sev(r#"[api] {"level":50,"msg":"x"}"#), Severity::Error);
         // Leading whitespace does not hide the level.
