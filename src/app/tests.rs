@@ -20329,6 +20329,22 @@ async fn provider_lookback_prompt_changes_period_and_requeries() {
     assert!(app.log_gen > gen_before, "lookback change must re-stream");
     assert_eq!(app.flash, "lookback: 4h");
 
+    // Compound, decimal and week durations are accepted.
+    for typed in ["1h30m", "1.5h", "1w"] {
+        app.handle_key(press(KeyCode::Char('T'))).unwrap();
+        for c in typed.chars() {
+            app.handle_key(press(KeyCode::Char(c))).unwrap();
+        }
+        app.handle_key(press(KeyCode::Enter)).unwrap();
+        assert!(!app.flash_err, "{typed}: {}", app.flash);
+        assert_eq!(app.log_provider.as_ref().unwrap().lookback_label, typed);
+    }
+    app.handle_key(press(KeyCode::Char('T'))).unwrap();
+    for c in "4h".chars() {
+        app.handle_key(press(KeyCode::Char(c))).unwrap();
+    }
+    app.handle_key(press(KeyCode::Enter)).unwrap();
+
     // Garbage is rejected with a warning; nothing changes.
     app.handle_key(press(KeyCode::Char('T'))).unwrap();
     for c in "soon".chars() {
@@ -20369,7 +20385,7 @@ async fn kubelet_lookback_prompt_shows_validated_config() {
         assert_eq!(app.mode, Mode::Prompt);
         assert_eq!(
             app.prompt_label,
-            format!("lookback: s/m/h/d or tail (current: {current})")
+            format!("lookback: s/m/h/d/w or tail (current: {current})")
         );
         assert_eq!(app.log_tail_and_since().1, since);
     }

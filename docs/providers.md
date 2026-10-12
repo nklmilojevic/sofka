@@ -63,7 +63,7 @@ Kubernetes API-server service proxy, and reuses your kubeconfig credentials.
 [providers.logs]
 type = "victorialogs"
 url = "https://vlogs.example.com"  # omit to autodiscover in-cluster
-lookback = "1h"                    # initial query window (s/m/h/d)
+lookback = "1h"                    # initial query window (s/m/h/d/w, compound like 1h30m)
 limit = 300                        # lines fetched by the initial query
 
 [providers.logs.headers]           # optional, sent with every request

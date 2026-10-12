@@ -1531,7 +1531,7 @@ impl App {
             match crate::providers::parse_lookback(input) {
                 Ok(secs) => secs,
                 Err(error) => {
-                    self.flash_warn(&format!("lookback: {error}; use s/m/h/d or tail"));
+                    self.flash_warn(&format!("lookback: {error}; use s/m/h/d/w or tail"));
                     return;
                 }
             }

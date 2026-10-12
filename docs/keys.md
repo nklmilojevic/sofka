@@ -174,7 +174,7 @@ point instead. See [PVC explore](features.md#pvc-explore).
 `J` JSON view (raw/record/pretty) · `Ctrl+Z` warning/error filter · `m` visual marker · `t` timestamps · `x` stop/resume stream · `z` clear buffer · `c` copy buffer ·
 `a` default/all containers (pods with a default-container annotation) ·
 `ctrl-s` save to file · `F` fullscreen (no chrome, clean text selection) ·
-`0`–`5` time anchors (tail · 1m · 5m · 15m · 30m · 1h) · `T` custom lookback (`s`/`m`/`h`/`d`, or `tail` for kubelet logs)
+`0`–`5` time anchors (tail · 1m · 5m · 15m · 30m · 1h) · `T` custom lookback (`s`/`m`/`h`/`d`/`w`, compound like `1h30m`, decimal like `1.5h`, or `tail` for kubelet logs)
 (VictoriaLogs views) · `esc` back. The newest line anchors to the bottom of the
 viewport.
 

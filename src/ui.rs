@@ -3001,7 +3001,7 @@ fn build_help(app: &App, width: usize) -> (Vec<Line<'static>>, String) {
         } else if scope == "port_forward_picker" && action == Action::Edit {
             "edit local port of the selected mapping"
         } else if scope == "logs" && action == Action::Lookback {
-            "set lookback (s/m/h/d); kubelet logs also accept tail"
+            "set lookback (s/m/h/d/w, e.g. 1h30m); kubelet logs also accept tail"
         } else if action == Action::LogMarker {
             "add visual marker at the log tail (excluded from copy/save)"
         } else if action == Action::Fullscreen {

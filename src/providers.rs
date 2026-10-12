@@ -494,30 +494,62 @@ fn pick_service(services: &[Service]) -> Option<(String, String, i32)> {
     ))
 }
 
-/// `"90s"` / `"15m"` / `"1h"` / `"2d"` (bare numbers are seconds).
+/// `"90s"` / `"15m"` / `"1h"` / `"2d"` / `"1w"`, compound (`"1h30m"`) and
+/// decimal (`"1.5h"`, rounded to whole seconds). Bare numbers are seconds.
 pub(crate) fn parse_lookback(s: &str) -> Result<i64, String> {
     let s = s.trim();
-    let (digits, unit) = match s.find(|c: char| !c.is_ascii_digit()) {
-        Some(i) => s.split_at(i),
-        None => (s, "s"),
-    };
-    let n: i64 = digits
-        .parse()
-        .map_err(|_| format!("{s:?} is not a duration like \"30m\" or \"1h\""))?;
-    let per_unit = match unit {
-        "s" => 1,
-        "m" => 60,
-        "h" => 3600,
-        "d" => 86_400,
-        _ => return Err(format!("{s:?} has unknown unit {unit:?} (use s/m/h/d)")),
-    };
-    let secs = n
-        .checked_mul(per_unit)
-        .ok_or_else(|| format!("{s:?} is too large"))?;
-    if secs <= 0 {
+    let bad = || format!("{s:?} is not a duration like \"30m\", \"1h30m\" or \"1.5h\"");
+    let mut rest = s;
+    let mut total = 0f64;
+    while !rest.is_empty() {
+        let int_end = rest
+            .find(|c: char| !c.is_ascii_digit())
+            .unwrap_or(rest.len());
+        let num_end = match rest[int_end..].strip_prefix('.') {
+            Some(frac) => {
+                let n = frac
+                    .find(|c: char| !c.is_ascii_digit())
+                    .unwrap_or(frac.len());
+                if int_end == 0 || n == 0 {
+                    return Err(bad());
+                }
+                int_end + 1 + n
+            }
+            None if int_end == 0 => return Err(bad()),
+            None => int_end,
+        };
+        let n: f64 = rest[..num_end].parse().map_err(|_| bad())?;
+        let after = &rest[num_end..];
+        let unit_end = after
+            .find(|c: char| c.is_ascii_digit() || c == '.')
+            .unwrap_or(after.len());
+        let unit = &after[..unit_end];
+        let per_unit = match unit {
+            "s" => 1.0,
+            "m" => 60.0,
+            "h" => 3600.0,
+            "d" => 86_400.0,
+            "w" => 604_800.0,
+            "" if rest.len() == num_end && total == 0.0 => 1.0, // bare seconds
+            "" => {
+                return Err(format!(
+                    "{s:?} is missing a unit after {:?}",
+                    &rest[..num_end]
+                ));
+            }
+            _ => return Err(format!("{s:?} has unknown unit {unit:?} (use s/m/h/d/w)")),
+        };
+        total += n * per_unit;
+        rest = &after[unit_end..];
+    }
+    let secs = total.round();
+    if !secs.is_finite() || secs >= i64::MAX as f64 {
+        return Err(format!("{s:?} is too large"));
+    }
+    if secs <= 0.0 {
         return Err(format!("{s:?} must be a positive duration"));
     }
-    Ok(secs)
+    Ok(secs as i64)
 }
 
 /// LogsQL field names we emit unquoted into filters.
@@ -1723,7 +1755,28 @@ mod tests {
         assert_eq!(parse_lookback("1d"), Ok(86_400));
         assert_eq!(parse_lookback("45"), Ok(45)); // bare seconds
         assert!(parse_lookback("0m").is_err());
-        assert!(parse_lookback("1w").is_err());
+        assert_eq!(parse_lookback("1w"), Ok(604_800));
+        assert_eq!(parse_lookback("1h30m"), Ok(5400));
+        assert_eq!(parse_lookback("1d2h"), Ok(93_600));
+        assert_eq!(
+            parse_lookback("1w2d3h4m5s"),
+            Ok(604_800 + 172_800 + 10_800 + 245)
+        );
+        assert_eq!(parse_lookback("1.5h"), Ok(5400));
+        assert_eq!(parse_lookback("0.5m"), Ok(30));
+        assert_eq!(parse_lookback("1.5"), Ok(2)); // bare decimal seconds round
+        assert_eq!(parse_lookback(" 2h "), Ok(7200));
+        for bad in [
+            "", "1h30", "30m1", ".5h", "1.h", "1..5h", "-1h", "1x", "1h-30m", "0.2s", "0h0m",
+        ] {
+            assert!(parse_lookback(bad).is_err(), "{bad:?} should be rejected");
+        }
+        assert!(
+            parse_lookback("99999999999999999w")
+                .unwrap_err()
+                .contains("too large")
+        );
+        assert!(parse_lookback("99999999999999999999999999999w").is_err());
         assert!(parse_lookback("h").is_err());
     }
 

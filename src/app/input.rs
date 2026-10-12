@@ -1450,7 +1450,7 @@ impl App {
             (Some(Action::Lookback), _) => {
                 self.prompt_label = if self.provider_logs_active() {
                     format!(
-                        "lookback period: e.g. 30m, 4h, 2d (current: {})",
+                        "lookback period: e.g. 30m, 1h30m, 2d (current: {})",
                         self.provider_lookback_label()
                     )
                 } else {
@@ -1461,7 +1461,7 @@ impl App {
                             .filter(|_| self.log_tail_and_since().1.is_some())
                             .unwrap_or_else(|| "tail".into())
                     });
-                    format!("lookback: s/m/h/d or tail (current: {current})")
+                    format!("lookback: s/m/h/d/w or tail (current: {current})")
                 };
                 self.prompt_input.clear();
                 self.prompt_kind = Some(PromptKind::LogLookback);
