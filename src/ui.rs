@@ -649,27 +649,27 @@ fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
         // the right-aligned block stays coherent.
         let logo = vec![
             Line::from(Span::styled(
-                "  /\\        /\\ ",
+                "  /\\       /\\  ",
                 Style::default().fg(theme::overlay1()),
             )),
             Line::from(Span::styled(
-                " /  \\______/  \\",
+                " /  \\_____/  \\ ",
                 Style::default().fg(theme::overlay1()),
             )),
             Line::from(Span::styled(
-                "( -        -  )",
+                "(  -       -  )",
                 Style::default().fg(theme::green()),
             )),
             Line::from(Span::styled(
-                " \\     ᴥ      /",
+                " \\     ᴥ     / ",
                 Style::default().fg(theme::maroon()),
             )),
             Line::from(Span::styled(
-                "  \\    \\__/   /",
+                "  \\   \\_/   /  ",
                 Style::default().fg(theme::overlay1()),
             )),
             Line::from(Span::styled(
-                "   '--------'  ",
+                "   '-------'   ",
                 Style::default().fg(theme::overlay1()),
             )),
             Line::from(Span::styled(format!("   sofka v{VERSION}"), theme::dim())),
