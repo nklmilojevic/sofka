@@ -495,42 +495,46 @@ fn pick_service(services: &[Service]) -> Option<(String, String, i32)> {
 }
 
 /// `"90s"` / `"15m"` / `"1h"` / `"2d"` / `"1w"`, compound (`"1h30m"`) and
-/// decimal (`"1.5h"`, rounded to whole seconds). Bare numbers are seconds.
+/// decimal (`"1.5h"`, rounded half-up to whole seconds). Bare numbers are
+/// seconds. Integer math throughout, so no float rounding.
 pub(crate) fn parse_lookback(s: &str) -> Result<i64, String> {
+    // shortcut: fraction digits past 18 are truncated, matters only for exact ties at 19+ digits.
+    const SCALE: i128 = 1_000_000_000_000_000_000;
     let s = s.trim();
     let bad = || format!("{s:?} is not a duration like \"30m\", \"1h30m\" or \"1.5h\"");
+    let too_large = || format!("{s:?} is too large");
+    let digits_end = |t: &str| t.find(|c: char| !c.is_ascii_digit()).unwrap_or(t.len());
     let mut rest = s;
-    let mut total = 0f64;
+    let (mut whole, mut frac) = (0i128, 0i128); // frac is in 1/SCALE seconds
     while !rest.is_empty() {
-        let int_end = rest
-            .find(|c: char| !c.is_ascii_digit())
-            .unwrap_or(rest.len());
-        let num_end = match rest[int_end..].strip_prefix('.') {
-            Some(frac) => {
-                let n = frac
-                    .find(|c: char| !c.is_ascii_digit())
-                    .unwrap_or(frac.len());
-                if int_end == 0 || n == 0 {
-                    return Err(bad());
-                }
-                int_end + 1 + n
+        let int_end = digits_end(rest);
+        if int_end == 0 {
+            return Err(bad());
+        }
+        let mut num_end = int_end;
+        let mut frac_digits = "";
+        if let Some(f) = rest[int_end..].strip_prefix('.') {
+            let n = digits_end(f);
+            if n == 0 {
+                return Err(bad());
             }
-            None if int_end == 0 => return Err(bad()),
-            None => int_end,
-        };
-        let n: f64 = rest[..num_end].parse().map_err(|_| bad())?;
+            frac_digits = &f[..n];
+            num_end += 1 + n;
+        }
+        let int: i128 = rest[..int_end].parse().map_err(|_| too_large())?;
         let after = &rest[num_end..];
         let unit_end = after
             .find(|c: char| c.is_ascii_digit() || c == '.')
             .unwrap_or(after.len());
         let unit = &after[..unit_end];
-        let per_unit = match unit {
-            "s" => 1.0,
-            "m" => 60.0,
-            "h" => 3600.0,
-            "d" => 86_400.0,
-            "w" => 604_800.0,
-            "" if rest.len() == num_end && total == 0.0 => 1.0, // bare seconds
+        let per_unit: i128 = match unit {
+            "s" => 1,
+            "m" => 60,
+            "h" => 3600,
+            "d" => 86_400,
+            "w" => 604_800,
+            // bare seconds only when the number is the whole input
+            "" if rest.len() == s.len() && num_end == s.len() => 1,
             "" => {
                 return Err(format!(
                     "{s:?} is missing a unit after {:?}",
@@ -539,17 +543,27 @@ pub(crate) fn parse_lookback(s: &str) -> Result<i64, String> {
             }
             _ => return Err(format!("{s:?} has unknown unit {unit:?} (use s/m/h/d/w)")),
         };
-        total += n * per_unit;
+        let scaled: i128 = format!("{frac_digits:0<18.18}")
+            .parse()
+            .map_err(|_| bad())?;
+        whole = int
+            .checked_mul(per_unit)
+            .and_then(|v| whole.checked_add(v))
+            .ok_or_else(too_large)?;
+        frac = scaled
+            .checked_mul(per_unit)
+            .and_then(|v| frac.checked_add(v))
+            .ok_or_else(too_large)?;
         rest = &after[unit_end..];
     }
-    let secs = total.round();
-    if !secs.is_finite() || secs >= i64::MAX as f64 {
-        return Err(format!("{s:?} is too large"));
-    }
-    if secs <= 0.0 {
+    let secs = whole
+        .checked_add((frac + SCALE / 2) / SCALE)
+        .and_then(|v| i64::try_from(v).ok())
+        .ok_or_else(too_large)?;
+    if secs <= 0 {
         return Err(format!("{s:?} must be a positive duration"));
     }
-    Ok(secs as i64)
+    Ok(secs)
 }
 
 /// LogsQL field names we emit unquoted into filters.
@@ -1777,6 +1791,23 @@ mod tests {
                 .contains("too large")
         );
         assert!(parse_lookback("99999999999999999999999999999w").is_err());
+        assert_eq!(
+            parse_lookback("0h30").unwrap_err(),
+            "\"0h30\" is missing a unit after \"30\""
+        );
+        assert_eq!(parse_lookback("30"), Ok(30));
+        assert_eq!(
+            parse_lookback("9007199254740993s"),
+            Ok(9_007_199_254_740_993)
+        );
+        assert_eq!(parse_lookback("9223372036854775807s"), Ok(i64::MAX));
+        assert!(
+            parse_lookback("9223372036854775808s")
+                .unwrap_err()
+                .contains("too large")
+        );
+        assert_eq!(parse_lookback("1.025m"), Ok(62)); // exactly 61.5s, rounds up
+        assert_eq!(parse_lookback("0.5s0.5s"), Ok(1)); // rounding is on the total
         assert!(parse_lookback("h").is_err());
     }
 
