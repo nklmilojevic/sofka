@@ -13112,6 +13112,31 @@ async fn command_with_namespace_switches_both() {
 }
 
 #[tokio::test]
+async fn workloads_command_completes_namespace() {
+    let (mut app, _rx) = test_app();
+    app.ns_list = vec!["<all>".into(), "social".into(), "kube-system".into()];
+    app.handle_key(press(KeyCode::Char(':'))).unwrap();
+    for c in "wk ".chars() {
+        app.handle_key(press(KeyCode::Char(c))).unwrap();
+    }
+    assert!(
+        app.cmd_suggestions
+            .iter()
+            .all(|s| s.kind == SuggestKind::Namespace)
+    );
+    assert!(app.cmd_suggestions.iter().any(|s| s.label == "social"));
+    for c in "soc".chars() {
+        app.handle_key(press(KeyCode::Char(c))).unwrap();
+    }
+    let first = app.cmd_suggestions.first().expect("namespace suggestion");
+    assert_eq!(first.kind, SuggestKind::Namespace);
+    assert_eq!(first.label, "social");
+    app.handle_key(press(KeyCode::Enter)).unwrap();
+    assert_eq!(app.kind_plural, "workloads");
+    assert_eq!(app.namespace, "social");
+}
+
+#[tokio::test]
 async fn command_with_unlisted_namespace_is_freeform() {
     let (mut app, _rx) = test_app();
     // No cache match → no completion, but the typed namespace still applies

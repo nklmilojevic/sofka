@@ -1034,6 +1034,16 @@ impl App {
                 }
                 return;
             }
+            // `:workloads [ns]` takes its namespace as the bare second word.
+            if workloads::NAMES.contains(&head.to_ascii_lowercase().as_str()) {
+                if namespace_word(&self.command) == Some(1) {
+                    self.suggest_namespaces(&arg);
+                } else {
+                    self.cmd_suggestions.clear();
+                    self.cmd_sel = 0;
+                }
+                return;
+            }
         }
 
         let q = self.command.split_whitespace().next().unwrap_or("");
