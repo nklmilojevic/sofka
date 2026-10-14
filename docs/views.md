@@ -50,9 +50,9 @@ never by array index, whose order nothing guarantees - renders its `status`
 
 Optional `width` (for fixed columns) and `align` (`left`/`center`/`right`) tune
 the layout. By default columns overlay the curated ones: a matching header
-replaces it in place, new columns go before AGE. Invalid entries and
-unknown keys are skipped with a warning in the app - they never take down the
-TUI.
+replaces it in place, new columns go before AGE. Invalid entries are skipped
+with a warning in the app; unknown keys are ignored with a warning while the
+rest of the entry still applies. Neither takes down the TUI.
 
 ### Fallback paths
 
