@@ -42001,3 +42001,95 @@ async fn a_bookmark_reports_a_view_that_fails_to_open() {
         app.flash
     );
 }
+
+/// Chars of the drawn screen styled with the filter highlight, grouped into
+/// contiguous runs per line.
+fn highlighted_runs(buf: &ratatui::buffer::Buffer) -> Vec<String> {
+    let hl = crate::theme::yellow();
+    let mut runs = Vec::new();
+    for y in 0..buf.area.height {
+        let mut run = String::new();
+        for x in 0..buf.area.width {
+            let cell = &buf[(x, y)];
+            if cell.fg == hl && cell.modifier.contains(ratatui::style::Modifier::BOLD) {
+                run.push_str(cell.symbol());
+            } else if !run.is_empty() {
+                runs.push(std::mem::take(&mut run));
+            }
+        }
+        if !run.is_empty() {
+            runs.push(run);
+        }
+    }
+    runs
+}
+
+#[tokio::test]
+async fn filter_highlights_the_match_in_whichever_column_matched() {
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    let (mut app, _rx) = test_app();
+    app.switch_kind("kustomizations");
+    app.namespace.clear();
+    for (name, ns, revision) in [
+        ("infra", "team-a", "main@sha1:4f2c9e1"),
+        ("apps", "team-b", "main@sha1:4f2c0aa"),
+    ] {
+        apply(
+            &mut app,
+            json!({
+                "apiVersion": "kustomize.toolkit.fluxcd.io/v1", "kind": "Kustomization",
+                "metadata": {"name": name, "namespace": ns, "labels": {"tier": "platform"}},
+                "spec": {"suspend": false},
+                "status": {
+                    "lastAppliedRevision": revision,
+                    "conditions": [{"type": "Ready", "status": "True", "message": "Applied"}]
+                }
+            }),
+        );
+    }
+    let mut term = Terminal::new(TestBackend::new(160, 20)).unwrap();
+    // Both rows match every filter below; the selection bar repaints the
+    // cursor row, so the highlight is read from the other one.
+    let mut draw = |app: &mut App| {
+        term.draw(|f| crate::ui::draw(f, app)).unwrap();
+        term.backend().buffer().clone()
+    };
+
+    retype_filter(&mut app, "4f2c");
+    let buf = draw(&mut app);
+    assert_eq!(highlighted_runs(&buf), ["4f2c"], "REVISION");
+    // Layered over the column style: the rest of the cell keeps its tint.
+    let (x, y) = (0..buf.area.height)
+        .flat_map(|y| (0..buf.area.width).map(move |x| (x, y)))
+        .find(|&(x, y)| buf[(x, y)].fg == crate::theme::yellow())
+        .unwrap();
+    assert_eq!(buf[(x - 10, y)].symbol(), "m");
+    let tint = buf[(x - 10, y)].fg;
+    assert_ne!(tint, ratatui::style::Color::Reset);
+    assert_ne!(tint, crate::theme::yellow());
+    assert_eq!(buf[(x + 4, y)].fg, tint, "after the match");
+
+    retype_filter(&mut app, "team");
+    assert_eq!(highlighted_runs(&draw(&mut app)), ["team"], "NAMESPACE");
+
+    retype_filter(&mut app, "/sha1:[0-9a-f]{4}/");
+    assert_eq!(highlighted_runs(&draw(&mut app)), ["sha1:4f2c"], "regex");
+
+    for filter in ["!zzz", "label:platform"] {
+        retype_filter(&mut app, filter);
+        let buf = draw(&mut app);
+        assert!(find_text(&buf, "main@sha1:4f2c").is_some(), "{filter}");
+        assert_eq!(highlighted_runs(&buf), Vec::<String>::new(), "{filter}");
+    }
+}
+
+/// Top-left cell of the first line containing `text`.
+fn find_text(buf: &ratatui::buffer::Buffer, text: &str) -> Option<(u16, u16)> {
+    (0..buf.area.height).find_map(|y| {
+        let line: String = (0..buf.area.width).map(|x| buf[(x, y)].symbol()).collect();
+        let col = line.find(text)?;
+        Some((line[..col].chars().count() as u16, y))
+    })
+}

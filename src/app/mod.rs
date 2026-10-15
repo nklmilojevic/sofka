@@ -1785,7 +1785,7 @@ struct CopyEntryMemo {
     value: Rc<Vec<(String, String)>>,
 }
 
-/// Names are only inserted when they are drawn, so this holds a screenful in
+/// Cell texts are only inserted when they are drawn, so this holds a screenful in
 /// practice. The bound is here for the pathological case — a session left on
 /// one filter while rows churn through it — and clearing costs one redraw's
 /// worth of rematching.

@@ -1449,6 +1449,8 @@ fn draw_table(frame: &mut Frame, app: &mut App, area: Rect) {
     let now = crate::columns::now_secs();
     app.ensure_table_cell_cache_at(&visible_objects, now);
     let cell_cache = app.table_cell_cache();
+    // Decided once per frame so an unfiltered table never asks per cell.
+    let highlight = app.filter_highlights();
 
     let rows: Vec<Vec<RenderCell>> = visible_objects
         .iter()
@@ -1485,7 +1487,8 @@ fn draw_table(frame: &mut Frame, app: &mut App, area: Rect) {
             // blue), but a handful of columns keep their own visibility
             // treatment on top: STATUS gets a semantic badge, RESTARTS/CPU/MEM
             // flag outliers, AGE is dimmed (rarely the interesting signal),
-            // and NAME highlights the active text filter's matched chars.
+            // and every text cell highlights the active text filter's matched
+            // chars on top of its own style.
             let status_val = style_idx
                 .and_then(|i| cells.get(i))
                 .map(TableCellText::as_str)
@@ -1510,27 +1513,27 @@ fn draw_table(frame: &mut Frame, app: &mut App, area: Rect) {
                 .enumerate()
                 .map(|(i, c)| {
                     let align = align_of(i);
-                    if marked_row {
-                        if i == name_col {
-                            render_name_cell(app, c.as_str(), theme::mark(), forwarded).style(
+                    if i == name_col && (marked_row || Some(i) != style_idx) {
+                        let base = if marked_row { theme::mark() } else { row_color };
+                        let cell = render_name_cell(app, c.as_str(), base, forwarded);
+                        return if marked_row {
+                            cell.style(
                                 Style::default()
                                     .fg(theme::mark())
                                     .add_modifier(Modifier::BOLD),
                             )
                         } else {
-                            c.into_cell_aligned(align).style(
-                                Style::default()
-                                    .fg(theme::mark())
-                                    .add_modifier(Modifier::BOLD),
-                            )
-                        }
+                            cell
+                        };
+                    }
+                    let style = if marked_row {
+                        Style::default()
+                            .fg(theme::mark())
+                            .add_modifier(Modifier::BOLD)
                     } else if Some(i) == style_idx {
-                        c.into_cell_aligned(align)
-                            .style(Style::default().fg(status_badge))
-                    } else if i == name_col {
-                        render_name_cell(app, c.as_str(), row_color, forwarded)
+                        Style::default().fg(status_badge)
                     } else if Some(i) == age_idx {
-                        c.into_cell_aligned(align).style(theme::dim())
+                        theme::dim()
                     } else if Some(i) == restarts_idx {
                         let n: i64 = c.as_str().trim().parse().unwrap_or(0);
                         let color = thresholds
@@ -1538,7 +1541,7 @@ fn draw_table(frame: &mut Frame, app: &mut App, area: Rect) {
                             .severity(n)
                             .map(theme::severity_fg)
                             .unwrap_or(row_color);
-                        c.into_cell_aligned(align).style(Style::default().fg(color))
+                        Style::default().fg(color)
                     } else if let Some(metric) = metric_columns[i] {
                         let value = app.metric_value(obj, metric);
                         let color = if metric.percentage() {
@@ -1556,11 +1559,19 @@ fn draw_table(frame: &mut Frame, app: &mut App, area: Rect) {
                                 .map(theme::severity_fg)
                                 .unwrap_or(row_color)
                         };
-                        c.into_cell_aligned(align).style(Style::default().fg(color))
+                        Style::default().fg(color)
                     } else {
-                        c.into_cell_aligned(align)
-                            .style(Style::default().fg(row_color))
+                        Style::default().fg(row_color)
+                    };
+                    let matched = highlight
+                        .then(|| app.filter_match_indices(c.as_str()))
+                        .flatten()
+                        .filter(|idx| !idx.is_empty());
+                    match matched {
+                        Some(idx) => highlighted_cell(c.as_str(), &idx, align),
+                        None => c.into_cell_aligned(align),
                     }
+                    .style(style)
                 })
                 .collect();
             render_cells
@@ -1945,17 +1956,40 @@ fn render_name_cell(app: &App, name: &str, base: Color, forwarded: bool) -> Rend
         spans.push(Span::styled(name.to_string(), Style::default().fg(base)));
         return RenderCell::from(Line::from(spans));
     };
-    let matched: std::collections::HashSet<usize> = matched.iter().copied().collect();
-    let plain = Style::default().fg(base);
+    let mut spans = marker;
+    push_match_spans(&mut spans, name, &matched, Style::default().fg(base));
+    RenderCell::from(Line::from(spans))
+}
+
+/// A non-NAME table cell with the active row filter's matched characters
+/// highlighted. Unmatched characters carry no style of their own, so the
+/// column's style set on the cell (STATUS badge, outlier colors, dimmed AGE,
+/// row tint) still shows through, and the highlight is layered on top.
+fn highlighted_cell(
+    text: &str,
+    matched: &[usize],
+    align: Option<Alignment>,
+) -> RenderCell<'static> {
+    let mut spans = Vec::new();
+    push_match_spans(&mut spans, text, matched, Style::default());
+    let line = Line::from(spans);
+    match align {
+        Some(align) => RenderCell::from(Text::from(line).alignment(align)),
+        None => RenderCell::from(line),
+    }
+}
+
+/// Append `text` to `spans` in runs, styling the chars at `matched` (ascending
+/// char positions) bold yellow and the rest `plain`.
+fn push_match_spans(spans: &mut Vec<Span<'static>>, text: &str, matched: &[usize], plain: Style) {
     let hl = Style::default()
         .fg(theme::yellow())
         .add_modifier(Modifier::BOLD);
-
-    let mut spans = marker;
+    let mut next = matched.iter().copied().peekable();
     let mut run = String::new();
     let mut run_matched = false;
-    for (i, ch) in name.chars().enumerate() {
-        let is_match = matched.contains(&i);
+    for (i, ch) in text.chars().enumerate() {
+        let is_match = next.next_if_eq(&i).is_some();
         if !run.is_empty() && is_match != run_matched {
             spans.push(Span::styled(
                 std::mem::take(&mut run),
@@ -1968,7 +2002,6 @@ fn render_name_cell(app: &App, name: &str, base: Color, forwarded: bool) -> Rend
     if !run.is_empty() {
         spans.push(Span::styled(run, if run_matched { hl } else { plain }));
     }
-    RenderCell::from(Line::from(spans))
 }
 
 fn draw_scrollable(

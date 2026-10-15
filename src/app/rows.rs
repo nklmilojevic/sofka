@@ -492,17 +492,23 @@ impl App {
             || parsed.fields() != self.applied_filter_fields.as_deref()
     }
 
-    /// Char indices in `name` that matched the active row filter's text
-    /// pattern, for highlighting them in the table. `None` when there's no
-    /// active filter or no positive text term (every visible row already
-    /// passed the filter pass, so this is purely a rendering aid, not a
-    /// second filter decision).
+    /// Whether the active row filter has a positive text term whose matches
+    /// the table can highlight.
+    pub fn filter_highlights(&self) -> bool {
+        !self.filter.is_empty() && self.parsed_filter().highlight_pattern().is_some()
+    }
+
+    /// Char indices in `text` (a NAME, NAMESPACE or other displayed cell)
+    /// that matched the active row filter's text pattern, for highlighting
+    /// them in the table. `None` when there's no active filter or no positive
+    /// text term (every visible row already passed the filter pass, so this
+    /// is purely a rendering aid, not a second filter decision).
     ///
-    /// Memoized per name for the current filter: the renderer asks this for
-    /// every visible row on every redraw, and re-running the matcher to get
+    /// Memoized per text for the current filter: the renderer asks this for
+    /// every visible cell on every redraw, and re-running the matcher to get
     /// an answer that cannot have changed is the single most expensive thing
     /// a filtered frame used to do.
-    pub fn filter_match_indices(&self, name: &str) -> Option<Rc<[usize]>> {
+    pub fn filter_match_indices(&self, text: &str) -> Option<Rc<[usize]>> {
         if self.filter.is_empty() {
             return None;
         }
@@ -515,14 +521,14 @@ impl App {
             cache.filter.push_str(&self.filter);
             cache.rows.clear();
         }
-        if let Some(hit) = cache.rows.get(name) {
+        if let Some(hit) = cache.rows.get(text) {
             return hit.clone();
         }
         if cache.rows.len() >= HIGHLIGHT_CACHE_LIMIT {
             cache.rows.clear();
         }
-        let idx = self.match_positions(pat, name).map(Rc::from);
-        cache.rows.insert(Box::from(name), idx.clone());
+        let idx = self.match_positions(pat, text).map(Rc::from);
+        cache.rows.insert(Box::from(text), idx.clone());
         idx
     }
 
