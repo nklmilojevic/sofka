@@ -3863,13 +3863,27 @@ async fn notify_note_prefixes_messages_and_replaces_without_toggling_off() {
         Some("look at this - pod/web: Ready True → False")
     );
 
-    // A new note on a watched row replaces the note and keeps the watch.
-    run(&mut app, ":notify rollout done?");
+    // A new note on a watched row replaces the note and keeps the watch;
+    // whitespace inside the note is kept.
+    run(&mut app, ":notify rollout  done?");
     assert_eq!(app.notify_tasks.len(), 1);
+    let noted = deliver(&mut app).unwrap();
+    assert_eq!(noted, "rollout  done? - pod/web: Ready True → False");
+
+    // The configured notifier command gets the same noted text as $MESSAGE.
+    let cfg = crate::config::NotifyConfig {
+        command: vec!["notify-send".into(), "sofka".into(), "$MESSAGE".into()],
+        ..crate::config::NotifyConfig::default()
+    };
     assert_eq!(
-        deliver(&mut app).as_deref(),
-        Some("rollout done? - pod/web: Ready True → False")
+        super::notify::notification_command(&cfg, false, &noted),
+        Some(vec!["notify-send".into(), "sofka".into(), noted.clone()])
     );
+
+    // A long note is capped so the change itself still fits the message.
+    run(&mut app, &format!(":notify {}", "x".repeat(400)));
+    let long = deliver(&mut app).unwrap();
+    assert!(long.ends_with("pod/web: Ready True → False"), "{long}");
 
     // Bare :notify still toggles it off and forgets the note.
     run(&mut app, ":notify");

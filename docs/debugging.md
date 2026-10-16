@@ -74,7 +74,8 @@ Everything is session-local.
 message for that object: `look at this - pod/web: Ready True → False`. The same
 text goes to the status line, the terminal, and `$MESSAGE`, so notifier configs
 need no change. `:notify <note>` on an object that is already watched replaces
-the note and keeps the watch; bare `:notify` still turns it off.
+the note and keeps the watch; bare `:notify` still turns it off. Notes longer
+than 80 characters are shortened so the change itself always fits.
 
 ```toml
 [notify]

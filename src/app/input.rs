@@ -828,6 +828,19 @@ impl App {
         self.update_suggestions();
     }
 
+    /// Point a row action at the selected row's kind in the workloads view.
+    /// Returns `false` when the view has no row to act on.
+    fn focus_action_row(&mut self, action: PaletteAction) -> bool {
+        if action.acts_on_row() && self.ns_resources_active() {
+            self.flash_warn("ns-resources lists kinds: ⏎ opens one, r counts again");
+            return false;
+        }
+        if action.acts_on_row() {
+            self.focus_workload_row();
+        }
+        true
+    }
+
     /// Run a built-in palette action.
     pub(super) fn run_action(&mut self, action: PaletteAction) {
         if matches!(action, PaletteAction::PluginActivity) {
@@ -835,12 +848,8 @@ impl App {
             return;
         }
         self.stop_plugins();
-        if action.acts_on_row() && self.ns_resources_active() {
-            self.flash_warn("ns-resources lists kinds: ⏎ opens one, r counts again");
+        if !self.focus_action_row(action) {
             return;
-        }
-        if action.acts_on_row() {
-            self.focus_workload_row();
         }
         match action {
             PaletteAction::PluginActivity => unreachable!(),
@@ -938,12 +947,12 @@ impl App {
         }
         // `:notify [note]` toggles a watch notification; the optional note is
         // prepended to its messages.
-        let mut parts = cmd.split_whitespace();
-        if let Some(first) = parts.next()
+        if let Some(first) = cmd.split_whitespace().next()
             && matches!(first.to_ascii_lowercase().as_str(), "notify" | "bell")
         {
-            let note = parts.collect::<Vec<_>>().join(" ");
-            self.toggle_notify(&note);
+            if self.focus_action_row(PaletteAction::Notify) {
+                self.toggle_notify(&cmd[first.len()..]);
+            }
             return true;
         }
         // `:find <text>` sweeps object names across the common kinds.

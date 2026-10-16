@@ -616,3 +616,38 @@ async fn palette_commands_and_timeline_follow_the_selected_row() {
     assert!(app.workloads_active());
     assert_eq!(app.kind_plural, "workloads");
 }
+
+#[tokio::test]
+async fn notify_with_a_note_watches_the_selected_row_kind() {
+    let (mut app, _rx) = workloads_app();
+    seed(&mut app);
+    let row = app
+        .rows()
+        .iter()
+        .position(|o| {
+            o.types.as_ref().unwrap().kind == "Deployment"
+                && o.metadata.name.as_deref() == Some("web")
+        })
+        .unwrap();
+    app.table_state.select(Some(row));
+
+    type_resource_query(&mut app, "notify rollout done?");
+    assert!(
+        app.notify_tasks.contains_key("deployments/default/web"),
+        "{:?} {}",
+        app.notify_tasks.keys().collect::<Vec<_>>(),
+        app.flash
+    );
+    assert_eq!(
+        app.notify_notes
+            .get("deployments/default/web")
+            .map(String::as_str),
+        Some("rollout done?")
+    );
+    assert_eq!(app.kind_plural, "workloads");
+
+    // Bare :notify on the same row finds the same watch and turns it off.
+    type_resource_query(&mut app, "notify");
+    assert!(app.notify_tasks.is_empty(), "{}", app.flash);
+    assert!(app.notify_notes.is_empty());
+}

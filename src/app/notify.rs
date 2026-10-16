@@ -1,5 +1,9 @@
 use super::*;
 
+/// Longest note kept, so a pasted paragraph can't push the change itself out
+/// of the 300-character delivered message.
+const NOTE_MAX: usize = 80;
+
 impl App {
     /// `:notify` — toggle a watch-notification on the selected object. While
     /// active, every state change the watch sees for it (the same transitions
@@ -12,7 +16,8 @@ impl App {
     /// on an already watched object it replaces the note instead of toggling
     /// the watch off.
     pub(super) fn toggle_notify(&mut self, note: &str) {
-        let note = note.trim();
+        let note = crate::text::ellipsize(note.trim(), NOTE_MAX);
+        let note = note.as_str();
         if matches!(self.kind_plural.as_str(), "helm" | "helmhistory") {
             self.flash_warn("notify is not available for Helm views");
             return;
