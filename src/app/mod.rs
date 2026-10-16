@@ -2523,6 +2523,9 @@ pub struct App {
     /// a notify must survive `bump_generation` (view switches) and fire from
     /// anywhere until toggled off or the context changes.
     pub(super) notify_tasks: HashMap<String, tokio::task::JoinHandle<()>>,
+    /// The `:notify <text>` note per active watch, same keys as
+    /// [`Self::notify_tasks`]. Prepended to that watch's messages.
+    pub(super) notify_notes: HashMap<String, String>,
     /// Lifecycle shared by notification watchers and their messages. Unlike
     /// the view generation, this advances only when the cluster context changes.
     pub(super) notify_epoch: u64,
@@ -2894,6 +2897,7 @@ impl App {
             timeline: crate::timeline::Timeline::default(),
             table_hit: RefCell::new(None),
             notify_tasks: HashMap::new(),
+            notify_notes: HashMap::new(),
             notify_epoch: 0,
             pending_notify: Vec::new(),
             prev_revisions: PrevRevisions::default(),

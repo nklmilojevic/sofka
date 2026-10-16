@@ -627,8 +627,9 @@ include those conditions. Row filters can search the route paths.
   Late replies are ignored. `c` starts another search; `r` repeats the initial
   adjacent lookup. This action does not search across namespaces, follow
   descendants recursively, or start background watches.
-- **Watch notifications** (`:notify`) - toggle a notification on the selected
-  object and Sophie watches it for you. See [Notifications](debugging.md#notifications).
+- **Watch notifications** (`:notify [note]`) - toggle a notification on the
+  selected object and Sophie watches it for you. An optional note reminds you
+  why you are watching it. See [Notifications](debugging.md#notifications).
 
 ## GitOps and Helm
 

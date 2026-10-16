@@ -70,6 +70,12 @@ browse other views - "tell me when this rollout finishes" and keep working.
 notifications so events from the previous cluster cannot cross contexts.
 Everything is session-local.
 
+`:notify <note>` adds a note that says why you are watching, prepended to every
+message for that object: `look at this - pod/web: Ready True → False`. The same
+text goes to the status line, the terminal, and `$MESSAGE`, so notifier configs
+need no change. `:notify <note>` on an object that is already watched replaces
+the note and keeps the watch; bare `:notify` still turns it off.
+
 ```toml
 [notify]
 bell = true         # ring the terminal bell

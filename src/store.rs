@@ -505,6 +505,7 @@ pub enum Msg {
     /// survives view changes but invalidates messages from a previous context.
     Notify {
         epoch: u64,
+        id: String,
         text: String,
     },
 }

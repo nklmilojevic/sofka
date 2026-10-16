@@ -3830,6 +3830,58 @@ async fn notify_toggles_a_background_watch_per_object() {
 }
 
 #[tokio::test]
+async fn notify_note_prefixes_messages_and_replaces_without_toggling_off() {
+    let (mut app, _rx) = test_app();
+    app.switch_kind("pods");
+    apply(
+        &mut app,
+        json!({"apiVersion": "v1", "kind": "Pod",
+               "metadata": {"name": "web", "namespace": "default"}}),
+    );
+    app.handle_key(press(KeyCode::Home)).unwrap();
+    let run = |app: &mut App, cmd: &str| {
+        for ch in cmd.chars() {
+            app.handle_key(press(KeyCode::Char(ch))).unwrap();
+        }
+        app.handle_key(press(KeyCode::Enter)).unwrap();
+    };
+
+    run(&mut app, ":notify  look at this ");
+    assert_eq!(app.notify_tasks.len(), 1);
+    assert!(app.flash.contains("look at this"), "{}", app.flash);
+    let epoch = app.notify_epoch;
+    let deliver = |app: &mut App| {
+        app.handle_msg(Msg::Notify {
+            epoch,
+            id: "pods/default/web".into(),
+            text: "pod/web: Ready True → False".into(),
+        });
+        app.take_notification()
+    };
+    assert_eq!(
+        deliver(&mut app).as_deref(),
+        Some("look at this - pod/web: Ready True → False")
+    );
+
+    // A new note on a watched row replaces the note and keeps the watch.
+    run(&mut app, ":notify rollout done?");
+    assert_eq!(app.notify_tasks.len(), 1);
+    assert_eq!(
+        deliver(&mut app).as_deref(),
+        Some("rollout done? - pod/web: Ready True → False")
+    );
+
+    // Bare :notify still toggles it off and forgets the note.
+    run(&mut app, ":notify");
+    assert!(app.notify_tasks.is_empty());
+    assert!(app.notify_notes.is_empty());
+    assert_eq!(
+        deliver(&mut app).as_deref(),
+        Some("pod/web: Ready True → False")
+    );
+}
+
+#[tokio::test]
 async fn notify_survives_view_switches() {
     let (mut app, _rx) = test_app();
     app.switch_kind("pods");
@@ -3851,6 +3903,7 @@ async fn notify_survives_view_switches() {
     assert_eq!(app.notify_epoch, epoch);
     app.handle_msg(Msg::Notify {
         epoch,
+        id: "pods/default/web".into(),
         text: "pod/web: Ready True → False".into(),
     });
     assert_eq!(
@@ -3879,6 +3932,7 @@ async fn context_switch_stops_notifications_and_drops_stale_messages() {
 
     app.handle_msg(Msg::Notify {
         epoch: old_epoch,
+        id: "pods/default/web".into(),
         text: "pod/web: old cluster".into(),
     });
     assert_eq!(app.pending_notify.len(), 1);
@@ -3896,6 +3950,7 @@ async fn context_switch_stops_notifications_and_drops_stale_messages() {
     let flash = app.flash.clone();
     app.handle_msg(Msg::Notify {
         epoch: old_epoch,
+        id: "pods/default/web".into(),
         text: "pod/web: late old cluster".into(),
     });
     assert_eq!(app.flash, flash);
@@ -3919,6 +3974,7 @@ async fn notify_msg_flashes_and_queues_bell() {
     let (mut app, _rx) = test_app();
     app.handle_msg(Msg::Notify {
         epoch: app.notify_epoch,
+        id: "pods/default/web".into(),
         text: "pod/web: Ready True → False".into(),
     });
     assert!(!app.flash_err);
@@ -3939,10 +3995,12 @@ async fn notification_bursts_coalesce_into_one_delivery() {
     let epoch = app.notify_epoch;
     app.handle_msg(Msg::Notify {
         epoch,
+        id: "pods/default/web".into(),
         text: "pod/a: Ready True → False".into(),
     });
     app.handle_msg(Msg::Notify {
         epoch,
+        id: "pods/default/web".into(),
         text: "pod/a: deleted".into(),
     });
     assert_eq!(
@@ -3954,6 +4012,7 @@ async fn notification_bursts_coalesce_into_one_delivery() {
     for i in 0..100 {
         app.handle_msg(Msg::Notify {
             epoch,
+            id: "pods/default/web".into(),
             text: format!("pod/pod-{i}: restarts 0 → 1"),
         });
     }
@@ -7021,6 +7080,7 @@ async fn background_status_borrows_the_bar_without_orphaning_an_action() {
     let claim = app.claim_status("draining node-1…");
     app.handle_msg(Msg::Notify {
         epoch: app.notify_epoch,
+        id: "pods/default/web".into(),
         text: "pod/web: Ready True → False".into(),
     });
     assert!(app.flash.starts_with('🔔'), "{}", app.flash);

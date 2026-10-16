@@ -3269,6 +3269,10 @@ fn build_help(app: &App, width: usize) -> (Vec<Line<'static>>, String, HelpSecti
         "capture the current view (text/json/yaml) · browse saved snapshots",
     ));
     lines.push(bind(
+        ":notify [note]",
+        "toggle watch notifications on the selection · note prefixes its messages",
+    ));
+    lines.push(bind(
         ":pvc-clean",
         "delete helper pods left behind by a session that exited uncleanly (:pvc-cleanup)",
     ));

@@ -888,7 +888,7 @@ impl App {
             PaletteAction::Helm => self.open_helm_releases(),
             PaletteAction::Workloads => self.open_workloads(None),
             PaletteAction::NsResources => self.open_ns_resources(None),
-            PaletteAction::Notify => self.toggle_notify(),
+            PaletteAction::Notify => self.toggle_notify(""),
             PaletteAction::Reload => self.reload_config(),
             PaletteAction::Layout => self.open_layout_picker(),
             PaletteAction::ConfigInfo => self.open_config_info(),
@@ -934,6 +934,16 @@ impl App {
         {
             let rest = parts.collect::<Vec<_>>().join(" ");
             self.take_snapshot(&rest);
+            return true;
+        }
+        // `:notify [note]` toggles a watch notification; the optional note is
+        // prepended to its messages.
+        let mut parts = cmd.split_whitespace();
+        if let Some(first) = parts.next()
+            && matches!(first.to_ascii_lowercase().as_str(), "notify" | "bell")
+        {
+            let note = parts.collect::<Vec<_>>().join(" ");
+            self.toggle_notify(&note);
             return true;
         }
         // `:find <text>` sweeps object names across the common kinds.

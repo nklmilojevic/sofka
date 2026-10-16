@@ -1318,7 +1318,11 @@ impl App {
                 self.last_error = Some(error.clone());
                 self.borrow_status(format!("internal error: {error}"), true);
             }
-            Msg::Notify { epoch, text } if epoch == self.notify_epoch => {
+            Msg::Notify { epoch, id, text } if epoch == self.notify_epoch => {
+                let text = match self.notify_notes.get(&id) {
+                    Some(note) => format!("{note} - {text}"),
+                    None => text,
+                };
                 self.borrow_status(format!("🔔 {text}"), false);
                 // Delivery happens once per frame in the run loop (see
                 // `take_notification`), so a batch of these coalesces.

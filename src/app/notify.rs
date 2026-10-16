@@ -8,8 +8,11 @@ impl App {
     /// emits a desktop notification (`[notify]`). Each notify is its own bounded
     /// single-object watch, so it keeps firing no matter which view is open,
     /// until toggled off, the context changes, or the session ends. Nothing
-    /// touches disk.
-    pub(super) fn toggle_notify(&mut self) {
+    /// touches disk. A non-empty `note` is prepended to the watch's messages;
+    /// on an already watched object it replaces the note instead of toggling
+    /// the watch off.
+    pub(super) fn toggle_notify(&mut self, note: &str) {
+        let note = note.trim();
         if matches!(self.kind_plural.as_str(), "helm" | "helmhistory") {
             self.flash_warn("notify is not available for Helm views");
             return;
@@ -29,8 +32,15 @@ impl App {
             return;
         };
         let id = format!("{}/{key}", self.kind_plural);
+        if !note.is_empty() && self.notify_tasks.contains_key(&id) {
+            self.notify_notes.insert(id, note.to_string());
+            self.flash = format!("notify note: {key} - {note}");
+            self.flash_err = false;
+            return;
+        }
         if let Some(handle) = self.notify_tasks.remove(&id) {
             handle.abort();
+            self.notify_notes.remove(&id);
             self.flash = format!(
                 "notify off: {key} ({} still active)",
                 self.notify_tasks.len()
@@ -49,6 +59,7 @@ impl App {
         let namespaced = kind.namespaced;
         let tx = self.tx.clone();
         let epoch = self.notify_epoch;
+        let task_id = id.clone();
 
         let handle = tokio::spawn(async move {
             let api: Api<DynamicObject> = if namespaced && !ns.is_empty() {
@@ -83,7 +94,12 @@ impl App {
                         };
                         if !items.is_empty() {
                             let text = format!("{label}: {}", items.join(" · "));
-                            if tx.send(Msg::Notify { epoch, text }).await.is_err() {
+                            let msg = Msg::Notify {
+                                epoch,
+                                id: task_id.clone(),
+                                text,
+                            };
+                            if tx.send(msg).await.is_err() {
                                 return;
                             }
                         }
@@ -94,6 +110,7 @@ impl App {
                         if tx
                             .send(Msg::Notify {
                                 epoch,
+                                id: task_id.clone(),
                                 text: format!("{label}: deleted"),
                             })
                             .await
@@ -110,11 +127,19 @@ impl App {
                 }
             }
         });
-        self.notify_tasks.insert(id, handle);
-        self.flash = format!(
-            "notify on: {key} — changes flash + bell ({} active)",
-            self.notify_tasks.len()
-        );
+        self.notify_tasks.insert(id.clone(), handle);
+        self.flash = if note.is_empty() {
+            format!(
+                "notify on: {key} — changes flash + bell ({} active)",
+                self.notify_tasks.len()
+            )
+        } else {
+            self.notify_notes.insert(id, note.to_string());
+            format!(
+                "notify on: {key} - {note} ({} active)",
+                self.notify_tasks.len()
+            )
+        };
         self.flash_err = false;
     }
 
@@ -125,6 +150,7 @@ impl App {
         for (_, task) in self.notify_tasks.drain() {
             task.abort();
         }
+        self.notify_notes.clear();
         self.pending_notify.clear();
     }
 
