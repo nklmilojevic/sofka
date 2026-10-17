@@ -1143,13 +1143,6 @@ fn lookup_value<'a>(obj: &'a DynamicObject, col: &UserColumn) -> Option<Extracte
     }
 }
 
-/// Read the status of a condition selected by type name.
-pub fn condition_status(obj: &DynamicObject, cond_type: &str) -> Option<String> {
-    condition_value(obj, cond_type, ConditionMatch::Type, "status")?
-        .as_str()
-        .map(str::to_string)
-}
-
 /// Read the first available output field from matching conditions.
 fn condition_value<'a>(
     obj: &'a DynamicObject,

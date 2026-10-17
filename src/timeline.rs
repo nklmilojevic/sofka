@@ -1,9 +1,8 @@
 //! Session-local resource timeline.
 //!
-//! As the table watch streams object versions, [`Timeline::observe`] diffs each
-//! new version against the previous one and records the meaningful state
-//! changes — generation bumps, replica/readiness shifts, pod phase and restart
-//! changes, and condition transitions — into a bounded, per-object history.
+//! [`Timeline::observe_as`] compares each watched object version with the
+//! previous version. It records generation, replica, readiness, pod phase,
+//! restart, and condition changes in a bounded history for each object.
 //! The explain/timeline view then presents them as a causal, chronological log.
 //!
 //! This is deliberately session-local: it observes only what happens while
@@ -76,24 +75,9 @@ impl Timeline {
         self.seen.clear();
     }
 
-    /// Record the transitions from `prev` to `new` for one object. `prev` is
-    /// `None` on first sight (initial list / post-relist): nothing is recorded
-    /// except a genuine creation (first sight *and* born after we started
-    /// watching), so a relisted fleet doesn't flood the log with phantom
-    /// "created" lines.
-    pub fn observe(
-        &mut self,
-        plural: &str,
-        rk: &str,
-        prev: Option<&DynamicObject>,
-        new: &DynamicObject,
-    ) {
-        self.observe_as(plural, plural, rk, prev, new);
-    }
-
-    /// [`Self::observe`] for a row filed under `view` whose own kind is
-    /// `plural`, as in the workloads view: the history is kept under the
-    /// view, the changes worth recording come from the row's kind.
+    /// Record changes for a resource of kind `plural` under `view`.
+    /// On first sight, record creation only if the object was created after
+    /// this session started. A repeated initial list adds no creation entry.
     pub fn observe_as(
         &mut self,
         view: &str,
@@ -127,12 +111,7 @@ impl Timeline {
         }
     }
 
-    /// Record a deletion.
-    pub fn observe_delete(&mut self, plural: &str, rk: &str) {
-        self.observe_delete_as(plural, plural, rk);
-    }
-
-    /// [`Self::observe_delete`] for a row filed under `view`.
+    /// Record deletion of a resource of kind `plural` under `view`.
     pub fn observe_delete_as(&mut self, view: &str, plural: &str, rk: &str) {
         let now = Self::now();
         self.push(
@@ -497,7 +476,7 @@ mod tests {
             "metadata":{"name":"p","creationTimestamp":"1970-01-01T00:16:40Z"},
             "status":{"phase":"Running"}
         }));
-        tl.observe("pods", "ns/p", None, &old);
+        tl.observe_as("pods", "pods", "ns/p", None, &old);
         assert!(tl.entries("pods", "ns/p").is_none());
         // A later phase change records.
         let changed = obj(json!({
@@ -505,7 +484,7 @@ mod tests {
             "metadata":{"name":"p","creationTimestamp":"1970-01-01T00:16:40Z"},
             "status":{"phase":"Failed"}
         }));
-        tl.observe("pods", "ns/p", Some(&old), &changed);
+        tl.observe_as("pods", "pods", "ns/p", Some(&old), &changed);
         let e = tl.entries("pods", "ns/p").unwrap();
         assert_eq!(e.len(), 1);
         assert!(e[0].text.contains("phase Running → Failed"));
@@ -520,13 +499,36 @@ mod tests {
             "metadata":{"name":"new","creationTimestamp":"2999-01-01T00:00:00Z"},
             "status":{"phase":"Pending"}
         }));
-        tl.observe("pods", "ns/new", None, &born);
+        tl.observe_as("pods", "pods", "ns/new", None, &born);
         let e = tl.entries("pods", "ns/new").unwrap();
         assert_eq!(e.len(), 1);
         assert!(e[0].text.contains("Pod created"));
         // A relist (prev=None again) must not record a second creation.
-        tl.observe("pods", "ns/new", None, &born);
+        tl.observe_as("pods", "pods", "ns/new", None, &born);
         assert_eq!(tl.entries("pods", "ns/new").unwrap().len(), 1);
+    }
+
+    #[test]
+    fn shared_view_keeps_resource_labels_and_separate_history() {
+        let mut tl = Timeline::default();
+        let born = obj(json!({
+            "apiVersion":"apps/v1","kind":"Deployment",
+            "metadata":{"name":"api","creationTimestamp":"2999-01-01T00:00:00Z"}
+        }));
+
+        tl.observe_as("workloads", "deployments", "ns/api", None, &born);
+        tl.observe_delete_as("workloads", "deployments", "ns/api");
+        tl.observe_as("deployments", "deployments", "ns/api", None, &born);
+
+        let entries = tl.entries("workloads", "ns/api").unwrap();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].text, "Deployment created");
+        assert_eq!(entries[0].level, Level::Good);
+        assert_eq!(entries[1].text, "Deployment deleted");
+        assert_eq!(entries[1].level, Level::Bad);
+        let entries = tl.entries("deployments", "ns/api").unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].text, "Deployment created");
     }
 
     #[test]
@@ -541,7 +543,7 @@ mod tests {
         let mut prev = mk(0);
         for g in 1..(MAX_PER_OBJECT as i64 + 50) {
             let cur = mk(g);
-            tl.observe("deployments", "ns/api", Some(&prev), &cur);
+            tl.observe_as("deployments", "deployments", "ns/api", Some(&prev), &cur);
             prev = cur;
         }
         assert_eq!(

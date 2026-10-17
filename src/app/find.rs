@@ -41,6 +41,8 @@ impl App {
         self.find_query = query.clone();
         self.find_items.clear();
         self.find_state.select(None);
+        self.find_request += 1;
+        let request = self.find_request;
         self.mode = Mode::Find;
         let claim = self.claim_status(format!("finding '{query}'…"));
 
@@ -109,6 +111,7 @@ impl App {
                 .send(Msg::FindResults {
                     generation: genr,
                     claim,
+                    request,
                     query,
                     items,
                     warn,

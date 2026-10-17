@@ -920,10 +920,6 @@ impl std::io::Write for RequestBuffer {
     }
 }
 
-pub async fn execute(job: Job) -> std::io::Result<std::process::Output> {
-    execute_with_activity(job, None).await
-}
-
 pub async fn execute_with_activity(
     mut job: Job,
     activity: Option<(activity::Activity, String)>,
@@ -1524,9 +1520,10 @@ default = "false"
 
     #[tokio::test]
     async fn capture_stops_chatty_processes_before_unbounded_allocation() {
-        let error = execute(job("/bin/sh", &["-c", "head -c 1100000 /dev/zero"]))
-            .await
-            .unwrap_err();
+        let error =
+            execute_with_activity(job("/bin/sh", &["-c", "head -c 1100000 /dev/zero"]), None)
+                .await
+                .unwrap_err();
         assert!(error.to_string().contains("exceeds 1 MiB"));
     }
 
@@ -1556,7 +1553,9 @@ default = "false"
         assert!(snapshot.lines.iter().map(String::len).sum::<usize>() <= 64 * 1024);
         for redirection in ["", ">&2"] {
             let script = format!("head -c 1048577 /dev/zero {redirection}");
-            let error = execute(job("/bin/sh", &["-c", &script])).await.unwrap_err();
+            let error = execute_with_activity(job("/bin/sh", &["-c", &script]), None)
+                .await
+                .unwrap_err();
             assert!(error.to_string().contains("exceeds 1 MiB"));
         }
     }
@@ -1596,7 +1595,7 @@ default = "false"
         command.directory = Some(dir.clone());
         command.request =
             Some(serde_json::json!({"schema_version":1,"object":{"metadata":{"name":"pod"}}}));
-        let output = execute(command).await.unwrap();
+        let output = execute_with_activity(command, None).await.unwrap();
         assert!(output.status.success());
         let text = String::from_utf8(output.stdout).unwrap();
         let (cwd, json) = text.split_once('\n').unwrap();
@@ -1621,10 +1620,13 @@ default = "false"
             remote: 80,
             local: None,
         });
-        let output = tokio::time::timeout(std::time::Duration::from_secs(3), execute(command))
-            .await
-            .unwrap()
-            .unwrap();
+        let output = tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            execute_with_activity(command, None),
+        )
+        .await
+        .unwrap()
+        .unwrap();
         assert!(output.status.success());
         let request: Value = serde_json::from_slice(&output.stdout).unwrap();
         assert_eq!(request["forward"]["local_port"], 32123);
@@ -1640,7 +1642,7 @@ default = "false"
             remote: 443,
             local: Some(32124),
         });
-        let output = execute(command).await.unwrap();
+        let output = execute_with_activity(command, None).await.unwrap();
         assert_eq!(
             serde_json::from_slice::<Value>(&output.stdout).unwrap()["forward"]["local_port"],
             32124
@@ -1663,9 +1665,12 @@ default = "false"
             ],
         );
         assert!(
-            tokio::time::timeout(std::time::Duration::from_millis(150), execute(command))
-                .await
-                .is_err()
+            tokio::time::timeout(
+                std::time::Duration::from_millis(150),
+                execute_with_activity(command, None)
+            )
+            .await
+            .is_err()
         );
         tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
         assert!(!marker.exists(), "a descendant survived cancellation");

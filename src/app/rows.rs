@@ -1096,18 +1096,6 @@ impl App {
             .map(|m| m.get(name).unwrap_or(&crate::columns::NO_LOAD))
     }
 
-    pub fn node_pods_for(&self, o: &DynamicObject) -> Option<usize> {
-        self.node_load_for(o).map(|l| l.pods)
-    }
-
-    /// The PODS cell for a node as displayed.
-    pub fn node_pods_cell(&self, o: &DynamicObject) -> String {
-        match self.node_pods_for(o) {
-            Some(n) => n.to_string(),
-            None => "-".into(),
-        }
-    }
-
     /// Comparable value of `header`'s cell for object `o`.
     pub(super) fn column_sort_key(&self, o: &DynamicObject, header: &str, now: i64) -> SortKey {
         if let Some(metric) = self.spec.metric(header) {

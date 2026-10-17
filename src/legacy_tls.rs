@@ -174,7 +174,8 @@ fn connect(config: Config, tls: ClientConfig, auth: Option<AuthLayer>) -> Result
         Some(proxy) if proxy.scheme_str() == Some("https") => {
             // Use the configured trust settings for the proxy, without sending
             // the cluster client certificate or overriding the proxy hostname.
-            let mut proxy_config = without_identity(&config);
+            let mut proxy_config = config.clone();
+            proxy_config.auth_info = Default::default();
             proxy_config.tls_server_name = None;
             let connector = proxy_config.rustls_https_connector_with_connector(connector)?;
             let connector = proxy_auth(proxy, Tunnel::new(proxy.clone(), connector))?;
@@ -1217,6 +1218,94 @@ printf '%s' "$SOFKA_TEST_EXEC_CREDENTIAL"
                 .await
                 .unwrap()
                 .unwrap();
+                assert_eq!(version.git_version, "v1.35.0");
+                server_task.await.unwrap().unwrap();
+                proxy_task.await.unwrap();
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn https_proxy_does_not_receive_the_cluster_client_certificate() {
+        for version in [&rustls::version::TLS12, &rustls::version::TLS13] {
+            for (client_pem, exec) in [(CLIENT, false), (CLIENT_V3, false), (CLIENT_V3, true)] {
+                let (url, server_task) = server(SERVER, version).await;
+                let destination = url.authority().unwrap().to_string();
+                let mut roots = rustls::RootCertStore::empty();
+                roots
+                    .add(CertificateDer::from_pem_slice(CA).unwrap())
+                    .unwrap();
+                let verifier = rustls::server::WebPkiClientVerifier::builder(Arc::new(roots))
+                    .allow_unauthenticated()
+                    .build()
+                    .unwrap();
+                let tls = ServerConfig::builder_with_protocol_versions(&[version])
+                    .with_client_cert_verifier(verifier)
+                    .with_single_cert(
+                        vec![CertificateDer::from_pem_slice(SERVER).unwrap()],
+                        PrivateKeyDer::from_pem_slice(SERVER_KEY).unwrap(),
+                    )
+                    .unwrap();
+                let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+                let proxy_url = format!(
+                    "https://localhost:{}",
+                    listener.local_addr().unwrap().port()
+                )
+                .parse()
+                .unwrap();
+                let proxy_task = tokio::spawn(async move {
+                    let (stream, _) = listener.accept().await.unwrap();
+                    let mut stream = tokio_rustls::TlsAcceptor::from(Arc::new(tls))
+                        .accept(stream)
+                        .await
+                        .unwrap();
+                    assert!(
+                        stream.get_ref().1.peer_certificates().is_none(),
+                        "proxy received the cluster certificate; exec: {exec}"
+                    );
+                    let mut request = Vec::new();
+                    while !request.ends_with(b"\r\n\r\n") {
+                        request.push(stream.read_u8().await.unwrap());
+                        assert!(request.len() < 16384);
+                    }
+                    let request = String::from_utf8(request).unwrap();
+                    assert!(request.starts_with(&format!("CONNECT {destination} ")));
+                    stream
+                        .write_all(b"HTTP/1.1 200 Connection established\r\n\r\n")
+                        .await
+                        .unwrap();
+                    let mut upstream = tokio::net::TcpStream::connect(destination).await.unwrap();
+                    let _ = tokio::io::copy_bidirectional(&mut stream, &mut upstream).await;
+                });
+                let mut config = config();
+                config.cluster_url = url;
+                config.proxy_url = Some(proxy_url);
+                config.auth_info.client_certificate_data = Some(STANDARD.encode(client_pem));
+                if exec {
+                    let credential = serde_json::json!({
+                        "apiVersion": "client.authentication.k8s.io/v1", "kind": "ExecCredential",
+                        "status": {
+                            "clientCertificateData": std::str::from_utf8(CLIENT_V3).unwrap(),
+                            "clientKeyData": std::str::from_utf8(KEY).unwrap()
+                        }
+                    });
+                    config.auth_info.exec = Some(
+                        serde_json::from_value(serde_json::json!({
+                            "apiVersion": "client.authentication.k8s.io/v1", "command": "sh",
+                            "args": ["-c", "printf '%s' \"$SOFKA_TEST_EXEC_CREDENTIAL\""],
+                            "interactiveMode": "Never",
+                            "env": [{"name": "SOFKA_TEST_EXEC_CREDENTIAL", "value": credential.to_string()}]
+                        }))
+                        .unwrap(),
+                    );
+                }
+                let client = crate::k8s::build_client(config, client_pem == CLIENT, false).unwrap();
+                let version =
+                    tokio::time::timeout(Duration::from_secs(5), client.apiserver_version())
+                        .await
+                        .unwrap()
+                        .unwrap();
                 assert_eq!(version.git_version, "v1.35.0");
                 server_task.await.unwrap().unwrap();
                 proxy_task.await.unwrap();

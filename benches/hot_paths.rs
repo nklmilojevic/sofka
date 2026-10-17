@@ -467,6 +467,7 @@ fn custom_columns(c: &mut Criterion) {
         align: None,
         condition_field: None,
         condition_match: sofka::views::ConditionMatch::Type,
+        default: None,
     };
     let now = columns::now_secs();
 

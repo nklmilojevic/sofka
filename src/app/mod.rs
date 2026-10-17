@@ -2307,6 +2307,7 @@ pub struct App {
     pub find_items: Vec<crate::store::FindItem>,
     pub find_state: ListState,
     pub find_query: String,
+    find_request: u64,
     /// The last bundle assembled by `:bundle`, previewed in the detail view and
     /// written to disk by `:bundle-save`: `(filename, text)`.
     pub pending_bundle: Option<(String, String)>,
@@ -2806,6 +2807,7 @@ impl App {
             find_items: Vec::new(),
             find_state: ListState::default(),
             find_query: String::new(),
+            find_request: 0,
             pending_bundle: None,
             journal: crate::journal::Journal::default(),
             watch_errors: 0,

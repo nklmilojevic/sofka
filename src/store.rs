@@ -472,6 +472,7 @@ pub enum Msg {
     FindResults {
         generation: u64,
         claim: StatusClaim,
+        request: u64,
         query: String,
         items: Vec<FindItem>,
         /// Kinds that failed to list — the results may be incomplete.
