@@ -920,6 +920,10 @@ impl std::io::Write for RequestBuffer {
     }
 }
 
+pub async fn execute(job: Job) -> std::io::Result<std::process::Output> {
+    execute_with_activity(job, None).await
+}
+
 pub async fn execute_with_activity(
     mut job: Job,
     activity: Option<(activity::Activity, String)>,

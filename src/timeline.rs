@@ -75,6 +75,17 @@ impl Timeline {
         self.seen.clear();
     }
 
+    /// Record changes for one object under its own resource kind.
+    pub fn observe(
+        &mut self,
+        plural: &str,
+        rk: &str,
+        prev: Option<&DynamicObject>,
+        new: &DynamicObject,
+    ) {
+        self.observe_as(plural, plural, rk, prev, new);
+    }
+
     /// Record changes for a resource of kind `plural` under `view`.
     /// On first sight, record creation only if the object was created after
     /// this session started. A repeated initial list adds no creation entry.
@@ -109,6 +120,11 @@ impl Timeline {
                 }
             }
         }
+    }
+
+    /// Record a deletion.
+    pub fn observe_delete(&mut self, plural: &str, rk: &str) {
+        self.observe_delete_as(plural, plural, rk);
     }
 
     /// Record deletion of a resource of kind `plural` under `view`.

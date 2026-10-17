@@ -824,6 +824,18 @@ impl Drop for ArtifactArchive {
     }
 }
 
+pub async fn artifact(artifact: &Artifact, offline: bool) -> Result<ArtifactArchive, String> {
+    artifact_in(&cache_dir(), artifact, offline).await
+}
+
+pub async fn artifact_in(
+    cache: &Path,
+    artifact: &Artifact,
+    offline: bool,
+) -> Result<ArtifactArchive, String> {
+    artifact_from(cache, artifact, offline, &Source::default()).await
+}
+
 pub async fn artifact_from(
     cache: &Path,
     artifact: &Artifact,

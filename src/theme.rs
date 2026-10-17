@@ -77,6 +77,9 @@ macro_rules! palette_swatches {
             }
         }
 
+        $(pub fn $field() -> Color {
+            palette().$field
+        })+
     };
 }
 
@@ -106,20 +109,6 @@ palette_swatches! {
     22 => base,
     23 => mantle,
     24 => crust,
-}
-
-macro_rules! palette_accessors {
-    ($($field:ident),+ $(,)?) => {
-        $(pub fn $field() -> Color {
-            palette().$field
-        })+
-    };
-}
-
-palette_accessors! {
-    rosewater, pink, mauve, red, maroon, peach, yellow, green, teal, sky,
-    sapphire, blue, lavender, text, subtext1, subtext0, overlay1, overlay0,
-    surface1, surface0, base, crust,
 }
 
 // ---------------------------------------------------------------------------
@@ -589,6 +578,10 @@ pub fn mark() -> Color {
 
 pub fn dim() -> Style {
     Style::default().fg(overlay1())
+}
+
+pub fn accent() -> Style {
+    Style::default().fg(teal())
 }
 
 /// Colorize a status-like string (pod phase, node condition, etc.) for the

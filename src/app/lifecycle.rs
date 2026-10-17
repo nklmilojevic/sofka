@@ -1458,11 +1458,10 @@ impl App {
             Msg::FindResults {
                 generation,
                 claim,
-                request,
                 query,
                 items,
                 warn,
-            } if generation == self.generation && request == self.find_request => {
+            } if generation == self.generation && Some(claim) == self.find_claim => {
                 match warn {
                     Some(w) => {
                         self.set_claimed_status(claim, format!("find is incomplete — {w}"), true)

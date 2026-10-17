@@ -4169,7 +4169,6 @@ async fn find_opens_picker_and_enter_navigates_to_the_object() {
     app.handle_msg(Msg::FindResults {
         generation: app.generation,
         claim: current_claim(&app),
-        request: app.find_request,
         query: "web".into(),
         items: vec![
             crate::store::FindItem {
@@ -4199,7 +4198,6 @@ async fn find_opens_picker_and_enter_navigates_to_the_object() {
     app.handle_msg(Msg::FindResults {
         generation: app.generation,
         claim: current_claim(&app),
-        request: app.find_request,
         query: "web".into(),
         items: Vec::new(),
         warn: Some("2 kind(s) could not be listed".into()),
@@ -4214,7 +4212,6 @@ async fn find_keeps_the_newest_search_when_results_arrive_out_of_order() {
         let (mut app, _rx) = test_app();
         type_resource_query(&mut app, "services");
         type_resource_query(&mut app, "find web");
-        let old_request = app.find_request;
         let old_claim = current_claim(&app);
         type_resource_query(&mut app, &format!("find {latest}"));
         assert_eq!(app.mode, Mode::Find);
@@ -4228,7 +4225,6 @@ async fn find_keeps_the_newest_search_when_results_arrive_out_of_order() {
         app.handle_msg(Msg::FindResults {
             generation,
             claim: current_claim(&app),
-            request: app.find_request,
             query: latest.into(),
             items: vec![newest.clone()],
             warn: None,
@@ -4237,7 +4233,6 @@ async fn find_keeps_the_newest_search_when_results_arrive_out_of_order() {
         app.handle_msg(Msg::FindResults {
             generation,
             claim: old_claim,
-            request: old_request,
             query: "web".into(),
             items: Vec::new(),
             warn: Some("old search failed".into()),
@@ -7000,19 +6995,25 @@ async fn every_async_result_is_scoped_to_its_own_operation() {
     // user started later.
     let (mut app, _rx) = test_app();
 
-    let find = app.claim_status("finding 'foo'…");
+    type_resource_query(&mut app, "find foo");
+    let find = current_claim(&app);
     let delete = app.claim_status("deleting 3 pods…");
     app.handle_msg(Msg::FindResults {
         generation: app.generation,
         claim: find,
-        request: app.find_request,
         query: "foo".into(),
-        items: Vec::new(),
+        items: vec![crate::store::FindItem {
+            plural: "pods".into(),
+            ns: "default".into(),
+            name: "foo-1".into(),
+        }],
         warn: None,
     });
     assert_eq!(app.flash, "deleting 3 pods…");
     // The results still land, only the status is scoped.
     assert_eq!(app.find_query, "foo");
+    assert_eq!(app.find_items.len(), 1);
+    assert_eq!(app.find_items[0].name, "foo-1");
 
     app.handle_msg(Msg::TransferDone {
         generation: app.generation,
