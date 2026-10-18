@@ -193,6 +193,11 @@ impl App {
     }
 
     fn render_rbac_document(&mut self) {
+        let cluster_scoped = if self.rbac.rule_list {
+            Default::default()
+        } else {
+            self.cluster.cluster_scoped_resources()
+        };
         let mut lines: Vec<String> = self
             .rbac
             .warnings
@@ -211,7 +216,11 @@ impl App {
                 Section::Rules {
                     rules,
                     namespaced_binding,
-                } => lines.extend(crate::rbac::rule_matrix(rules, *namespaced_binding)),
+                } => lines.extend(crate::rbac::rule_matrix(
+                    rules,
+                    *namespaced_binding,
+                    &cluster_scoped,
+                )),
             }
         }
         let document = &mut self.rbac.document;
@@ -409,7 +418,7 @@ async fn gather(client: kube::Client, query: Query) -> Report {
                     report.text("Role definition. Access depends on its bindings.");
                     report.sections.push(Section::Rules {
                         rules,
-                        namespaced_binding: false,
+                        namespaced_binding: object.kind == "Role",
                     });
                 }
                 Err(e) => report

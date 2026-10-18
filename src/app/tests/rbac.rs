@@ -515,15 +515,33 @@ async fn namespaced_binding_keeps_role_scope_and_does_not_grant_urls() {
     let mut responses = fixtures();
     responses.insert(format!("{BASE}/clusterroles/shared"), (200, json!({
         "apiVersion":"rbac.authorization.k8s.io/v1","kind":"ClusterRole","metadata":{"name":"shared"},
-        "rules":[{"nonResourceURLs":["/healthz"],"verbs":["get"]}]
+        "rules":[
+            {"nonResourceURLs":["/healthz"],"verbs":["get"]},
+            {"apiGroups":[""],"resources":["nodes","nodes/proxy","configmaps"],"verbs":["get"]}
+        ]
     })));
     app.cluster.client = client(responses).0;
     palette(&mut app, "policy u:alice");
     let msg = reply(&mut rx).await;
     app.handle_msg(msg);
     let text = output(&app);
-    assert!(text.contains("/healthz  non-resource URL"), "{text}");
-    assert!(text.contains("Not granted by this namespaced binding."));
+    let row = |name: &str| {
+        text.lines()
+            .find(|line| line.starts_with(&format!("{name} ")))
+            .unwrap_or_else(|| panic!("{name}: {text}"))
+            .to_string()
+    };
+    for ungranted in ["/healthz", "nodes", "nodes/proxy"] {
+        let line = row(ungranted);
+        assert!(!line.contains('✓'), "{line}");
+        assert!(line.ends_with("not granted in a namespace"), "{line}");
+    }
+    assert!(row("configmaps").contains('✓'), "{text}");
+    assert!(text.contains(
+        "Cluster-scoped resources and non-resource URLs are not granted in a namespace."
+    ));
+    app.handle_key(press(KeyCode::Char('t'))).unwrap();
+    assert!(output(&app).contains("Not granted by this namespaced binding."));
 }
 
 #[tokio::test]

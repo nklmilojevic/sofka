@@ -591,8 +591,8 @@ include those conditions. Row filters can search the route paths.
   per standard verb. Rows for the same resource merge verbs from all rules.
   Other verbs, such as `escalate` or `*`, are listed in `OTHER`. A row marked
   `(named)` applies only to the objects in `RESOURCE NAMES`. Under a
-  RoleBinding, non-resource URL rows show no ticks because the binding does not
-  grant them. Press `t` to switch to the
+  Role or RoleBinding, rows for cluster-scoped resources and non-resource URLs
+  show no ticks because a namespace cannot grant them. Press `t` to switch to the
   per-rule list. The choice is kept for the session. Set
   `rbac_rule_list = true` to start with the list.
   Each rule keeps its source binding, source role, namespace scope, resource

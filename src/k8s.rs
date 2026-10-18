@@ -1197,6 +1197,15 @@ impl Cluster {
             .collect()
     }
 
+    /// Lowercased `(group, plural)` of every discovered cluster-scoped kind.
+    pub fn cluster_scoped_resources(&self) -> std::collections::HashSet<(String, String)> {
+        self.registry
+            .values()
+            .filter(|k| !k.namespaced)
+            .map(|k| (k.ar.group.to_lowercase(), k.ar.plural.to_lowercase()))
+            .collect()
+    }
+
     pub fn resolve_in_group(&self, kind: &str, group: &str) -> Option<Kind> {
         let mut found: Vec<&Kind> = self
             .registry
