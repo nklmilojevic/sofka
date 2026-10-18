@@ -839,3 +839,28 @@ async fn configured_rule_list_opens_first_and_t_still_switches() {
     );
     std::fs::remove_dir_all(dir).unwrap();
 }
+
+#[tokio::test]
+async fn help_names_the_configured_rbac_keys() {
+    let (mut app, _rx) = test_app();
+    let cfg: crate::config::Config = toml::from_str(
+        r#"
+        [keys.rbac]
+        toggle = "f7"
+        refresh = "f6"
+    "#,
+    )
+    .unwrap();
+    app.keymap = Keymap::compile(&cfg.keys).unwrap();
+    app.handle_key(press(KeyCode::Char('?'))).unwrap();
+    app.handle_key(press(KeyCode::Char('/'))).unwrap();
+    for c in "matrix and list".chars() {
+        app.handle_key(press(KeyCode::Char(c))).unwrap();
+    }
+    app.handle_key(press(KeyCode::Enter)).unwrap();
+    let text = super::screen_text(&mut app, 160, 40);
+    assert!(
+        text.contains("show rules; f7 switches matrix and list; f6 refreshes; esc returns"),
+        "{text}"
+    );
+}

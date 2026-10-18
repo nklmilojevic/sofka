@@ -3222,7 +3222,12 @@ fn build_help(app: &App, width: usize) -> (Vec<Line<'static>>, String, HelpSecti
     ));
     lines.push(bind(
         "Enter on RBAC roles/bindings",
-        "show rules; t switches matrix and list; r refreshes; Esc returns",
+        &format!(
+            "show rules; {} switches matrix and list; {} refreshes; {} returns",
+            app.keymap.label("rbac", Action::Toggle),
+            app.keymap.label("rbac", Action::Refresh),
+            app.keymap.label("rbac", Action::Back),
+        ),
     ));
     lines.push(bind(
         ":can-i",
