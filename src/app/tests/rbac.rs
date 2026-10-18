@@ -517,7 +517,8 @@ async fn namespaced_binding_keeps_role_scope_and_does_not_grant_urls() {
         "apiVersion":"rbac.authorization.k8s.io/v1","kind":"ClusterRole","metadata":{"name":"shared"},
         "rules":[
             {"nonResourceURLs":["/healthz"],"verbs":["get"]},
-            {"apiGroups":[""],"resources":["nodes","nodes/proxy","configmaps"],"verbs":["get"]}
+            {"apiGroups":[""],"resources":["nodes","nodes/proxy","configmaps"],"verbs":["get"]},
+            {"apiGroups":["*"],"resources":["nodes"],"verbs":["list"]}
         ]
     })));
     app.cluster.client = client(responses).0;
@@ -537,6 +538,15 @@ async fn namespaced_binding_keeps_role_scope_and_does_not_grant_urls() {
         assert!(line.ends_with("not granted in a namespace"), "{line}");
     }
     assert!(row("configmaps").contains('✓'), "{text}");
+    let wildcard = text
+        .lines()
+        .find(|line| line.split_whitespace().take(2).eq(["nodes", "*"]))
+        .unwrap_or_else(|| panic!("{text}"));
+    assert!(!wildcard.contains('✓'), "{wildcard}");
+    assert!(
+        wildcard.ends_with("not granted in a namespace"),
+        "{wildcard}"
+    );
     assert!(text.contains(
         "Cluster-scoped resources and non-resource URLs are not granted in a namespace."
     ));

@@ -1197,12 +1197,17 @@ impl Cluster {
             .collect()
     }
 
-    /// Lowercased `(group, plural)` of every discovered cluster-scoped kind.
-    pub fn cluster_scoped_resources(&self) -> std::collections::HashSet<(String, String)> {
+    /// Whether each discovered kind is namespaced, keyed by lowercased
+    /// `(group, plural)`.
+    pub fn resource_scopes(&self) -> HashMap<(String, String), bool> {
         self.registry
             .values()
-            .filter(|k| !k.namespaced)
-            .map(|k| (k.ar.group.to_lowercase(), k.ar.plural.to_lowercase()))
+            .map(|k| {
+                (
+                    (k.ar.group.to_lowercase(), k.ar.plural.to_lowercase()),
+                    k.namespaced,
+                )
+            })
             .collect()
     }
 

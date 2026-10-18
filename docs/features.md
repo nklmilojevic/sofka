@@ -592,7 +592,10 @@ include those conditions. Row filters can search the route paths.
   Other verbs, such as `escalate` or `*`, are listed in `OTHER`. A row marked
   `(named)` applies only to the objects in `RESOURCE NAMES`. Under a
   Role or RoleBinding, rows for cluster-scoped resources and non-resource URLs
-  show no ticks because a namespace cannot grant them. Press `t` to switch to the
+  show no ticks because a namespace cannot grant them. A rule for every API
+  group (`*`) is checked against each discovered group with that resource. If
+  only some of them are namespaced, the row says it covers namespaced API groups
+  only. Press `t` to switch to the
   per-rule list. The choice is kept for the session. Set
   `rbac_rule_list = true` to start with the list.
   Each rule keeps its source binding, source role, namespace scope, resource

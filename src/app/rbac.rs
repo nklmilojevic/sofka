@@ -193,10 +193,10 @@ impl App {
     }
 
     fn render_rbac_document(&mut self) {
-        let cluster_scoped = if self.rbac.rule_list {
+        let scopes = if self.rbac.rule_list {
             Default::default()
         } else {
-            self.cluster.cluster_scoped_resources()
+            self.cluster.resource_scopes()
         };
         let mut lines: Vec<String> = self
             .rbac
@@ -219,7 +219,7 @@ impl App {
                 } => lines.extend(crate::rbac::rule_matrix(
                     rules,
                     *namespaced_binding,
-                    &cluster_scoped,
+                    &scopes,
                 )),
             }
         }
