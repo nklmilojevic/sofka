@@ -4,6 +4,16 @@ let
   cfg = config.programs.sofka;
   toml = pkgs.formats.toml { };
 
+  # Without the flake (a plain import of this module), package.nix still needs
+  # craneLib; take crane from the revision flake.lock pins.
+  craneLock = (lib.importJSON ../flake.lock).nodes.crane.locked;
+  craneLib = import
+    (builtins.fetchTarball {
+      url = "https://github.com/${craneLock.owner}/${craneLock.repo}/archive/${craneLock.rev}.tar.gz";
+      sha256 = craneLock.narHash;
+    })
+    { inherit pkgs; };
+
   fileOptions = {
     settings = lib.mkOption {
       type = toml.type;
@@ -59,7 +69,7 @@ in
     enable = lib.mkEnableOption "Sofka";
     package = lib.mkOption {
       type = lib.types.nullOr lib.types.package;
-      default = pkgs.callPackage ../package.nix { };
+      default = pkgs.callPackage ../package.nix { inherit craneLib; };
       defaultText = lib.literalExpression "the Sofka package from this flake";
       description = "Sofka package to install. Set null to manage configuration only.";
     };

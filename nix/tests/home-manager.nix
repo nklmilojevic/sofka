@@ -2,7 +2,7 @@
 
 let
   inherit (pkgs) lib;
-  evaluate = extra: (home-manager.lib.homeManagerConfiguration {
+  evaluateWith = module: extra: (home-manager.lib.homeManagerConfiguration {
     inherit pkgs;
     modules = [
       module
@@ -14,6 +14,8 @@ let
       extra
     ];
   }).config;
+  evaluate = evaluateWith module;
+  standalone = evaluateWith ../home-manager.nix { programs.sofka.enable = true; };
   enabled = settings: evaluate { programs.sofka = { enable = true; package = null; } // settings; };
   fails = settings: !(builtins.tryEval (builtins.deepSeq (enabled settings).xdg.configFile true)).success;
   disabled = evaluate { programs.sofka.settings.readonly = true; };
@@ -97,6 +99,9 @@ assert noSofkaFiles disabled;
 assert !(builtins.elem package disabled.home.packages);
 assert noSofkaFiles default;
 assert builtins.elem package default.home.packages;
+assert standalone.programs.sofka.package.pname == package.pname;
+assert builtins.elem standalone.programs.sofka.package standalone.home.packages;
+assert builtins.isString standalone.programs.sofka.package.drvPath;
 assert noSofkaFiles empty;
 assert !(builtins.elem package empty.home.packages);
 assert builtins.elem replacement overridden.home.packages;
