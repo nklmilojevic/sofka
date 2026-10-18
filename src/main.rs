@@ -474,6 +474,7 @@ async fn run_main(args: Args) -> Result<()> {
     app.hide_header = cfg.hide_header;
     app.compact = cfg.compact_mode;
     app.detail.wrap = cfg.detail_wrap;
+    app.rbac.rule_list = cfg.rbac_rule_list;
     app.terminal_title = cfg.terminal_title.unwrap_or(true);
     app.update_check = cfg.update_check.unwrap_or(true);
     app.save_dir = cfg.save_dir.clone();

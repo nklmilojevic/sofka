@@ -266,16 +266,21 @@ pub fn rule_matrix(rules: &[PolicyRule], namespaced_binding: bool) -> Vec<String
     let mut table = vec![header];
     for ((target, names), verbs) in &rows {
         let (resource, group) = match target {
-            Target::Resource { group, resource } => (
+            Target::Resource { group, resource } if names.is_empty() => (
                 resource.clone(),
+                if group.is_empty() { "core" } else { group }.to_string(),
+            ),
+            Target::Resource { group, resource } => (
+                format!("{resource} (named)"),
                 if group.is_empty() { "core" } else { group }.to_string(),
             ),
             Target::Url(url) => (url.clone(), "non-resource URL".into()),
         };
+        let ungranted = namespaced_binding && matches!(target, Target::Url(_));
         let all = verbs.contains("*");
         let mut row = vec![resource, group];
         row.extend(MATRIX_VERBS.iter().map(|(verb, _)| {
-            if all || verbs.contains(verb) {
+            if !ungranted && (all || verbs.contains(verb)) {
                 "✓"
             } else {
                 "·"
@@ -287,7 +292,11 @@ pub fn rule_matrix(rules: &[PolicyRule], namespaced_binding: bool) -> Vec<String
             .copied()
             .filter(|verb| !MATRIX_VERBS.iter().any(|(known, _)| known == verb))
             .collect();
-        row.push(other.join(", "));
+        row.push(if ungranted {
+            "not granted by this binding".into()
+        } else {
+            other.join(", ")
+        });
         if with_names {
             row.push(names.join(", "));
         }
@@ -302,20 +311,9 @@ pub fn rule_matrix(rules: &[PolicyRule], namespaced_binding: bool) -> Vec<String
                 .unwrap_or(0)
         })
         .collect();
-    let mut lines: Vec<String> = table
-        .iter()
-        .map(|row| {
-            let mut line = String::new();
-            for (cell, width) in row.iter().zip(&widths) {
-                line.push_str(cell);
-                let pad = width - unicode_width::UnicodeWidthStr::width(cell.as_str());
-                line.push_str(&" ".repeat(pad + 2));
-            }
-            line.trim_end().to_string()
-        })
-        .collect();
+    let mut lines = Vec::new();
     if with_names {
-        lines.push("Rows with resource names apply only to those objects.".into());
+        lines.push("Rows marked (named) apply only to the objects in RESOURCE NAMES.".into());
     }
     if namespaced_binding
         && rows
@@ -324,6 +322,15 @@ pub fn rule_matrix(rules: &[PolicyRule], namespaced_binding: bool) -> Vec<String
     {
         lines.push("Non-resource URLs: Not granted by this namespaced binding.".into());
     }
+    lines.extend(table.iter().map(|row| {
+        let mut line = String::new();
+        for (cell, width) in row.iter().zip(&widths) {
+            line.push_str(cell);
+            let pad = width - unicode_width::UnicodeWidthStr::width(cell.as_str());
+            line.push_str(&" ".repeat(pad + 2));
+        }
+        line.trim_end().to_string()
+    }));
     lines
 }
 
@@ -381,27 +388,37 @@ mod tests {
         ];
         let lines = rule_matrix(&rules, true);
         let text = lines.join("\n");
-        assert!(lines[0].ends_with("OTHER  RESOURCE NAMES"), "{text}");
-        let tokens = |i: usize| lines[i].split_whitespace().collect::<Vec<_>>();
-        assert_eq!(tokens(1)[..4], ["secrets", "core", "·", "✓"], "{text}");
-        assert_eq!(tokens(2)[..4], ["secrets", "core", "✓", "·"], "{text}");
-        assert!(lines[2].ends_with("a, b"), "{text}");
         assert_eq!(
-            tokens(3)[..5],
-            ["/healthz", "non-resource", "URL", "✓", "·"],
-            "{text}"
-        );
-        assert!(lines[3].ends_with("post"), "{text}");
-        assert!(text.contains("apply only to those objects"), "{text}");
-        assert!(
-            text.contains("Not granted by this namespaced binding."),
+            lines[..2],
+            [
+                "Rows marked (named) apply only to the objects in RESOURCE NAMES.",
+                "Non-resource URLs: Not granted by this namespaced binding.",
+            ],
             "{text}"
         );
         assert!(
-            !rule_matrix(&rules, false)
-                .join("\n")
-                .contains("Not granted")
+            lines[2].ends_with("OTHER                        RESOURCE NAMES"),
+            "{text}"
         );
+        let tokens = |i: usize| lines[i].split_whitespace().collect::<Vec<_>>();
+        assert_eq!(tokens(3)[..4], ["secrets", "core", "·", "✓"], "{text}");
+        assert_eq!(
+            tokens(4)[..5],
+            ["secrets", "(named)", "core", "✓", "·"],
+            "{text}"
+        );
+        assert!(lines[4].ends_with("a, b"), "{text}");
+        let url = tokens(5);
+        assert_eq!(url[..3], ["/healthz", "non-resource", "URL"], "{text}");
+        assert!(url[3..11].iter().all(|cell| *cell == "·"), "{text}");
+        assert!(lines[5].ends_with("not granted by this binding"), "{text}");
+
+        let cluster = rule_matrix(&rules, false);
+        let text = cluster.join("\n");
+        assert!(!text.contains("not granted"), "{text}");
+        let url = cluster[4].split_whitespace().collect::<Vec<_>>();
+        assert_eq!(url[3], "✓", "{text}");
+        assert!(cluster[4].ends_with("post"), "{text}");
         assert_eq!(rule_matrix(&[], false), vec!["No rules in this role."]);
     }
 }

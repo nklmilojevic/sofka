@@ -507,7 +507,7 @@ async fn namespaced_binding_keeps_role_scope_and_does_not_grant_urls() {
     assert_eq!(
         row,
         [
-            "pods/log", "core", "✓", "·", "✓", "·", "·", "·", "·", "·", "one,", "two"
+            "pods/log", "(named)", "core", "✓", "·", "✓", "·", "·", "·", "·", "·", "one,", "two"
         ]
     );
     assert!(!text.contains("secrets"));
@@ -759,7 +759,12 @@ async fn t_switches_rules_between_matrix_and_list_for_the_session() {
     let msg = reply(&mut rx).await;
     app.handle_msg(msg);
     let matrix = output(&app);
-    assert!(matrix.contains("RESOURCE  API GROUP"), "{matrix}");
+    assert!(
+        matrix
+            .lines()
+            .any(|line| line.starts_with("RESOURCE ") && line.contains(" API GROUP ")),
+        "{matrix}"
+    );
     assert!(!matrix.contains("Rule 1"), "{matrix}");
     assert!(!app.rbac.document.wrap);
     app.handle_key(press(KeyCode::Char('l'))).unwrap();
@@ -788,4 +793,31 @@ async fn t_switches_rules_between_matrix_and_list_for_the_session() {
     app.handle_key(press(KeyCode::Char('t'))).unwrap();
     assert_eq!(output(&app), matrix);
     assert_eq!(app.flash, "rules: matrix");
+}
+
+#[tokio::test]
+async fn configured_rule_list_opens_first_and_t_still_switches() {
+    let dir = std::env::temp_dir().join(format!("sofka-rbac-rule-list-{}", std::process::id()));
+    write_config(&dir, "rbac_rule_list = true\n");
+    let (mut app, mut rx) = test_app();
+    app.config = crate::config::ConfigLoader::from_dir(Some(dir.clone()));
+    app.rbac.rule_list = app
+        .config
+        .resolve("dev", "test-cluster")
+        .config
+        .rbac_rule_list;
+    app.cluster.client = client(fixtures()).0;
+    palette(&mut app, "policy u:alice");
+    let msg = reply(&mut rx).await;
+    app.handle_msg(msg);
+    assert!(output(&app).contains("Rule 1"), "{}", output(&app));
+    app.handle_key(press(KeyCode::Char('t'))).unwrap();
+    assert!(
+        output(&app)
+            .lines()
+            .any(|line| line.starts_with("RESOURCE ") && line.contains(" API GROUP ")),
+        "{}",
+        output(&app)
+    );
+    std::fs::remove_dir_all(dir).unwrap();
 }

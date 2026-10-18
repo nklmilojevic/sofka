@@ -79,6 +79,8 @@ pub struct Config {
     pub compact_mode: bool,
     /// Start with document line wrapping enabled.
     pub detail_wrap: bool,
+    /// Start RBAC rules as the per-rule list instead of the matrix.
+    pub rbac_rule_list: bool,
     /// Custom alias -> canonical resource (plural/kind) mappings.
     pub aliases: HashMap<String, String>,
     /// Namespaces pinned to the top of the switcher (a curated team list, in
@@ -2062,6 +2064,18 @@ mod tests {
             let yaml: Config = serde_yaml::from_str(&format!("detail_wrap: {enabled}\n")).unwrap();
             assert_eq!(toml.detail_wrap, enabled);
             assert_eq!(yaml.detail_wrap, enabled);
+        }
+    }
+
+    #[test]
+    fn rbac_rule_list_defaults_and_formats() {
+        assert!(!Config::default().rbac_rule_list);
+        for enabled in [false, true] {
+            let toml: Config = toml::from_str(&format!("rbac_rule_list = {enabled}")).unwrap();
+            let yaml: Config =
+                serde_yaml::from_str(&format!("rbac_rule_list: {enabled}\n")).unwrap();
+            assert_eq!(toml.rbac_rule_list, enabled);
+            assert_eq!(yaml.rbac_rule_list, enabled);
         }
     }
 

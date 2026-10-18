@@ -229,6 +229,7 @@ readonly          = false  # true disables every mutating action (delete, edit,
 hide_header = false # true hides the header and logo
 compact_mode = false # true starts with a one-line header and no footer
 detail_wrap = false # true starts with document line wrapping enabled
+rbac_rule_list = false # true opens RBAC rules as the per-rule list, not the matrix
 mouse             = false  # default; :mouse switches it for this session
                            # false keeps the terminal's native mouse behavior
                            # (text selection) instead of scroll/click/sort
@@ -291,6 +292,11 @@ The `w` key changes wrapping for the current session. New documents, `:reload`,
 and context switches keep this setting. The configuration is read at startup,
 including cluster and context overrides. Changes made with `w` are not written
 to the configuration file. Log wrapping is separate.
+
+Set `rbac_rule_list = true` to open RBAC rules as the per-rule list instead of
+the resource and verb matrix. The default is `false`. The `t` key in the RBAC
+view switches the layout for the current session and is not written to the
+configuration file.
 
 `mouse_scroll_lines` sets how many navigation steps one received mouse wheel
 event triggers in views with mouse capture enabled (tables and pickers). The
