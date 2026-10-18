@@ -21,11 +21,26 @@ impl Query {
     }
 }
 
+#[derive(Clone, Debug)]
+pub enum Section {
+    Text(String),
+    Rules {
+        rules: Vec<PolicyRule>,
+        namespaced_binding: bool,
+    },
+}
+
 #[derive(Default)]
 pub struct Report {
     pub subjects: Vec<(Subject, usize)>,
-    pub lines: Vec<String>,
+    pub sections: Vec<Section>,
     pub warnings: Vec<String>,
+}
+
+impl Report {
+    fn text(&mut self, line: impl Into<String>) {
+        self.sections.push(Section::Text(line.into()));
+    }
 }
 
 #[derive(Default)]
@@ -35,6 +50,10 @@ pub struct State {
     pub selection: ListState,
     pub document: Scrollable,
     pub warnings: Vec<String>,
+    pub sections: Vec<Section>,
+    /// Rules as the per-rule list instead of the resource and verb matrix.
+    /// Kept across views for the session.
+    pub rule_list: bool,
     pub pending: bool,
     history: Vec<(Query, Option<Subject>)>,
     selection_target: Option<Subject>,
@@ -118,6 +137,7 @@ impl App {
         self.rbac.selection.select(None);
         self.rbac.subjects.clear();
         self.rbac.warnings.clear();
+        self.rbac.sections.clear();
         self.rbac.pending = true;
         self.rbac.query = Some(query.clone());
         self.mode = Mode::Rbac;
@@ -167,13 +187,38 @@ impl App {
             None => (!self.rbac.subjects.is_empty()).then_some(0),
         };
         self.rbac.selection.select(selected);
-        let mut lines = Vec::new();
-        for warning in &report.warnings {
-            lines.push(format!("INCOMPLETE: {warning}"));
-        }
-        lines.extend(report.lines);
-        self.rbac.document.lines = lines.into();
+        self.rbac.sections = report.sections;
         self.rbac.warnings = report.warnings;
+        self.render_rbac_document();
+    }
+
+    fn render_rbac_document(&mut self) {
+        let mut lines: Vec<String> = self
+            .rbac
+            .warnings
+            .iter()
+            .map(|warning| format!("INCOMPLETE: {warning}"))
+            .collect();
+        for section in &self.rbac.sections {
+            match section {
+                Section::Text(line) => lines.push(line.clone()),
+                Section::Rules {
+                    rules,
+                    namespaced_binding,
+                } if self.rbac.rule_list => {
+                    lines.extend(crate::rbac::rule_lines(rules, *namespaced_binding))
+                }
+                Section::Rules {
+                    rules,
+                    namespaced_binding,
+                } => lines.extend(crate::rbac::rule_matrix(rules, *namespaced_binding)),
+            }
+        }
+        let document = &mut self.rbac.document;
+        document.lines = lines.into();
+        document.wrap = self.rbac.rule_list;
+        document.scroll = 0;
+        document.hscroll = 0;
     }
 
     pub(super) fn key_rbac(&mut self, key: KeyInput) {
@@ -195,6 +240,19 @@ impl App {
                     self.load_rbac(query, selection);
                 }
             }
+            Some(Action::Toggle) if !subjects && !self.rbac.pending => {
+                self.rbac.rule_list = !self.rbac.rule_list;
+                self.render_rbac_document();
+                self.flash = format!(
+                    "rules: {}",
+                    if self.rbac.rule_list {
+                        "list"
+                    } else {
+                        "matrix"
+                    }
+                );
+                self.flash_err = false;
+            }
             Some(Action::Accept) if subjects => {
                 if let Some((subject, _)) = self
                     .rbac
@@ -214,6 +272,8 @@ impl App {
             Some(Action::First) if subjects => self.rbac.selection.select((len > 0).then_some(0)),
             Some(Action::Last) if subjects => self.rbac.selection.select(len.checked_sub(1)),
             Some(Action::Down) => self.rbac.document.scroll_by(1),
+            Some(Action::Left) if !subjects => self.rbac.document.scroll_h(-5),
+            Some(Action::Right) if !subjects => self.rbac.document.scroll_h(5),
             Some(Action::Up) => self.rbac.document.scroll_by(-1),
             Some(a @ (Action::PageDown | Action::HalfPageDown)) if subjects => {
                 for _ in 0..a.page_size(10) {
@@ -306,25 +366,23 @@ async fn append_grants(
         .await;
     for grant in grants {
         let rules = &cache[&grant.role];
-        report.lines.push(String::new());
-        report
-            .lines
-            .push(format!("Binding: {}", grant.binding.label()));
-        report.lines.push(format!("Role: {}", grant.role.label()));
-        report.lines.push(match &grant.binding.namespace {
+        report.text(String::new());
+        report.text(format!("Binding: {}", grant.binding.label()));
+        report.text(format!("Role: {}", grant.role.label()));
+        report.text(match &grant.binding.namespace {
             Some(ns) => format!("Scope: namespace {ns} (namespaced resources only)"),
             None => "Scope: cluster and all namespaces".into(),
         });
         match rules {
-            Ok(rules) => report.lines.extend(crate::rbac::rule_lines(
-                rules,
-                grant.binding.namespace.is_some(),
-            )),
+            Ok(rules) => report.sections.push(Section::Rules {
+                rules: rules.clone(),
+                namespaced_binding: grant.binding.namespace.is_some(),
+            }),
             Err(e) => {
                 report
                     .warnings
                     .push(format!("{} could not be read: {e}", grant.role.label()));
-                report.lines.push("Rules unavailable.".into());
+                report.text("Rules unavailable.");
             }
         }
     }
@@ -338,26 +396,21 @@ async fn gather(client: kube::Client, query: Query) -> Report {
         }
         Query::Subject(subject) => {
             let grants = bindings(&client, &mut report).await.grants(&subject);
-            report
-                .lines
-                .push("Direct subject matches only. Group membership is not resolved.".into());
-            report
-                .lines
-                .push("These are stored RBAC rules, not an API access check.".into());
+            report.text("Direct subject matches only. Group membership is not resolved.");
+            report.text("These are stored RBAC rules, not an API access check.");
             if grants.is_empty() {
-                report
-                    .lines
-                    .push("No direct bindings found in the data read.".into());
+                report.text("No direct bindings found in the data read.");
             }
             append_grants(&client, grants, &mut report).await;
         }
         Query::Object(object) => match object.kind.as_str() {
             "Role" | "ClusterRole" => match role_rules(&client, &object).await {
                 Ok(rules) => {
-                    report
-                        .lines
-                        .push("Role definition. Access depends on its bindings.".into());
-                    report.lines.extend(crate::rbac::rule_lines(&rules, false));
+                    report.text("Role definition. Access depends on its bindings.");
+                    report.sections.push(Section::Rules {
+                        rules,
+                        namespaced_binding: false,
+                    });
                 }
                 Err(e) => report
                     .warnings

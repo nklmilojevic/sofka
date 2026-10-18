@@ -203,7 +203,7 @@ async fn subjects_enter_refresh_and_back_preserve_scope_and_sources() {
         "Scope: namespace a",
         "Scope: namespace b",
         "pods/log",
-        "Resource names (restricted): allowed",
+        "RESOURCE NAMES",
     ] {
         assert!(text.contains(expected), "{expected}: {text}");
     }
@@ -241,7 +241,13 @@ async fn group_rules_keep_non_resource_urls() {
     app.handle_key(press(KeyCode::Enter)).unwrap();
     let msg = reply(&mut rx).await;
     app.handle_msg(msg);
-    assert!(output(&app).contains("Non-resource URLs: /healthz/*"));
+    assert!(
+        output(&app)
+            .lines()
+            .any(|line| line.starts_with("/healthz/*  non-resource URL  ✓")),
+        "{}",
+        output(&app)
+    );
     assert!(output(&app).contains("Scope: cluster and all namespaces"));
 }
 
@@ -364,7 +370,7 @@ async fn enter_on_each_rbac_kind_reads_its_rules() {
         let msg = reply(&mut rx).await;
         app.handle_msg(msg);
         assert!(app.rbac.warnings.is_empty(), "{:?}", app.rbac.warnings);
-        assert!(output(&app).contains("Verbs: get"));
+        assert!(output(&app).contains("RESOURCE"), "{}", output(&app));
         if kind == "RoleBinding" {
             assert!(output(&app).contains("Scope: namespace a"));
         }
@@ -386,7 +392,10 @@ async fn denied_binding_lists_and_missing_roles_are_incomplete() {
     let text = output(&app);
     assert!(text.contains("INCOMPLETE: ClusterRoleBindings could not be read"));
     assert!(text.contains("INCOMPLETE: Role a/reader could not be read"));
-    assert!(text.contains("Resources: secrets"));
+    assert!(
+        text.lines().any(|line| line.starts_with("secrets ")),
+        "{text}"
+    );
     assert!(text.contains("Rules unavailable."));
 }
 
@@ -489,8 +498,18 @@ async fn namespaced_binding_keeps_role_scope_and_does_not_grant_urls() {
     app.handle_msg(msg);
     let text = output(&app);
     assert!(text.contains("Role: Role a/reader"), "{text}");
-    assert!(text.contains("Resource names (restricted): one, two"));
-    assert!(text.contains("Verbs: get, watch"));
+    let row: Vec<_> = text
+        .lines()
+        .find(|line| line.starts_with("pods/log"))
+        .unwrap()
+        .split_whitespace()
+        .collect();
+    assert_eq!(
+        row,
+        [
+            "pods/log", "core", "✓", "·", "✓", "·", "·", "·", "·", "·", "one,", "two"
+        ]
+    );
     assert!(!text.contains("secrets"));
 
     let mut responses = fixtures();
@@ -503,7 +522,7 @@ async fn namespaced_binding_keeps_role_scope_and_does_not_grant_urls() {
     let msg = reply(&mut rx).await;
     app.handle_msg(msg);
     let text = output(&app);
-    assert!(text.contains("Non-resource URLs: /healthz"));
+    assert!(text.contains("/healthz  non-resource URL"), "{text}");
     assert!(text.contains("Not granted by this namespaced binding."));
 }
 
@@ -725,4 +744,48 @@ async fn role_reads_run_in_bounded_parallel_and_output_stays_ordered() {
     sorted.sort();
     assert_eq!(lines, sorted);
     assert!(app.rbac.warnings.is_empty());
+}
+
+#[tokio::test]
+async fn t_switches_rules_between_matrix_and_list_for_the_session() {
+    let (mut app, mut rx) = test_app();
+    app.cluster.client = client(fixtures()).0;
+    palette(&mut app, "users");
+    let msg = reply(&mut rx).await;
+    app.handle_msg(msg);
+    app.handle_key(press(KeyCode::Char('t'))).unwrap();
+    assert!(!app.rbac.rule_list, "t does nothing on the subject list");
+    app.handle_key(press(KeyCode::Enter)).unwrap();
+    let msg = reply(&mut rx).await;
+    app.handle_msg(msg);
+    let matrix = output(&app);
+    assert!(matrix.contains("RESOURCE  API GROUP"), "{matrix}");
+    assert!(!matrix.contains("Rule 1"), "{matrix}");
+    assert!(!app.rbac.document.wrap);
+    app.handle_key(press(KeyCode::Char('l'))).unwrap();
+    assert_eq!(app.rbac.document.hscroll, 5);
+
+    app.handle_key(press(KeyCode::Char('t'))).unwrap();
+    let list = output(&app);
+    assert!(list.contains("Rule 1"), "{list}");
+    assert!(
+        list.contains("Resource names (restricted): allowed"),
+        "{list}"
+    );
+    assert!(list.contains("Binding: RoleBinding a/one"), "{list}");
+    assert!(app.rbac.document.wrap);
+    assert_eq!(app.rbac.document.hscroll, 0);
+    assert_eq!(app.flash, "rules: list");
+
+    app.handle_key(press(KeyCode::Esc)).unwrap();
+    let msg = reply(&mut rx).await;
+    app.handle_msg(msg);
+    app.handle_key(press(KeyCode::Enter)).unwrap();
+    let msg = reply(&mut rx).await;
+    app.handle_msg(msg);
+    assert_eq!(output(&app), list);
+
+    app.handle_key(press(KeyCode::Char('t'))).unwrap();
+    assert_eq!(output(&app), matrix);
+    assert_eq!(app.flash, "rules: matrix");
 }
