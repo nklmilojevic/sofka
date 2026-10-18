@@ -233,12 +233,14 @@ enum Target {
 /// `scopes` maps discovered `(group, plural)` pairs to whether they are
 /// namespaced. Under a namespaced scope, cluster-scoped resources and
 /// non-resource URLs are not granted. A `*` group is checked against every
-/// discovered group with that plural. Wildcard and undiscovered resources keep
-/// their ticks.
+/// discovered group with that plural; when `discovery_complete` is false, a
+/// skipped group may still be namespaced, so such a row is never declared
+/// ungranted. Wildcard and undiscovered resources keep their ticks.
 pub fn rule_matrix(
     rules: &[PolicyRule],
     namespaced_binding: bool,
     scopes: &std::collections::HashMap<(String, String), bool>,
+    discovery_complete: bool,
 ) -> Vec<String> {
     if rules.is_empty() {
         return vec!["No rules in this role.".into()];
@@ -299,10 +301,8 @@ pub fn rule_matrix(
                         .map(|(_, namespaced)| *namespaced)
                         .collect();
                     let cluster = namespaced.iter().any(|namespaced| !namespaced);
-                    (
-                        cluster && !namespaced.contains(&true),
-                        cluster && namespaced.contains(&true),
-                    )
+                    let mixed = namespaced.contains(&true) || !discovery_complete;
+                    (cluster && !mixed, cluster && mixed)
                 } else {
                     let key = (group.clone(), plural.to_string());
                     (scopes.get(&key) == Some(&false), false)
@@ -398,7 +398,7 @@ mod tests {
             rule(&["apps"], &["deployments"], &[], &["watch", "escalate"]),
             rule(&["batch"], &["jobs"], &[], &["*"]),
         ];
-        let lines = rule_matrix(&rules, false, &Default::default());
+        let lines = rule_matrix(&rules, false, &Default::default(), true);
         assert_eq!(
             lines,
             vec![
@@ -423,7 +423,7 @@ mod tests {
             rule(&[""], &["secrets"], &[], &["list"]),
             url,
         ];
-        let lines = rule_matrix(&rules, true, &Default::default());
+        let lines = rule_matrix(&rules, true, &Default::default(), true);
         let text = lines.join("\n");
         assert_eq!(
             lines[..2],
@@ -454,14 +454,14 @@ mod tests {
         assert!(url[3..11].iter().all(|cell| *cell == "·"), "{text}");
         assert!(lines[5].ends_with("not granted in a namespace"), "{text}");
 
-        let cluster = rule_matrix(&rules, false, &Default::default());
+        let cluster = rule_matrix(&rules, false, &Default::default(), true);
         let text = cluster.join("\n");
         assert!(!text.contains("not granted"), "{text}");
         let url = cluster[4].split_whitespace().collect::<Vec<_>>();
         assert_eq!(url[3], "✓", "{text}");
         assert!(cluster[4].ends_with("post"), "{text}");
         assert_eq!(
-            rule_matrix(&[], false, &Default::default()),
+            rule_matrix(&[], false, &Default::default(), true),
             vec!["No rules in this role."]
         );
     }
@@ -506,7 +506,7 @@ mod tests {
                 line.ends_with("not granted in a namespace"),
             )
         };
-        let namespaced = rule_matrix(&rules, true, &scopes);
+        let namespaced = rule_matrix(&rules, true, &scopes, true);
         assert!(
             namespaced[0].starts_with("Cluster-scoped resources"),
             "{namespaced:?}"
@@ -530,7 +530,14 @@ mod tests {
         assert!(mixed.contains('✓'), "{mixed}");
         assert!(mixed.ends_with("namespaced API groups only"), "{mixed}");
 
-        let cluster = rule_matrix(&rules, false, &scopes);
+        // Skipped discovery groups may hold a namespaced `nodes`.
+        let partial = rule_matrix(&rules, true, &scopes, false);
+        let nodes = row(&partial, "nodes", "*");
+        assert!(nodes.contains('✓'), "{nodes}");
+        assert!(nodes.ends_with("namespaced API groups only"), "{nodes}");
+        assert_eq!(ticked(row(&partial, "nodes", "core")), (false, true));
+
+        let cluster = rule_matrix(&rules, false, &scopes, true);
         assert_eq!(ticked(row(&cluster, "nodes", "core")), (true, false));
         assert_eq!(ticked(row(&cluster, "nodes", "*")), (true, false));
         let text = cluster.join("\n");

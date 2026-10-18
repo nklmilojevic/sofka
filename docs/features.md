@@ -594,8 +594,8 @@ include those conditions. Row filters can search the route paths.
   Role or RoleBinding, rows for cluster-scoped resources and non-resource URLs
   show no ticks because a namespace cannot grant them. A rule for every API
   group (`*`) is checked against each discovered group with that resource. If
-  only some of them are namespaced, the row says it covers namespaced API groups
-  only. Press `t` to switch to the
+  only some of them are namespaced, or API discovery skipped a group, the row
+  says it covers namespaced API groups only. Press `t` to switch to the
   per-rule list. The choice is kept for the session. Set
   `rbac_rule_list = true` to start with the list.
   Each rule keeps its source binding, source role, namespace scope, resource

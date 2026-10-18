@@ -552,6 +552,20 @@ async fn namespaced_binding_keeps_role_scope_and_does_not_grant_urls() {
     ));
     app.handle_key(press(KeyCode::Char('t'))).unwrap();
     assert!(output(&app).contains("Not granted by this namespaced binding."));
+
+    // A group discovery skipped may serve a namespaced `nodes`.
+    app.cluster.discovery_warnings = vec!["API discovery could not read broken.io/v1".into()];
+    app.handle_key(press(KeyCode::Char('t'))).unwrap();
+    let text = output(&app);
+    let wildcard = text
+        .lines()
+        .find(|line| line.split_whitespace().take(2).eq(["nodes", "*"]))
+        .unwrap_or_else(|| panic!("{text}"));
+    assert!(wildcard.contains('✓'), "{wildcard}");
+    assert!(
+        wildcard.ends_with("namespaced API groups only"),
+        "{wildcard}"
+    );
 }
 
 #[tokio::test]

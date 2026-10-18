@@ -220,6 +220,7 @@ impl App {
                     rules,
                     *namespaced_binding,
                     &scopes,
+                    self.cluster.discovery_warnings.is_empty(),
                 )),
             }
         }
