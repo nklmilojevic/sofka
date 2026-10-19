@@ -1051,6 +1051,9 @@ pub struct ViewColumnConfig {
     pub kind: Option<String>,
     /// Path display format: `image-tag` for text, `cpu` or `memory` for quantities.
     pub format: Option<String>,
+    /// Regex applied to a path value: the cell shows the first capture group,
+    /// or the whole match when the pattern has none.
+    pub regex: Option<String>,
     /// Only shown in wide mode.
     pub wide: bool,
     /// Fixed display width in columns (defaults to a flexible share).

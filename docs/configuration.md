@@ -393,6 +393,9 @@ Custom text path columns accept `format = "image-tag"` to show only the image
 tag. See the [image tag example](views.md#image-tags) for configuration and
 validation rules.
 
+Path columns accept `regex` to show the first capture group of a value. See
+[regex extraction](views.md#regex-extraction).
+
 Quantity path columns accept `format = "cpu"` or `format = "memory"` with
 `type = "quantity"`. These formats use millicores or Mi/Gi for display and
 the original values for sorting and numeric filters. See

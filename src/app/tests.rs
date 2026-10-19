@@ -17720,6 +17720,7 @@ async fn user_view_wins_over_printer_columns() {
                 condition_match: crate::views::ConditionMatch::Type,
                 condition_field: None,
                 default: None,
+                regex: None,
             }],
             ..Default::default()
         })),
@@ -34122,6 +34123,59 @@ async fn image_tag_columns_render_selected_paths_and_filter_by_tag() {
     let (_, rows) = app.snapshot_table();
     assert_eq!(rows.len(), 2);
     assert!(rows.iter().all(|row| row[2] == "1.2.3"));
+}
+
+#[tokio::test]
+async fn regex_columns_show_the_extracted_value_and_filter_by_it() {
+    let (mut app, _rx) = test_app();
+    install_views(
+        &mut app,
+        r#"
+        [views."v1/nodes"]
+        replace = true
+        columns = [
+            { name = "NAME", builtin = "NAME" },
+            { name = "NODEGROUP", path = "/metadata/labels/eks.amazonaws.com~1nodegroup", regex = '^(.*)-[0-9]{18}[0-9a-f]{8}$' },
+            { name = "OS", path = "/status/nodeInfo/osImage", regex = '^(.*?) \(', default = "none (yet)" },
+            { name = "PODS", path = ["/spec/missing", "/spec/pods"], type = "number", regex = '[0-9]+' },
+            { name = "OPTIONAL", path = "/spec/pods", regex = '^(x)?[0-9]' },
+        ]
+        "#,
+    );
+    palette(&mut app, "nodes");
+    for (name, nodegroup, os, pods) in [
+        (
+            "a",
+            "default-a-20250314092215118700000003",
+            Some("Bottlerocket OS 1.66.0 (aws-k8s-1.36)"),
+            "12 pods",
+        ),
+        ("b", "system-b-2025031409221512340000000c", None, "3 pods"),
+        ("c", "manual", Some("Ubuntu 24.04"), "none"),
+    ] {
+        let mut node = json!({
+            "apiVersion": "v1", "kind": "Node",
+            "metadata": {"name": name, "labels": {"eks.amazonaws.com/nodegroup": nodegroup}},
+            "spec": {"pods": pods},
+        });
+        if let Some(os) = os {
+            node["status"] = json!({"nodeInfo": {"osImage": os}});
+        }
+        apply(&mut app, node);
+    }
+    let (headers, rows) = app.snapshot_table();
+    assert_eq!(headers, ["NAME", "NODEGROUP", "OS", "PODS", "OPTIONAL"]);
+    assert_eq!(
+        rows[0],
+        ["a", "default-a", "Bottlerocket OS 1.66.0", "12", "12 pods"]
+    );
+    assert_eq!(rows[1], ["b", "system-b", "none (yet)", "3", "3 pods"]);
+    assert_eq!(rows[2], ["c", "manual", "Ubuntu 24.04", "none", "none"]);
+    type_filter(&mut app, "pods>5");
+    assert_eq!(row_names(&app), ["a"]);
+    app.handle_key(press(KeyCode::Esc)).unwrap();
+    type_filter(&mut app, "nodegroup=system-b");
+    assert_eq!(row_names(&app), ["b"]);
 }
 
 const PAGING_KEYS: &str = r#"

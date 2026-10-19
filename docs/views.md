@@ -129,6 +129,38 @@ The image tag formatter accepts an omitted `type` or `type = "text"`. Other type
 `metric` sources, and `builtin` sources are incompatible with `format`.
 Unsupported formats and incompatible columns are skipped with a config warning.
 
+### Regex extraction
+
+Use `regex` on a path column to show part of a value. The cell shows the
+first capture group, or the whole match when the pattern has no group:
+
+```toml
+[[views."v1/nodes".columns]]
+name = "NODEGROUP"
+path = "/metadata/labels/eks.amazonaws.com~1nodegroup"
+regex = '^(.*)-[0-9]{18}[0-9a-f]{8}$'
+
+[[views."v1/nodes".columns]]
+name = "OS-IMAGE"
+path = "/status/nodeInfo/osImage"
+regex = '^(.*?) \('
+```
+
+`default-a-20250314092215118700000003` shows `default-a`, and
+`Bottlerocket OS 1.66.0 (aws-k8s-1.36)` shows `Bottlerocket OS 1.66.0`.
+Use single quotes in TOML so backslashes stay as written.
+
+The pattern runs on the value selected from `path`, including fallback paths.
+A value that does not match, a first group that does not take part in the
+match, and values that are not strings keep their usual display. `default` is
+shown as written. Sorting, filters, and status colors use the extracted value.
+On `number`, `quantity`, and `time` columns the value is extracted first and
+parsed after, so `regex = '[0-9]+'` turns `12 pods` into the number 12.
+
+The syntax is the Rust [`regex`](https://docs.rs/regex) crate's. An invalid
+pattern, `regex` together with `format`, and `regex` on `metric`, `builtin`,
+or condition columns are skipped with a config warning.
+
 ### Quantity formats
 
 Use `format = "cpu"` or `format = "memory"` with `type = "quantity"`

@@ -116,6 +116,8 @@ pub struct UserColumn {
     pub condition_field: Option<String>,
     /// Shown, sorted, and colored in place of a missing or null value.
     pub default: Option<String>,
+    /// Extracts part of a string value — see [`apply_regex`].
+    pub regex: Option<regex::Regex>,
 }
 
 /// A compiled per-kind view.
@@ -501,6 +503,24 @@ pub fn compile(
                 ));
                 continue;
             }
+            let regex = match &c.regex {
+                None => None,
+                Some(_) if path.is_none() || kind == ColumnKind::Condition => {
+                    warnings.push(format!("views.\"{key}\": column {header}: regex applies only to path columns; column skipped"));
+                    continue;
+                }
+                Some(_) if c.format.is_some() => {
+                    warnings.push(format!("views.\"{key}\": column {header}: set only one of format or regex; column skipped"));
+                    continue;
+                }
+                Some(pattern) => match regex::Regex::new(pattern) {
+                    Ok(regex) => Some(regex),
+                    Err(err) => {
+                        warnings.push(format!("views.\"{key}\": column {header}: invalid regex '{pattern}' ({err}); column skipped"));
+                        continue;
+                    }
+                },
+            };
             let align = match c.align.as_deref() {
                 None => None,
                 Some("left") => Some(Align::Left),
@@ -538,6 +558,7 @@ pub fn compile(
                 condition_match: ConditionMatch::Type,
                 condition_field: None,
                 default,
+                regex,
             });
         }
         let mut replace = cfg.replace;
@@ -1125,6 +1146,40 @@ fn cell_value<'a>(obj: &'a DynamicObject, col: &'a UserColumn) -> Option<Extract
 }
 
 fn lookup_value<'a>(obj: &'a DynamicObject, col: &UserColumn) -> Option<Extracted<'a>> {
+    let value = raw_value(obj, col)?;
+    Some(match &col.regex {
+        Some(regex) => apply_regex(value, regex),
+        None => value,
+    })
+}
+
+/// The first capture group of a string value, or the whole match when the
+/// pattern has no group. Values that don't match, a first group that didn't
+/// take part, and values that aren't strings stay as they are.
+fn apply_regex<'a>(value: Extracted<'a>, regex: &regex::Regex) -> Extracted<'a> {
+    let range = |s: &str| {
+        let captures = regex.captures(s)?;
+        let group = if regex.captures_len() > 1 { 1 } else { 0 };
+        captures.get(group).map(|m| m.range())
+    };
+    match value {
+        Extracted::Text(s) => match range(s) {
+            Some(range) => Extracted::Text(&s[range]),
+            None => value,
+        },
+        Extracted::Json(Value::String(s)) => match range(s) {
+            Some(range) => Extracted::Text(&s[range]),
+            None => value,
+        },
+        Extracted::Owned(Value::String(ref s)) => match range(s) {
+            Some(range) => Extracted::Owned(Value::String(s[range].to_string())),
+            None => value,
+        },
+        other => other,
+    }
+}
+
+fn raw_value<'a>(obj: &'a DynamicObject, col: &UserColumn) -> Option<Extracted<'a>> {
     match col.condition_field.as_deref() {
         Some(field) => {
             condition_value(obj, &col.pointer, col.condition_match, field).map(Extracted::Json)
@@ -1334,6 +1389,7 @@ pub fn printer_columns_view(crd: &Value, version: &str) -> Option<View> {
                     condition_match,
                     condition_field,
                     default: None,
+                    regex: None,
                 });
             }
             let pointer = json_path_to_pointer(json_path)?;
@@ -1348,6 +1404,7 @@ pub fn printer_columns_view(crd: &Value, version: &str) -> Option<View> {
                 condition_match: ConditionMatch::Type,
                 condition_field: None,
                 default: None,
+                regex: None,
             })
         })
         .collect();
@@ -1667,12 +1724,53 @@ mod tests {
             condition_match: ConditionMatch::Type,
             condition_field: None,
             default: None,
+            regex: None,
         }
     }
 
     fn compile_toml(text: &str) -> (HashMap<String, View>, Vec<String>) {
         let cfg: crate::config::Config = toml::from_str(text).unwrap();
         compile(&cfg.views)
+    }
+
+    #[test]
+    fn regex_columns_validate_and_keep_values_they_cannot_match() {
+        let (views, warnings) = compile_toml(
+            r#"
+            [views."v1/pods"]
+            columns = [
+                { name = "OK", path = "/spec/value", regex = '^(\w+)' },
+                { name = "INVALID", path = "/spec/value", regex = '(' },
+                { name = "FORMAT", path = "/spec/image", format = "image-tag", regex = '.' },
+                { name = "METRIC", metric = "cpu", regex = '.' },
+                { name = "BUILTIN", builtin = "NAME", regex = '.' },
+                { name = "CONDITION", path = "Ready", type = "condition", regex = '.' },
+            ]
+            "#,
+        );
+        let columns = &views["v1/pods"].columns;
+        assert_eq!(columns.len(), 1);
+        assert_eq!(warnings.len(), 5, "{warnings:?}");
+        assert!(warnings[0].contains("column INVALID: invalid regex '('"));
+        assert!(warnings[1].contains("column FORMAT: set only one of format or regex"));
+        assert!(
+            warnings[2..]
+                .iter()
+                .all(|w| w.contains("regex applies only to path columns"))
+        );
+        for (value, expected) in [
+            (json!("abc-def"), "abc"),
+            (json!("-def"), "-def"),
+            (json!(42), "42"),
+            (json!(["a"]), "[\"a\"]"),
+        ] {
+            let object = obj(json!({"metadata": {"name": "p"}, "spec": {"value": value}}));
+            assert_eq!(render_cell(&object, &columns[0], 0), expected);
+        }
+        let object = obj(json!({"metadata": {"name": "p-1"}}));
+        let mut column = col("/metadata/name", ColumnKind::Text);
+        column.regex = Some(regex::Regex::new("-([0-9])$").unwrap());
+        assert_eq!(render_cell(&object, &column, 0), "1");
     }
 
     #[test]

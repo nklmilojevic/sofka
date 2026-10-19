@@ -307,7 +307,8 @@ include those conditions. Row filters can search the route paths.
   structured filters, and threshold colors. Custom text path columns support
   `format = "image-tag"` to show image tags, with registry ports and digests
   handled separately. Quantity path columns support `format = "cpu"` and
-  `format = "memory"` for millicore and Mi/Gi display. Sorting and numeric
+  `format = "memory"` for millicore and Mi/Gi display. Path columns accept
+  `regex` to show only the part of a value they need. Sorting and numeric
   filters use values before display rounding. An
   unknown custom resource picks up its CRD `additionalPrinterColumns`
   automatically. If no usable CRD columns are available, server Table columns
