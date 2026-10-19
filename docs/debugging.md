@@ -240,8 +240,9 @@ Permission errors and connection failures do not trigger this recovery offer.
 the pod shell. Set `profile` to pass `--profile=<profile>`, for example
 `restricted` where pod security admission or an OpenShift SCC rejects the debug
 container kubectl's default profile builds. Unset keeps kubectl's default. The
-`d` recovery from a failed shell uses the same setting. `d` in the container picker sets `--target=<container>` so the
-debug container shares that container's process namespace. The ephemeral
+`d` recovery from a failed shell uses the same setting. `d` in the container
+picker sets `--target=<container>` so the debug container shares that
+container's process namespace. The ephemeral
 container stays on the pod until the pod is recreated - Kubernetes can't remove
 it, so there's nothing for sofka to clean up.
 
