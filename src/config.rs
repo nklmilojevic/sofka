@@ -732,16 +732,16 @@ pub struct DebugConfig {
     pub image: String,
     /// Entrypoint for the ephemeral container. Empty = an interactive shell.
     pub command: Vec<String>,
-    /// `kubectl debug --profile` for pod debug containers (`restricted`,
-    /// `general`, …). `None` = kubectl's default (`legacy`).
+    /// `kubectl debug --profile` for pod debug containers (`general`,
+    /// `baseline`, `restricted`, …). `None` = kubectl's default profile.
     pub profile: Option<String>,
     /// Image for a node debug pod (`kubectl debug node/<node>`).
     pub node_image: String,
     /// Namespace the node debugger pod is created in (so `:debug-clean` knows
     /// where to find it).
     pub node_namespace: String,
-    /// `kubectl debug --profile` for node debuggers (`legacy`, `sysadmin`,
-    /// `netadmin`, …). `None` = kubectl's default (`legacy`).
+    /// `kubectl debug --profile` for node debuggers (`sysadmin`, `netadmin`,
+    /// …). `None` = kubectl's default profile.
     pub node_profile: Option<String>,
 }
 
