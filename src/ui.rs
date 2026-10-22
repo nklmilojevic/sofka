@@ -1238,7 +1238,11 @@ fn header_hints(app: &App) -> Vec<Line<'static>> {
         lines.push(hint_line(app, &[(Action::ActionMenu, "suspend/sync")]));
     }
     if app.kind_plural == "helmreleases" {
-        lines.push(hint_line(app, &[(Action::Open, "helm history")]));
+        let mut pairs = vec![(Action::Open, "helm history")];
+        if app.flux_helmrelease_kind() {
+            pairs.push((Action::SetImage, "version"));
+        }
+        lines.push(hint_line(app, &pairs));
     }
     if app.cronjob_kind() {
         lines.push(hint_line(app, &[(Action::ActionMenu, "trigger/suspend")]));
@@ -3157,6 +3161,8 @@ fn build_help(app: &App, width: usize) -> (Vec<Line<'static>>, String, HelpSecti
             "describe; experimental native backend: --experimental-describe or experimental.native_describe in config"
         } else if scope == "table" && action == Action::RestartOrRefresh {
             "restart workloads (marked rows, or current); force-sync external secrets; rollback Helm or rollout history; refresh elsewhere"
+        } else if scope == "table" && action == Action::SetImage {
+            "set container image; Flux HelmRelease: set chart version"
         } else if scope == "table" && action == Action::Logs {
             "logs (marked pods, or current row)"
         } else if scope == "table" && action == Action::ActionMenu {
@@ -7141,6 +7147,16 @@ mod tests {
         let text = text.join("\n");
         assert!(text.contains("argo view"), "{text}");
         assert_eq!(text.matches("yaml").count(), 1, "{text}");
+    }
+
+    #[tokio::test]
+    async fn helmrelease_rows_hint_the_chart_version_key() {
+        let (tx, _rx) = tokio::sync::mpsc::channel(16);
+        let mut app = App::new(crate::k8s::Cluster::fake(), tx);
+        app.switch_kind("helmreleases");
+        let text: Vec<String> = header_hints(&app).iter().map(line_text).collect();
+        let text = text.join("\n");
+        assert!(text.contains("i version"), "{text}");
     }
 
     #[tokio::test]

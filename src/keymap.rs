@@ -196,6 +196,7 @@ impl Action {
                 "daemonsets",
                 "replicasets",
                 "replicationcontrollers",
+                "helmreleases",
             ]),
             _ => None,
         }

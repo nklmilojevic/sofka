@@ -669,6 +669,12 @@ include those conditions. Row filters can search the route paths.
   (resolved the way helm-controller composes `releaseName`/`storageNamespace`):
   `⏎` shows a revision's values, `y` the rendered manifest, `d` the NOTES, `r`
   rolls back.
+- **HelmRelease chart version** (`i`) - prompts for `spec.chart.spec.version`,
+  pre-filled with the current version, and patches it. A HelmRelease that uses
+  `spec.chartRef` gets its version from the referenced OCIRepository or
+  HelmChart, so `i` points there instead. If a Flux Kustomization manages the
+  HelmRelease, its next reconcile reverts the change; suspend it first (`t`) to
+  keep the new version.
 - **Argo CD controls** (`t`) - a suspend/resume/refresh/hard-refresh/sync-now/sync-with-prune menu for ArgoCD
   Applications, and a suspend/resume menu for ApplicationSets, built on native
   Kubernetes API patches. Suspend removes `spec.syncPolicy.automated` and

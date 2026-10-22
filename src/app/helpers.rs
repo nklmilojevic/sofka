@@ -19,6 +19,10 @@ pub(super) fn set_image_patch(plural: &str, container: &str, image: &str) -> Val
     }
 }
 
+pub(super) fn chart_version_patch(version: &str) -> Value {
+    json!({ "spec": { "chart": { "spec": { "version": version } } } })
+}
+
 pub(super) fn scale_patch(replicas: i32) -> Value {
     json!({ "spec": { "replicas": replicas } })
 }
@@ -573,6 +577,12 @@ pub(super) fn xray_pool_plurals(root_kind: &str) -> &'static [&'static str] {
 }
 
 impl App {
+    pub fn flux_helmrelease_kind(&self) -> bool {
+        self.kind.as_ref().is_some_and(|kind| {
+            kind.ar.group == "helm.toolkit.fluxcd.io" && kind.ar.plural == "helmreleases"
+        })
+    }
+
     /// Whether the current kind supports the Flux suspend/resume menu (`t`).
     pub fn flux_suspendable(&self) -> bool {
         self.kind.as_ref().is_some_and(|kind| {

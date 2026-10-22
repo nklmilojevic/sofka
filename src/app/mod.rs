@@ -554,6 +554,10 @@ enum PromptKind {
         plural: String,
         container: String,
     },
+    ChartVersion {
+        ns: String,
+        name: String,
+    },
     /// Debug image for an ephemeral debug container (`:debug`), prefilled with
     /// the configured default. `target` pins `--target=<container>` when the
     /// workflow was launched from the container picker.

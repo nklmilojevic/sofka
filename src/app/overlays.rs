@@ -423,6 +423,13 @@ impl App {
                             self.do_set_image(ns, name, plural, container, input);
                         }
                     }
+                    Some(PromptKind::ChartVersion { ns, name }) => {
+                        if input.is_empty() {
+                            self.flash_warn("no chart version given");
+                        } else {
+                            self.do_set_chart_version(ns, name, input);
+                        }
+                    }
                     Some(PromptKind::Debug {
                         ns,
                         pod,
