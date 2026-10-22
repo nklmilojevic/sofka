@@ -1003,3 +1003,92 @@ async fn gitops_inventory_limits_large_lists() {
         vec![path]
     );
 }
+
+#[tokio::test]
+async fn set_image_key_on_helmrelease_patches_the_chart_version() {
+    let (mut app, mut rx) = test_app();
+    app.switch_kind("helmreleases");
+    apply(
+        &mut app,
+        json!({
+            "apiVersion": "helm.toolkit.fluxcd.io/v2", "kind": "HelmRelease",
+            "metadata": {"name": "podinfo", "namespace": "default"},
+            "spec": {"chart": {"spec": {"chart": "podinfo", "version": "6.5.0"}}}
+        }),
+    );
+    app.table_state.select(Some(0));
+    let (requests, mut received) = mpsc::unbounded_channel();
+    app.cluster.client = kube::Client::new(
+        tower::service_fn(move |request: http::Request<kube::client::Body>| {
+            let requests = requests.clone();
+            async move {
+                let (parts, body) = request.into_parts();
+                let bytes = body.collect().await.unwrap().to_bytes();
+                let patch: Value = serde_json::from_slice(&bytes).unwrap();
+                requests
+                    .send((
+                        parts.method,
+                        parts.headers["content-type"].to_str().unwrap().to_string(),
+                        parts.uri.path().to_string(),
+                        patch,
+                    ))
+                    .unwrap();
+                Ok::<_, std::convert::Infallible>(
+                    http::Response::builder()
+                        .status(200)
+                        .body(http_body_util::Full::new(hyper::body::Bytes::from(
+                            helmrelease("podinfo").to_string(),
+                        )))
+                        .unwrap(),
+                )
+            }
+        }),
+        "default",
+    );
+
+    app.handle_key(press(KeyCode::Char('i'))).unwrap();
+    assert_eq!(app.mode, Mode::Prompt);
+    assert_eq!(app.prompt_label, "Chart version for podinfo:");
+    assert_eq!(app.prompt_input, "6.5.0");
+    for _ in 0..app.prompt_input.len() {
+        app.handle_key(press(KeyCode::Backspace)).unwrap();
+    }
+    for ch in "6.7.0".chars() {
+        app.handle_key(press(KeyCode::Char(ch))).unwrap();
+    }
+    app.handle_key(press(KeyCode::Enter)).unwrap();
+    assert_eq!(app.mode, Mode::Table);
+    assert_eq!(app.flash, "setting chart version: podinfo → 6.7.0…");
+
+    let (method, content_type, path, patch) =
+        tokio::time::timeout(Duration::from_secs(2), received.recv())
+            .await
+            .unwrap()
+            .unwrap();
+    assert_eq!(method, http::Method::PATCH);
+    assert_eq!(content_type, "application/merge-patch+json");
+    let version = &app.kind.as_ref().unwrap().ar.version;
+    assert_eq!(
+        path,
+        format!("/apis/helm.toolkit.fluxcd.io/{version}/namespaces/default/helmreleases/podinfo")
+    );
+    assert_eq!(
+        patch,
+        json!({"spec": {"chart": {"spec": {"version": "6.7.0"}}}})
+    );
+
+    let reply = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let msg = rx.recv().await.unwrap();
+            if matches!(&msg, Msg::Flash { message, .. } if message.starts_with("chart version")) {
+                break msg;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    app.handle_msg(reply);
+    assert_eq!(app.flash, "chart version set: podinfo → 6.7.0");
+    assert!(!app.flash_err);
+    assert!(received.try_recv().is_err());
+}

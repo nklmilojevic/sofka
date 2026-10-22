@@ -13921,31 +13921,6 @@ fn helmrelease_app(spec: serde_json::Value) -> (App, tokio::sync::mpsc::Receiver
 }
 
 #[tokio::test]
-async fn set_image_key_on_helmrelease_sets_the_chart_version() {
-    let (mut app, _rx) = helmrelease_app(json!({
-        "chart": {"spec": {"chart": "podinfo", "version": "6.5.0"}}
-    }));
-    app.handle_key(press(KeyCode::Char('i'))).unwrap();
-    assert_eq!(app.mode, Mode::Prompt);
-    assert_eq!(app.prompt_label, "Chart version for podinfo:");
-    assert_eq!(app.prompt_input, "6.5.0");
-
-    for _ in 0..app.prompt_input.len() {
-        app.handle_key(press(KeyCode::Backspace)).unwrap();
-    }
-    for ch in "6.7.0".chars() {
-        app.handle_key(press(KeyCode::Char(ch))).unwrap();
-    }
-    app.handle_key(press(KeyCode::Enter)).unwrap();
-    assert_eq!(app.mode, Mode::Table);
-    assert_eq!(app.flash, "setting chart version: podinfo → 6.7.0…");
-    assert_eq!(
-        chart_version_patch("6.7.0"),
-        json!({"spec": {"chart": {"spec": {"version": "6.7.0"}}}})
-    );
-}
-
-#[tokio::test]
 async fn set_image_key_on_helmrelease_rejects_an_empty_version() {
     let (mut app, _rx) = helmrelease_app(json!({"chart": {"spec": {"chart": "podinfo"}}}));
     app.handle_key(press(KeyCode::Char('i'))).unwrap();
@@ -13988,6 +13963,19 @@ async fn set_image_key_ignores_helmreleases_outside_flux() {
     app.table_state.select(Some(0));
     app.handle_key(press(KeyCode::Char('i'))).unwrap();
     assert_eq!(app.mode, Mode::Table);
+    assert!(app.prompt_kind.is_none());
+    assert!(app.flash.contains("Flux HelmReleases"), "{}", app.flash);
+
+    app.plugins = vec![crate::config::Plugin {
+        name: "release-cmd".into(),
+        key: "i".into(),
+        command: "true".into(),
+        scopes: vec!["helmreleases".into()],
+        mutating: Some(false),
+        ..Default::default()
+    }];
+    app.handle_key(press(KeyCode::Char('i'))).unwrap();
+    assert!(matches!(app.pending, Some(Suspend::Shell(_))));
     assert!(app.prompt_kind.is_none());
 }
 

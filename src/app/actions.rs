@@ -716,10 +716,7 @@ impl App {
             return;
         }
         let is_pod = self.kind_plural == "pods";
-        if !Action::SetImage
-            .kinds()
-            .is_some_and(|kinds| kinds.contains(&self.kind_plural.as_str()))
-        {
+        if !self.action_applies(Action::SetImage) {
             self.flash_warn(
                 "set image applies to pods, workload controllers and Flux HelmReleases",
             );

@@ -583,6 +583,15 @@ impl App {
         })
     }
 
+    /// Whether a kind-specific action applies to the current kind. Plurals are
+    /// not unique across API groups, so `helmreleases` only counts for Flux.
+    pub(super) fn action_applies(&self, action: Action) -> bool {
+        action.kinds().is_some_and(|kinds| {
+            kinds.contains(&self.kind_plural.as_str())
+                && (self.kind_plural != "helmreleases" || self.flux_helmrelease_kind())
+        })
+    }
+
     /// Whether the current kind supports the Flux suspend/resume menu (`t`).
     pub fn flux_suspendable(&self) -> bool {
         self.kind.as_ref().is_some_and(|kind| {

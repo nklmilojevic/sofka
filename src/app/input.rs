@@ -401,8 +401,7 @@ impl App {
         // kinds; with none bound it still runs and says where it applies.
         if key
             .action
-            .and_then(Action::kinds)
-            .is_some_and(|kinds| !kinds.contains(&self.kind_plural.as_str()))
+            .is_some_and(|action| action.kinds().is_some() && !self.action_applies(action))
             && (self.try_bookmark_key(key.event())
                 || self.try_workspace_key(key.event())
                 || self.try_plugin_key(key.event()))
