@@ -42801,3 +42801,58 @@ async fn status_bar_and_popup_footer_style_hint_keys() {
         assert_eq!(label.fg, crate::theme::dim().fg.unwrap(), "{label:?}");
     }
 }
+
+fn assert_literal_hint(app: &mut App, hint: &str, keys: &[&str]) {
+    let cells = hint_cells(app, 200, 40, hint);
+    let mut styled = vec![false; cells.len()];
+    for key in keys {
+        let at = hint
+            .find(key)
+            .unwrap_or_else(|| panic!("{key:?} not in {hint:?}"));
+        let start = hint[..at].chars().count();
+        styled[start..start + key.chars().count()].fill(true);
+    }
+    for (cell, key) in cells.iter().zip(styled) {
+        if key {
+            assert_hint_key(cell);
+        } else {
+            assert!(
+                !cell.modifier.contains(ratatui::style::Modifier::BOLD),
+                "{hint:?}: {cell:?}"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn drain_footers_style_their_keys() {
+    let (mut app, mut rx, _api) = drain_app(DrainApiState::default());
+    app.guardrails = vec![crate::config::Guardrail {
+        actions: vec!["drain".into()],
+        confirmation: Some("type-resource-name".into()),
+        ..Default::default()
+    }];
+    drain_open(&mut app);
+    app.handle_key(press(KeyCode::Enter)).unwrap();
+    assert_literal_hint(&mut app, "Enter: confirm   Esc: cancel", &["Enter", "Esc"]);
+    for c in "node-a".chars() {
+        app.handle_key(press(KeyCode::Char(c))).unwrap();
+    }
+    app.handle_key(press(KeyCode::Enter)).unwrap();
+    drain_until(&mut app, &mut rx, |app| app.drain.done).await;
+    assert_literal_hint(&mut app, "Enter/Esc: close", &["Enter/Esc"]);
+}
+
+#[tokio::test]
+async fn command_failure_footer_styles_its_keys() {
+    let (mut app, _rx) = app_with_pod();
+    app.handle_key(press(KeyCode::Char('s'))).unwrap();
+    complete_failed_shell(&mut app, MISSING_SHELL);
+    app.expire_flash();
+    assert!(app.command_failure_visible());
+    assert_literal_hint(
+        &mut app,
+        "d Start debug container · esc/enter dismiss · PgUp/PgDn scroll",
+        &["d", "esc/enter", "PgUp/PgDn"],
+    );
+}

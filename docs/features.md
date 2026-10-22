@@ -475,6 +475,8 @@ include those conditions. Row filters can search the route paths.
 - **Configurable key bindings** - change or disable built-in keyboard actions
   under `[keys]`. Shared navigation settings and mode overrides keep text input
   separate from navigation. Help and key hints show the effective bindings.
+  Hint keys are bold in the skin's key color in the header, the status bar and
+  popup footers; labels keep the surrounding style.
   Changes support `:reload` and cluster/context overrides. Invalid bindings keep
   the previous keymap. Legacy palette settings are migrated with a config
   backup; managed files produce a warning and use the converted keys in memory.

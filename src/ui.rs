@@ -841,6 +841,20 @@ fn key_hint(app: &App, scope: &str, actions: &[(Action, &str)]) -> Line<'static>
     Line::from(spans)
 }
 
+/// A hint for keys that are not keymap actions. Each label carries its own
+/// leading punctuation, so the text reads exactly as written.
+fn literal_hint(pairs: &[(&str, &str)], separator: &str) -> Line<'static> {
+    let mut spans = Vec::new();
+    for &(key, label) in pairs {
+        if !spans.is_empty() {
+            spans.push(Span::raw(separator.to_owned()));
+        }
+        spans.push(Span::styled(key.to_owned(), hint_key_style()));
+        spans.push(Span::raw(label.to_owned()));
+    }
+    Line::from(spans)
+}
+
 /// Pad a hint with one space on each side, for use inside a border.
 fn spaced(mut line: Line<'static>) -> Line<'static> {
     line.spans.insert(0, Span::raw(" "));
@@ -4750,11 +4764,17 @@ fn draw_drain(frame: &mut Frame, app: &mut App, area: Rect) {
                 },
             )
         }));
-        footer = vec![Line::from(if app.drain.done {
-            "Enter/Esc: close"
+        footer = vec![if app.drain.done {
+            literal_hint(&[("Enter/Esc", ": close")], "")
         } else {
-            "Esc/Ctrl-C: cancel. Accepted requests cannot be reversed."
-        })];
+            literal_hint(
+                &[(
+                    "Esc/Ctrl-C",
+                    ": cancel. Accepted requests cannot be reversed.",
+                )],
+                "",
+            )
+        }];
     } else {
         for (i, row) in app.drain.rows().into_iter().enumerate() {
             let selected = !review && app.drain.field == i;
@@ -4779,13 +4799,16 @@ fn draw_drain(frame: &mut Frame, app: &mut App, area: Rect) {
         ]);
         if review {
             footer = if app.mode == Mode::Prompt {
-                format!(
-                    "{}\n> {}█\nEnter: confirm   Esc: cancel",
-                    app.prompt_label, app.prompt_input
-                )
-                .lines()
-                .map(|line| Line::from(line.to_owned()))
-                .collect()
+                let mut footer: Vec<Line> =
+                    format!("{}\n> {}█", app.prompt_label, app.prompt_input)
+                        .lines()
+                        .map(|line| Line::from(line.to_owned()))
+                        .collect();
+                footer.push(literal_hint(
+                    &[("Enter", ": confirm"), ("Esc", ": cancel")],
+                    "   ",
+                ));
+                footer
             } else {
                 vec![
                     Line::from("Confirm drain with these options?"),
@@ -4888,11 +4911,21 @@ fn draw_text_popup(frame: &mut Frame, app: &mut App, input: bool) {
             &failure.message,
             "confirm",
             " Command failed ",
-            Line::from(if failure.target.is_some() {
-                "d Start debug container · esc/enter dismiss · PgUp/PgDn scroll"
+            if failure.target.is_some() {
+                literal_hint(
+                    &[
+                        ("d", " Start debug container"),
+                        ("esc/enter", " dismiss"),
+                        ("PgUp/PgDn", " scroll"),
+                    ],
+                    " · ",
+                )
             } else {
-                "esc/enter dismiss · PgUp/PgDn scroll"
-            }),
+                literal_hint(
+                    &[("esc/enter", " dismiss"), ("PgUp/PgDn", " scroll")],
+                    " · ",
+                )
+            },
         )
     } else if input {
         (
