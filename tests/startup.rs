@@ -40,6 +40,46 @@ fn headless_start_without_current_context_reports_selection_instructions() {
     std::fs::remove_dir_all(dir).unwrap();
 }
 
+#[test]
+fn missing_kubeconfig_flag_exits_before_connecting() {
+    let dir = std::env::temp_dir().join(format!("sofka-missing-kubeconfig-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("kubeconfig");
+    let sofka = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_sofka"))
+            .arg("--kubeconfig")
+            .arg(&path)
+            .args(args)
+            .env("HOME", &dir)
+            .env("XDG_CONFIG_HOME", &dir)
+            .env("XDG_CACHE_HOME", &dir)
+            .env_remove("KUBECONFIG")
+            .env_remove("SOFKA_COMPLETE")
+            .env_remove("KUBERNETES_SERVICE_HOST")
+            .env_remove("KUBERNETES_SERVICE_PORT")
+            .output()
+            .unwrap()
+    };
+
+    let output = sofka(&["pods"]);
+    assert_eq!(output.status.code(), Some(1));
+    let error = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        error.contains(&format!("kubeconfig file not found: {}", path.display())),
+        "{error}"
+    );
+    assert!(!error.contains("Connecting to cluster"), "{error}");
+    assert!(!error.contains("in-cluster"), "{error}");
+
+    let output = sofka(&["info", "--offline"]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
 /// A kubeconfig whose only user runs `script` through `sh` as its exec plugin.
 #[cfg(unix)]
 fn exec_kubeconfig(script: &str, env: &[(&str, &str)]) -> String {

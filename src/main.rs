@@ -234,12 +234,22 @@ impl Args {
     /// with a torn-down temporary cluster) can never connect, so fail before
     /// the terminal UI starts instead of opening a disconnected session.
     fn validate_kubeconfig(&self) -> Result<()> {
-        if let Some(path) = &self.kubeconfig {
-            anyhow::ensure!(
-                path.is_file(),
-                "kubeconfig file not found: {}",
+        let Some(path) = &self.kubeconfig else {
+            return Ok(());
+        };
+        match std::fs::metadata(path) {
+            Ok(metadata) => anyhow::ensure!(
+                metadata.is_file(),
+                "kubeconfig is not a file: {}",
                 path.display()
-            );
+            ),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                anyhow::bail!("kubeconfig file not found: {}", path.display())
+            }
+            Err(error) => {
+                return Err(anyhow::Error::new(error)
+                    .context(format!("checking kubeconfig {}", path.display())));
+            }
         }
         Ok(())
     }
@@ -317,7 +327,10 @@ async fn run_main(args: Args) -> Result<()> {
         return result;
     }
 
-    args.validate_kubeconfig()?;
+    if let Err(error) = args.validate_kubeconfig() {
+        applog::shutdown();
+        return Err(error);
+    }
     let mut context_picker = args.context_picker()?;
 
     // Connect before taking over the terminal so errors are readable. An
@@ -1338,6 +1351,16 @@ mod tests {
             error.to_string(),
             format!("kubeconfig file not found: {}", missing.display())
         );
+
+        std::fs::create_dir_all(&missing).unwrap();
+        let args =
+            Args::try_parse_from(["sofka", "--kubeconfig", missing.to_str().unwrap()]).unwrap();
+        let error = args.validate_kubeconfig().unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            format!("kubeconfig is not a file: {}", missing.display())
+        );
+        std::fs::remove_dir(&missing).unwrap();
 
         std::fs::write(&missing, "apiVersion: v1\n").unwrap();
         let args =
