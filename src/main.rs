@@ -230,6 +230,30 @@ impl Args {
         Ok(())
     }
 
+    /// A `--kubeconfig` file that no longer exists (for example, one removed
+    /// with a torn-down temporary cluster) can never connect, so fail before
+    /// the terminal UI starts instead of opening a disconnected session.
+    fn validate_kubeconfig(&self) -> Result<()> {
+        let Some(path) = &self.kubeconfig else {
+            return Ok(());
+        };
+        match std::fs::metadata(path) {
+            Ok(metadata) => anyhow::ensure!(
+                metadata.is_file(),
+                "kubeconfig is not a file: {}",
+                path.display()
+            ),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                anyhow::bail!("kubeconfig file not found: {}", path.display())
+            }
+            Err(error) => {
+                return Err(anyhow::Error::new(error)
+                    .context(format!("checking kubeconfig {}", path.display())));
+            }
+        }
+        Ok(())
+    }
+
     fn context_picker(&self) -> Result<bool> {
         let picker = matches!(self.resource(), Some("ctx" | "contexts"));
         anyhow::ensure!(
@@ -303,6 +327,10 @@ async fn run_main(args: Args) -> Result<()> {
         return result;
     }
 
+    if let Err(error) = args.validate_kubeconfig() {
+        applog::shutdown();
+        return Err(error);
+    }
     let mut context_picker = args.context_picker()?;
 
     // Connect before taking over the terminal so errors are readable. An
@@ -1308,6 +1336,43 @@ mod tests {
         ] {
             assert!(Args::try_parse_from(argv).unwrap().experimental_describe);
         }
+    }
+
+    #[test]
+    fn missing_kubeconfig_file_is_an_error() {
+        let dir =
+            std::env::temp_dir().join(format!("sofka-missing-kubeconfig-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let missing = dir.join("kubeconfig");
+        let args =
+            Args::try_parse_from(["sofka", "--kubeconfig", missing.to_str().unwrap()]).unwrap();
+        let error = args.validate_kubeconfig().unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            format!("kubeconfig file not found: {}", missing.display())
+        );
+
+        std::fs::create_dir_all(&missing).unwrap();
+        let args =
+            Args::try_parse_from(["sofka", "--kubeconfig", missing.to_str().unwrap()]).unwrap();
+        let error = args.validate_kubeconfig().unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            format!("kubeconfig is not a file: {}", missing.display())
+        );
+        std::fs::remove_dir(&missing).unwrap();
+
+        std::fs::write(&missing, "apiVersion: v1\n").unwrap();
+        let args =
+            Args::try_parse_from(["sofka", "--kubeconfig", missing.to_str().unwrap()]).unwrap();
+        assert!(args.validate_kubeconfig().is_ok());
+        assert!(
+            Args::try_parse_from(["sofka"])
+                .unwrap()
+                .validate_kubeconfig()
+                .is_ok()
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
