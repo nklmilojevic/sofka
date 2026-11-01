@@ -1804,7 +1804,7 @@ fn flux_operator_disabled(obj: &DynamicObject) -> bool {
 }
 
 fn col_argocd_sync<'a>(ctx: &CellContext<'a>) -> Cow<'a, str> {
-    Cow::Borrowed(sget(ctx.data, &["status", "sync", "status"]).unwrap_or_default())
+    Cow::Borrowed(crate::argocd::sync_cell(ctx.obj))
 }
 
 fn col_argocd_health<'a>(ctx: &CellContext<'a>) -> Cow<'a, str> {

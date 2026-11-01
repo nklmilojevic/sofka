@@ -1641,12 +1641,20 @@ impl App {
                 destination,
                 findings,
                 resources,
+                following,
             } if generation == self.generation && request == self.argocd_request => {
                 self.argocd_claim = None;
+                self.argocd_pending = false;
+                self.argocd_following = following;
+                self.argocd_gathered_at = Some(std::time::Instant::now());
                 self.argocd_resources = resources;
                 if let Some(source) = source {
                     self.argocd_source = Some(*source);
                 }
+                let previous = self
+                    .argocd_state
+                    .selected()
+                    .map(|i| (i, self.argocd_items.get(i).cloned()));
                 self.argocd_items = findings;
                 self.argocd_title = title;
                 self.argocd_destination = destination;
@@ -1655,14 +1663,38 @@ impl App {
                     .iter()
                     .position(|f| f.target.is_some())
                     .unwrap_or(0);
-                let selected = self
-                    .argocd_reselect
-                    .take()
-                    .and_then(|row| self.managed_row_at(row))
-                    .unwrap_or(first);
+                let selected = match (claim, previous) {
+                    // A follow-up read while a sync runs: the cursor stays
+                    // on the row it was on, or where that row was.
+                    (None, Some((index, row))) => {
+                        let same = |f: &crate::explain::Finding| {
+                            row.as_ref().is_some_and(|row| match &row.target {
+                                Some(t) => f.target.as_ref() == Some(t),
+                                None => f.text == row.text,
+                            })
+                        };
+                        // The same object can be listed twice, failed in the
+                        // sync and again as a managed resource.
+                        if self.argocd_items.get(index).is_some_and(same) {
+                            index
+                        } else {
+                            self.argocd_items
+                                .iter()
+                                .position(same)
+                                .unwrap_or(index.min(self.argocd_items.len().saturating_sub(1)))
+                        }
+                    }
+                    _ => self
+                        .argocd_reselect
+                        .take()
+                        .and_then(|row| self.managed_row_at(row))
+                        .unwrap_or(first),
+                };
                 self.argocd_state
                     .select((!self.argocd_items.is_empty()).then_some(selected));
-                self.clear_claimed_status(claim);
+                if let Some(claim) = claim {
+                    self.clear_claimed_status(claim);
+                }
                 // Nothing in the Application's own status says why it is
                 // unhealthy, so go and look. Costs nothing for the rest.
                 if self
@@ -1670,7 +1702,14 @@ impl App {
                     .as_ref()
                     .is_some_and(|a| crate::argocd::health_unexplained(a, &self.argocd_resources))
                 {
-                    self.spawn_argocd_cause();
+                    // A running sync is re-read every few seconds; searching
+                    // each time would make the cause rows come and go.
+                    if claim.is_none() && following {
+                        let causes = self.argocd_causes.clone();
+                        self.apply_argocd_cause(causes);
+                    } else {
+                        self.spawn_argocd_cause();
+                    }
                 }
             }
             Msg::ArgocdCause {

@@ -196,7 +196,8 @@ pub enum Msg {
     Argocd {
         generation: u64,
         request: u64,
-        claim: StatusClaim,
+        /// `None` for the quiet re-read that follows a running sync.
+        claim: Option<StatusClaim>,
         title: String,
         source: Option<Box<DynamicObject>>,
         destination: crate::argocd::Destination,
@@ -204,6 +205,8 @@ pub enum Msg {
         /// Kept so an expansion can resolve a managed resource in its own API
         /// group; a plural on its own is ambiguous across groups.
         resources: Vec<crate::argocd::ManagedResource>,
+        /// A sync is requested or running, so the view keeps re-reading.
+        following: bool,
     },
     /// What is making an Application unhealthy, found by walking its managed
     /// resources when its own status does not say.

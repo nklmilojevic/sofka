@@ -707,7 +707,10 @@ include those conditions. Row filters can search the route paths.
   longer in Git are deleted; it asks first and is gated by `prune`
   guardrails. A plain sync never prunes, even when `syncPolicy.automated.prune`
   is set, because that only applies to automated syncs. No `argocd` binary
-  needed. Works with bulk multiselect.
+  needed. Works with bulk multiselect. While a sync is requested or running,
+  the Application's SYNC cell reads `Syncing`, then goes back to `Synced` or
+  `OutOfSync` when the operation finishes. The list's own watch drives it, so
+  this costs no extra reads.
 - **GitOps view** (`:gitops` / `:flux`) - the Flux ownership and reconciliation
   chain for the selection: the owning Kustomization/HelmRelease, its source
   (GitRepository/OCIRepository/HelmRepository) with applied and latest revision,
@@ -746,7 +749,16 @@ include those conditions. Row filters can search the route paths.
   `argocd app diff` for the fields: Argo CD never writes the diff to the
   Application. Telling a missing object from a differing one needs per-resource
   health, which Argo CD only persists with `controller.resource.health.persist`;
-  without it the view says it is one or the other. `⏎` on an Application row opens this view. Each managed resource is a finding you can `⏎` into. Read entirely from
+  without it the view says it is one or the other. `⏎` on an Application row opens this view.
+  The **Sync operation** section shows the current or last sync from
+  `status.operationState`: its phase, how long ago it started or finished, its
+  message, a count of what it synced, pruned or failed, and each object it
+  failed on or is still running a hook for, which you can `⏎` into. A sync that
+  is requested but not yet picked up reads as waiting for the controller. While
+  the sync runs, the view re-reads the Application every 2 seconds, without a
+  progress message and keeping the cursor on its row, and stops once the sync
+  finishes or the view is closed. It waits while a managed resource is expanded
+  with `c`, because a re-read would fold it away. Each managed resource is a finding you can `⏎` into. Read entirely from
   the Application CRD: no Argo CD API server, no token, no `argocd` binary.
   The headline names how long the current health has held, from
   `status.health.lastTransitionTime` - "Degraded (since 4m)" is a different

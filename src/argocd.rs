@@ -139,13 +139,19 @@ pub struct ManagedResource {
     pub plural: String,
 }
 
+/// A jump to an object the Application deploys. Only an object in this
+/// cluster whose kind the cluster knows can be opened.
+fn jump(dest: &Destination, plural: &str, namespace: &str, name: &str) -> Option<Target> {
+    (dest.is_current() && !plural.is_empty()).then(|| Target {
+        plural: plural.to_string(),
+        namespace: (!namespace.is_empty()).then(|| namespace.to_string()),
+        name: name.to_string(),
+    })
+}
+
 impl ManagedResource {
     fn target(&self, dest: &Destination) -> Option<Target> {
-        (dest.is_current() && !self.plural.is_empty()).then(|| Target {
-            plural: self.plural.clone(),
-            namespace: (!self.namespace.is_empty()).then(|| self.namespace.clone()),
-            name: self.name.clone(),
-        })
+        jump(dest, &self.plural, &self.namespace, &self.name)
     }
 
     fn level(&self) -> Level {
@@ -209,6 +215,7 @@ pub struct Evidence {
     /// `spec.destination.namespace`.
     pub destination_namespace: String,
     pub resources: Vec<ManagedResource>,
+    pub sync_results: Vec<SyncResult>,
 }
 
 // ----- field accessors ------------------------------------------------------
@@ -227,6 +234,100 @@ pub fn sync_status(app: &DynamicObject) -> &str {
 /// `status.health.status`: `Healthy`, `Progressing`, `Degraded`, `Missing`.
 pub fn health_status(app: &DynamicObject) -> &str {
     str_at(&app.data, "/status/health/status")
+}
+
+/// `status.operationState.phase`: `Running`, `Terminating`, `Succeeded`,
+/// `Failed` or `Error`. It describes the last operation until the controller
+/// picks up the next one.
+fn operation_phase(app: &DynamicObject) -> &str {
+    str_at(&app.data, "/status/operationState/phase")
+}
+
+/// A sync was requested (top-level `operation`, which the controller clears
+/// when it finishes) and the controller has not finished it.
+fn operation_requested(app: &DynamicObject) -> bool {
+    app.data.get("operation").is_some_and(|o| !o.is_null())
+}
+
+/// Whether a sync is waiting for the controller or running.
+pub fn operation_in_flight(app: &DynamicObject) -> bool {
+    operation_requested(app) || matches!(operation_phase(app), "Running" | "Terminating")
+}
+
+/// The SYNC column. `status.sync.status` does not change while an Application
+/// that was already `Synced` syncs again, so an operation in flight reads
+/// `Syncing` instead.
+pub fn sync_cell(app: &DynamicObject) -> &str {
+    if operation_in_flight(app) {
+        "Syncing"
+    } else {
+        sync_status(app)
+    }
+}
+
+/// One entry of `status.operationState.syncResult.resources[]`: what the
+/// current or last sync did to one object, hooks included.
+#[derive(Debug, Clone)]
+pub struct SyncResult {
+    pub kind: String,
+    pub group: String,
+    pub namespace: String,
+    pub name: String,
+    /// `Synced`, `SyncFailed`, `Pruned` or `PruneSkipped`.
+    pub status: String,
+    pub message: String,
+    /// `PreSync`, `Sync`, `PostSync`, `SyncFail`; empty for a plain resource.
+    pub hook_type: String,
+    /// `Running`, `Terminating`, `Succeeded`, `Failed` or `Error`; hooks only.
+    pub hook_phase: String,
+    /// Resolved by the app layer, like [`ManagedResource::plural`].
+    pub plural: String,
+}
+
+impl SyncResult {
+    fn failed(&self) -> bool {
+        self.status == "SyncFailed" || matches!(self.hook_phase.as_str(), "Failed" | "Error")
+    }
+
+    fn hook_running(&self) -> bool {
+        !self.hook_type.is_empty() && matches!(self.hook_phase.as_str(), "Running" | "Terminating")
+    }
+
+    fn line(&self) -> String {
+        let state = if self.hook_type.is_empty() {
+            self.status.clone()
+        } else {
+            format!("{} hook {}", self.hook_type, self.hook_phase)
+        };
+        join(
+            &format!("{}/{}: {state}", self.kind, self.name),
+            &self.message,
+        )
+    }
+}
+
+/// `status.operationState.syncResult.resources[]`, with `plural` left empty.
+pub fn sync_results(app: &DynamicObject) -> Vec<SyncResult> {
+    let s = |v: &Value, k: &str| str_at(v, k).to_string();
+    app.data
+        .pointer("/status/operationState/syncResult/resources")
+        .and_then(Value::as_array)
+        .map(|rs| {
+            rs.iter()
+                .map(|r| SyncResult {
+                    kind: s(r, "/kind"),
+                    group: s(r, "/group"),
+                    namespace: s(r, "/namespace"),
+                    name: s(r, "/name"),
+                    status: s(r, "/status"),
+                    message: s(r, "/message"),
+                    hook_type: s(r, "/hookType"),
+                    hook_phase: s(r, "/hookPhase"),
+                    plural: String::new(),
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// The revision actually deployed. Argo writes it to `status.sync.revision`;
@@ -864,6 +965,8 @@ pub fn describe(ev: &Evidence, now: i64) -> Vec<Finding> {
         ));
     }
 
+    out.extend(operation_findings(ev, app, now));
+
     // Source block.
     out.push(finding(0, Level::Heading, "Source"));
     if sources.is_empty() {
@@ -957,11 +1060,113 @@ fn headline(ev: &Evidence, app: &DynamicObject, sync: &str, health: &str, now: i
 /// field (older versions may not), it doesn't parse, or it is somehow ahead
 /// of `now` (clock skew, not a real case worth reporting as negative).
 pub fn health_since(app: &DynamicObject, now: i64) -> Option<String> {
-    let raw = app
-        .data
-        .pointer("/status/health/lastTransitionTime")?
-        .as_str()?;
-    let secs = raw.parse::<Timestamp>().ok()?.as_second();
+    ago(app, "/status/health/lastTransitionTime", now)
+}
+
+/// How many failed or running sync results to list before summarising the rest.
+const MAX_SYNC_RESULTS: usize = 10;
+
+/// The current sync, or the last one: its phase, message, and the objects it
+/// failed on or is still running hooks for. Empty for an Application no
+/// operation has ever synced.
+fn operation_findings(ev: &Evidence, app: &DynamicObject, now: i64) -> Vec<Finding> {
+    let requested = operation_requested(app);
+    let phase = operation_phase(app);
+    if !requested && phase.is_empty() {
+        return Vec::new();
+    }
+    let mut out = vec![finding(0, Level::Heading, "Sync operation")];
+    let running = matches!(phase, "Running" | "Terminating");
+    // The state on the Application still describes the previous operation
+    // until the controller picks the new one up.
+    if requested && !running {
+        out.push(finding(
+            1,
+            Level::Info,
+            "requested, waiting for the Argo CD controller",
+        ));
+        return out;
+    }
+
+    let level = match phase {
+        "Succeeded" => Level::Good,
+        "Failed" | "Error" => Level::Critical,
+        _ => Level::Info,
+    };
+    let (field, verb) = if running {
+        ("/status/operationState/startedAt", "started")
+    } else {
+        ("/status/operationState/finishedAt", "finished")
+    };
+    let line = match ago(app, field, now) {
+        Some(ago) => format!("{phase}, {verb} {ago} ago"),
+        None => phase.to_string(),
+    };
+    out.push(finding(1, level, line));
+    let message = str_at(&app.data, "/status/operationState/message");
+    if !message.is_empty() {
+        out.push(finding(2, level, crate::text::one_line(message)));
+    }
+
+    let results = &ev.sync_results;
+    let count = |f: &dyn Fn(&SyncResult) -> bool| results.iter().filter(|r| f(r)).count();
+    let mut parts: Vec<String> = [
+        (
+            count(&|r| r.hook_type.is_empty() && r.status == "Synced"),
+            "synced",
+        ),
+        (count(&|r| r.status == "Pruned"), "pruned"),
+        (count(&|r| r.status == "PruneSkipped"), "prune skipped"),
+        (count(&SyncResult::failed), "failed"),
+    ]
+    .into_iter()
+    .filter(|(n, _)| *n > 0)
+    .map(|(n, label)| format!("{n} {label}"))
+    .collect();
+    match count(&SyncResult::hook_running) {
+        0 => {}
+        1 => parts.push("1 hook running".into()),
+        n => parts.push(format!("{n} hooks running")),
+    }
+    if !parts.is_empty() {
+        out.push(finding(1, Level::Info, parts.join(" · ")));
+    }
+
+    let listed: Vec<(&SyncResult, Level)> = results
+        .iter()
+        .filter(|r| r.failed())
+        .map(|r| (r, Level::Critical))
+        .chain(
+            results
+                .iter()
+                .filter(|r| r.hook_running())
+                .map(|r| (r, Level::Warn)),
+        )
+        .collect();
+    for (r, level) in listed.iter().take(MAX_SYNC_RESULTS) {
+        let mut f = finding(1, *level, r.line());
+        if let Some(t) = jump(&ev.destination, &r.plural, &r.namespace, &r.name) {
+            f = f.with_target(t);
+        }
+        out.push(f);
+    }
+    if listed.len() > MAX_SYNC_RESULTS {
+        out.push(finding(
+            1,
+            Level::Info,
+            format!("… and {} more", listed.len() - MAX_SYNC_RESULTS),
+        ));
+    }
+    out
+}
+
+/// How long ago the timestamp at `pointer` was, or `None` when it is absent,
+/// unparseable, or ahead of `now`.
+fn ago(app: &DynamicObject, pointer: &str, now: i64) -> Option<String> {
+    let secs = str_at(&app.data, pointer)
+        .parse::<Timestamp>()
+        .ok()?
+        .as_second();
     (now >= secs).then(|| humanize(now - secs))
 }
 
@@ -1250,6 +1455,10 @@ mod tests {
         for r in &mut resources {
             r.plural = format!("{}s", r.kind.to_lowercase());
         }
+        let mut sync_results = sync_results(&obj);
+        for r in &mut sync_results {
+            r.plural = format!("{}s", r.kind.to_lowercase());
+        }
         Evidence {
             subject: "Application/guestbook".into(),
             via: None,
@@ -1258,6 +1467,7 @@ mod tests {
             app: Some(obj),
             destination,
             resources,
+            sync_results,
         }
     }
 
@@ -1867,6 +2077,7 @@ mod tests {
             destination: Destination::Current,
             destination_namespace: String::new(),
             resources: Vec::new(),
+            sync_results: Vec::new(),
         };
         let out = describe(&ev, now_secs());
         assert_eq!(out.len(), 1);
@@ -1979,6 +2190,7 @@ mod tests {
             destination: Destination::Current,
             destination_namespace: String::new(),
             resources: Vec::new(),
+            sync_results: Vec::new(),
         };
         let out = describe(&ev, now_secs());
         assert_eq!(out[0].text, "Deployment/web is not managed by Argo CD");
@@ -2001,6 +2213,7 @@ mod tests {
             destination: Destination::Current,
             destination_namespace: String::new(),
             resources: Vec::new(),
+            sync_results: Vec::new(),
         };
         let out = describe(&ev, now_secs());
         assert_eq!(out[0].level, Level::Warn);
@@ -2028,6 +2241,7 @@ mod tests {
             destination: Destination::Current,
             destination_namespace: String::new(),
             resources: Vec::new(),
+            sync_results: Vec::new(),
         };
         let out = describe(&ev, now_secs());
         assert_eq!(out[0].level, Level::Info);
@@ -2298,5 +2512,173 @@ mod tests {
                 .iter()
                 .any(|f| f.level == Level::Critical && f.text == "invalid repo URL")
         );
+    }
+
+    /// What the view shows under "Sync operation", from its heading to the
+    /// next one.
+    fn operation_section(findings: &[Finding]) -> Vec<(u8, Level, String)> {
+        let start = findings
+            .iter()
+            .position(|f| f.level == Level::Heading && f.text == "Sync operation")
+            .expect("no Sync operation section");
+        findings[start + 1..]
+            .iter()
+            .take_while(|f| f.level != Level::Heading)
+            .map(|f| (f.indent, f.level, f.text.clone()))
+            .collect()
+    }
+
+    /// A requested sync the controller has not picked up yet says so, and
+    /// does not pass off the previous operation's result as this one's.
+    #[test]
+    fn a_requested_sync_waits_for_the_controller() {
+        let mut obj = healthy();
+        obj.data["operation"] = json!({"sync": {"prune": false}});
+        obj.data["status"]["operationState"] =
+            json!({"phase": "Failed", "message": "an older failure"});
+        assert!(operation_in_flight(&obj));
+        assert_eq!(sync_cell(&obj), "Syncing");
+
+        let out = describe(&evidence(obj, Destination::Current), 1_700_000_000);
+        assert_eq!(
+            operation_section(&out),
+            vec![(
+                1,
+                Level::Info,
+                "requested, waiting for the Argo CD controller".to_string()
+            )]
+        );
+    }
+
+    /// A running sync names how long it has run, what it is doing, and the
+    /// objects it failed on or still runs hooks for, each one a jump.
+    #[test]
+    fn a_running_sync_lists_failures_and_running_hooks() {
+        let mut obj = healthy();
+        obj.data["status"]["operationState"] = json!({
+            "phase": "Running",
+            "message": "waiting for completion of hook batch/Job/migrate",
+            "startedAt": "2023-11-14T22:13:08Z",
+            "syncResult": {"resources": [
+                {"group": "", "kind": "Service", "namespace": "guestbook", "name": "guestbook-ui",
+                 "status": "Synced"},
+                {"group": "apps", "kind": "Deployment", "namespace": "guestbook", "name": "web",
+                 "status": "SyncFailed", "message": "admission webhook denied"},
+                {"group": "batch", "kind": "Job", "namespace": "guestbook", "name": "migrate",
+                 "hookType": "PreSync", "hookPhase": "Running", "status": "Synced"},
+                {"group": "", "kind": "ConfigMap", "namespace": "guestbook", "name": "old",
+                 "status": "Pruned"}
+            ]}
+        });
+        assert!(operation_in_flight(&obj));
+        assert_eq!(sync_cell(&obj), "Syncing");
+
+        let out = describe(&evidence(obj, Destination::Current), 1_700_000_000);
+        assert_eq!(
+            operation_section(&out),
+            vec![
+                (1, Level::Info, "Running, started 12s ago".to_string()),
+                (
+                    2,
+                    Level::Info,
+                    "waiting for completion of hook batch/Job/migrate".to_string()
+                ),
+                (
+                    1,
+                    Level::Info,
+                    "1 synced · 1 pruned · 1 failed · 1 hook running".to_string()
+                ),
+                (
+                    1,
+                    Level::Critical,
+                    "Deployment/web: SyncFailed — admission webhook denied".to_string()
+                ),
+                (
+                    1,
+                    Level::Warn,
+                    "Job/migrate: PreSync hook Running".to_string()
+                ),
+            ]
+        );
+        let failed = out
+            .iter()
+            .find(|f| f.text.starts_with("Deployment/web: SyncFailed"))
+            .unwrap();
+        assert_eq!(
+            failed.target,
+            Some(Target {
+                plural: "deployments".into(),
+                namespace: Some("guestbook".into()),
+                name: "web".into(),
+            })
+        );
+    }
+
+    /// Once it is over, the last sync stays visible with when it finished,
+    /// and the Application reads its plain sync status again.
+    #[test]
+    fn a_finished_sync_reports_its_result() {
+        let mut obj = healthy();
+        obj.data["status"]["operationState"] = json!({
+            "phase": "Succeeded",
+            "message": "successfully synced (all tasks run)",
+            "startedAt": "2023-11-14T22:10:00Z",
+            "finishedAt": "2023-11-14T22:11:20Z",
+            "syncResult": {"resources": [
+                {"group": "", "kind": "Service", "namespace": "guestbook", "name": "guestbook-ui",
+                 "status": "Synced"}
+            ]}
+        });
+        assert!(!operation_in_flight(&obj));
+        assert_eq!(sync_cell(&obj), "Synced");
+
+        let out = describe(&evidence(obj, Destination::Current), 1_700_000_000);
+        assert_eq!(
+            operation_section(&out),
+            vec![
+                (1, Level::Good, "Succeeded, finished 2m ago".to_string()),
+                (
+                    2,
+                    Level::Good,
+                    "successfully synced (all tasks run)".to_string()
+                ),
+                (1, Level::Info, "1 synced".to_string()),
+            ]
+        );
+    }
+
+    /// An Application no operation has synced has no section at all.
+    #[test]
+    fn no_operation_means_no_sync_operation_section() {
+        let out = describe(&evidence(healthy(), Destination::Current), 1_700_000_000);
+        assert!(
+            !out.iter().any(|f| f.text == "Sync operation"),
+            "{:?}",
+            texts(&out)
+        );
+    }
+
+    /// A remote destination's objects are not in this cluster, so a failed
+    /// sync result there names the object without a jump.
+    #[test]
+    fn a_failed_sync_result_in_a_remote_cluster_has_no_jump() {
+        let mut obj = healthy();
+        obj.data["status"]["operationState"] = json!({
+            "phase": "Failed",
+            "syncResult": {"resources": [
+                {"group": "apps", "kind": "Deployment", "namespace": "guestbook", "name": "web",
+                 "status": "SyncFailed"}
+            ]}
+        });
+        let out = describe(
+            &evidence(obj, Destination::Context("prod".into())),
+            1_700_000_000,
+        );
+        let failed = out
+            .iter()
+            .find(|f| f.text == "Deployment/web: SyncFailed")
+            .expect("failed row");
+        assert_eq!(failed.level, Level::Critical);
+        assert_eq!(failed.target, None);
     }
 }

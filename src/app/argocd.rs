@@ -7,6 +7,15 @@ use crate::explain::{Finding, Level, Target};
 /// the spawned gather has no access to the cluster registry.
 type KindPlurals = HashMap<(String, String), String>;
 
+fn plural_of(plurals: &KindPlurals, kind: &str, group: &str) -> Option<String> {
+    plurals
+        .get(&(kind.to_lowercase(), group.to_lowercase()))
+        .cloned()
+}
+
+/// How often the Argo CD view re-reads an Application while it syncs.
+const FOLLOW_INTERVAL: Duration = Duration::from_secs(2);
+
 /// Kubernetes caps a label value here, which is where Argo truncates a long
 /// Application name.
 const LABEL_VALUE_MAX: usize = 63;
@@ -76,7 +85,7 @@ impl App {
         self.cancel_explain_request();
         self.argocd_source = Some(obj);
         self.mode = Mode::Argocd;
-        self.spawn_argocd();
+        self.spawn_argocd(false);
     }
 
     /// The kubeconfig as seen now, for resolving destinations.
@@ -91,11 +100,36 @@ impl App {
     /// `r` in the Argo CD view: re-gather for the same selection.
     pub(super) fn refresh_argocd(&mut self) {
         if self.argocd_source.is_some() {
-            self.spawn_argocd();
+            self.spawn_argocd(false);
         }
     }
 
-    fn spawn_argocd(&mut self) {
+    /// Called every second: while the Application in the open Argo CD view is
+    /// syncing, re-read it so the Sync operation section follows along.
+    pub fn follow_argocd_operation(&mut self) {
+        self.follow_argocd_operation_at(std::time::Instant::now());
+    }
+
+    pub(super) fn follow_argocd_operation_at(&mut self, now: std::time::Instant) {
+        let due = self
+            .argocd_gathered_at
+            .is_some_and(|at| now.saturating_duration_since(at) >= FOLLOW_INTERVAL);
+        // A re-gather rebuilds every row, which would fold away what the user
+        // expanded, so following waits until nothing is.
+        if self.mode == Mode::Argocd
+            && self.argocd_following
+            && !self.argocd_pending
+            && self.argocd_expanded.is_empty()
+            && self.argocd_cause_claim.is_none()
+            && due
+        {
+            self.spawn_argocd(true);
+        }
+    }
+
+    /// `quiet` is the follow-up read while a sync runs: no progress message,
+    /// and the cursor stays on its row.
+    fn spawn_argocd(&mut self, quiet: bool) {
         let Some(obj) = self.argocd_source.clone() else {
             return;
         };
@@ -123,7 +157,7 @@ impl App {
         let client = self.cluster.client.clone();
         let tx = self.tx.clone();
         let genr = self.generation;
-        let claim = self.claim_status(format!("Argo CD: {}…", subject));
+        let claim = (!quiet).then(|| self.claim_status(format!("Argo CD: {}…", subject)));
 
         // A re-gather rebuilds every finding, so nothing stays expanded.
         self.argocd_expanded.clear();
@@ -131,7 +165,11 @@ impl App {
         if let Some(stale) = self.argocd_cause_claim.take() {
             self.clear_claimed_status(stale);
         }
-        self.argocd_claim = Some(claim);
+        if let Some(claim) = claim {
+            self.argocd_claim = Some(claim);
+            self.argocd_causes.clear();
+        }
+        self.argocd_pending = true;
         self.argocd_request = self.argocd_request.wrapping_add(1);
         let request = self.argocd_request;
         tokio::spawn(async move {
@@ -146,14 +184,13 @@ impl App {
                 if self_is_appset {
                     let mut resources = argocd::managed_resources(&selection);
                     for r in &mut resources {
-                        let key = (r.kind.to_lowercase(), r.group.to_lowercase());
-                        if let Some(plural) = plurals.get(&key) {
-                            r.plural = plural.clone();
+                        if let Some(plural) = plural_of(&plurals, &r.kind, &r.group) {
+                            r.plural = plural;
                         }
                     }
                     let findings =
                         argocd::describe_applicationset(&selection, &subject, &resources);
-                    return Ok((selection, findings, Destination::Current, resources));
+                    return Ok((selection, findings, Destination::Current, resources, false));
                 }
                 let Some(app_kind) = app_kind else {
                     return Err("this cluster has no Argo CD Application CRD".to_string());
@@ -197,11 +234,17 @@ impl App {
                     .map(argocd::managed_resources)
                     .unwrap_or_default();
                 for r in &mut resources {
-                    let key = (r.kind.to_lowercase(), r.group.to_lowercase());
-                    if let Some(plural) = plurals.get(&key) {
-                        r.plural = plural.clone();
+                    if let Some(plural) = plural_of(&plurals, &r.kind, &r.group) {
+                        r.plural = plural;
                     }
                 }
+                let mut sync_results = app.as_ref().map(argocd::sync_results).unwrap_or_default();
+                for r in &mut sync_results {
+                    if let Some(plural) = plural_of(&plurals, &r.kind, &r.group) {
+                        r.plural = plural;
+                    }
+                }
+                let following = app.as_ref().is_some_and(argocd::operation_in_flight);
                 let ev = Evidence {
                     subject,
                     via,
@@ -212,22 +255,27 @@ impl App {
                         .unwrap_or_default(),
                     destination: destination.clone(),
                     resources,
+                    sync_results,
                     app,
                 };
                 let findings = argocd::describe(&ev, crate::columns::now_secs());
-                Ok((selection, findings, destination, ev.resources))
+                Ok((selection, findings, destination, ev.resources, following))
             }
             .await;
             // Not `report_result`: the destination travels with the findings so
             // the view can explain an absent jump target.
-            let (source, findings, destination, resources) = match gathered {
-                Ok((source, findings, destination, resources)) => {
-                    (Some(Box::new(source)), findings, destination, resources)
-                }
+            let (source, findings, destination, resources, following) = match gathered {
+                Ok((source, findings, destination, resources, following)) => (
+                    Some(Box::new(source)),
+                    findings,
+                    destination,
+                    resources,
+                    following,
+                ),
                 Err(error) => {
                     let mut findings = Vec::new();
                     prepend_warn_finding(&mut findings, Some(error));
-                    (None, findings, Destination::Current, Vec::new())
+                    (None, findings, Destination::Current, Vec::new(), false)
                 }
             };
             let _ = tx
@@ -240,6 +288,7 @@ impl App {
                     destination,
                     findings,
                     resources,
+                    following,
                 })
                 .await;
         });
@@ -247,6 +296,7 @@ impl App {
 
     pub(super) fn cancel_argocd_request(&mut self) {
         self.argocd_request = self.argocd_request.wrapping_add(1);
+        self.argocd_pending = false;
         self.argocd_reselect = None;
         if let Some(claim) = self.argocd_claim.take() {
             self.clear_claimed_status(claim);
@@ -1086,6 +1136,7 @@ impl App {
     /// Put the causes under the line that said none were known.
     pub(super) fn apply_argocd_cause(&mut self, findings: Vec<Finding>) {
         self.argocd_cause_claim = None;
+        self.argocd_causes = findings.clone();
         if findings.is_empty() {
             return;
         }
