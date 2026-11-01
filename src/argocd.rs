@@ -289,15 +289,23 @@ impl SyncResult {
         self.status == "SyncFailed" || matches!(self.hook_phase.as_str(), "Failed" | "Error")
     }
 
+    /// A failed hook is listed as failed, not also as running.
     fn hook_running(&self) -> bool {
-        !self.hook_type.is_empty() && matches!(self.hook_phase.as_str(), "Running" | "Terminating")
+        !self.hook_type.is_empty()
+            && !self.failed()
+            && matches!(self.hook_phase.as_str(), "Running" | "Terminating")
     }
 
     fn line(&self) -> String {
-        let state = if self.hook_type.is_empty() {
-            self.status.clone()
-        } else {
-            format!("{} hook {}", self.hook_type, self.hook_phase)
+        // A hook can fail to apply (`SyncFailed`) while its phase says
+        // nothing about that, so the status is shown whenever it failed.
+        let state = match (self.hook_type.as_str(), self.hook_phase.as_str()) {
+            ("", _) => self.status.clone(),
+            (hook, "") => format!("{hook} hook {}", self.status),
+            (hook, phase) if self.status == "SyncFailed" => {
+                format!("{hook} hook {phase}, SyncFailed")
+            }
+            (hook, phase) => format!("{hook} hook {phase}"),
         };
         join(
             &format!("{}/{}: {state}", self.kind, self.name),
@@ -2680,5 +2688,52 @@ mod tests {
             .expect("failed row");
         assert_eq!(failed.level, Level::Critical);
         assert_eq!(failed.target, None);
+    }
+
+    /// A hook that failed to apply is a failure whatever its phase says, and
+    /// its row says so instead of showing only the phase.
+    #[test]
+    fn a_hook_that_failed_to_apply_shows_the_failure() {
+        let mut obj = healthy();
+        obj.data["status"]["operationState"] = json!({
+            "phase": "Running",
+            "syncResult": {"resources": [
+                {"group": "batch", "kind": "Job", "namespace": "guestbook", "name": "migrate",
+                 "hookType": "PreSync", "hookPhase": "Running", "status": "SyncFailed",
+                 "message": "Job.batch is invalid"},
+                {"group": "batch", "kind": "Job", "namespace": "guestbook", "name": "seed",
+                 "hookType": "PostSync", "status": "SyncFailed"}
+            ]}
+        });
+        let out = describe(&evidence(obj, Destination::Current), 1_700_000_000);
+        let section = operation_section(&out);
+        assert!(
+            section.contains(&(1, Level::Info, "2 failed".to_string())),
+            "{section:?}"
+        );
+        assert!(
+            section.contains(&(
+                1,
+                Level::Critical,
+                "Job/migrate: PreSync hook Running, SyncFailed — Job.batch is invalid".to_string()
+            )),
+            "{section:?}"
+        );
+        assert!(
+            section.contains(&(
+                1,
+                Level::Critical,
+                "Job/seed: PostSync hook SyncFailed".to_string()
+            )),
+            "{section:?}"
+        );
+        assert_eq!(
+            section
+                .iter()
+                .filter(|(_, _, t)| t.starts_with("Job/migrate"))
+                .count(),
+            1,
+            "listed twice: {section:?}"
+        );
     }
 }
