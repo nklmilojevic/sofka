@@ -90,6 +90,7 @@ impl App {
             MouseEventKind::Down(MouseButton::Left) if self.mode == Mode::Table => {
                 self.range_selection = None;
                 self.table_click(m.column, m.row);
+                self.drop_moved_filter_reselect();
                 Ok(())
             }
             _ => Ok(()),

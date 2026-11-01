@@ -18791,6 +18791,295 @@ fn row_names(app: &App) -> Vec<String> {
         .collect()
 }
 
+fn selected_name(app: &App) -> Option<String> {
+    app.selected_ref().and_then(|o| o.metadata.name.clone())
+}
+
+fn type_text(app: &mut App, text: &str) {
+    for c in text.chars() {
+        app.handle_key(press(KeyCode::Char(c))).unwrap();
+    }
+}
+
+#[tokio::test]
+async fn clearing_the_filter_in_the_table_keeps_the_selected_object() {
+    let (mut app, _rx) = test_app();
+    app.switch_kind("pods");
+    sync_view(&mut app, &["alpha", "beta", "delta", "gamma"]);
+
+    type_filter(&mut app, "gam");
+    assert_eq!(row_names(&app), ["gamma"]);
+    assert_eq!(selected_name(&app).as_deref(), Some("gamma"));
+
+    app.handle_key(press(KeyCode::Esc)).unwrap();
+    assert!(app.filter.is_empty());
+    assert_eq!(app.row_count(), 4);
+    assert_eq!(selected_name(&app).as_deref(), Some("gamma"));
+}
+
+#[tokio::test]
+async fn editing_the_filter_keeps_the_selected_object_while_it_matches() {
+    let (mut app, _rx) = test_app();
+    app.switch_kind("pods");
+    sync_view(&mut app, &["alpha", "beta", "delta", "gamma"]);
+    app.handle_key(press(KeyCode::End)).unwrap();
+    assert_eq!(selected_name(&app).as_deref(), Some("gamma"));
+
+    app.handle_key(press(KeyCode::Char('/'))).unwrap();
+    type_text(&mut app, "a");
+    assert_eq!(app.row_count(), 4);
+    assert_eq!(selected_name(&app).as_deref(), Some("gamma"));
+    type_text(&mut app, "m");
+    assert_eq!(row_names(&app), ["gamma"]);
+    assert_eq!(selected_name(&app).as_deref(), Some("gamma"));
+    app.handle_key(press(KeyCode::Backspace)).unwrap();
+    app.handle_key(press(KeyCode::Backspace)).unwrap();
+    assert_eq!(app.row_count(), 4);
+    assert_eq!(selected_name(&app).as_deref(), Some("gamma"));
+
+    type_text(&mut app, "elt");
+    assert_eq!(row_names(&app), ["delta"]);
+    assert_eq!(
+        selected_name(&app).as_deref(),
+        Some("delta"),
+        "a filtered-out selection falls back to the first row"
+    );
+    app.handle_key(press(KeyCode::Enter)).unwrap();
+    assert_eq!(app.mode, Mode::Table);
+    assert_eq!(selected_name(&app).as_deref(), Some("delta"));
+
+    app.handle_key(press(KeyCode::Char('/'))).unwrap();
+    app.handle_key(press(KeyCode::Esc)).unwrap();
+    assert_eq!(app.mode, Mode::Table);
+    assert!(app.filter.is_empty());
+    assert_eq!(app.row_count(), 4);
+    assert_eq!(selected_name(&app).as_deref(), Some("delta"));
+}
+
+#[tokio::test]
+async fn toggling_the_faults_filter_keeps_the_selected_object() {
+    let (mut app, _rx) = test_app();
+    app.switch_kind("pods");
+    for (name, faulty) in [
+        ("a-ok", false),
+        ("b-crash", true),
+        ("c-ok", false),
+        ("d-crash", true),
+    ] {
+        let mut pod = faults_test_pod(name);
+        if faulty {
+            pod["status"]["containerStatuses"][0]["state"] =
+                json!({"waiting": {"reason": "CrashLoopBackOff"}});
+        }
+        apply(&mut app, pod);
+    }
+    app.handle_key(press(KeyCode::End)).unwrap();
+    assert_eq!(selected_name(&app).as_deref(), Some("d-crash"));
+
+    app.handle_key(ctrl(KeyCode::Char('z'))).unwrap();
+    assert_eq!(row_names(&app), ["b-crash", "d-crash"]);
+    assert_eq!(selected_name(&app).as_deref(), Some("d-crash"));
+    app.handle_key(ctrl(KeyCode::Char('z'))).unwrap();
+    assert_eq!(app.row_count(), 4);
+    assert_eq!(selected_name(&app).as_deref(), Some("d-crash"));
+
+    app.handle_key(press(KeyCode::Up)).unwrap();
+    assert_eq!(selected_name(&app).as_deref(), Some("c-ok"));
+    app.handle_key(ctrl(KeyCode::Char('z'))).unwrap();
+    assert_eq!(
+        selected_name(&app).as_deref(),
+        Some("b-crash"),
+        "a filtered-out selection falls back to the first row"
+    );
+}
+
+#[tokio::test]
+async fn toggling_the_faults_filter_during_a_relist_keeps_the_fallback_row() {
+    let (mut app, _rx) = test_app();
+    app.switch_kind("pods");
+    let list = |app: &mut App| {
+        for (name, faulty) in [("a-ok", false), ("b-crash", true), ("c-ok", false)] {
+            let mut pod = faults_test_pod(name);
+            if faulty {
+                pod["status"]["containerStatuses"][0]["state"] =
+                    json!({"waiting": {"reason": "CrashLoopBackOff"}});
+            }
+            apply(app, pod);
+        }
+    };
+    list(&mut app);
+    app.handle_msg(Msg::Synced {
+        generation: app.generation,
+    });
+    app.handle_key(press(KeyCode::Home)).unwrap();
+    assert_eq!(selected_name(&app).as_deref(), Some("a-ok"));
+    app.handle_msg(Msg::Reset {
+        generation: app.generation,
+    });
+    assert!(!app.store.synced, "the relist keeps the rows on screen");
+
+    app.handle_key(ctrl(KeyCode::Char('z'))).unwrap();
+    assert_eq!(selected_name(&app).as_deref(), Some("b-crash"));
+    app.handle_key(ctrl(KeyCode::Char('z'))).unwrap();
+    assert_eq!(app.row_count(), 3);
+    assert_eq!(
+        selected_name(&app).as_deref(),
+        Some("b-crash"),
+        "a-ok was hidden by the filter, not missing from the list"
+    );
+    list(&mut app);
+    app.handle_msg(Msg::Synced {
+        generation: app.generation,
+    });
+    assert_eq!(selected_name(&app).as_deref(), Some("b-crash"));
+}
+
+#[tokio::test]
+async fn clearing_the_filter_scrolls_the_selected_row_into_view() {
+    let (mut app, _rx) = test_app();
+    app.switch_kind("pods");
+    let names: Vec<String> = (0..40).map(|i| format!("pod-{i:02}")).collect();
+    let names: Vec<&str> = names.iter().map(String::as_str).collect();
+    sync_view(&mut app, &names);
+    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 24)).unwrap();
+    let screen = |terminal: &ratatui::Terminal<ratatui::backend::TestBackend>| -> String {
+        terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|c| c.symbol())
+            .collect()
+    };
+    terminal.draw(|f| crate::ui::draw(f, &mut app)).unwrap();
+    assert!(!screen(&terminal).contains("pod-33"));
+
+    type_filter(&mut app, "pod-33");
+    terminal.draw(|f| crate::ui::draw(f, &mut app)).unwrap();
+    app.handle_key(press(KeyCode::Esc)).unwrap();
+    terminal.draw(|f| crate::ui::draw(f, &mut app)).unwrap();
+    assert_eq!(selected_name(&app).as_deref(), Some("pod-33"));
+    assert!(screen(&terminal).contains("pod-33"));
+}
+
+fn list_web_pods(app: &mut App, names: &[&str], synced: bool) {
+    app.handle_msg(Msg::Reset {
+        generation: app.generation,
+    });
+    for name in names {
+        let mut pod = pod(name);
+        pod["metadata"]["labels"] = json!({"app": "web"});
+        apply(app, pod);
+    }
+    if synced {
+        app.handle_msg(Msg::Synced {
+            generation: app.generation,
+        });
+    }
+}
+
+#[tokio::test]
+async fn server_side_filters_keep_the_selected_object_once_the_watch_lists() {
+    let (mut app, _rx) = test_app();
+    app.switch_kind("pods");
+    list_web_pods(&mut app, &["alpha", "beta", "delta", "gamma"], true);
+    app.handle_key(press(KeyCode::End)).unwrap();
+    assert_eq!(selected_name(&app).as_deref(), Some("gamma"));
+
+    let before = app.generation;
+    type_filter(&mut app, "-l app=web");
+    assert_eq!(app.generation, before + 1);
+    assert_eq!(app.row_count(), 0, "a first visit has no cached rows");
+    list_web_pods(&mut app, &["beta", "gamma"], true);
+    assert_eq!(selected_name(&app).as_deref(), Some("gamma"));
+
+    let before = app.generation;
+    app.handle_key(press(KeyCode::Esc)).unwrap();
+    assert_eq!(app.generation, before + 1);
+    assert_eq!(
+        app.row_count(),
+        4,
+        "the unfiltered rows come from the cache"
+    );
+    assert_eq!(selected_name(&app).as_deref(), Some("gamma"));
+    list_web_pods(&mut app, &["aaa", "alpha", "beta", "delta", "gamma"], true);
+    assert_eq!(
+        selected_name(&app).as_deref(),
+        Some("gamma"),
+        "the fresh list moved gamma down a row"
+    );
+}
+
+#[tokio::test]
+async fn moving_the_cursor_while_a_server_side_filter_lists_keeps_the_new_row() {
+    let (mut app, _rx) = test_app();
+    app.switch_kind("pods");
+    list_web_pods(&mut app, &["alpha", "beta", "delta", "gamma"], true);
+    app.handle_key(press(KeyCode::End)).unwrap();
+
+    type_filter(&mut app, "-l app=web");
+    list_web_pods(&mut app, &["beta", "delta", "gamma"], false);
+    assert_eq!(selected_name(&app).as_deref(), Some("beta"));
+    app.handle_key(press(KeyCode::Down)).unwrap();
+    assert_eq!(selected_name(&app).as_deref(), Some("delta"));
+    app.handle_msg(Msg::Synced {
+        generation: app.generation,
+    });
+    assert_eq!(selected_name(&app).as_deref(), Some("delta"));
+}
+
+#[tokio::test]
+async fn moving_the_cursor_away_and_back_while_a_filter_lists_keeps_the_row() {
+    let (mut app, _rx) = test_app();
+    app.switch_kind("pods");
+    list_web_pods(&mut app, &["alpha", "beta", "delta", "gamma"], true);
+    app.handle_key(press(KeyCode::End)).unwrap();
+
+    type_filter(&mut app, "-l app=web");
+    list_web_pods(&mut app, &["beta", "delta", "gamma"], false);
+    app.handle_key(press(KeyCode::Down)).unwrap();
+    app.handle_key(press(KeyCode::Up)).unwrap();
+    assert_eq!(selected_name(&app).as_deref(), Some("beta"));
+    app.handle_msg(Msg::Synced {
+        generation: app.generation,
+    });
+    assert_eq!(
+        selected_name(&app).as_deref(),
+        Some("beta"),
+        "the user's navigation outranks the remembered gamma"
+    );
+}
+
+#[tokio::test]
+async fn clicking_rows_while_a_filter_lists_keeps_the_clicked_row() {
+    use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+    use ratatui::{Terminal, backend::TestBackend};
+    let (mut app, _rx) = test_app();
+    app.switch_kind("pods");
+    list_web_pods(&mut app, &["alpha", "beta", "delta", "gamma"], true);
+    app.handle_key(press(KeyCode::End)).unwrap();
+
+    type_filter(&mut app, "-l app=web");
+    list_web_pods(&mut app, &["beta", "delta", "gamma"], false);
+    let mut terminal = Terminal::new(TestBackend::new(120, 32)).unwrap();
+    terminal.draw(|f| crate::ui::draw(f, &mut app)).unwrap();
+    let hit = app.table_hit.borrow().clone().expect("geometry recorded");
+    let click = |row: u16| MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: hit.x_min + 3,
+        row: hit.rows_y + row,
+        modifiers: KeyModifiers::NONE,
+    };
+    app.handle_mouse(click(1)).unwrap();
+    assert_eq!(selected_name(&app).as_deref(), Some("delta"));
+    app.handle_mouse(click(0)).unwrap();
+    assert_eq!(selected_name(&app).as_deref(), Some("beta"));
+    app.handle_msg(Msg::Synced {
+        generation: app.generation,
+    });
+    assert_eq!(selected_name(&app).as_deref(), Some("beta"));
+}
+
 fn type_resource_query(app: &mut App, query: &str) {
     app.handle_key(press(KeyCode::Char(':'))).unwrap();
     for c in query.chars() {
@@ -23114,13 +23403,15 @@ async fn ctrl_z_filters_pod_faults() {
     }
     assert_eq!(app.row_count(), cases.len());
     app.handle_key(press(KeyCode::End)).unwrap();
+    let last = selected_name(&app).unwrap();
     app.handle_key(ctrl(KeyCode::Char('z'))).unwrap();
     let names = row_names(&app);
     for (pod, faulty) in &cases {
         let name = pod["metadata"]["name"].as_str().unwrap();
         assert_eq!(names.iter().any(|n| n == name), *faulty, "{name}");
     }
-    assert_eq!(app.table_state.selected(), Some(0));
+    assert!(names.contains(&last), "{last} is faulty");
+    assert_eq!(selected_name(&app), Some(last));
     let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 24)).unwrap();
     terminal.draw(|f| crate::ui::draw(f, &mut app)).unwrap();
     let screen: String = terminal

@@ -27,7 +27,7 @@ impl App {
         let Some(key) = self.return_selection.take() else {
             return;
         };
-        if let Some(i) = self.rows().iter().position(|o| self.key_of(o) == key) {
+        if let Some(i) = self.row_index(&key) {
             self.table_state.select(Some(i));
         }
     }

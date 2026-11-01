@@ -1340,6 +1340,83 @@ impl App {
         self.selected_ref().cloned()
     }
 
+    pub(super) fn selected_key(&self) -> Option<String> {
+        self.selected_ref().map(|o| self.key_of(o))
+    }
+
+    /// Display position of the row with store key `key`, if it is listed.
+    pub(super) fn row_index(&self, key: &str) -> Option<usize> {
+        self.ensure_rows_cache();
+        self.rows_cache
+            .borrow()
+            .keys
+            .iter()
+            .position(|k| k.as_ref() == key)
+    }
+
+    /// The object a filter change should keep selected: one still waiting for
+    /// its watch to list, while the cursor has not moved, else the selection.
+    pub(super) fn filter_anchor(&self) -> Option<String> {
+        match &self.filter_reselect {
+            Some(pending)
+                if pending.generation == self.generation
+                    && self.table_state.selected() == Some(pending.index) =>
+            {
+                Some(pending.key.clone())
+            }
+            _ => self.selected_key(),
+        }
+    }
+
+    /// Re-select `key` after the filter changed which rows are listed, so the
+    /// cursor stays on the same object. Falls back to the first row once that
+    /// object is filtered out. While the watch is still listing, the rows are
+    /// not final, so `finish_filter_reselect` looks `key` up again on sync,
+    /// unless the object is already here and the filter hid it.
+    pub(super) fn reselect_after_filter(&mut self, key: Option<String>) {
+        self.invalidate_rows();
+        let found = key.as_deref().and_then(|key| self.row_index(key));
+        let index = found.unwrap_or(0);
+        self.table_state.select(Some(index));
+        self.filter_reselect = key
+            .filter(|key| !self.store.synced && (found.is_some() || self.store.get(key).is_none()))
+            .map(|key| FilterReselect {
+                generation: self.generation,
+                key,
+                index,
+            });
+    }
+
+    /// Drop a pending [`Self::reselect_after_filter`] once the watch was
+    /// replaced or the cursor left the row it set. Run after every key and
+    /// click, so moving away and back before the list arrives still counts.
+    pub(super) fn drop_moved_filter_reselect(&mut self) {
+        if self.filter_reselect.as_ref().is_some_and(|pending| {
+            pending.generation != self.generation
+                || self.table_state.selected() != Some(pending.index)
+        }) {
+            self.filter_reselect = None;
+        }
+    }
+
+    /// Apply a pending [`Self::reselect_after_filter`] once its watch has
+    /// listed. Returns whether it still owns the selection: applied now, or
+    /// waiting.
+    pub(super) fn finish_filter_reselect(&mut self) -> bool {
+        self.drop_moved_filter_reselect();
+        if self.filter_reselect.is_none() {
+            return false;
+        }
+        if !self.store.synced {
+            return true;
+        }
+        if let Some(pending) = self.filter_reselect.take() {
+            let index = self.row_index(&pending.key).unwrap_or(0);
+            self.table_state.select(Some(index));
+        }
+        true
+    }
+
     /// Full `(header, value)` pairs for the selected row, in display order.
     /// Live values replace cached cells. Empty cells are excluded.
     pub fn selected_row_fields(&self) -> Vec<(String, String)> {

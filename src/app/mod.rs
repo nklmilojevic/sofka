@@ -1729,6 +1729,14 @@ impl PrevRevisions {
     }
 }
 
+/// An object to re-select once the watch a filter change restarted has
+/// listed, because the rows it was looked up in were not the final ones.
+struct FilterReselect {
+    generation: u64,
+    key: String,
+    index: usize,
+}
+
 /// The active filter string alongside its parsed form, so the grammar is
 /// reparsed only when the string actually changes — never per frame or row.
 struct FilterCache {
@@ -2632,6 +2640,7 @@ pub struct App {
     /// Row key (ns/name) selected when a transient view was opened, restored on
     /// return so the cursor lands back on the same object.
     return_selection: Option<String>,
+    filter_reselect: Option<FilterReselect>,
     pub should_quit: bool,
     matcher: crate::fuzzy::Fuzzy,
     rows_cache: RefCell<RowsCache>,
@@ -3003,6 +3012,7 @@ impl App {
             command_failure: None,
             return_mode: Mode::Table,
             return_selection: None,
+            filter_reselect: None,
             should_quit: false,
             matcher: crate::fuzzy::Fuzzy::new(),
             hay_buf: RefCell::new(String::new()),

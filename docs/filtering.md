@@ -5,6 +5,13 @@ Ctrl-U clears the input line. Local terms update as you type; selectors take
 effect on Enter, which starts a new watch scoped at the Kubernetes API.
 Malformed input shows an error and stays open for editing.
 
+Editing or clearing the filter keeps the cursor on the selected object while it
+is still listed, and scrolls it into view. Once the filter hides that object,
+the cursor moves to the first row. Turning the `Ctrl+Z` faults filter on or off
+works the same way. When adding or clearing a selector restarts the watch, the
+cursor finds the object again once the new list arrives, unless you moved it
+in the meantime.
+
 Plain text is split into words, and every word must match. A word matches
 contiguous text, ignoring case, in the namespace, the name, or an individual
 displayed column: `istiod` finds `istiod-7c9f` but not `istio-cni-node`. A `|`

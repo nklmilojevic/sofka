@@ -75,6 +75,7 @@ impl App {
             self.focus_workload_row();
         }
         let result = self.handle_key_inner(key);
+        self.drop_moved_filter_reselect();
         self.note_skipped_marks(input_mode);
         self.restore_workloads_identity();
         if self.mode != input_mode {
@@ -417,9 +418,9 @@ impl App {
                     && !self.try_workspace_key(key.event())
                     && !self.try_plugin_key(key.event())
                 {
+                    let selected = self.filter_anchor();
                     self.faults_only = !self.faults_only;
-                    self.invalidate_rows();
-                    self.table_state.select(Some(0));
+                    self.reselect_after_filter(selected);
                 }
             }
             (Some(Action::ToggleOwned), _) if self.workloads_active() => {
@@ -432,12 +433,13 @@ impl App {
                 if !self.marked.is_empty() {
                     self.clear_marks();
                 } else if !self.filter.is_empty() {
+                    let selected = self.filter_anchor();
                     self.filter.clear();
-                    self.invalidate_rows();
                     // Dropping the filter also drops its server-side
                     // selectors, so the watch must widen back out.
                     self.sync_filter_selectors();
                     self.save_history_filter();
+                    self.reselect_after_filter(selected);
                 } else if !self.pop_frame()
                     && let Some(back) = self.argocd_return.take()
                 {
@@ -1415,9 +1417,9 @@ impl App {
     /// apply live per keystroke; `-l`/`-f` selectors are sent to the API on
     /// ⏎, since that restarts the watch (see `sync_filter_selectors`).
     pub(super) fn key_filter(&mut self, key: KeyInput) {
+        let selected = self.filter_anchor();
         if edit_action(key.action, &mut self.filter) {
-            self.invalidate_rows();
-            self.table_state.select(Some(0));
+            self.reselect_after_filter(selected);
             return;
         }
         match (key.action, key.code) {
@@ -1442,8 +1444,7 @@ impl App {
             (None, KeyCode::Char(c)) if key.is_text() => self.filter.push(c),
             _ => {}
         }
-        self.invalidate_rows();
-        self.table_state.select(Some(0));
+        self.reselect_after_filter(selected);
     }
 
     pub(super) fn key_scroll(&mut self, key: KeyInput, detail: bool) {
