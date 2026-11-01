@@ -383,3 +383,44 @@ async fn sorting_filtering_and_selection_follow_headers_under_pin() {
     let hit = draw(&mut term, &mut app);
     assert_eq!(rows(&term, &hit), ["node-c a"]);
 }
+
+#[tokio::test]
+async fn pins_on_crd_printer_columns_are_checked_once_the_columns_arrive() {
+    let (mut app, _rx) = test_app();
+    pin_views(
+        &mut app,
+        r#"
+        [views.certificates]
+        pin = ["READY", "NOPE"]
+    "#,
+    );
+    palette(&mut app, "certificates");
+    assert!(app.config_warnings.is_empty(), "{:?}", app.config_warnings);
+
+    let crd = json!({"spec": {"versions": [{
+        "name": "v1", "served": true, "storage": true,
+        "additionalPrinterColumns": [
+            {"name": "Ready", "type": "string", "jsonPath": ".status.ready"}
+        ]
+    }]}});
+    app.handle_msg(Msg::PrinterColumns {
+        generation: app.generation,
+        resource: app.cluster.resolve("certificates").unwrap().resource_key(),
+        view: Box::new(crate::views::printer_columns_view(&crd, "v1")),
+    });
+    apply(
+        &mut app,
+        json!({
+            "apiVersion": "cert-manager.io/v1", "kind": "Certificate",
+            "metadata": {"name": "tls", "namespace": "default"},
+            "status": {"ready": "True"}
+        }),
+    );
+    let mut term = Terminal::new(TestBackend::new(120, 24)).unwrap();
+    let hit = draw(&mut term, &mut app);
+    assert_eq!(visible(&app, &hit)[..2], ["READY", "NAME"]);
+    assert_eq!(
+        app.config_warnings,
+        ["view cert-manager.io/certificates: pin column NOPE is not in this view; ignored"]
+    );
+}

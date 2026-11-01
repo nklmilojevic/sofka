@@ -976,13 +976,16 @@ impl App {
     }
 
     /// A warning for each pinned header the active view does not have, in
-    /// wide mode or out of it. NAMESPACE is always accepted. While the server
-    /// table's columns are still loading, the headers are not known yet.
+    /// wide mode or out of it. NAMESPACE is always accepted. While the CRD
+    /// printer columns or the server table's columns are still loading, the
+    /// headers are not known yet.
     fn pin_warnings(&self) -> Vec<String> {
         let Some(pin) = &self.pinned_columns else {
             return Vec::new();
         };
-        if self.server_table_eligible() && self.server_table.columns.is_empty() {
+        if self.printer_columns_pending()
+            || (self.server_table_eligible() && self.server_table.columns.is_empty())
+        {
             return Vec::new();
         }
         let has = |headers: &[String], header: &str| headers.iter().any(|h| h == header);
