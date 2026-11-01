@@ -436,6 +436,11 @@ core up; memory displays Mi/Gi. Both use the original values for sorting and
 numeric filters. See
 [quantity formats](views.md#quantity-formats).
 
+A view's `pin` lists the column headers that render first and stay fixed during
+horizontal scrolling, such as `pin = ["NAME", "STATUS"]`. Without it, NAMESPACE
+and NAME stay fixed; `pin = []` fixes none. See
+[pinned columns](views.md#pinned-columns).
+
 ## Other sections
 
 Each of these is documented where the feature itself is:

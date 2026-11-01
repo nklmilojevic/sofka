@@ -1543,11 +1543,13 @@ fn draw_table(frame: &mut Frame, app: &mut App, area: Rect) {
         .saturating_sub(2)
         .saturating_sub(2)
         .saturating_sub(2 * ncols.saturating_sub(1));
+    let (order, fixed) = column_order(&headers, app.pinned_headers(), name_col);
     let mut widths = distribute_column_widths(content_budget, &col_rules);
     for (i, (rule, needed)) in col_rules.iter().enumerate() {
         if matches!(rule, ColWidth::Flex(_)) {
-            let minimum = if i <= name_col {
-                (*needed).min(area.width.saturating_sub(4) / (2 * (name_col + 1) as u16))
+            let minimum = if order[..fixed].contains(&i) {
+                let share = u16::try_from(2 * fixed).unwrap_or(u16::MAX);
+                (*needed).min(area.width.saturating_sub(4) / share)
             } else {
                 *needed
             };
@@ -1555,7 +1557,8 @@ fn draw_table(frame: &mut Frame, app: &mut App, area: Rect) {
         }
     }
     let inner = area.inner(ratatui::layout::Margin::new(1, 1));
-    let viewport = TableViewport::new(&widths, name_col + 1, inner.width);
+    let display_widths: Vec<u16> = order.iter().map(|&i| widths[i]).collect();
+    let viewport = TableViewport::new(&display_widths, fixed, inner.width);
     app.col_scroll_max = viewport.max_offset;
     app.col_offset = app.col_offset.min(app.col_scroll_max);
     let col_offset = app.col_offset;
@@ -1748,7 +1751,7 @@ fn draw_table(frame: &mut Frame, app: &mut App, area: Rect) {
         viewport
             .ranges(col_offset)
             .iter()
-            .map(|&(start, end, i, _)| (inner.x + start, inner.x + end, i))
+            .map(|&(start, end, i, _)| (inner.x + start, inner.x + end, order[i]))
             .collect(),
     );
     frame.render_widget(
@@ -1764,6 +1767,7 @@ fn draw_table(frame: &mut Frame, app: &mut App, area: Rect) {
             header: header_cells,
             rows,
             widths,
+            order,
             viewport,
             offset: col_offset,
             selected: render_selected,
@@ -1857,10 +1861,45 @@ impl TableViewport {
     }
 }
 
+/// The order columns are drawn in, as `display_headers()` indices, and how
+/// many of them, from the left, stay fixed during horizontal scrolling.
+/// Without `pin`, columns keep their order and every column up to NAME is
+/// fixed. With it, the pinned headers come first, in list order.
+fn column_order(
+    headers: &[String],
+    pin: Option<&[String]>,
+    name_col: usize,
+) -> (Vec<usize>, usize) {
+    let Some(pin) = pin else {
+        return (
+            (0..headers.len()).collect(),
+            (name_col + 1).min(headers.len()),
+        );
+    };
+    let mut order: Vec<usize> = Vec::with_capacity(headers.len());
+    for header in pin {
+        if let Some(i) = headers.iter().position(|h| h.eq_ignore_ascii_case(header))
+            && !order.contains(&i)
+        {
+            order.push(i);
+        }
+    }
+    let fixed = order.len();
+    for i in 0..headers.len() {
+        if !order[..fixed].contains(&i) {
+            order.push(i);
+        }
+    }
+    (order, fixed)
+}
+
 struct ScrollingTable<'a> {
     header: Vec<RenderCell<'a>>,
     rows: Vec<Vec<RenderCell<'a>>>,
+    /// Indexed like `header` and each row.
     widths: Vec<u16>,
+    /// Display position to cell index; the viewport works in display order.
+    order: Vec<usize>,
     viewport: TableViewport,
     offset: usize,
     selected: Option<usize>,
@@ -1872,7 +1911,7 @@ impl ratatui::widgets::Widget for ScrollingTable<'_> {
         let ranges = self.viewport.ranges(self.offset);
         let max_width = ranges
             .iter()
-            .map(|&(_, _, i, _)| self.widths[i])
+            .map(|&(_, _, i, _)| self.widths[self.order[i]])
             .max()
             .unwrap_or(0);
         // Reuse one row of storage. Long values do not allocate a full table.
@@ -1900,7 +1939,8 @@ impl ratatui::widgets::Widget for ScrollingTable<'_> {
             if selected {
                 buf.set_stringn(area.x, y_pos, "▌ ", usize::from(area.width), style);
             }
-            for &(start, end, index, source_start) in &ranges {
+            for &(start, end, position, source_start) in &ranges {
+                let index = self.order[position];
                 source.reset();
                 if let Some(bg) = theme::background() {
                     source.set_style(source.area, Style::default().bg(bg));

@@ -646,14 +646,7 @@ impl App {
 
     /// Read CRD columns first, then try server Tables if no columns are available.
     pub(super) fn maybe_fetch_printer_columns(&mut self, kind: &Kind) {
-        let user_has_columns = self
-            .active_user_view()
-            .is_some_and(|v| !v.columns.is_empty());
-        if crate::columns::has_curated(&kind.ar.group, &self.kind_plural)
-            || kind.ar.group.is_empty()
-            || kind.ar.plural.to_lowercase() != self.kind_plural
-            || user_has_columns
-        {
+        if !self.uses_printer_columns(kind) {
             return;
         }
         if self.crd_views.contains_key(&kind.resource_key()) {
@@ -689,13 +682,28 @@ impl App {
         self.tasks.push(handle);
     }
 
-    pub(super) fn server_table_eligible(&self) -> bool {
-        let Some(kind) = &self.kind else { return false };
-        !self.namespace_is_pattern()
-            && !kind.ar.group.is_empty()
+    /// Whether `kind`'s columns come from its CRD printer columns, or the
+    /// server Table when it has none: an uncurated custom resource whose
+    /// active view declares no columns.
+    fn uses_printer_columns(&self, kind: &Kind) -> bool {
+        !kind.ar.group.is_empty()
             && kind.ar.plural.to_lowercase() == self.kind_plural
             && !crate::columns::has_curated(&kind.ar.group, &self.kind_plural)
             && self.active_user_view().is_none_or(|v| v.columns.is_empty())
+    }
+
+    /// The current kind's CRD printer-column lookup has not answered yet, so
+    /// its columns are still the provisional NAME/AGE.
+    pub(super) fn printer_columns_pending(&self) -> bool {
+        self.kind.as_ref().is_some_and(|kind| {
+            self.uses_printer_columns(kind) && !self.crd_views.contains_key(&kind.resource_key())
+        })
+    }
+
+    pub(super) fn server_table_eligible(&self) -> bool {
+        let Some(kind) = &self.kind else { return false };
+        !self.namespace_is_pattern()
+            && self.uses_printer_columns(kind)
             && self
                 .crd_views
                 .get(&kind.resource_key())

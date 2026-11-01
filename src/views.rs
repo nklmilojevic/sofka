@@ -128,6 +128,9 @@ pub struct View {
     pub sort: Option<(String, bool)>,
     /// Replace the curated columns entirely instead of overlaying them.
     pub replace: bool,
+    /// Uppercased headers that render first and stay fixed during horizontal
+    /// scrolling, in this order. `None` keeps the default fixed columns.
+    pub pin: Option<Vec<String>>,
     /// JSON Pointer to the name of the node this kind's objects name — see
     /// [`node_pointer`].
     pub node: Option<String>,
@@ -568,6 +571,22 @@ pub fn compile(
             ));
             replace = false;
         }
+        let pin = cfg.pin.as_ref().map(|headers| {
+            let mut pin: Vec<String> = Vec::with_capacity(headers.len());
+            for header in headers {
+                let header = header.trim().to_uppercase();
+                if header.is_empty() {
+                    warnings.push(format!("views.\"{key}\": empty pin column ignored"));
+                } else if pin.contains(&header) {
+                    warnings.push(format!(
+                        "views.\"{key}\": duplicate pin column {header} ignored"
+                    ));
+                } else {
+                    pin.push(header);
+                }
+            }
+            pin
+        });
         let sort = cfg
             .sort
             .as_deref()
@@ -764,6 +783,7 @@ pub fn compile(
                 columns,
                 sort,
                 replace,
+                pin,
                 node,
                 drill,
                 refs,
@@ -866,7 +886,7 @@ pub fn lookup<'a>(
 /// Find the view for a resource in a named layout: `key:layout@namespace`
 /// for every key form, then `key:layout`. Without a layout, or when the kind
 /// has no such layout, the default view from [`lookup`]. Only its columns,
-/// `replace`, and `sort` are read; [`drill_for`], [`node_pointer`], and the
+/// `replace`, `pin`, and `sort` are read; [`drill_for`], [`node_pointer`], and the
 /// adjacent rules resolve from [`lookup_keys`], which never names a layout.
 pub fn lookup_layout<'a>(
     views: &'a HashMap<String, View>,
@@ -1415,6 +1435,7 @@ pub fn printer_columns_view(crd: &Value, version: &str) -> Option<View> {
             columns,
             sort: None,
             replace: false,
+            pin: None,
             node: None,
             drill: None,
             refs: Vec::new(),

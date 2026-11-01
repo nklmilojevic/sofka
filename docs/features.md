@@ -309,7 +309,8 @@ include those conditions. Row filters can search the route paths.
   Failure reasons use red rows and status text, including init failures and
   the `Lost` PVC state.
 - **Horizontal scrolling** - Left and Right move the table by five text positions.
-  NAME and NAMESPACE stay fixed. Other columns keep their widths while you
+  NAME and NAMESPACE stay fixed; a view's `pin` list chooses other fixed
+  columns, or none. Other columns keep their widths while you
   scroll. Arrows in the title show where more content is available. When all
   columns fit, Left and Right do nothing.
 - **Custom views** - define columns for any resource in the config file.

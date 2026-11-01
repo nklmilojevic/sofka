@@ -20,6 +20,7 @@ mod namespace_patterns;
 mod node_roles;
 mod ns_resources;
 mod oidc;
+mod pin_columns;
 mod plugin_form;
 mod popup_wrapping;
 mod proxy;
