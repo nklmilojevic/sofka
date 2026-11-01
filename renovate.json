@@ -20,6 +20,11 @@
       "groupName": "rust dependencies"
     },
     {
+      "matchPackageNames": ["kube", "/^kube-/", "k8s-openapi", "deskribe"],
+      "groupName": "kubernetes crates",
+      "separateMajorMinor": false
+    },
+    {
       "matchManagers": ["nix"],
       "groupName": "nix dependencies"
     }
