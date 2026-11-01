@@ -3,6 +3,79 @@ use std::net::IpAddr;
 use http::Uri;
 use kube::{Config, config::Kubeconfig};
 
+/// kube-rs parses `NO_PROXY` while it loads a kubeconfig and refuses the
+/// whole config over one entry it cannot read, such as the empty entry a
+/// trailing comma leaves. Rewrite each variable to the entries kube-rs
+/// accepts, and return a warning for each non-empty entry that was dropped.
+///
+/// # Safety
+///
+/// Modifies the process environment, so no other thread may be running.
+pub(super) unsafe fn sanitize_env() -> Vec<String> {
+    let mut warnings = Vec::new();
+    for name in ["NO_PROXY", "no_proxy"] {
+        let Ok(value) = std::env::var(name) else {
+            continue;
+        };
+        let Some((clean, dropped)) = sanitize(&value) else {
+            continue;
+        };
+        if !dropped.is_empty() {
+            warnings.push(format!(
+                "{name}: ignoring entries that are not a host, IP address or CIDR range: {}",
+                dropped.join(", ")
+            ));
+        }
+        let unset = clean.is_none();
+        // SAFETY: the caller guarantees no other thread is running.
+        match clean {
+            Some(clean) => unsafe { std::env::set_var(name, clean) },
+            None => unsafe { std::env::remove_var(name) },
+        }
+        // A non-blank NO_PROXY hides no_proxy. When none of its entries are
+        // usable, unset both, so no_proxy does not start to apply.
+        if name == "NO_PROXY" && unset && !value.trim().is_empty() {
+            unsafe { std::env::remove_var("no_proxy") };
+            break;
+        }
+    }
+    warnings
+}
+
+/// `None` when kube-rs accepts `value` as it is. Otherwise the replacement
+/// value (`None` inside to unset the variable) and the dropped entries.
+fn sanitize(value: &str) -> Option<(Option<String>, Vec<String>)> {
+    // kube-rs skips an empty variable and reads a lone `*` as a wildcard.
+    if value.is_empty() || value.trim() == "*" {
+        return None;
+    }
+    if value.split(',').map(str::trim).all(kube_accepts) {
+        return None;
+    }
+    let mut kept = Vec::new();
+    let mut dropped = Vec::new();
+    for entry in value.split(',').map(str::trim) {
+        if entry == "*" {
+            return Some((Some("*".to_owned()), Vec::new()));
+        }
+        if kube_accepts(entry) {
+            kept.push(entry);
+        } else if !entry.is_empty() {
+            dropped.push(entry.to_owned());
+        }
+    }
+    Some(((!kept.is_empty()).then(|| kept.join(",")), dropped))
+}
+
+/// The entries `kube::config` accepts: an IP network, an IP address, or
+/// anything that parses as a URI with a host.
+fn kube_accepts(entry: &str) -> bool {
+    !entry.is_empty()
+        && (entry.parse::<ipnet::IpNet>().is_ok()
+            || entry.parse::<IpAddr>().is_ok()
+            || entry.parse::<Uri>().is_ok_and(|uri| uri.host().is_some()))
+}
+
 pub(super) fn configure(config: &mut Config, kubeconfig: &Kubeconfig, context: Option<&str>) {
     let context = context.or(kubeconfig.current_context.as_deref());
     let cluster = kubeconfig
@@ -17,13 +90,20 @@ pub(super) fn configure(config: &mut Config, kubeconfig: &Kubeconfig, context: O
                 .find(|entry| entry.name == context.cluster)
         })
         .and_then(|entry| entry.cluster.as_ref());
-    // An explicit kubeconfig proxy takes priority over environment exclusions.
     let Some(cluster) = cluster else { return };
-    if cluster
-        .proxy_url
-        .as_ref()
-        .is_some_and(|url| !url.is_empty())
-    {
+    // kube-rs applies NO_PROXY too, but matches it against the proxy instead
+    // of the API server, and lets it drop an explicit proxy-url. Choose the
+    // proxy the way kube-rs did before it read NO_PROXY, then match here.
+    let explicit = cluster.proxy_url.as_deref().filter(|url| !url.is_empty());
+    let proxy = explicit
+        .map(str::to_owned)
+        .or_else(|| env_nonempty("HTTPS_PROXY"))
+        .or_else(|| env_nonempty("https_proxy"));
+    if let Some(proxy) = proxy.and_then(|url| url.parse::<Uri>().ok()) {
+        config.proxy_url = Some(proxy);
+    }
+    // An explicit kubeconfig proxy takes priority over environment exclusions.
+    if explicit.is_some() {
         return;
     }
     let exclusions = first_nonempty(
@@ -33,6 +113,10 @@ pub(super) fn configure(config: &mut Config, kubeconfig: &Kubeconfig, context: O
     if exclusions.is_some_and(|value| matches(&config.cluster_url, &value)) {
         config.proxy_url = None;
     }
+}
+
+fn env_nonempty(name: &str) -> Option<String> {
+    std::env::var(name).ok().filter(|value| !value.is_empty())
 }
 
 fn first_nonempty(upper: Option<String>, lower: Option<String>) -> Option<String> {
@@ -170,6 +254,65 @@ mod tests {
                 "{server}, {exclusions}"
             );
         }
+    }
+
+    #[test]
+    fn sanitize_keeps_values_kube_accepts() {
+        for value in [
+            "",
+            "*",
+            " * ",
+            "localhost",
+            "localhost,127.0.0.1",
+            "localhost, 127.0.0.1 ,10.0.0.0/8",
+            "example.com,.example.com,*.example.com",
+            "rke2-server:6443,10.20.30.40:6443",
+            "2001:db8::1,[2001:db8::1],[2001:db8::1]:6443,2001:db8::/32",
+            "https://rke2-server",
+        ] {
+            assert_eq!(sanitize(value), None, "{value:?}");
+        }
+    }
+
+    #[test]
+    fn sanitize_drops_entries_kube_rejects() {
+        for (value, clean, dropped) in [
+            ("localhost,127.0.0.1,", Some("localhost,127.0.0.1"), vec![]),
+            (",localhost", Some("localhost"), vec![]),
+            (
+                "localhost,,10.0.0.0/8",
+                Some("localhost,10.0.0.0/8"),
+                vec![],
+            ),
+            ("<local>,localhost", Some("localhost"), vec!["<local>"]),
+            ("localhost,a b", Some("localhost"), vec!["a b"]),
+            ("  ", None, vec![]),
+            (" , ,", None, vec![]),
+            ("<local>", None, vec!["<local>"]),
+            ("localhost,*,", Some("*"), vec![]),
+            ("<local>,*", Some("*"), vec![]),
+        ] {
+            assert_eq!(
+                sanitize(value),
+                Some((
+                    clean.map(str::to_owned),
+                    dropped.into_iter().map(str::to_owned).collect()
+                )),
+                "{value:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn sanitized_values_keep_their_exclusions() {
+        let (clean, _) = sanitize("<local>,rke2-server,,10.20.0.0/16,").unwrap();
+        let clean = clean.unwrap();
+        assert!(matches(
+            &"https://rke2-server:6443".parse().unwrap(),
+            &clean
+        ));
+        assert!(matches(&"https://10.20.30.40".parse().unwrap(), &clean));
+        assert!(!matches(&"https://other".parse().unwrap(), &clean));
     }
 
     #[test]

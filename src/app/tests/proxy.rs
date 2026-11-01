@@ -17,6 +17,9 @@ async fn read_headers(stream: &mut (impl tokio::io::AsyncRead + Unpin)) -> Optio
 async fn proxy_exclusions_apply_on_startup_and_context_switch() {
     const CHILD: &str = "SOFKA_TEST_PROXY_CONNECTION";
     if let Ok(phase) = std::env::var(CHILD) {
+        // SAFETY: this child process runs only this test, and `main` does the
+        // same before its runtime starts.
+        unsafe { crate::k8s::sanitize_no_proxy_env() };
         let (mut app, mut rx) = test_app();
         if phase == "startup" {
             app.cluster = Cluster::connect(false, false)
@@ -133,6 +136,9 @@ async fn proxy_exclusions_apply_on_startup_and_context_switch() {
     ));
     std::fs::create_dir(&directory).unwrap();
     let config_path = directory.join("kubeconfig");
+    // Excludes the proxy itself but not the API server, which listens on
+    // another port of the same address.
+    let proxy_only = proxy_url.trim_start_matches("http://");
     for (upper, lower, explicit, use_proxy) in [
         (Some("127.0.0.1"), None, false, false),
         (None, Some("127.0.0.1"), false, false),
@@ -142,6 +148,11 @@ async fn proxy_exclusions_apply_on_startup_and_context_switch() {
         (Some("unmatched.invalid"), Some("127.0.0.1"), false, true),
         (Some("*"), None, false, false),
         (Some("127.0.0.0/8"), None, false, false),
+        (Some("127.0.0.1,"), None, false, false),
+        (Some("<local>,,127.0.0.1"), None, false, false),
+        (Some("<local>,"), Some("127.0.0.1"), false, true),
+        (Some(proxy_only), None, false, true),
+        (Some(proxy_only), None, true, true),
         (None, None, false, true),
         (Some("*"), None, true, true),
     ] {

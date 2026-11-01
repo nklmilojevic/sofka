@@ -192,11 +192,13 @@ fn main() -> Result<()> {
     if let Some(path) = &args.kubeconfig {
         unsafe { std::env::set_var("KUBECONFIG", path) };
     }
+    // SAFETY: still single-threaded, as above.
+    let proxy_warnings = unsafe { sofka::k8s::sanitize_no_proxy_env() };
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
         .context("starting tokio runtime")?
-        .block_on(run_main(args))
+        .block_on(run_main(args, proxy_warnings))
 }
 
 impl Args {
@@ -264,7 +266,7 @@ impl Args {
     }
 }
 
-async fn run_main(args: Args) -> Result<()> {
+async fn run_main(args: Args, proxy_warnings: Vec<String>) -> Result<()> {
     // Before anything else: an adapter run owns stdout for its report and must
     // never load config, connect, or touch the terminal.
     if let Some(name) = &args.plugin_adapter {
@@ -319,6 +321,11 @@ async fn run_main(args: Args) -> Result<()> {
     // connection it belongs to.
     let base = loader.resolve("", "").config;
     start_logging(&base.logging, &mut config_warnings);
+    for w in proxy_warnings {
+        eprintln!("warning: {w}");
+        sofka::log_warn!("proxy.no_proxy", warning = w);
+        config_warnings.push(w);
+    }
 
     // `sofka info` (and the deprecated `--info`): report and exit.
     if let Some(info) = info_request(&args) {

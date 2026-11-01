@@ -283,6 +283,17 @@ static EXEC_WRAPPER: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLo
 /// exec auth plugin. See [`run_detached`].
 pub const EXEC_DETACHED_ARG: &str = "--exec-detached";
 
+/// Drop the `NO_PROXY` entries kube-rs would refuse the kubeconfig over, and
+/// return a warning for each value that lost a non-empty entry.
+///
+/// # Safety
+///
+/// Modifies the process environment, so call it before any other thread starts.
+pub unsafe fn sanitize_no_proxy_env() -> Vec<String> {
+    // SAFETY: forwarded from the caller.
+    unsafe { proxy::sanitize_env() }
+}
+
 /// Route exec auth plugins through `exe` so they run without a controlling
 /// terminal. Call once at startup with the sofka binary.
 pub fn detach_exec_plugins(exe: std::path::PathBuf) {
@@ -1645,7 +1656,7 @@ fn spawn_watch_task(
         let mut initializing = true;
         // Distinct from `initializing`, which drives the streaming-list
         // fallback and must keep its current lifetime: this tracks whether a
-        // list is in flight, so the UI gets exactly one Reset per re-list.
+        // list is in flight, so an Init after the first list logs a re-list.
         // Starts true because the Reset below opens the first list.
         let mut listing = true;
         let list_params = ListParams {
@@ -1721,21 +1732,6 @@ fn spawn_watch_task(
             {
                 failed = false;
                 if tx.send(Msg::WatchRecovered { generation }).await.is_err() {
-                    break;
-                }
-            }
-            // A streaming list restarts after a 410 without an Init event, so
-            // without this Reset the re-list would only upsert and objects
-            // deleted while the watch was down would stay on screen.
-            if !listing
-                && matches!(
-                    event,
-                    Ok(watcher::Event::InitApply(_) | watcher::Event::InitDone)
-                )
-            {
-                listing = true;
-                crate::log_info!("watch.relist", kind = kind, generation = generation);
-                if tx.send(Msg::Reset { generation }).await.is_err() {
                     break;
                 }
             }
@@ -2300,12 +2296,11 @@ pub(crate) mod tests {
         kube::runtime::watcher::Error::WatchStartFailed(kube::Error::Auth(
             kube::client::AuthError::AuthExecRun {
                 cmd: "aws".into(),
-                status: std::process::ExitStatus::from_raw(256),
-                out: std::process::Output {
+                out: Box::new(std::process::Output {
                     status: std::process::ExitStatus::from_raw(256),
                     stdout: vec![],
                     stderr: stderr.as_bytes().to_vec(),
-                },
+                }),
             },
         ))
     }
