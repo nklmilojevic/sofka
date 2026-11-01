@@ -365,11 +365,7 @@ async fn get_or_warn(
     name: &str,
     warn: &mut Option<String>,
 ) -> Option<DynamicObject> {
-    let api: Api<DynamicObject> = if r.namespaced && !ns.is_empty() {
-        Api::namespaced_with(client.clone(), ns, &r.ar)
-    } else {
-        Api::all_with(client.clone(), &r.ar)
-    };
+    let api = crate::k8s::dynamic_api(client.clone(), &r.ar, r.namespaced, ns);
     match api.get(name).await {
         Ok(o) => Some(o),
         Err(kube::Error::Api(ae)) if ae.code == 404 => None,

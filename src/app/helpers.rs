@@ -1087,11 +1087,7 @@ pub(super) async fn list_kind(
     namespaced: bool,
     ns: &str,
 ) -> Result<Vec<DynamicObject>, String> {
-    let api: Api<DynamicObject> = if namespaced && !ns.is_empty() {
-        Api::namespaced_with(client.clone(), ns, ar)
-    } else {
-        Api::all_with(client.clone(), ar)
-    };
+    let api = crate::k8s::dynamic_api(client.clone(), ar, namespaced, ns);
     api.list(&ListParams::default())
         .await
         .map(|l| l.items)
@@ -1130,16 +1126,16 @@ pub(super) async fn report_source(
         .name
         .as_deref()
         .ok_or("resource name is missing")?;
-    let api: Api<DynamicObject> = if namespaced {
-        let ns = source
+    let ns = if namespaced {
+        source
             .metadata
             .namespace
             .as_deref()
-            .ok_or("resource namespace is missing")?;
-        Api::namespaced_with(client.clone(), ns, ar)
+            .ok_or("resource namespace is missing")?
     } else {
-        Api::all_with(client.clone(), ar)
+        ""
     };
+    let api = crate::k8s::dynamic_api(client.clone(), ar, namespaced, ns);
     let fresh = api
         .get(name)
         .await

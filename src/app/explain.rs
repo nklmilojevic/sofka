@@ -254,11 +254,7 @@ async fn list_with(
     ns: &str,
     params: &ListParams,
 ) -> Result<Vec<DynamicObject>, String> {
-    let api: Api<DynamicObject> = if namespaced && !ns.is_empty() {
-        Api::namespaced_with(client.clone(), ns, ar)
-    } else {
-        Api::all_with(client.clone(), ar)
-    };
+    let api = crate::k8s::dynamic_api(client.clone(), ar, namespaced, ns);
     api.list(params)
         .await
         .map(|l| l.items)
