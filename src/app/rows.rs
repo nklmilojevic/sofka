@@ -1284,6 +1284,29 @@ impl App {
         self.selected_ref().cloned()
     }
 
+    pub(super) fn selected_key(&self) -> Option<String> {
+        self.selected_ref().map(|o| self.key_of(o))
+    }
+
+    /// Display position of the row with store key `key`, if it is listed.
+    pub(super) fn row_index(&self, key: &str) -> Option<usize> {
+        self.ensure_rows_cache();
+        self.rows_cache
+            .borrow()
+            .keys
+            .iter()
+            .position(|k| k.as_ref() == key)
+    }
+
+    /// Re-select `key` after the filter changed which rows are listed, so the
+    /// cursor stays on the same object. Falls back to the first row once that
+    /// object is filtered out.
+    pub(super) fn reselect_after_filter(&mut self, key: Option<String>) {
+        self.invalidate_rows();
+        let index = key.and_then(|key| self.row_index(&key));
+        self.table_state.select(Some(index.unwrap_or(0)));
+    }
+
     /// Full `(header, value)` pairs for the selected row, in display order.
     /// Live values replace cached cells. Empty cells are excluded.
     pub fn selected_row_fields(&self) -> Vec<(String, String)> {

@@ -18790,6 +18790,136 @@ fn row_names(app: &App) -> Vec<String> {
         .collect()
 }
 
+fn selected_name(app: &App) -> Option<String> {
+    app.selected_ref().and_then(|o| o.metadata.name.clone())
+}
+
+fn type_text(app: &mut App, text: &str) {
+    for c in text.chars() {
+        app.handle_key(press(KeyCode::Char(c))).unwrap();
+    }
+}
+
+#[tokio::test]
+async fn clearing_the_filter_in_the_table_keeps_the_selected_object() {
+    let (mut app, _rx) = test_app();
+    app.switch_kind("pods");
+    sync_view(&mut app, &["alpha", "beta", "delta", "gamma"]);
+
+    type_filter(&mut app, "gam");
+    assert_eq!(row_names(&app), ["gamma"]);
+    assert_eq!(selected_name(&app).as_deref(), Some("gamma"));
+
+    app.handle_key(press(KeyCode::Esc)).unwrap();
+    assert!(app.filter.is_empty());
+    assert_eq!(app.row_count(), 4);
+    assert_eq!(selected_name(&app).as_deref(), Some("gamma"));
+}
+
+#[tokio::test]
+async fn editing_the_filter_keeps_the_selected_object_while_it_matches() {
+    let (mut app, _rx) = test_app();
+    app.switch_kind("pods");
+    sync_view(&mut app, &["alpha", "beta", "delta", "gamma"]);
+    app.handle_key(press(KeyCode::End)).unwrap();
+    assert_eq!(selected_name(&app).as_deref(), Some("gamma"));
+
+    app.handle_key(press(KeyCode::Char('/'))).unwrap();
+    type_text(&mut app, "a");
+    assert_eq!(app.row_count(), 4);
+    assert_eq!(selected_name(&app).as_deref(), Some("gamma"));
+    type_text(&mut app, "m");
+    assert_eq!(row_names(&app), ["gamma"]);
+    assert_eq!(selected_name(&app).as_deref(), Some("gamma"));
+    app.handle_key(press(KeyCode::Backspace)).unwrap();
+    app.handle_key(press(KeyCode::Backspace)).unwrap();
+    assert_eq!(app.row_count(), 4);
+    assert_eq!(selected_name(&app).as_deref(), Some("gamma"));
+
+    type_text(&mut app, "elt");
+    assert_eq!(row_names(&app), ["delta"]);
+    assert_eq!(
+        selected_name(&app).as_deref(),
+        Some("delta"),
+        "a filtered-out selection falls back to the first row"
+    );
+    app.handle_key(press(KeyCode::Enter)).unwrap();
+    assert_eq!(app.mode, Mode::Table);
+    assert_eq!(selected_name(&app).as_deref(), Some("delta"));
+
+    app.handle_key(press(KeyCode::Char('/'))).unwrap();
+    app.handle_key(press(KeyCode::Esc)).unwrap();
+    assert_eq!(app.mode, Mode::Table);
+    assert!(app.filter.is_empty());
+    assert_eq!(app.row_count(), 4);
+    assert_eq!(selected_name(&app).as_deref(), Some("delta"));
+}
+
+#[tokio::test]
+async fn toggling_the_faults_filter_keeps_the_selected_object() {
+    let (mut app, _rx) = test_app();
+    app.switch_kind("pods");
+    for (name, faulty) in [
+        ("a-ok", false),
+        ("b-crash", true),
+        ("c-ok", false),
+        ("d-crash", true),
+    ] {
+        let mut pod = faults_test_pod(name);
+        if faulty {
+            pod["status"]["containerStatuses"][0]["state"] =
+                json!({"waiting": {"reason": "CrashLoopBackOff"}});
+        }
+        apply(&mut app, pod);
+    }
+    app.handle_key(press(KeyCode::End)).unwrap();
+    assert_eq!(selected_name(&app).as_deref(), Some("d-crash"));
+
+    app.handle_key(ctrl(KeyCode::Char('z'))).unwrap();
+    assert_eq!(row_names(&app), ["b-crash", "d-crash"]);
+    assert_eq!(selected_name(&app).as_deref(), Some("d-crash"));
+    app.handle_key(ctrl(KeyCode::Char('z'))).unwrap();
+    assert_eq!(app.row_count(), 4);
+    assert_eq!(selected_name(&app).as_deref(), Some("d-crash"));
+
+    app.handle_key(press(KeyCode::Up)).unwrap();
+    assert_eq!(selected_name(&app).as_deref(), Some("c-ok"));
+    app.handle_key(ctrl(KeyCode::Char('z'))).unwrap();
+    assert_eq!(
+        selected_name(&app).as_deref(),
+        Some("b-crash"),
+        "a filtered-out selection falls back to the first row"
+    );
+}
+
+#[tokio::test]
+async fn clearing_the_filter_scrolls_the_selected_row_into_view() {
+    let (mut app, _rx) = test_app();
+    app.switch_kind("pods");
+    let names: Vec<String> = (0..40).map(|i| format!("pod-{i:02}")).collect();
+    let names: Vec<&str> = names.iter().map(String::as_str).collect();
+    sync_view(&mut app, &names);
+    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 24)).unwrap();
+    let screen = |terminal: &ratatui::Terminal<ratatui::backend::TestBackend>| -> String {
+        terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|c| c.symbol())
+            .collect()
+    };
+    terminal.draw(|f| crate::ui::draw(f, &mut app)).unwrap();
+    assert!(!screen(&terminal).contains("pod-33"));
+
+    type_filter(&mut app, "pod-33");
+    terminal.draw(|f| crate::ui::draw(f, &mut app)).unwrap();
+    app.handle_key(press(KeyCode::Esc)).unwrap();
+    terminal.draw(|f| crate::ui::draw(f, &mut app)).unwrap();
+    assert_eq!(selected_name(&app).as_deref(), Some("pod-33"));
+    assert!(screen(&terminal).contains("pod-33"));
+}
+
 fn type_resource_query(app: &mut App, query: &str) {
     app.handle_key(press(KeyCode::Char(':'))).unwrap();
     for c in query.chars() {
@@ -23113,13 +23243,15 @@ async fn ctrl_z_filters_pod_faults() {
     }
     assert_eq!(app.row_count(), cases.len());
     app.handle_key(press(KeyCode::End)).unwrap();
+    let last = selected_name(&app).unwrap();
     app.handle_key(ctrl(KeyCode::Char('z'))).unwrap();
     let names = row_names(&app);
     for (pod, faulty) in &cases {
         let name = pod["metadata"]["name"].as_str().unwrap();
         assert_eq!(names.iter().any(|n| n == name), *faulty, "{name}");
     }
-    assert_eq!(app.table_state.selected(), Some(0));
+    assert!(names.contains(&last), "{last} is faulty");
+    assert_eq!(selected_name(&app), Some(last));
     let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 24)).unwrap();
     terminal.draw(|f| crate::ui::draw(f, &mut app)).unwrap();
     let screen: String = terminal

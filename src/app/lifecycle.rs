@@ -2228,15 +2228,10 @@ impl App {
         }
         if preserve_selection {
             let index = selected_pod.and_then(|(key, uid)| {
-                self.ensure_rows_cache();
                 if self.store.get(&key)?.metadata.uid != uid {
                     return None;
                 }
-                self.rows_cache
-                    .borrow()
-                    .keys
-                    .iter()
-                    .position(|k| k.as_ref() == key)
+                self.row_index(&key)
             });
             self.table_state.select(index);
         }
