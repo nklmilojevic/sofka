@@ -6,7 +6,7 @@ use kube::{Config, config::Kubeconfig};
 /// kube-rs parses `NO_PROXY` while it loads a kubeconfig and refuses the
 /// whole config over one entry it cannot read, such as the empty entry a
 /// trailing comma leaves. Rewrite each variable to the entries kube-rs
-/// accepts, and return a warning for each non-empty entry that was dropped.
+/// accepts, and return a warning for each variable that lost a non-empty entry.
 ///
 /// # Safety
 ///
@@ -20,11 +20,8 @@ pub(super) unsafe fn sanitize_env() -> Vec<String> {
         let Some((clean, dropped)) = sanitize(&value) else {
             continue;
         };
-        if !dropped.is_empty() {
-            warnings.push(format!(
-                "{name}: ignoring entries that are not a host, IP address or CIDR range: {}",
-                dropped.join(", ")
-            ));
+        if dropped > 0 {
+            warnings.push(dropped_warning(name, dropped));
         }
         let unset = clean.is_none();
         // SAFETY: the caller guarantees no other thread is running.
@@ -42,9 +39,21 @@ pub(super) unsafe fn sanitize_env() -> Vec<String> {
     warnings
 }
 
+/// Names the variable and counts the entries, but never quotes them: the
+/// environment can hold values that should not reach stderr or a log.
+fn dropped_warning(name: &str, dropped: usize) -> String {
+    let (entries, are) = if dropped == 1 {
+        ("entry", "is")
+    } else {
+        ("entries", "are")
+    };
+    format!("{name}: ignoring {dropped} {entries} that {are} not a host, IP address or CIDR range")
+}
+
 /// `None` when kube-rs accepts `value` as it is. Otherwise the replacement
-/// value (`None` inside to unset the variable) and the dropped entries.
-fn sanitize(value: &str) -> Option<(Option<String>, Vec<String>)> {
+/// value (`None` inside to unset the variable) and how many non-empty
+/// entries were dropped.
+fn sanitize(value: &str) -> Option<(Option<String>, usize)> {
     // kube-rs skips an empty variable and reads a lone `*` as a wildcard.
     if value.is_empty() || value.trim() == "*" {
         return None;
@@ -53,18 +62,24 @@ fn sanitize(value: &str) -> Option<(Option<String>, Vec<String>)> {
         return None;
     }
     let mut kept = Vec::new();
-    let mut dropped = Vec::new();
+    let mut dropped = 0;
+    let mut wildcard = false;
     for entry in value.split(',').map(str::trim) {
         if entry == "*" {
-            return Some((Some("*".to_owned()), Vec::new()));
-        }
-        if kube_accepts(entry) {
+            wildcard = true;
+        } else if kube_accepts(entry) {
             kept.push(entry);
         } else if !entry.is_empty() {
-            dropped.push(entry.to_owned());
+            dropped += 1;
         }
     }
-    Some(((!kept.is_empty()).then(|| kept.join(",")), dropped))
+    // kube-rs only reads `*` as the whole value, and it excludes everything.
+    let clean = if wildcard {
+        Some("*".to_owned())
+    } else {
+        (!kept.is_empty()).then(|| kept.join(","))
+    };
+    Some((clean, dropped))
 }
 
 /// The entries `kube::config` accepts: an IP network, an IP address, or
@@ -277,30 +292,36 @@ mod tests {
     #[test]
     fn sanitize_drops_entries_kube_rejects() {
         for (value, clean, dropped) in [
-            ("localhost,127.0.0.1,", Some("localhost,127.0.0.1"), vec![]),
-            (",localhost", Some("localhost"), vec![]),
-            (
-                "localhost,,10.0.0.0/8",
-                Some("localhost,10.0.0.0/8"),
-                vec![],
-            ),
-            ("<local>,localhost", Some("localhost"), vec!["<local>"]),
-            ("localhost,a b", Some("localhost"), vec!["a b"]),
-            ("  ", None, vec![]),
-            (" , ,", None, vec![]),
-            ("<local>", None, vec!["<local>"]),
-            ("localhost,*,", Some("*"), vec![]),
-            ("<local>,*", Some("*"), vec![]),
+            ("localhost,127.0.0.1,", Some("localhost,127.0.0.1"), 0),
+            (",localhost", Some("localhost"), 0),
+            ("localhost,,10.0.0.0/8", Some("localhost,10.0.0.0/8"), 0),
+            ("<local>,localhost", Some("localhost"), 1),
+            ("localhost,a b,<local>", Some("localhost"), 2),
+            ("  ", None, 0),
+            (" , ,", None, 0),
+            ("<local>", None, 1),
+            ("localhost,*,", Some("*"), 0),
+            ("<local>,*", Some("*"), 1),
+            ("*,<local>", Some("*"), 1),
         ] {
             assert_eq!(
                 sanitize(value),
-                Some((
-                    clean.map(str::to_owned),
-                    dropped.into_iter().map(str::to_owned).collect()
-                )),
+                Some((clean.map(str::to_owned), dropped)),
                 "{value:?}"
             );
         }
+    }
+
+    #[test]
+    fn dropped_warning_counts_entries_without_quoting_them() {
+        assert_eq!(
+            dropped_warning("NO_PROXY", 1),
+            "NO_PROXY: ignoring 1 entry that is not a host, IP address or CIDR range"
+        );
+        assert_eq!(
+            dropped_warning("no_proxy", 3),
+            "no_proxy: ignoring 3 entries that are not a host, IP address or CIDR range"
+        );
     }
 
     #[test]

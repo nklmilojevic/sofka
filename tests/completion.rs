@@ -59,9 +59,20 @@ impl Fixture {
     }
 
     fn complete(&self, shell: &str, config: &std::ffi::OsStr, words: &[&str]) -> Vec<String> {
+        self.complete_with(&[], shell, config, words)
+    }
+
+    fn complete_with(
+        &self,
+        env: &[(&str, &str)],
+        shell: &str,
+        config: &std::ffi::OsStr,
+        words: &[&str],
+    ) -> Vec<String> {
         let output = Command::new(env!("CARGO_BIN_EXE_sofka"))
             .arg("--")
             .args(words)
+            .envs(env.iter().copied())
             .env("SOFKA_COMPLETE", shell)
             .env_remove("SOFKA_COMPLETE_WORKER")
             .env("_CLAP_COMPLETE_INDEX", (words.len() - 1).to_string())
@@ -247,6 +258,29 @@ fn namespaces_use_current_or_explicit_context_without_discovery() {
             &["sofka", "--kubeconfig", selected.to_str().unwrap(), "-npay"]
         ),
         ["-npayments"]
+    );
+    handle.join().unwrap();
+}
+
+#[test]
+fn namespaces_complete_when_no_proxy_has_a_trailing_comma() {
+    const NS: &str = r#"{"apiVersion":"v1","kind":"NamespaceList","metadata":{},"items":[{"metadata":{"name":"payments"}}]}"#;
+    let f = Fixture::new("no-proxy");
+    let (server, handle) = serve(vec![("/api/v1/namespaces?", NS)]);
+    let config = f.config("config", "ctx", &server);
+    // kube-rs refuses a kubeconfig over the empty entry; the excluded server
+    // is reached directly instead of through the unreachable proxy.
+    assert_eq!(
+        f.complete_with(
+            &[
+                ("HTTPS_PROXY", "http://127.0.0.1:9"),
+                ("NO_PROXY", "127.0.0.1,"),
+            ],
+            "bash",
+            config.as_os_str(),
+            &["sofka", "-n", "pay"]
+        ),
+        ["payments"]
     );
     handle.join().unwrap();
 }

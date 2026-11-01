@@ -168,6 +168,11 @@ fn main() -> Result<()> {
             sofka::k8s::detach_exec_plugins(exe);
         }
     }
+    // Before completion too: it loads the kubeconfig to suggest names, and
+    // kube-rs refuses one over an unusable NO_PROXY entry. Completion output
+    // must stay clean, so the warnings are only reported by `run_main`.
+    // SAFETY: single-threaded here — no runtime has started yet.
+    let proxy_warnings = unsafe { sofka::k8s::sanitize_no_proxy_env() };
     if completion::try_complete() {
         return Ok(());
     }
@@ -192,8 +197,6 @@ fn main() -> Result<()> {
     if let Some(path) = &args.kubeconfig {
         unsafe { std::env::set_var("KUBECONFIG", path) };
     }
-    // SAFETY: still single-threaded, as above.
-    let proxy_warnings = unsafe { sofka::k8s::sanitize_no_proxy_env() };
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
