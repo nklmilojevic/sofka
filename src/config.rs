@@ -953,6 +953,9 @@ pub struct ViewConfig {
     pub sort: Option<String>,
     /// Replace the curated columns instead of overlaying them.
     pub replace: bool,
+    /// Column headers that render first and stay fixed during horizontal
+    /// scrolling. Unset keeps NAMESPACE and NAME fixed; empty fixes none.
+    pub pin: Option<Vec<String>>,
     /// JSON Pointer to the name of the node this kind's objects name
     /// (e.g. `/status/nodeName`), making `enter`/`o` jump to that node.
     pub node: Option<String>,

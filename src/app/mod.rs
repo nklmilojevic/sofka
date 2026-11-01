@@ -2686,6 +2686,9 @@ pub struct App {
     /// Active column layout for the current view; rebuilt by
     /// [`App::refresh_view_spec`] whenever kind/views/wide change.
     spec: crate::columns::ViewSpec,
+    /// The active view's `pin`, read with [`Self::spec`] so a frame does not
+    /// look the view up again.
+    pinned_columns: Option<Vec<String>>,
 }
 
 impl App {
@@ -3035,6 +3038,7 @@ impl App {
             latest_release: None,
             update_fetcher: default_update_fetcher,
             spec: crate::columns::build_spec("", "", None, None, false),
+            pinned_columns: None,
         }
     }
 

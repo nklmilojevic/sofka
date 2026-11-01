@@ -54,6 +54,35 @@ replaces it in place, new columns go before AGE. Invalid entries are skipped
 with a warning in the app; unknown keys are ignored with a warning while the
 rest of the entry still applies. Neither takes down the TUI.
 
+### Pinned columns
+
+By default NAMESPACE and NAME stay fixed while Left and Right scroll the table
+(or the first column when the view has no NAME). Set `pin` to choose the fixed
+columns:
+
+```toml
+[views."v1/pods"]
+pin = ["NAME", "STATUS"]
+```
+
+Pinned columns render first, in list order, and stay fixed. All other columns
+keep their order and scroll. Headers match in any letter case.
+
+- `pin = []` pins nothing; every column scrolls.
+- `"NAMESPACE"` is accepted even though the view does not declare it. It
+  applies in all-namespaces and namespace-pattern mode. When NAMESPACE is shown
+  and not pinned, it is the first scrolling column.
+- A header the view does not have, in wide mode or out of it, produces a
+  config warning and is ignored. The rest of the list still applies. A pinned
+  wide-only column is fixed while wide mode shows it.
+- On a narrow terminal the pinned columns share the minimum width NAME gets
+  without `pin`. When the pinned columns fill the table, nothing scrolls.
+- Sorting, filtering, header clicks, and selection follow the header, not its
+  position.
+
+`pin` works in overlay and `replace = true` views, namespace-specific views,
+and named layouts. A `replace = true` view that leaves out NAME hides it.
+
 ### Fallback paths
 
 Set `path` to an ordered list of JSON Pointers when the same value can be stored
@@ -410,7 +439,7 @@ columns = [
 The suffix works on every key form and before a namespace suffix:
 `pods:images@matlab`. With layout `images` active, sofka tries
 `key:images@namespace` for every key form, then `key:images`. A named layout
-sets only `columns`, `replace`, and `sort`, and does not inherit columns from
+sets only `columns`, `replace`, `pin`, and `sort`, and does not inherit columns from
 the base key. `drill`, `refs`, `children`, and `node` describe the kind, so
 they always come from the base key; setting them on a named layout produces a
 configuration warning and they are ignored. `default` and `wide` are reserved.

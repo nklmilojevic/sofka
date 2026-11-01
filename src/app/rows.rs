@@ -926,37 +926,19 @@ impl App {
                     .map(|h| (h, self.sort_desc))
             }),
         };
-        let resource = self.kind.as_ref().map(Kind::resource_key);
-        let warnings = crate::columns::view_warnings(
+        let mut warnings = crate::columns::view_warnings(
             self.kind.as_ref().map_or("", |kind| kind.ar.group.as_str()),
             &self.kind_plural,
             self.active_user_view(),
         );
+        self.spec = self.build_view_spec(self.wide);
+        self.pinned_columns = self.active_user_view().and_then(|v| v.pin.clone());
+        warnings.extend(self.pin_warnings());
         for warning in warnings {
             if !self.config_warnings.contains(&warning) {
                 self.config_warnings.push(warning);
             }
         }
-        let spec = crate::columns::build_spec(
-            self.kind.as_ref().map_or("", |kind| kind.ar.group.as_str()),
-            &self.kind_plural,
-            self.active_user_view(),
-            resource
-                .as_ref()
-                .and_then(|resource| self.crd_views.get(resource))
-                .and_then(Option::as_ref),
-            self.wide,
-        );
-        self.spec = if self.server_table_eligible() && !self.server_table.columns.is_empty() {
-            crate::columns::build_table_spec(
-                self.kind.as_ref().map_or("", |kind| kind.ar.group.as_str()),
-                &self.kind_plural,
-                &self.server_table.columns,
-                self.wide,
-            )
-        } else {
-            spec
-        };
         self.spec.set_node_roles(Arc::clone(&self.node_roles));
         self.spec_rev = self.spec_rev.wrapping_add(1);
         if let Some((h, desc)) = sort {
@@ -966,6 +948,77 @@ impl App {
         self.clear_rows_cache();
         self.col_offset = 0;
         self.col_scroll_max = 0;
+    }
+
+    /// The column layout for the current kind, user views, printer-column
+    /// fallback, and server table, with or without the wide-only columns.
+    fn build_view_spec(&self, wide: bool) -> crate::columns::ViewSpec {
+        let group = self.kind.as_ref().map_or("", |kind| kind.ar.group.as_str());
+        if self.server_table_eligible() && !self.server_table.columns.is_empty() {
+            return crate::columns::build_table_spec(
+                group,
+                &self.kind_plural,
+                &self.server_table.columns,
+                wide,
+            );
+        }
+        let resource = self.kind.as_ref().map(Kind::resource_key);
+        crate::columns::build_spec(
+            group,
+            &self.kind_plural,
+            self.active_user_view(),
+            resource
+                .as_ref()
+                .and_then(|resource| self.crd_views.get(resource))
+                .and_then(Option::as_ref),
+            wide,
+        )
+    }
+
+    /// A warning for each pinned header the active view does not have, in
+    /// wide mode or out of it. NAMESPACE is always accepted. While the server
+    /// table's columns are still loading, the headers are not known yet.
+    fn pin_warnings(&self) -> Vec<String> {
+        let Some(pin) = &self.pinned_columns else {
+            return Vec::new();
+        };
+        if self.server_table_eligible() && self.server_table.columns.is_empty() {
+            return Vec::new();
+        }
+        let has = |headers: &[String], header: &str| headers.iter().any(|h| h == header);
+        let shown = self.spec.headers();
+        let missing: Vec<&String> = pin
+            .iter()
+            .filter(|h| *h != "NAMESPACE" && !has(&shown, h))
+            .collect();
+        if missing.is_empty() {
+            return Vec::new();
+        }
+        let all = if self.wide {
+            shown
+        } else {
+            self.build_view_spec(true).headers()
+        };
+        let group = self.kind.as_ref().map_or("", |kind| kind.ar.group.as_str());
+        let mut view = if group.is_empty() {
+            self.kind_plural.clone()
+        } else {
+            format!("{group}/{}", self.kind_plural)
+        };
+        if let Some(layout) = self.active_layout() {
+            view = format!("{view}:{layout}");
+        }
+        missing
+            .into_iter()
+            .filter(|h| !has(&all, h))
+            .map(|h| format!("view {view}: pin column {h} is not in this view; ignored"))
+            .collect()
+    }
+
+    /// The active view's `pin`: headers that render first and stay fixed
+    /// during horizontal scrolling. `None` when the view does not set one.
+    pub(crate) fn pinned_headers(&self) -> Option<&[String]> {
+        self.pinned_columns.as_deref()
     }
 
     pub(super) fn view_namespace(&self) -> Option<&str> {
@@ -1033,7 +1086,7 @@ impl App {
         self.flash_err = false;
     }
 
-    /// Move the table by five terminal cells. Keep the name columns fixed.
+    /// Move the table by five terminal cells. Keep the fixed columns in place.
     pub(super) fn scroll_columns(&mut self, delta: isize) {
         self.col_offset = self
             .col_offset
