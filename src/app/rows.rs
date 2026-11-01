@@ -1315,16 +1315,15 @@ impl App {
     /// Re-select `key` after the filter changed which rows are listed, so the
     /// cursor stays on the same object. Falls back to the first row once that
     /// object is filtered out. While the watch is still listing, the rows are
-    /// not final, so `finish_filter_reselect` looks `key` up again on sync.
+    /// not final, so `finish_filter_reselect` looks `key` up again on sync,
+    /// unless the object is already here and the filter hid it.
     pub(super) fn reselect_after_filter(&mut self, key: Option<String>) {
         self.invalidate_rows();
-        let index = key
-            .as_deref()
-            .and_then(|key| self.row_index(key))
-            .unwrap_or(0);
+        let found = key.as_deref().and_then(|key| self.row_index(key));
+        let index = found.unwrap_or(0);
         self.table_state.select(Some(index));
         self.filter_reselect = key
-            .filter(|_| !self.store.synced)
+            .filter(|key| !self.store.synced && (found.is_some() || self.store.get(key).is_none()))
             .map(|key| FilterReselect {
                 generation: self.generation,
                 key,

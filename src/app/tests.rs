@@ -18893,6 +18893,47 @@ async fn toggling_the_faults_filter_keeps_the_selected_object() {
 }
 
 #[tokio::test]
+async fn toggling_the_faults_filter_during_a_relist_keeps_the_fallback_row() {
+    let (mut app, _rx) = test_app();
+    app.switch_kind("pods");
+    let list = |app: &mut App| {
+        for (name, faulty) in [("a-ok", false), ("b-crash", true), ("c-ok", false)] {
+            let mut pod = faults_test_pod(name);
+            if faulty {
+                pod["status"]["containerStatuses"][0]["state"] =
+                    json!({"waiting": {"reason": "CrashLoopBackOff"}});
+            }
+            apply(app, pod);
+        }
+    };
+    list(&mut app);
+    app.handle_msg(Msg::Synced {
+        generation: app.generation,
+    });
+    app.handle_key(press(KeyCode::Home)).unwrap();
+    assert_eq!(selected_name(&app).as_deref(), Some("a-ok"));
+    app.handle_msg(Msg::Reset {
+        generation: app.generation,
+    });
+    assert!(!app.store.synced, "the relist keeps the rows on screen");
+
+    app.handle_key(ctrl(KeyCode::Char('z'))).unwrap();
+    assert_eq!(selected_name(&app).as_deref(), Some("b-crash"));
+    app.handle_key(ctrl(KeyCode::Char('z'))).unwrap();
+    assert_eq!(app.row_count(), 3);
+    assert_eq!(
+        selected_name(&app).as_deref(),
+        Some("b-crash"),
+        "a-ok was hidden by the filter, not missing from the list"
+    );
+    list(&mut app);
+    app.handle_msg(Msg::Synced {
+        generation: app.generation,
+    });
+    assert_eq!(selected_name(&app).as_deref(), Some("b-crash"));
+}
+
+#[tokio::test]
 async fn clearing_the_filter_scrolls_the_selected_row_into_view() {
     let (mut app, _rx) = test_app();
     app.switch_kind("pods");
