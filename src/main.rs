@@ -168,6 +168,11 @@ fn main() -> Result<()> {
             sofka::k8s::detach_exec_plugins(exe);
         }
     }
+    // Before completion too: it loads the kubeconfig to suggest names, and
+    // kube-rs refuses one over an unusable NO_PROXY entry. Completion output
+    // must stay clean, so the warnings are only reported by `run_main`.
+    // SAFETY: single-threaded here — no runtime has started yet.
+    let proxy_warnings = unsafe { sofka::k8s::sanitize_no_proxy_env() };
     if completion::try_complete() {
         return Ok(());
     }
@@ -196,7 +201,7 @@ fn main() -> Result<()> {
         .enable_all()
         .build()
         .context("starting tokio runtime")?
-        .block_on(run_main(args))
+        .block_on(run_main(args, proxy_warnings))
 }
 
 impl Args {
@@ -264,7 +269,7 @@ impl Args {
     }
 }
 
-async fn run_main(args: Args) -> Result<()> {
+async fn run_main(args: Args, proxy_warnings: Vec<String>) -> Result<()> {
     // Before anything else: an adapter run owns stdout for its report and must
     // never load config, connect, or touch the terminal.
     if let Some(name) = &args.plugin_adapter {
@@ -319,6 +324,11 @@ async fn run_main(args: Args) -> Result<()> {
     // connection it belongs to.
     let base = loader.resolve("", "").config;
     start_logging(&base.logging, &mut config_warnings);
+    for w in proxy_warnings {
+        eprintln!("warning: {w}");
+        sofka::log_warn!("proxy.no_proxy", warning = w);
+        config_warnings.push(w);
+    }
 
     // `sofka info` (and the deprecated `--info`): report and exit.
     if let Some(info) = info_request(&args) {
