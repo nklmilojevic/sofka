@@ -1348,6 +1348,7 @@ async fn run(
                 app.check_journal_error();
                 app.detect_resume();
                 app.renew_credentials();
+                app.follow_argocd_operation();
                 dirty = true;
             }
             // A held Esc was a real keypress after all, not the head of a

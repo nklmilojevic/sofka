@@ -660,6 +660,7 @@ fn pending_status(status: &str) -> bool {
             | "progressing"
             | "processing"
             | "reconciling"
+            | "syncing"
             | "pending-install"
             | "pending-upgrade"
             | "pending-rollback"
@@ -898,6 +899,9 @@ mod tests {
         assert_eq!(row_color("superseded"), overlay0());
         assert_eq!(row_color("pending-upgrade"), peach());
         assert_eq!(status_color("pending-upgrade"), yellow());
+        // An Argo CD sync in flight is progress, like Progressing.
+        assert_eq!(status_color("Syncing"), yellow());
+        assert_eq!(row_color("Syncing"), peach());
     }
 
     #[test]

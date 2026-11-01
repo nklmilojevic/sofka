@@ -2,10 +2,20 @@ use super::*;
 
 use crate::argocd::{self, Destination, Evidence};
 use crate::explain::{Finding, Level, Target};
+use crate::store::ArgocdReport;
 
 /// Lowercased `(kind, group)` -> lowercased plural, resolved up front because
 /// the spawned gather has no access to the cluster registry.
 type KindPlurals = HashMap<(String, String), String>;
+
+fn plural_of(plurals: &KindPlurals, kind: &str, group: &str) -> Option<String> {
+    plurals
+        .get(&(kind.to_lowercase(), group.to_lowercase()))
+        .cloned()
+}
+
+/// How often the Argo CD view re-reads an Application while it syncs.
+const FOLLOW_INTERVAL: Duration = Duration::from_secs(2);
 
 /// Kubernetes caps a label value here, which is where Argo truncates a long
 /// Application name.
@@ -76,7 +86,7 @@ impl App {
         self.cancel_explain_request();
         self.argocd_source = Some(obj);
         self.mode = Mode::Argocd;
-        self.spawn_argocd();
+        self.spawn_argocd(false);
     }
 
     /// The kubeconfig as seen now, for resolving destinations.
@@ -91,11 +101,36 @@ impl App {
     /// `r` in the Argo CD view: re-gather for the same selection.
     pub(super) fn refresh_argocd(&mut self) {
         if self.argocd_source.is_some() {
-            self.spawn_argocd();
+            self.spawn_argocd(false);
         }
     }
 
-    fn spawn_argocd(&mut self) {
+    /// Called every second: while the Application in the open Argo CD view is
+    /// syncing, re-read it so the Sync operation section follows along.
+    pub fn follow_argocd_operation(&mut self) {
+        self.follow_argocd_operation_at(std::time::Instant::now());
+    }
+
+    pub(super) fn follow_argocd_operation_at(&mut self, now: std::time::Instant) {
+        let due = self
+            .argocd_gathered_at
+            .is_some_and(|at| now.saturating_duration_since(at) >= FOLLOW_INTERVAL);
+        // A re-gather rebuilds every row, which would fold away what the user
+        // expanded, so following waits until nothing is.
+        if self.mode == Mode::Argocd
+            && self.argocd_following
+            && !self.argocd_pending
+            && self.argocd_expanded.is_empty()
+            && self.argocd_cause_claim.is_none()
+            && due
+        {
+            self.spawn_argocd(true);
+        }
+    }
+
+    /// `quiet` is the follow-up read while a sync runs: no progress message,
+    /// and the cursor stays on its row.
+    fn spawn_argocd(&mut self, quiet: bool) {
         let Some(obj) = self.argocd_source.clone() else {
             return;
         };
@@ -123,7 +158,7 @@ impl App {
         let client = self.cluster.client.clone();
         let tx = self.tx.clone();
         let genr = self.generation;
-        let claim = self.claim_status(format!("Argo CD: {}…", subject));
+        let claim = (!quiet).then(|| self.claim_status(format!("Argo CD: {}…", subject)));
 
         // A re-gather rebuilds every finding, so nothing stays expanded.
         self.argocd_expanded.clear();
@@ -131,7 +166,11 @@ impl App {
         if let Some(stale) = self.argocd_cause_claim.take() {
             self.clear_claimed_status(stale);
         }
-        self.argocd_claim = Some(claim);
+        if let Some(claim) = claim {
+            self.argocd_claim = Some(claim);
+            self.argocd_causes = None;
+        }
+        self.argocd_pending = true;
         self.argocd_request = self.argocd_request.wrapping_add(1);
         let request = self.argocd_request;
         tokio::spawn(async move {
@@ -146,14 +185,13 @@ impl App {
                 if self_is_appset {
                     let mut resources = argocd::managed_resources(&selection);
                     for r in &mut resources {
-                        let key = (r.kind.to_lowercase(), r.group.to_lowercase());
-                        if let Some(plural) = plurals.get(&key) {
-                            r.plural = plural.clone();
+                        if let Some(plural) = plural_of(&plurals, &r.kind, &r.group) {
+                            r.plural = plural;
                         }
                     }
                     let findings =
                         argocd::describe_applicationset(&selection, &subject, &resources);
-                    return Ok((selection, findings, Destination::Current, resources));
+                    return Ok((selection, findings, Destination::Current, resources, false));
                 }
                 let Some(app_kind) = app_kind else {
                     return Err("this cluster has no Argo CD Application CRD".to_string());
@@ -197,11 +235,23 @@ impl App {
                     .map(argocd::managed_resources)
                     .unwrap_or_default();
                 for r in &mut resources {
-                    let key = (r.kind.to_lowercase(), r.group.to_lowercase());
-                    if let Some(plural) = plurals.get(&key) {
-                        r.plural = plural.clone();
+                    if let Some(plural) = plural_of(&plurals, &r.kind, &r.group) {
+                        r.plural = plural;
                     }
                 }
+                let mut sync_results = app.as_ref().map(argocd::sync_results).unwrap_or_default();
+                // These rows open through the plural alone, and kind names
+                // collide across groups, so the group goes with it.
+                for r in &mut sync_results {
+                    if let Some(plural) = plural_of(&plurals, &r.kind, &r.group) {
+                        r.plural = if r.group.is_empty() {
+                            plural
+                        } else {
+                            format!("{plural}.{}", r.group.to_lowercase())
+                        };
+                    }
+                }
+                let following = app.as_ref().is_some_and(argocd::operation_in_flight);
                 let ev = Evidence {
                     subject,
                     via,
@@ -212,34 +262,42 @@ impl App {
                         .unwrap_or_default(),
                     destination: destination.clone(),
                     resources,
+                    sync_results,
                     app,
                 };
                 let findings = argocd::describe(&ev, crate::columns::now_secs());
-                Ok((selection, findings, destination, ev.resources))
+                Ok((selection, findings, destination, ev.resources, following))
             }
             .await;
             // Not `report_result`: the destination travels with the findings so
             // the view can explain an absent jump target.
-            let (source, findings, destination, resources) = match gathered {
-                Ok((source, findings, destination, resources)) => {
-                    (Some(Box::new(source)), findings, destination, resources)
-                }
+            let (source, findings, destination, resources, following) = match gathered {
+                Ok((source, findings, destination, resources, following)) => (
+                    Some(Box::new(source)),
+                    findings,
+                    destination,
+                    resources,
+                    following,
+                ),
                 Err(error) => {
                     let mut findings = Vec::new();
                     prepend_warn_finding(&mut findings, Some(error));
-                    (None, findings, Destination::Current, Vec::new())
+                    (None, findings, Destination::Current, Vec::new(), false)
                 }
             };
             let _ = tx
                 .send(Msg::Argocd {
                     generation: genr,
                     request,
-                    claim,
-                    title,
-                    source,
-                    destination,
-                    findings,
-                    resources,
+                    report: ArgocdReport {
+                        claim,
+                        title,
+                        source,
+                        destination,
+                        findings,
+                        resources,
+                        following,
+                    },
                 })
                 .await;
         });
@@ -247,6 +305,7 @@ impl App {
 
     pub(super) fn cancel_argocd_request(&mut self) {
         self.argocd_request = self.argocd_request.wrapping_add(1);
+        self.argocd_pending = false;
         self.argocd_reselect = None;
         if let Some(claim) = self.argocd_claim.take() {
             self.clear_claimed_status(claim);
@@ -1086,23 +1145,13 @@ impl App {
     /// Put the causes under the line that said none were known.
     pub(super) fn apply_argocd_cause(&mut self, findings: Vec<Finding>) {
         self.argocd_cause_claim = None;
-        if findings.is_empty() {
-            return;
-        }
-        let Some(at) = self
-            .argocd_items
-            .iter()
-            .position(|f| f.text.contains("but no managed resource reports it"))
-        else {
+        self.argocd_causes = Some(findings.clone());
+        let Some(at) = self.insert_argocd_causes(findings) else {
             return;
         };
-        let before = self.argocd_items.len();
-        for (offset, finding) in findings.into_iter().enumerate() {
-            self.argocd_items.insert(at + 1 + offset, finding);
-        }
         // Drift lines sit below this point, so a cursor parked on one would
         // otherwise slide onto a different row when the search lands.
-        let shift = self.argocd_items.len() as isize - before as isize;
+        let shift = self.argocd_causes.as_ref().map_or(0, Vec::len) as isize;
         if let Some(selected) = self.argocd_state.selected()
             && selected > at
             && shift != 0
@@ -1112,6 +1161,136 @@ impl App {
                 .select(Some(moved.min(self.argocd_items.len().saturating_sub(1))));
         }
     }
+
+    /// Put cause findings under the line that said none was known. Returns
+    /// that line's index, or `None` when nothing was inserted.
+    fn insert_argocd_causes(&mut self, findings: Vec<Finding>) -> Option<usize> {
+        if findings.is_empty() {
+            return None;
+        }
+        let at = self
+            .argocd_items
+            .iter()
+            .position(|f| f.text.contains("but no managed resource reports it"))?;
+        for (offset, finding) in findings.into_iter().enumerate() {
+            self.argocd_items.insert(at + 1 + offset, finding);
+        }
+        Some(at)
+    }
+
+    /// Show a gathered report. A quiet one, read while a sync runs, keeps the
+    /// cursor on its row and the causes already found, and leaves the view as
+    /// it was when the read failed or the user expanded a row meanwhile.
+    pub(super) fn apply_argocd_report(&mut self, report: ArgocdReport) {
+        let ArgocdReport {
+            claim,
+            title,
+            source,
+            destination,
+            findings,
+            resources,
+            following,
+        } = report;
+        self.argocd_claim = None;
+        self.argocd_pending = false;
+        self.argocd_gathered_at = Some(std::time::Instant::now());
+        let quiet = claim.is_none();
+        if quiet && source.is_none() {
+            // Keep following: one failed read says nothing about the sync.
+            if let Some(error) = findings.first() {
+                self.flash_warn(&error.text);
+            }
+            return;
+        }
+        if quiet && !self.argocd_expanded.is_empty() {
+            return;
+        }
+        self.argocd_following = following;
+        self.argocd_resources = resources;
+        if let Some(source) = source {
+            self.argocd_source = Some(*source);
+        }
+        let previous = self
+            .argocd_state
+            .selected()
+            .and_then(|i| Some((i, row_identity(&self.argocd_items, i)?)));
+        self.argocd_items = findings;
+        self.argocd_title = title;
+        self.argocd_destination = destination;
+
+        // Nothing in the Application's own status says why it is unhealthy,
+        // so go and look. Costs nothing for the rest. A running sync is
+        // re-read every few seconds, and searching each time would make the
+        // cause rows come and go, so those reads reuse what was found.
+        let unexplained = self
+            .argocd_source
+            .as_ref()
+            .is_some_and(|a| argocd::health_unexplained(a, &self.argocd_resources));
+        let mut search = false;
+        if !unexplained {
+            self.argocd_causes = None;
+        } else if let Some(causes) = self.argocd_causes.clone().filter(|_| quiet && following) {
+            self.insert_argocd_causes(causes);
+        } else {
+            search = true;
+        }
+
+        let first = self
+            .argocd_items
+            .iter()
+            .position(|f| f.target.is_some())
+            .unwrap_or(0);
+        let selected = match previous.filter(|_| quiet) {
+            Some((index, identity)) => {
+                // The same object can be listed twice, failed in the sync and
+                // again as a managed resource, so its section is matched too.
+                let found = |section: bool| {
+                    (0..self.argocd_items.len()).find(|&i| {
+                        row_identity(&self.argocd_items, i).is_some_and(|other| {
+                            other.row == identity.row
+                                && (!section || other.section == identity.section)
+                        })
+                    })
+                };
+                found(true)
+                    .or_else(|| found(false))
+                    .unwrap_or(index.min(self.argocd_items.len().saturating_sub(1)))
+            }
+            None => self
+                .argocd_reselect
+                .take()
+                .and_then(|row| self.managed_row_at(row))
+                .unwrap_or(first),
+        };
+        self.argocd_state
+            .select((!self.argocd_items.is_empty()).then_some(selected));
+        if let Some(claim) = claim {
+            self.clear_claimed_status(claim);
+        }
+        if search {
+            self.spawn_argocd_cause();
+        }
+    }
+}
+
+/// What a row of the Argo CD view shows, for finding it again in a re-read.
+struct RowIdentity {
+    /// The heading the row sits under, without its count.
+    section: String,
+    /// The object a row opens, or its text when it opens nothing.
+    row: Result<Target, String>,
+}
+
+fn row_identity(items: &[Finding], index: usize) -> Option<RowIdentity> {
+    let finding = items.get(index)?;
+    let section = items[..=index]
+        .iter()
+        .rfind(|f| f.level == Level::Heading)
+        .map_or("", |h| h.text.split(" (").next().unwrap_or_default());
+    Some(RowIdentity {
+        section: section.to_string(),
+        row: finding.target.clone().ok_or_else(|| finding.text.clone()),
+    })
 }
 
 /// Walk one managed resource and report only the descendants in a bad state.

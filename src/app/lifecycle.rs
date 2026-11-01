@@ -1635,43 +1635,9 @@ impl App {
             Msg::Argocd {
                 generation,
                 request,
-                claim,
-                title,
-                source,
-                destination,
-                findings,
-                resources,
+                report,
             } if generation == self.generation && request == self.argocd_request => {
-                self.argocd_claim = None;
-                self.argocd_resources = resources;
-                if let Some(source) = source {
-                    self.argocd_source = Some(*source);
-                }
-                self.argocd_items = findings;
-                self.argocd_title = title;
-                self.argocd_destination = destination;
-                let first = self
-                    .argocd_items
-                    .iter()
-                    .position(|f| f.target.is_some())
-                    .unwrap_or(0);
-                let selected = self
-                    .argocd_reselect
-                    .take()
-                    .and_then(|row| self.managed_row_at(row))
-                    .unwrap_or(first);
-                self.argocd_state
-                    .select((!self.argocd_items.is_empty()).then_some(selected));
-                self.clear_claimed_status(claim);
-                // Nothing in the Application's own status says why it is
-                // unhealthy, so go and look. Costs nothing for the rest.
-                if self
-                    .argocd_source
-                    .as_ref()
-                    .is_some_and(|a| crate::argocd::health_unexplained(a, &self.argocd_resources))
-                {
-                    self.spawn_argocd_cause();
-                }
+                self.apply_argocd_report(report);
             }
             Msg::ArgocdCause {
                 generation,

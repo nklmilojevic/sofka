@@ -2555,6 +2555,15 @@ pub struct App {
     argocd_children_claims: Vec<StatusClaim>,
     /// Claim held while searching for what is making an Application unhealthy.
     argocd_cause_claim: Option<StatusClaim>,
+    /// A gather is in flight, quiet or not.
+    argocd_pending: bool,
+    /// The last report showed a sync in flight, so the view keeps re-reading.
+    argocd_following: bool,
+    argocd_gathered_at: Option<std::time::Instant>,
+    /// What the last cause search found, shown again by the follow-up reads
+    /// of a running sync instead of searching on every one.
+    /// `None` until a search has run for the state on screen.
+    argocd_causes: Option<Vec<crate::explain::Finding>>,
     /// Session-local per-object state-change history, fed by the table watch.
     pub timeline: crate::timeline::Timeline,
     /// Table geometry from the last frame, for mouse hit-testing. A RefCell
@@ -2953,6 +2962,10 @@ impl App {
             argocd_children_request: 0,
             argocd_children_claims: Vec::new(),
             argocd_cause_claim: None,
+            argocd_pending: false,
+            argocd_following: false,
+            argocd_gathered_at: None,
+            argocd_causes: None,
             timeline: crate::timeline::Timeline::default(),
             table_hit: RefCell::new(None),
             notify_tasks: HashMap::new(),

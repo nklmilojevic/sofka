@@ -7864,6 +7864,51 @@ async fn argocd_menu_sync_now_patches_without_prune() {
     );
 }
 
+/// The SYNC cell of the first Application row.
+fn argocd_sync_cell(app: &mut App) -> String {
+    let rows = app.rows();
+    app.ensure_table_cell_cache(&rows);
+    let key = row_key(rows[0]);
+    let cache = app.table_cell_cache();
+    let (cells, _) = cache.get(&key).unwrap();
+    cells[1].to_string()
+}
+
+/// After `t` → Sync now, an Application that was already `Synced` would look
+/// exactly the same in the list. While the operation is in flight the SYNC
+/// cell reads `Syncing`, and goes back to the sync status when it is done.
+#[tokio::test]
+async fn argocd_sync_reads_syncing_in_the_list_until_it_finishes() {
+    let (mut app, _rx) = test_app();
+    app.switch_kind("applications");
+    let mut synced = argocd_app("guestbook");
+    synced["metadata"]["resourceVersion"] = json!("1");
+    synced["status"] = json!({"sync": {"status": "Synced"}, "health": {"status": "Healthy"}});
+    apply(&mut app, synced.clone());
+    assert_eq!(argocd_sync_cell(&mut app), "Synced");
+
+    open_argocd_menu_item(&mut app, "Sync now");
+    assert!(app.flash.contains("syncing guestbook"), "{}", app.flash);
+
+    let mut requested = synced.clone();
+    requested["metadata"]["resourceVersion"] = json!("2");
+    requested["operation"] = json!({"sync": {"prune": false}});
+    apply(&mut app, requested);
+    assert_eq!(argocd_sync_cell(&mut app), "Syncing");
+
+    let mut running = synced.clone();
+    running["metadata"]["resourceVersion"] = json!("3");
+    running["status"]["operationState"] = json!({"phase": "Running"});
+    apply(&mut app, running);
+    assert_eq!(argocd_sync_cell(&mut app), "Syncing");
+
+    let mut done = synced;
+    done["metadata"]["resourceVersion"] = json!("4");
+    done["status"]["operationState"] = json!({"phase": "Succeeded"});
+    apply(&mut app, done);
+    assert_eq!(argocd_sync_cell(&mut app), "Synced");
+}
+
 #[tokio::test]
 async fn argocd_menu_refresh_sets_annotation_without_confirming() {
     let (mut app, mut rx, log) = argocd_patch_app(&["guestbook"]);
@@ -28268,6 +28313,267 @@ async fn argocd_view_reports_objects_argo_does_not_manage() {
     assert!(texts.contains(&"Deployment/web is not managed by Argo CD"));
 }
 
+/// An Application whose sync is running a PreSync hook.
+fn argocd_syncing_application() -> serde_json::Value {
+    let mut root = argocd_application(json!({"server": "https://kubernetes.default.svc",
+                                             "namespace": "default"}));
+    root["status"]["operationState"] = json!({
+        "phase": "Running",
+        "message": "waiting for completion of hook batch/Job/migrate",
+        "syncResult": {"resources": [
+            {"group": "batch", "kind": "Job", "namespace": "default", "name": "migrate",
+             "hookType": "PreSync", "hookPhase": "Running", "status": "Synced"}
+        ]}
+    });
+    root
+}
+
+fn argocd_application_gets(requests: &Arc<std::sync::Mutex<Vec<String>>>) -> usize {
+    requests
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|p| p.ends_with("/applications/web"))
+        .count()
+}
+
+/// While the Application syncs, the Argo CD view shows the operation and
+/// re-reads it on its own, quietly and without moving the cursor, until the
+/// sync is over.
+#[tokio::test]
+async fn argocd_view_follows_a_running_sync_until_it_finishes() {
+    let root = argocd_syncing_application();
+    let (mut app, mut rx, responses, requests) = health_report_app("applications", root.clone());
+    let path = format!(
+        "/apis/{}/namespaces/default/applications/web",
+        app.kind.as_ref().unwrap().ar.api_version
+    );
+    responses.lock().unwrap().insert(path.clone(), (200, root));
+
+    app.handle_key(press(KeyCode::Enter)).unwrap();
+    receive_argocd_report(&mut app, &mut rx).await;
+    let texts: Vec<&str> = app.argocd_items.iter().map(|f| f.text.as_str()).collect();
+    assert!(texts.contains(&"Sync operation"), "{texts:?}");
+    assert!(texts.contains(&"Running"), "{texts:?}");
+    assert!(
+        texts.contains(&"Job/migrate: PreSync hook Running"),
+        "{texts:?}"
+    );
+    let service = app
+        .argocd_items
+        .iter()
+        .position(|f| f.text == "Service/web: OutOfSync / Healthy")
+        .unwrap();
+    app.argocd_state.select(Some(service));
+    assert_eq!(argocd_application_gets(&requests), 1);
+
+    // Not due yet.
+    app.follow_argocd_operation_at(std::time::Instant::now());
+    assert_eq!(app.argocd_request, 1);
+
+    let mut done = argocd_application(json!({"server": "https://kubernetes.default.svc",
+                                             "namespace": "default"}));
+    done["status"]["operationState"] = json!({
+        "phase": "Succeeded",
+        "message": "successfully synced (all tasks run)"
+    });
+    responses.lock().unwrap().insert(path, (200, done));
+    let later = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    app.follow_argocd_operation_at(later);
+    assert!(
+        app.flash.is_empty(),
+        "a follow-up read is quiet: {}",
+        app.flash
+    );
+    receive_argocd_report(&mut app, &mut rx).await;
+    assert_eq!(argocd_application_gets(&requests), 2);
+
+    let texts: Vec<&str> = app.argocd_items.iter().map(|f| f.text.as_str()).collect();
+    assert!(texts.contains(&"Succeeded"), "{texts:?}");
+    assert!(
+        !texts.contains(&"Job/migrate: PreSync hook Running"),
+        "{texts:?}"
+    );
+    let selected = app.argocd_state.selected().unwrap();
+    assert_eq!(
+        app.argocd_items[selected].text, "Service/web: OutOfSync / Healthy",
+        "the cursor stayed on its row"
+    );
+
+    // The sync is over, so nothing more is read.
+    app.follow_argocd_operation_at(later + std::time::Duration::from_secs(10));
+    assert_eq!(app.argocd_request, 2);
+}
+
+fn argocd_web_path(app: &App) -> String {
+    format!(
+        "/apis/{}/namespaces/default/applications/web",
+        app.kind.as_ref().unwrap().ar.api_version
+    )
+}
+
+/// The Argo CD view open on `root`, which is syncing, with its first report in.
+async fn argocd_view_following(root: serde_json::Value) -> (App, Receiver<Msg>, HealthResponses) {
+    let (mut app, mut rx, responses, _) = health_report_app("applications", root.clone());
+    responses
+        .lock()
+        .unwrap()
+        .insert(argocd_web_path(&app), (200, root));
+    app.handle_key(press(KeyCode::Enter)).unwrap();
+    receive_argocd_report(&mut app, &mut rx).await;
+    assert!(app.argocd_following);
+    (app, rx, responses)
+}
+
+fn argocd_texts(app: &App) -> Vec<String> {
+    app.argocd_items.iter().map(|f| f.text.clone()).collect()
+}
+
+/// One failed read while a sync runs says nothing about the sync: the view
+/// keeps what it showed, says the read failed, and the next read carries on.
+#[tokio::test]
+async fn argocd_follow_survives_a_failed_read() {
+    let (mut app, mut rx, responses) = argocd_view_following(argocd_syncing_application()).await;
+    let shown = argocd_texts(&app);
+    let path = argocd_web_path(&app);
+    responses.lock().unwrap().insert(
+        path.clone(),
+        (
+            500,
+            json!({"apiVersion": "v1", "kind": "Status", "status": "Failure",
+                   "message": "etcdserver: request timed out", "code": 500}),
+        ),
+    );
+    let later = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    app.follow_argocd_operation_at(later);
+    receive_argocd_report(&mut app, &mut rx).await;
+    assert_eq!(argocd_texts(&app), shown);
+    assert!(app.argocd_following);
+    assert!(app.flash.contains("timed out"), "{}", app.flash);
+
+    let mut done = argocd_application(json!({"server": "https://kubernetes.default.svc",
+                                             "namespace": "default"}));
+    done["status"]["operationState"] = json!({"phase": "Succeeded"});
+    responses.lock().unwrap().insert(path, (200, done));
+    app.follow_argocd_operation_at(later + std::time::Duration::from_secs(3));
+    receive_argocd_report(&mut app, &mut rx).await;
+    assert!(argocd_texts(&app).contains(&"Succeeded".to_string()));
+    assert!(!app.argocd_following);
+}
+
+/// A failed sync result and a managed resource can name the same object.
+/// When the failure appears above the managed row the cursor is on, the
+/// cursor stays on the managed row instead of jumping to the failure.
+#[tokio::test]
+async fn argocd_follow_keeps_the_cursor_in_its_section() {
+    let (mut app, mut rx, responses) = argocd_view_following(argocd_syncing_application()).await;
+    let managed = app
+        .argocd_items
+        .iter()
+        .position(|f| f.text == "Service/web: OutOfSync / Healthy")
+        .unwrap();
+    app.argocd_state.select(Some(managed));
+
+    let mut failing = argocd_syncing_application();
+    failing["status"]["operationState"]["syncResult"]["resources"] = json!([
+        {"group": "", "kind": "Service", "namespace": "default", "name": "web",
+         "status": "SyncFailed", "message": "field is immutable"}
+    ]);
+    responses
+        .lock()
+        .unwrap()
+        .insert(argocd_web_path(&app), (200, failing));
+    app.follow_argocd_operation_at(std::time::Instant::now() + std::time::Duration::from_secs(3));
+    receive_argocd_report(&mut app, &mut rx).await;
+
+    let texts = argocd_texts(&app);
+    let failed = texts
+        .iter()
+        .position(|t| t == "Service/web: SyncFailed — field is immutable")
+        .expect("failed row");
+    let selected = app.argocd_state.selected().unwrap();
+    assert!(selected > failed, "{texts:?}");
+    assert_eq!(texts[selected], "Service/web: OutOfSync / Healthy");
+}
+
+/// A row expanded while a follow-up read is in flight is not folded away
+/// when that read lands.
+#[tokio::test]
+async fn argocd_follow_drops_a_read_that_would_fold_an_expansion() {
+    let (mut app, mut rx, _) = argocd_view_following(argocd_syncing_application()).await;
+    let shown = argocd_texts(&app);
+    app.follow_argocd_operation_at(std::time::Instant::now() + std::time::Duration::from_secs(3));
+    app.argocd_expanded.insert(0, app.argocd_children_request);
+    receive_argocd_report(&mut app, &mut rx).await;
+    assert_eq!(argocd_texts(&app), shown);
+    assert!(!app.argocd_expanded.is_empty());
+}
+
+/// A failed sync result opens the object in its own API group, not another
+/// group's kind of the same name.
+#[tokio::test]
+async fn argocd_sync_result_opens_in_its_own_api_group() {
+    let mut root = argocd_application(json!({"server": "https://kubernetes.default.svc",
+                                             "namespace": "default"}));
+    root["status"]["operationState"] = json!({
+        "phase": "Failed",
+        "syncResult": {"resources": [
+            {"group": "serving.knative.dev", "kind": "Service", "namespace": "default",
+             "name": "web", "status": "SyncFailed"}
+        ]}
+    });
+    let (mut app, mut rx, responses, _) = health_report_app("applications", root.clone());
+    app.cluster
+        .register_kind("serving.knative.dev", "Service", "services", true);
+    responses
+        .lock()
+        .unwrap()
+        .insert(argocd_web_path(&app), (200, root));
+    app.handle_key(press(KeyCode::Enter)).unwrap();
+    receive_argocd_report(&mut app, &mut rx).await;
+
+    let row = app
+        .argocd_items
+        .iter()
+        .position(|f| f.text == "Service/web: SyncFailed")
+        .expect("failed row");
+    assert_eq!(
+        app.argocd_items[row].target.as_ref().unwrap().plural,
+        "services.serving.knative.dev"
+    );
+    app.argocd_state.select(Some(row));
+    app.handle_key(press(KeyCode::Enter)).unwrap();
+    assert_eq!(app.kind.as_ref().unwrap().ar.group, "serving.knative.dev");
+}
+
+/// A follow-up read would rebuild every row and fold away what the user
+/// expanded, so following waits while anything is expanded, and stops once
+/// the view is closed.
+#[tokio::test]
+async fn argocd_view_does_not_follow_while_expanded_or_closed() {
+    let root = argocd_syncing_application();
+    let (mut app, mut rx, responses, _) = health_report_app("applications", root.clone());
+    let path = format!(
+        "/apis/{}/namespaces/default/applications/web",
+        app.kind.as_ref().unwrap().ar.api_version
+    );
+    responses.lock().unwrap().insert(path, (200, root));
+    app.handle_key(press(KeyCode::Enter)).unwrap();
+    receive_argocd_report(&mut app, &mut rx).await;
+    let later = std::time::Instant::now() + std::time::Duration::from_secs(3);
+
+    app.argocd_expanded.insert(0, app.argocd_children_request);
+    app.follow_argocd_operation_at(later);
+    assert_eq!(app.argocd_request, 1);
+    app.argocd_expanded.clear();
+
+    app.handle_key(press(KeyCode::Esc)).unwrap();
+    assert_eq!(app.mode, Mode::Table);
+    let request = app.argocd_request;
+    app.follow_argocd_operation_at(later);
+    assert_eq!(app.argocd_request, request);
+}
+
 /// Leaving the view must drop a report still in flight, not let it land on a
 /// list the user has already walked away from.
 #[tokio::test]
@@ -28631,20 +28937,17 @@ async fn receive_argocd_cause(app: &mut App, rx: &mut Receiver<Msg>) {
     .expect("argocd cause did not arrive");
 }
 
-/// With Argo CD's default settings `status.resources[]` carries no health, so an
-/// unhealthy Application says nothing about why. The cause is then only in the
-/// objects themselves.
-#[tokio::test]
-async fn argocd_view_finds_the_cause_of_an_unexplained_degraded_application() {
-    let mut root = argocd_application(json!({"server": "https://kubernetes.default.svc",
-                                             "namespace": "default"}));
-    root["status"]["sync"]["status"] = json!("Synced");
-    root["status"]["health"] = json!({"status": "Degraded"});
-    root["status"]["resources"] = json!([
-        {"group": "apps", "version": "v1", "kind": "Deployment", "namespace": "default",
-         "name": "web", "status": "Synced"}
-    ]);
-    let (mut app, mut rx, responses, _) = health_report_app("applications", root.clone());
+/// The Applications list for `root`, a Degraded Application whose status names
+/// no cause, with the Deployment behind it crash-looping.
+fn unexplained_degraded_app(
+    root: serde_json::Value,
+) -> (
+    App,
+    Receiver<Msg>,
+    HealthResponses,
+    Arc<std::sync::Mutex<Vec<String>>>,
+) {
+    let (mut app, rx, responses, requests) = health_report_app("applications", root.clone());
     app.cluster
         .register_kind("apps", "ReplicaSet", "replicasets", true);
     let kind = app.kind.as_ref().unwrap();
@@ -28690,6 +28993,27 @@ async fn argocd_view_finds_the_cause_of_an_unexplained_degraded_application() {
             ),
         );
     }
+    (app, rx, responses, requests)
+}
+
+fn unexplained_degraded_application() -> serde_json::Value {
+    let mut root = argocd_application(json!({"server": "https://kubernetes.default.svc",
+                                             "namespace": "default"}));
+    root["status"]["sync"]["status"] = json!("Synced");
+    root["status"]["health"] = json!({"status": "Degraded"});
+    root["status"]["resources"] = json!([
+        {"group": "apps", "version": "v1", "kind": "Deployment", "namespace": "default",
+         "name": "web", "status": "Synced"}
+    ]);
+    root
+}
+
+/// With Argo CD's default settings `status.resources[]` carries no health, so an
+/// unhealthy Application says nothing about why. The cause is then only in the
+/// objects themselves.
+#[tokio::test]
+async fn argocd_view_finds_the_cause_of_an_unexplained_degraded_application() {
+    let (mut app, mut rx, _, _) = unexplained_degraded_app(unexplained_degraded_application());
 
     open_argocd_view(&mut app);
     receive_argocd_report(&mut app, &mut rx).await;
@@ -28713,6 +29037,108 @@ async fn argocd_view_finds_the_cause_of_an_unexplained_degraded_application() {
         "Pod/web-1-abc: CrashLoopBackOff",
         "the cause should sit under the line that said none was known: {after:?}"
     );
+}
+
+/// A sync started to fix a broken Application is re-read every few seconds.
+/// Those reads keep showing the cause already found rather than searching
+/// again each time, and the search runs once more when the sync is over.
+#[tokio::test]
+async fn argocd_follow_up_reads_keep_the_cause_without_searching_again() {
+    let mut root = unexplained_degraded_application();
+    root["status"]["operationState"] = json!({"phase": "Running"});
+    let (mut app, mut rx, responses, requests) = unexplained_degraded_app(root.clone());
+    let pod_lists = |requests: &Arc<std::sync::Mutex<Vec<String>>>| {
+        requests
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|p| p.as_str() == "/api/v1/namespaces/default/pods")
+            .count()
+    };
+    let cause_under_dead_end = |app: &App| {
+        let texts: Vec<&str> = app.argocd_items.iter().map(|f| f.text.as_str()).collect();
+        let at = texts
+            .iter()
+            .position(|t| t.contains("but no managed resource reports it"))
+            .expect("the line it explains");
+        texts[at + 1] == "Pod/web-1-abc: CrashLoopBackOff"
+    };
+
+    open_argocd_view(&mut app);
+    receive_argocd_report(&mut app, &mut rx).await;
+    receive_argocd_cause(&mut app, &mut rx).await;
+    assert!(cause_under_dead_end(&app));
+    assert_eq!(pod_lists(&requests), 1);
+    let cause = app
+        .argocd_items
+        .iter()
+        .position(|f| f.text == "Pod/web-1-abc: CrashLoopBackOff")
+        .unwrap();
+    app.argocd_state.select(Some(cause));
+
+    let later = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    app.follow_argocd_operation_at(later);
+    assert!(app.flash.is_empty(), "{}", app.flash);
+    receive_argocd_report(&mut app, &mut rx).await;
+    assert!(cause_under_dead_end(&app));
+    assert_eq!(pod_lists(&requests), 1, "searched again mid-sync");
+    let selected = app.argocd_state.selected().unwrap();
+    assert_eq!(
+        app.argocd_items[selected].text, "Pod/web-1-abc: CrashLoopBackOff",
+        "the cursor stayed on the cause"
+    );
+
+    let mut done = root;
+    done["status"]["operationState"] = json!({"phase": "Succeeded"});
+    let path = format!(
+        "/apis/{}/namespaces/default/applications/web",
+        app.kind.as_ref().unwrap().ar.api_version
+    );
+    responses.lock().unwrap().insert(path, (200, done));
+    app.follow_argocd_operation_at(later + std::time::Duration::from_secs(3));
+    receive_argocd_report(&mut app, &mut rx).await;
+    receive_argocd_cause(&mut app, &mut rx).await;
+    assert!(cause_under_dead_end(&app));
+    assert_eq!(pod_lists(&requests), 2);
+}
+
+/// Causes found before a recovery do not explain a later failure. Once a
+/// follow-up read shows the Application healthy, the next unexplained
+/// failure in the same sync is searched afresh.
+#[tokio::test]
+async fn argocd_follow_searches_again_after_a_recovery() {
+    let mut root = unexplained_degraded_application();
+    root["status"]["operationState"] = json!({"phase": "Running"});
+    let (mut app, mut rx, responses, requests) = unexplained_degraded_app(root.clone());
+    let pod_lists = || {
+        requests
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|p| p.as_str() == "/api/v1/namespaces/default/pods")
+            .count()
+    };
+    open_argocd_view(&mut app);
+    receive_argocd_report(&mut app, &mut rx).await;
+    receive_argocd_cause(&mut app, &mut rx).await;
+    assert_eq!(pod_lists(), 1);
+
+    let path = argocd_web_path(&app);
+    let mut healthy = root.clone();
+    healthy["status"]["health"] = json!({"status": "Healthy"});
+    responses
+        .lock()
+        .unwrap()
+        .insert(path.clone(), (200, healthy));
+    let later = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    app.follow_argocd_operation_at(later);
+    receive_argocd_report(&mut app, &mut rx).await;
+
+    responses.lock().unwrap().insert(path, (200, root));
+    app.follow_argocd_operation_at(later + std::time::Duration::from_secs(3));
+    receive_argocd_report(&mut app, &mut rx).await;
+    receive_argocd_cause(&mut app, &mut rx).await;
+    assert_eq!(pod_lists(), 2);
 }
 
 /// The Application's own status already names a cause, so there is nothing to
