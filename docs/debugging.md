@@ -550,6 +550,11 @@ These exclusions apply to the environment proxy on startup and context changes.
 Servers without a matching exclusion keep using the proxy. An explicit
 `proxy-url` in the selected kubeconfig cluster takes priority over exclusions.
 
+Empty entries, such as the one a trailing comma leaves, are skipped. sofka
+prints a warning and ignores any entry that is not a host name, IP address or
+CIDR range, such as `<local>`, and removes it from the environment that kubectl
+and exec plugins see.
+
 To test whether the environment proxy causes a connection failure, remove its
 settings for one run:
 
