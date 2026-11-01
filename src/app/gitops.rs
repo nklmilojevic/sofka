@@ -278,11 +278,7 @@ async fn fetch_flux(
     let Some((ar, namespaced, plural)) = flux.get(&r.kind.to_lowercase()) else {
         return (String::new(), None);
     };
-    let api: Api<DynamicObject> = if *namespaced && !r.namespace.is_empty() {
-        Api::namespaced_with(client.clone(), &r.namespace, ar)
-    } else {
-        Api::all_with(client.clone(), ar)
-    };
+    let api = crate::k8s::dynamic_api(client.clone(), ar, *namespaced, &r.namespace);
     let obj = match api.get(&r.name).await {
         Ok(o) => Some(o),
         Err(kube::Error::Api(ae)) if ae.code == 404 => None,

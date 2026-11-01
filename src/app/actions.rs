@@ -106,11 +106,7 @@ impl App {
         tokio::spawn(async move {
             let mut errors = Vec::new();
             for (name, ns) in targets {
-                let api: Api<DynamicObject> = if kind.namespaced && !ns.is_empty() {
-                    Api::namespaced_with(client.clone(), &ns, &kind.ar)
-                } else {
-                    Api::all_with(client.clone(), &kind.ar)
-                };
+                let api = kind.api(client.clone(), &ns);
                 let result = match &patch {
                     ActionPatch::Resource(patch) => api
                         .patch(&name, &PatchParams::default(), patch)
@@ -173,11 +169,7 @@ impl App {
             }
             let mut failed = false;
             for (name, ns) in targets {
-                let api: Api<DynamicObject> = if kind.namespaced && !ns.is_empty() {
-                    Api::namespaced_with(client.clone(), &ns, &kind.ar)
-                } else {
-                    Api::all_with(client.clone(), &kind.ar)
-                };
+                let api = kind.api(client.clone(), &ns);
                 if let Err(e) = api.delete(&name, &dp).await {
                     failed = true;
                     let _ = tx
@@ -2431,11 +2423,7 @@ impl App {
         tokio::spawn(async move {
             let mut failed = false;
             for (name, ns) in targets {
-                let api: Api<DynamicObject> = if kind.namespaced && !ns.is_empty() {
-                    Api::namespaced_with(client.clone(), &ns, &kind.ar)
-                } else {
-                    Api::all_with(client.clone(), &kind.ar)
-                };
+                let api = kind.api(client.clone(), &ns);
                 let obj = match api.get(&name).await {
                     Ok(o) => o,
                     Err(e) => {

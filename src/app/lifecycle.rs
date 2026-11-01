@@ -847,11 +847,7 @@ impl App {
                 let mut failure = None;
                 let mut succeeded = false;
                 for ns in &namespaces {
-                    let api: Api<DynamicObject> = if namespaced && !ns.is_empty() {
-                        Api::namespaced_with(client.clone(), ns, &ar)
-                    } else {
-                        Api::all_with(client.clone(), &ar)
-                    };
+                    let api = crate::k8s::dynamic_api(client.clone(), &ar, namespaced, ns);
                     match api.list(&ListParams::default()).await {
                         Ok(list) => {
                             succeeded = true;

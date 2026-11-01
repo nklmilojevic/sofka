@@ -173,11 +173,7 @@ async fn sanitize(
         .to_string();
 
     let pods = ApiResource::erase::<Pod>(&());
-    let api: Api<DynamicObject> = if namespace.is_empty() {
-        Api::all_with(client.clone(), &pods)
-    } else {
-        Api::namespaced_with(client.clone(), &namespace, &pods)
-    };
+    let api = crate::k8s::dynamic_api(client.clone(), &pods, true, &namespace);
 
     let mut params = ListParams::default().limit(PAGE);
     let (labels, fields) = selectors(request.get("filter").and_then(Value::as_str))?;

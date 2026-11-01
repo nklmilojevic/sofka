@@ -572,11 +572,7 @@ impl App {
         let tx = self.tx.clone();
         let generation = self.generation;
         tokio::spawn(async move {
-            let api: Api<DynamicObject> = if kind.namespaced && !ns.is_empty() {
-                Api::namespaced_with(client, &ns, &kind.ar)
-            } else {
-                Api::all_with(client, &kind.ar)
-            };
+            let api = kind.api(client, &ns);
             let result = api
                 .patch(&name, &PatchParams::default(), &Patch::Merge(&patch))
                 .await

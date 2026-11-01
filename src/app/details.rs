@@ -365,11 +365,7 @@ impl App {
         let watch_ns = ns;
         let is_events_v1 = ar.group == "events.k8s.io";
         let handle = tokio::spawn(async move {
-            let api: Api<DynamicObject> = if namespaced && !watch_ns.is_empty() {
-                Api::namespaced_with(client, &watch_ns, &ar)
-            } else {
-                Api::all_with(client, &ar)
-            };
+            let api = crate::k8s::dynamic_api(client, &ar, namespaced, &watch_ns);
             let cfg = watcher::Config::default().any_semantic().fields(&selector);
             let mut stream = watcher(api, cfg).boxed();
             let mut items: HashMap<String, DynamicObject> = HashMap::new();

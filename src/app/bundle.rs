@@ -96,11 +96,7 @@ impl App {
 
             let owner = match (&owner_ref, &owner_kind) {
                 (Some(oref), Some((ar, nsd))) => {
-                    let api: Api<DynamicObject> = if *nsd && !ns.is_empty() {
-                        Api::namespaced_with(client.clone(), &ns, ar)
-                    } else {
-                        Api::all_with(client.clone(), ar)
-                    };
+                    let api = crate::k8s::dynamic_api(client.clone(), ar, *nsd, &ns);
                     api.get(&oref.name).await.ok().map(|mut o| {
                         o.types = Some(TypeMeta {
                             api_version: ar.api_version.clone(),

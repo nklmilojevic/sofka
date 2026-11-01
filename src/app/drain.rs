@@ -480,15 +480,10 @@ impl DrainWorker {
                         owner.kind
                     );
                 };
-                let api: Api<DynamicObject> = if kind.namespaced {
-                    Api::namespaced_with(
-                        self.client.clone(),
-                        pod.metadata.namespace.as_deref().unwrap_or("default"),
-                        &kind.ar,
-                    )
-                } else {
-                    Api::all_with(self.client.clone(), &kind.ar)
-                };
+                let api = kind.api(
+                    self.client.clone(),
+                    pod.metadata.namespace.as_deref().unwrap_or("default"),
+                );
                 let controller = api_call(api.get_opt(&owner.name))
                     .await
                     .with_context(|| format!("{label}: cannot check controller"))?;

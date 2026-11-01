@@ -67,11 +67,7 @@ impl App {
         let task_id = id.clone();
 
         let handle = tokio::spawn(async move {
-            let api: Api<DynamicObject> = if namespaced && !ns.is_empty() {
-                Api::namespaced_with(client, &ns, &ar)
-            } else {
-                Api::all_with(client, &ar)
-            };
+            let api = crate::k8s::dynamic_api(client, &ar, namespaced, &ns);
             let cfg = watcher::Config::default()
                 .any_semantic()
                 .fields(&format!("metadata.name={name}"));

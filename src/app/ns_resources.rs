@@ -151,11 +151,7 @@ pub fn row(kind: &Kind, count: &Count) -> Option<DynamicObject> {
 
 /// Count `kind`'s objects in `namespace` ("" = all namespaces).
 pub(crate) async fn count(client: Client, kind: &Kind, namespace: &str) -> Count {
-    let api: Api<DynamicObject> = if namespace.is_empty() {
-        Api::all_with(client, &kind.ar)
-    } else {
-        Api::namespaced_with(client, namespace, &kind.ar)
-    };
+    let api = kind.api(client, namespace);
     let mut n = 0u64;
     let mut token: Option<String> = None;
     for _ in 0..MAX_PAGES {
