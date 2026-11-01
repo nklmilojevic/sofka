@@ -2226,6 +2226,9 @@ impl App {
             }
             _ => {} // stale generation, drop
         }
+        if self.finish_filter_reselect() {
+            return;
+        }
         if preserve_selection {
             let index = selected_pod.and_then(|(key, uid)| {
                 if self.store.get(&key)?.metadata.uid != uid {

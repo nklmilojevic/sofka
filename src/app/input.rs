@@ -417,7 +417,7 @@ impl App {
                     && !self.try_workspace_key(key.event())
                     && !self.try_plugin_key(key.event())
                 {
-                    let selected = self.selected_key();
+                    let selected = self.filter_anchor();
                     self.faults_only = !self.faults_only;
                     self.reselect_after_filter(selected);
                 }
@@ -432,7 +432,7 @@ impl App {
                 if !self.marked.is_empty() {
                     self.clear_marks();
                 } else if !self.filter.is_empty() {
-                    let selected = self.selected_key();
+                    let selected = self.filter_anchor();
                     self.filter.clear();
                     // Dropping the filter also drops its server-side
                     // selectors, so the watch must widen back out.
@@ -1416,7 +1416,7 @@ impl App {
     /// apply live per keystroke; `-l`/`-f` selectors are sent to the API on
     /// ⏎, since that restarts the watch (see `sync_filter_selectors`).
     pub(super) fn key_filter(&mut self, key: KeyInput) {
-        let selected = self.selected_key();
+        let selected = self.filter_anchor();
         if edit_action(key.action, &mut self.filter) {
             self.reselect_after_filter(selected);
             return;

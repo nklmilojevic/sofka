@@ -1298,13 +1298,61 @@ impl App {
             .position(|k| k.as_ref() == key)
     }
 
+    /// The object a filter change should keep selected: one still waiting for
+    /// its watch to list, while the cursor has not moved, else the selection.
+    pub(super) fn filter_anchor(&self) -> Option<String> {
+        match &self.filter_reselect {
+            Some(pending)
+                if pending.generation == self.generation
+                    && self.table_state.selected() == Some(pending.index) =>
+            {
+                Some(pending.key.clone())
+            }
+            _ => self.selected_key(),
+        }
+    }
+
     /// Re-select `key` after the filter changed which rows are listed, so the
     /// cursor stays on the same object. Falls back to the first row once that
-    /// object is filtered out.
+    /// object is filtered out. While the watch is still listing, the rows are
+    /// not final, so `finish_filter_reselect` looks `key` up again on sync.
     pub(super) fn reselect_after_filter(&mut self, key: Option<String>) {
         self.invalidate_rows();
-        let index = key.and_then(|key| self.row_index(&key));
-        self.table_state.select(Some(index.unwrap_or(0)));
+        let index = key
+            .as_deref()
+            .and_then(|key| self.row_index(key))
+            .unwrap_or(0);
+        self.table_state.select(Some(index));
+        self.filter_reselect = key
+            .filter(|_| !self.store.synced)
+            .map(|key| FilterReselect {
+                generation: self.generation,
+                key,
+                index,
+            });
+    }
+
+    /// Apply a pending [`Self::reselect_after_filter`] once its watch has
+    /// listed. Dropped when the watch is replaced or the cursor was moved.
+    /// Returns whether it still owns the selection: applied now, or waiting.
+    pub(super) fn finish_filter_reselect(&mut self) -> bool {
+        let Some(pending) = &self.filter_reselect else {
+            return false;
+        };
+        if pending.generation != self.generation
+            || self.table_state.selected() != Some(pending.index)
+        {
+            self.filter_reselect = None;
+            return false;
+        }
+        if !self.store.synced {
+            return true;
+        }
+        if let Some(pending) = self.filter_reselect.take() {
+            let index = self.row_index(&pending.key).unwrap_or(0);
+            self.table_state.select(Some(index));
+        }
+        true
     }
 
     /// Full `(header, value)` pairs for the selected row, in display order.

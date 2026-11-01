@@ -18920,6 +18920,72 @@ async fn clearing_the_filter_scrolls_the_selected_row_into_view() {
     assert!(screen(&terminal).contains("pod-33"));
 }
 
+fn list_web_pods(app: &mut App, names: &[&str], synced: bool) {
+    app.handle_msg(Msg::Reset {
+        generation: app.generation,
+    });
+    for name in names {
+        let mut pod = pod(name);
+        pod["metadata"]["labels"] = json!({"app": "web"});
+        apply(app, pod);
+    }
+    if synced {
+        app.handle_msg(Msg::Synced {
+            generation: app.generation,
+        });
+    }
+}
+
+#[tokio::test]
+async fn server_side_filters_keep_the_selected_object_once_the_watch_lists() {
+    let (mut app, _rx) = test_app();
+    app.switch_kind("pods");
+    list_web_pods(&mut app, &["alpha", "beta", "delta", "gamma"], true);
+    app.handle_key(press(KeyCode::End)).unwrap();
+    assert_eq!(selected_name(&app).as_deref(), Some("gamma"));
+
+    let before = app.generation;
+    type_filter(&mut app, "-l app=web");
+    assert_eq!(app.generation, before + 1);
+    assert_eq!(app.row_count(), 0, "a first visit has no cached rows");
+    list_web_pods(&mut app, &["beta", "gamma"], true);
+    assert_eq!(selected_name(&app).as_deref(), Some("gamma"));
+
+    let before = app.generation;
+    app.handle_key(press(KeyCode::Esc)).unwrap();
+    assert_eq!(app.generation, before + 1);
+    assert_eq!(
+        app.row_count(),
+        4,
+        "the unfiltered rows come from the cache"
+    );
+    assert_eq!(selected_name(&app).as_deref(), Some("gamma"));
+    list_web_pods(&mut app, &["aaa", "alpha", "beta", "delta", "gamma"], true);
+    assert_eq!(
+        selected_name(&app).as_deref(),
+        Some("gamma"),
+        "the fresh list moved gamma down a row"
+    );
+}
+
+#[tokio::test]
+async fn moving_the_cursor_while_a_server_side_filter_lists_keeps_the_new_row() {
+    let (mut app, _rx) = test_app();
+    app.switch_kind("pods");
+    list_web_pods(&mut app, &["alpha", "beta", "delta", "gamma"], true);
+    app.handle_key(press(KeyCode::End)).unwrap();
+
+    type_filter(&mut app, "-l app=web");
+    list_web_pods(&mut app, &["beta", "delta", "gamma"], false);
+    assert_eq!(selected_name(&app).as_deref(), Some("beta"));
+    app.handle_key(press(KeyCode::Down)).unwrap();
+    assert_eq!(selected_name(&app).as_deref(), Some("delta"));
+    app.handle_msg(Msg::Synced {
+        generation: app.generation,
+    });
+    assert_eq!(selected_name(&app).as_deref(), Some("delta"));
+}
+
 fn type_resource_query(app: &mut App, query: &str) {
     app.handle_key(press(KeyCode::Char(':'))).unwrap();
     for c in query.chars() {
