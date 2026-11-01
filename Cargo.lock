@@ -3293,6 +3293,7 @@ dependencies = [
  "libc",
  "memchr",
  "nucleo-matcher",
+ "percent-encoding",
  "ratatui",
  "regex",
  "rustls",

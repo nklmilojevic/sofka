@@ -49,6 +49,7 @@ kube = { version = "4.2.0", default-features = false, features = [
 ] }
 memchr = "2.8.3"
 nucleo-matcher = "0.3"
+percent-encoding = "2.3.2"
 ratatui = "0.30.1"
 regex = "1"
 rustls = { version = "0.23.43", default-features = false, features = ["aws-lc-rs", "std", "tls12"] }
