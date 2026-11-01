@@ -75,6 +75,7 @@ impl App {
             self.focus_workload_row();
         }
         let result = self.handle_key_inner(key);
+        self.drop_moved_filter_reselect();
         self.note_skipped_marks(input_mode);
         self.restore_workloads_identity();
         if self.mode != input_mode {

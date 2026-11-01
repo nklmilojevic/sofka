@@ -18986,6 +18986,58 @@ async fn moving_the_cursor_while_a_server_side_filter_lists_keeps_the_new_row() 
     assert_eq!(selected_name(&app).as_deref(), Some("delta"));
 }
 
+#[tokio::test]
+async fn moving_the_cursor_away_and_back_while_a_filter_lists_keeps_the_row() {
+    let (mut app, _rx) = test_app();
+    app.switch_kind("pods");
+    list_web_pods(&mut app, &["alpha", "beta", "delta", "gamma"], true);
+    app.handle_key(press(KeyCode::End)).unwrap();
+
+    type_filter(&mut app, "-l app=web");
+    list_web_pods(&mut app, &["beta", "delta", "gamma"], false);
+    app.handle_key(press(KeyCode::Down)).unwrap();
+    app.handle_key(press(KeyCode::Up)).unwrap();
+    assert_eq!(selected_name(&app).as_deref(), Some("beta"));
+    app.handle_msg(Msg::Synced {
+        generation: app.generation,
+    });
+    assert_eq!(
+        selected_name(&app).as_deref(),
+        Some("beta"),
+        "the user's navigation outranks the remembered gamma"
+    );
+}
+
+#[tokio::test]
+async fn clicking_rows_while_a_filter_lists_keeps_the_clicked_row() {
+    use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+    use ratatui::{Terminal, backend::TestBackend};
+    let (mut app, _rx) = test_app();
+    app.switch_kind("pods");
+    list_web_pods(&mut app, &["alpha", "beta", "delta", "gamma"], true);
+    app.handle_key(press(KeyCode::End)).unwrap();
+
+    type_filter(&mut app, "-l app=web");
+    list_web_pods(&mut app, &["beta", "delta", "gamma"], false);
+    let mut terminal = Terminal::new(TestBackend::new(120, 32)).unwrap();
+    terminal.draw(|f| crate::ui::draw(f, &mut app)).unwrap();
+    let hit = app.table_hit.borrow().clone().expect("geometry recorded");
+    let click = |row: u16| MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: hit.x_min + 3,
+        row: hit.rows_y + row,
+        modifiers: KeyModifiers::NONE,
+    };
+    app.handle_mouse(click(1)).unwrap();
+    assert_eq!(selected_name(&app).as_deref(), Some("delta"));
+    app.handle_mouse(click(0)).unwrap();
+    assert_eq!(selected_name(&app).as_deref(), Some("beta"));
+    app.handle_msg(Msg::Synced {
+        generation: app.generation,
+    });
+    assert_eq!(selected_name(&app).as_deref(), Some("beta"));
+}
+
 fn type_resource_query(app: &mut App, query: &str) {
     app.handle_key(press(KeyCode::Char(':'))).unwrap();
     for c in query.chars() {

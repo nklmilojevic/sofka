@@ -1332,17 +1332,24 @@ impl App {
             });
     }
 
-    /// Apply a pending [`Self::reselect_after_filter`] once its watch has
-    /// listed. Dropped when the watch is replaced or the cursor was moved.
-    /// Returns whether it still owns the selection: applied now, or waiting.
-    pub(super) fn finish_filter_reselect(&mut self) -> bool {
-        let Some(pending) = &self.filter_reselect else {
-            return false;
-        };
-        if pending.generation != self.generation
-            || self.table_state.selected() != Some(pending.index)
-        {
+    /// Drop a pending [`Self::reselect_after_filter`] once the watch was
+    /// replaced or the cursor left the row it set. Run after every key and
+    /// click, so moving away and back before the list arrives still counts.
+    pub(super) fn drop_moved_filter_reselect(&mut self) {
+        if self.filter_reselect.as_ref().is_some_and(|pending| {
+            pending.generation != self.generation
+                || self.table_state.selected() != Some(pending.index)
+        }) {
             self.filter_reselect = None;
+        }
+    }
+
+    /// Apply a pending [`Self::reselect_after_filter`] once its watch has
+    /// listed. Returns whether it still owns the selection: applied now, or
+    /// waiting.
+    pub(super) fn finish_filter_reselect(&mut self) -> bool {
+        self.drop_moved_filter_reselect();
+        if self.filter_reselect.is_none() {
             return false;
         }
         if !self.store.synced {
