@@ -1,5 +1,25 @@
 # Changelog
 
+## v0.34.0 - 2026-11-01
+
+This release shows Argo CD sync progress and lets you pin table columns. It also fixes proxy login, `NO_PROXY` handling, table watches on Kubernetes 1.37, and filter selection.
+
+### New features
+
+- Shows Argo CD sync progress in the list and the Argo CD view. The SYNC column shows `Syncing`, and the view lists the sync result and the failed objects.
+- Lets you choose which columns stay fixed during horizontal scrolling. Set `pin` in a view to list the headers that stay in view.
+
+### Fixes
+
+- Fixes proxy login for user names and passwords with special characters, such as `@`. Before, the proxy rejected these credentials with `407`.
+- Fixes `NO_PROXY` handling with entries that the Kubernetes client cannot read, such as a trailing comma. Before, sofka stopped. Now sofka skips the entry, warns, and keeps an explicit kubeconfig `proxy-url`.
+- Fixes the table watch on Kubernetes 1.37 clusters. sofka now requests uncompressed watch events.
+- Keeps the selected object when the filter changes. The cursor stays on the object, and before, it moved to the first row.
+
+### Other changes
+
+- Changes how sofka builds Kubernetes API calls for namespaced and cluster-scoped kinds. The request URLs stay the same, so users see no change.
+
 ## v0.33.0 - 2026-10-29
 
 sofka adds shell completions for the Nix package, Scoop install on Windows, and per-context badges. It also works when RBAC allows list but not watch.
