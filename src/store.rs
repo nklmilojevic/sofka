@@ -44,6 +44,22 @@ pub enum WatchFailure {
     NeedsInput,
 }
 
+/// One gathered Argo CD view, carried by [`Msg::Argocd`].
+pub struct ArgocdReport {
+    /// `None` for the quiet re-read that follows a running sync.
+    pub claim: Option<StatusClaim>,
+    pub title: String,
+    /// `None` when the read failed, and `findings` then holds the error.
+    pub source: Option<Box<DynamicObject>>,
+    pub destination: crate::argocd::Destination,
+    pub findings: Vec<crate::explain::Finding>,
+    /// Kept so an expansion can resolve a managed resource in its own API
+    /// group; a plural on its own is ambiguous across groups.
+    pub resources: Vec<crate::argocd::ManagedResource>,
+    /// A sync is requested or running, so the view keeps re-reading.
+    pub following: bool,
+}
+
 /// Messages flowing from watch tasks to the UI loop. Tagged with a
 /// `generation` so messages from a superseded watch can be discarded.
 pub enum Msg {
@@ -196,17 +212,7 @@ pub enum Msg {
     Argocd {
         generation: u64,
         request: u64,
-        /// `None` for the quiet re-read that follows a running sync.
-        claim: Option<StatusClaim>,
-        title: String,
-        source: Option<Box<DynamicObject>>,
-        destination: crate::argocd::Destination,
-        findings: Vec<crate::explain::Finding>,
-        /// Kept so an expansion can resolve a managed resource in its own API
-        /// group; a plural on its own is ambiguous across groups.
-        resources: Vec<crate::argocd::ManagedResource>,
-        /// A sync is requested or running, so the view keeps re-reading.
-        following: bool,
+        report: ArgocdReport,
     },
     /// What is making an Application unhealthy, found by walking its managed
     /// resources when its own status does not say.
