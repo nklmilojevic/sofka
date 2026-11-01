@@ -25,7 +25,7 @@
       "separateMajorMinor": false
     },
     {
-      "description": "deskribe 0.1.2 requires kube 4; remove both caps once a deskribe release supports kube 5 and k8s-openapi 0.29",
+      "description": "deskribe 0.1.2 requires kube 4; remove this, the k8s-openapi cap and the deskribe cap together once deskribe 0.2.0 is published",
       "matchPackageNames": ["kube", "/^kube-/"],
       "allowedVersions": "<5.0.0"
     },
@@ -33,6 +33,11 @@
       "description": "deskribe 0.1.2 requires k8s-openapi 0.28; remove with the kube cap above",
       "matchPackageNames": ["k8s-openapi"],
       "allowedVersions": "<0.29.0"
+    },
+    {
+      "description": "deskribe 0.2.0 moves to kube 5 and k8s-openapi 0.29; remove with the kube and k8s-openapi caps so all three update together",
+      "matchPackageNames": ["deskribe"],
+      "allowedVersions": "<0.2.0"
     },
     {
       "matchManagers": ["nix"],
