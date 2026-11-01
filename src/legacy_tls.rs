@@ -19,6 +19,7 @@ use kube::{
     Config,
     client::{Body, ClientBuilder, ConfigExt, DynBody, middleware::AuthLayer, retry::RetryPolicy},
 };
+use percent_encoding::percent_decode_str;
 use rustls::{
     ClientConfig,
     pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject},
@@ -276,7 +277,9 @@ fn proxy_auth<C>(proxy: &Uri, connector: Tunnel<C>) -> Result<Tunnel<C>> {
     if let Some(authority) = proxy.authority()
         && let Some((userinfo, _)) = authority.as_str().split_once('@')
     {
-        let header = format!("Basic {}", STANDARD.encode(userinfo)).parse()?;
+        // URI userinfo is percent-encoded; Basic auth carries the raw bytes.
+        let credentials = percent_decode_str(userinfo).collect::<Vec<u8>>();
+        let header = format!("Basic {}", STANDARD.encode(credentials)).parse()?;
         return Ok(connector.with_auth(header));
     }
     Ok(connector)
@@ -1222,6 +1225,69 @@ printf '%s' "$SOFKA_TEST_EXEC_CREDENTIAL"
                 server_task.await.unwrap().unwrap();
                 proxy_task.await.unwrap();
             }
+        }
+    }
+
+    #[tokio::test]
+    async fn http_proxy_receives_percent_decoded_basic_credentials() {
+        for (userinfo, credentials) in [
+            ("u%40corp:p%40ss", "u@corp:p@ss"),
+            ("user:p%3Aa%25ss", "user:p:a%ss"),
+            ("user:pass", "user:pass"),
+        ] {
+            let (url, server_task) = server(SERVER, &rustls::version::TLS13).await;
+            let destination = url.authority().unwrap().to_string();
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let proxy_url = format!("http://{userinfo}@{}", listener.local_addr().unwrap())
+                .parse()
+                .unwrap();
+            let expected = format!("Basic {}", STANDARD.encode(credentials));
+            let accepted = expected.clone();
+            let proxy_task = tokio::spawn(async move {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut request = Vec::new();
+                while !request.ends_with(b"\r\n\r\n") {
+                    request.push(stream.read_u8().await.unwrap());
+                    assert!(request.len() < 16384);
+                }
+                let request = String::from_utf8(request).unwrap();
+                let auth = request.lines().find_map(|line| {
+                    let (name, value) = line.split_once(':')?;
+                    name.eq_ignore_ascii_case("proxy-authorization")
+                        .then(|| value.trim().to_owned())
+                });
+                if auth.as_deref() != Some(accepted.as_str()) {
+                    let _ = stream
+                        .write_all(b"HTTP/1.1 407 Proxy Authentication Required\r\n\r\n")
+                        .await;
+                    return auth;
+                }
+                stream
+                    .write_all(b"HTTP/1.1 200 Connection established\r\n\r\n")
+                    .await
+                    .unwrap();
+                let mut upstream = tokio::net::TcpStream::connect(destination).await.unwrap();
+                let _ = tokio::io::copy_bidirectional(&mut stream, &mut upstream).await;
+                auth
+            });
+            let mut config = config();
+            config.cluster_url = url;
+            config.proxy_url = Some(proxy_url);
+            let client = crate::k8s::build_client(config, true, false).unwrap();
+            let result = tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                client.apiserver_version(),
+            )
+            .await
+            .unwrap();
+            let auth = proxy_task.await.unwrap();
+            assert_eq!(
+                auth.as_deref(),
+                Some(expected.as_str()),
+                "{userinfo}: {credentials}"
+            );
+            assert_eq!(result.unwrap().git_version, "v1.35.0", "{userinfo}");
+            server_task.await.unwrap().unwrap();
         }
     }
 
