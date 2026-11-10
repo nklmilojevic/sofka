@@ -6607,7 +6607,7 @@ async fn cursor_on_a_marked_row_uses_the_mark_color() {
         term.draw(|f| crate::ui::draw(f, app)).unwrap();
         let buf = term.backend().buffer();
         let count = |color| buf.content().iter().filter(|c| c.bg == color).count();
-        (count(crate::theme::surface0()), count(crate::theme::mark()))
+        (count(crate::theme::lavender()), count(crate::theme::mark()))
     };
 
     let (plain, marked) = cursor_bgs(&mut app);
@@ -6628,7 +6628,7 @@ async fn cursor_on_a_marked_row_uses_the_mark_color() {
 }
 
 #[tokio::test]
-async fn cursor_row_keeps_its_status_colors() {
+async fn cursor_row_is_a_lavender_bar_with_base_text() {
     use crate::theme;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
@@ -6664,10 +6664,6 @@ async fn cursor_row_keeps_its_status_colors() {
         Some("b-broken")
     );
 
-    let headers = app.display_headers();
-    let column = |name: &str| headers.iter().position(|h| h == name).unwrap();
-    let (name_col, status_col) = (column("NAME"), column("STATUS"));
-
     for background in [false, true] {
         theme::set_background(background);
         let mut term = Terminal::new(TestBackend::new(120, 24)).unwrap();
@@ -6679,40 +6675,16 @@ async fn cursor_row_keeps_its_status_colors() {
             .expect("cursor row marker");
         assert_eq!(y, hit.rows_y + 1, "background={background}");
 
-        let marker = &buf[(hit.x_min, y)];
-        assert_eq!(marker.fg, theme::lavender(), "background={background}");
         for x in hit.x_min..hit.x_max {
             let cell = &buf[(x, y)];
-            assert_eq!(cell.bg, theme::surface0(), "x={x} background={background}");
+            assert_eq!(cell.bg, theme::lavender(), "x={x} background={background}");
+            assert_eq!(cell.fg, theme::base(), "x={x} background={background}");
             assert!(cell.modifier.contains(Modifier::BOLD), "x={x}");
-            assert_ne!(cell.fg, theme::base(), "x={x} background={background}");
         }
-        let fgs = |index: usize| {
-            let &(start, end, _) = hit.cols.iter().find(|c| c.2 == index).unwrap();
-            (start..end)
-                .filter(|&x| !buf[(x, y)].symbol().trim().is_empty())
-                .map(|x| buf[(x, y)].fg)
-                .collect::<Vec<_>>()
-        };
-        let name = fgs(name_col);
-        assert!(!name.is_empty());
-        assert!(
-            name.iter()
-                .all(|&fg| fg == theme::row_color("CrashLoopBackOff")),
-            "{name:?}"
-        );
-        let status = fgs(status_col);
-        assert!(!status.is_empty());
-        assert!(
-            status
-                .iter()
-                .all(|&fg| fg == theme::status_color("CrashLoopBackOff")),
-            "{status:?}"
-        );
 
         let other = hit.rows_y;
         assert_ne!(buf[(hit.x_min, other)].symbol(), "▌");
-        assert!((hit.x_min..hit.x_max).all(|x| buf[(x, other)].bg != theme::surface0()));
+        assert!((hit.x_min..hit.x_max).all(|x| buf[(x, other)].bg != theme::lavender()));
     }
     theme::set_background(false);
 }
@@ -44926,8 +44898,8 @@ async fn filter_highlights_the_match_in_whichever_column_matched() {
         );
     }
     let mut term = Terminal::new(TestBackend::new(160, 20)).unwrap();
-    // Both rows match every filter below, and the cursor row keeps its
-    // highlight like the other row.
+    // Both rows match every filter below; the selection bar repaints the
+    // cursor row, so the highlight is read from the other one.
     let mut draw = |app: &mut App| {
         term.draw(|f| crate::ui::draw(f, app)).unwrap();
         term.backend().buffer().clone()
@@ -44935,7 +44907,7 @@ async fn filter_highlights_the_match_in_whichever_column_matched() {
 
     retype_filter(&mut app, "4f2c");
     let buf = draw(&mut app);
-    assert_eq!(highlighted_runs(&buf), ["4f2c", "4f2c"], "REVISION");
+    assert_eq!(highlighted_runs(&buf), ["4f2c"], "REVISION");
     // Layered over the column style: the rest of the cell keeps its tint.
     let (x, y) = (0..buf.area.height)
         .flat_map(|y| (0..buf.area.width).map(move |x| (x, y)))
@@ -44948,18 +44920,10 @@ async fn filter_highlights_the_match_in_whichever_column_matched() {
     assert_eq!(buf[(x + 4, y)].fg, tint, "after the match");
 
     retype_filter(&mut app, "team");
-    assert_eq!(
-        highlighted_runs(&draw(&mut app)),
-        ["team", "team"],
-        "NAMESPACE"
-    );
+    assert_eq!(highlighted_runs(&draw(&mut app)), ["team"], "NAMESPACE");
 
     retype_filter(&mut app, "/sha1:[0-9a-f]{4}/");
-    assert_eq!(
-        highlighted_runs(&draw(&mut app)),
-        ["sha1:4f2c", "sha1:4f2c"],
-        "regex"
-    );
+    assert_eq!(highlighted_runs(&draw(&mut app)), ["sha1:4f2c"], "regex");
 
     for filter in ["!zzz", "label:platform"] {
         retype_filter(&mut app, filter);
