@@ -5,15 +5,22 @@
 ```
 main.rs      CLI (clap), terminal lifecycle, the async select! event loop,
              and the --check / --snapshot headless modes.
-app.rs       All application state + input handling (a mode state machine:
-             Table / Command / Filter / Detail / Logs / FluxMenu /
-             PortForwards / Help / Namespaces / …), split into app/*.rs
-             (plugins, bookmarks, workspaces, navigation, …). Spawns watch/
-             log/port-forward tasks.
+app/         Application module in app/mod.rs, split into app/*.rs.
+             Application state and input handling through a mode state machine
+             (Table / Command / Filter / Detail / Logs / FluxMenu /
+             PortForwards / Help / Namespaces / …). Starts watch, log, and
+             port-forward tasks.
 k8s.rs       Cluster connect, API discovery, alias registry + group-priority
              resolution, watch-task spawning, namespace listing.
 keys.rs      Key-chord parsing + matching (ctrl-/alt-/shift-, function keys)
              for plugin, bookmark, and workspace bindings, with unit tests.
+config.rs    User configuration in TOML or YAML, with files that override
+             settings for each cluster and context.
+keymap.rs    Built-in actions and their effective keyboard bindings.
+views.rs     Custom table columns for resource kinds, with CRD
+             additionalPrinterColumns as a fallback for unknown resources.
+filter.rs    Row-filter grammar: text, fuzzy matches, regular expressions,
+             selectors, and typed comparisons.
 store.rs     In-memory resource store + the Msg enum that watch tasks send to
              the UI (generation-tagged so stale streams are dropped).
 columns.rs   Per-kind column definitions and cell extraction from
@@ -44,11 +51,25 @@ update.rs    Latest-release check, its daily cache, and the upgrade command
              for the detected install method. Never installs anything.
 redact.rs    What counts as a credential, and how it is stripped from text.
              Shared by the log, the diagnostics reports, and `bundle.rs`.
+atomicfile.rs Replaces small state files through a temporary file and rename
+             to prevent partial writes if the process stops.
+state_writer.rs Writes persistent UI state in order on a separate thread.
+             Combines queued changes to keep the latest state for each file.
+journal.rs   Bounded action history for the session, with optional JSON Lines
+             output. Records started actions, not confirmed results.
+bundle.rs    Collects incident data for one object into a Markdown document.
+             Removes secret data and records what was included or removed.
+legacy_tls.rs Kubernetes TLS compatibility and the shared HTTP transport.
+server_tls.rs Accepts an exact configured server certificate while keeping
+             TLS checks enabled.
 ```
 
 ## Data flow
 
-`watcher` tasks push generation-tagged `Msg`s over an `mpsc::UnboundedSender`.
+`watcher` tasks send generation-tagged `Msg`s through a bounded `mpsc` channel.
+The channel holds 4,096 messages (`EVENT_CHANNEL_CAP` in `main.rs`). When it is
+full, the sending task waits. Thus, a busy UI slows the watchers instead of
+letting the queue grow without limit.
 The main `tokio::select!` loop folds them into the `Store`, batching any other
 queued updates before it redraws. That same loop also handles terminal input and
 a 1s tick (age columns, reaping dead port-forwards). The UI never blocks on the
