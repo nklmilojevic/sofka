@@ -14,7 +14,6 @@ use std::path::{Path, PathBuf};
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
-use fs2::FileExt as _;
 
 use super::*;
 
@@ -311,7 +310,7 @@ fn private_file(contents: &str) -> std::io::Result<(PathBuf, std::fs::File, Path
             .write(true)
             .create_new(true)
             .open(&staging)?;
-        lock.try_lock_exclusive()?;
+        lock.try_lock()?;
         std::fs::rename(&staging, dir.join(LOCK_FILE))?;
         let path = dir.join("secret.yaml");
         create_private(&path, contents)?;
@@ -333,7 +332,7 @@ fn abandoned(dir: &Path) -> bool {
         .write(true)
         .open(dir.join(LOCK_FILE))
     {
-        Ok(lock) => lock.try_lock_exclusive().is_ok(),
+        Ok(lock) => lock.try_lock().is_ok(),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => std::fs::metadata(dir)
             .and_then(|meta| meta.modified())
             .ok()
@@ -771,7 +770,7 @@ mod tests {
             .write(true)
             .open(live.join(LOCK_FILE))
             .unwrap();
-        lock.try_lock_exclusive().unwrap();
+        lock.try_lock().unwrap();
         // Being created right now: no lock file yet.
         let starting = root.join(format!("{DIR_PREFIX}starting"));
         std::fs::create_dir(&starting).unwrap();

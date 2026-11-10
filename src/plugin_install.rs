@@ -4,7 +4,6 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::File;
 use std::path::{Component, Path, PathBuf};
 
-use fs2::FileExt as _;
 use serde::{Deserialize, Serialize};
 
 use crate::plugin_catalog::{self, CatalogSnapshot};
@@ -67,7 +66,7 @@ impl InstallLock {
             .write(true)
             .open(&path)
             .map_err(|e| format!("opening {}: {e}", path.display()))?;
-        file.try_lock_exclusive().map_err(|e| {
+        file.try_lock().map_err(|e| {
             format!(
                 "another sofka plugin operation holds {}: {e}",
                 path.display()
