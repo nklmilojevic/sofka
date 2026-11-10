@@ -692,7 +692,7 @@ async fn run_main(args: Args, proxy_warnings: Vec<String>) -> Result<()> {
     let result = run(&mut terminal, &mut app, &mut rx).await;
     // Still inside the runtime, so this actually completes — a spawned delete
     // would not, and the helper pod would sit out its TTL holding the volume.
-    app.shutdown_pvc_helper().await;
+    let _ = tokio::time::timeout(Duration::from_secs(5), app.shutdown_pvc_helper()).await;
     // Disable before leaving the alternate screen so the shell never sees
     // mouse-report sequences (harmless if capture was never enabled).
     let _ = crossterm::execute!(std::io::stdout(), crossterm::event::DisableMouseCapture);
@@ -1243,6 +1243,25 @@ fn take_suspend(terminal: &mut ratatui::DefaultTerminal, app: &mut App, captured
     }
 }
 
+/// Wait for SIGTERM or SIGHUP. Never completes on other platforms.
+async fn termination() -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+        let mut term = signal(SignalKind::terminate())?;
+        let mut hup = signal(SignalKind::hangup())?;
+        tokio::select! {
+            _ = term.recv() => {}
+            _ = hup.recv() => {}
+        }
+        Ok(())
+    }
+    #[cfg(not(unix))]
+    {
+        std::future::pending().await
+    }
+}
+
 async fn run(
     terminal: &mut ratatui::DefaultTerminal,
     app: &mut App,
@@ -1269,6 +1288,8 @@ async fn run(
 
     let mut title = terminal_title::Title::default();
     ui::present(terminal, app)?;
+    let terminated = termination();
+    tokio::pin!(terminated);
     loop {
         if app.should_quit {
             return Ok(());
@@ -1291,6 +1312,10 @@ async fn run(
         }
 
         tokio::select! {
+            _ = &mut terminated => {
+                app.should_quit = true;
+                return Ok(());
+            }
             maybe_event = reader.next() => {
                 match maybe_event {
                     Some(Ok(Event::Key(key))) if key.kind == KeyEventKind::Press => {
@@ -1363,6 +1388,25 @@ async fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn termination_resolves_on_sighup() {
+        let terminated = super::termination();
+        tokio::pin!(terminated);
+        // Poll once to install the handlers before the signal is raised.
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), &mut terminated)
+                .await
+                .is_err()
+        );
+        // SAFETY: The signal handler is installed for this process.
+        unsafe { libc::raise(libc::SIGHUP) };
+        tokio::time::timeout(Duration::from_secs(2), &mut terminated)
+            .await
+            .expect("SIGHUP ends the wait")
+            .unwrap();
+    }
 
     #[test]
     fn experimental_describe_is_opt_in() {
