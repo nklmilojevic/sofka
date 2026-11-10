@@ -4,8 +4,8 @@
 //! render/event-loop thread. Filesystems can stall unpredictably, so the live
 //! app hands snapshots to one ordered worker instead of doing TOML encoding,
 //! directory creation, and writes inline. A single queue prevents two rapid
-//! changes to the same file from completing out of order and coalesces a
-//! queued burst to its newest snapshot per destination.
+//! changes to the same file from completing out of order. Queued namespace
+//! and sort changes are merged per key. Fleet saves keep the newest snapshot.
 //!
 //! Teardown drains the queue but never waits forever: a state directory on a
 //! stalled network filesystem must not hold the process open after the TUI has
@@ -35,6 +35,8 @@ enum Write {
     /// observed without a genuinely stalled filesystem.
     #[cfg(test)]
     Stall(Duration, PathBuf),
+    #[cfg(test)]
+    Gate(Sender<()>, Receiver<()>, PathBuf),
 }
 
 impl Write {
@@ -42,12 +44,18 @@ impl Write {
         match self {
             Write::Fleet(_, path) | Write::Namespace(_, path) | Write::Sort(_, path) => path,
             #[cfg(test)]
-            Write::Stall(_, path) => path,
+            Write::Stall(_, path) | Write::Gate(_, _, path) => path,
         }
     }
 
     fn run(self) -> Result<(), String> {
         match self {
+            #[cfg(test)]
+            Write::Gate(started, release, _) => {
+                started.send(()).unwrap();
+                release.recv().unwrap();
+                Ok(())
+            }
             #[cfg(test)]
             Write::Stall(duration, _) => {
                 std::thread::sleep(duration);
@@ -149,14 +157,21 @@ impl StateWriter {
                         continue;
                     };
                     let mut pending = vec![first];
-                    // Only the newest snapshot for a file matters. Drain the
-                    // burst already waiting behind `first` before touching
-                    // disk, while retaining independent state files.
+                    // Merge pending keys before writing each file. Fleet
+                    // snapshots still replace earlier Fleet snapshots.
                     for next in std::iter::once(second).chain(rx.try_iter()) {
                         if let Some(slot) =
                             pending.iter_mut().find(|write| write.path() == next.path())
                         {
-                            *slot = next;
+                            match (slot, next) {
+                                (Write::Namespace(older, _), Write::Namespace(newer, _)) => {
+                                    older.merge_pending(&newer);
+                                }
+                                (Write::Sort(older, _), Write::Sort(newer, _)) => {
+                                    older.merge_pending(&newer);
+                                }
+                                (slot, next) => *slot = next,
+                            }
                         } else {
                             pending.push(next);
                         }
@@ -293,6 +308,276 @@ mod tests {
     use std::time::Instant;
 
     use super::*;
+
+    fn scratch(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("sofka-state-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        dir
+    }
+
+    #[test]
+    fn queued_snapshots_keep_changed_keys_and_latest_values() {
+        let dir = scratch("merged-burst");
+        let namespace_path = dir.join("namespaces.toml");
+        let sort_path = dir.join("sort.toml");
+        let mut namespaces = crate::nsmem::NamespaceMemory::default();
+        let mut sorts = crate::sortmem::SortMemory::default();
+        namespaces.set("external", "kept");
+        namespaces.snapshot().save(&namespace_path).unwrap();
+        sorts.set("nodes", "CPU", false);
+        sorts.snapshot().save(&sort_path).unwrap();
+        let (ui_tx, _ui_rx) = tokio::sync::mpsc::channel(1);
+        let writer = StateWriter::with_grace(ui_tx, Duration::from_secs(5)).unwrap();
+        let (started_tx, started_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        writer
+            .send(Write::Gate(started_tx, release_rx, dir.join("gate")))
+            .unwrap();
+        started_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+
+        for (context, namespace) in [
+            ("prod", "payments"),
+            ("staging", "web"),
+            ("prod", "checkout"),
+            ("all", ""),
+        ] {
+            namespaces.set(context, namespace);
+            writer
+                .save_namespace(namespaces.snapshot(), namespace_path.clone())
+                .unwrap();
+        }
+        sorts.set("pods", "AGE", true);
+        writer
+            .save_sort(sorts.snapshot(), sort_path.clone())
+            .unwrap();
+        sorts.set("deployments", "READY", false);
+        writer
+            .save_sort(sorts.snapshot(), sort_path.clone())
+            .unwrap();
+        assert!(sorts.clear("pods"));
+        writer
+            .save_sort(sorts.snapshot(), sort_path.clone())
+            .unwrap();
+        sorts.set("deployments", "REPLICAS", true);
+        writer
+            .save_sort(sorts.snapshot(), sort_path.clone())
+            .unwrap();
+        writer
+            .save_namespace(namespaces.snapshot(), namespace_path.clone())
+            .unwrap();
+        writer
+            .save_sort(sorts.snapshot(), sort_path.clone())
+            .unwrap();
+
+        release_tx.send(()).unwrap();
+        drop(writer);
+        let saved = crate::nsmem::NamespaceMemory::load(&namespace_path);
+        assert_eq!(saved.get("external"), Some("kept".into()));
+        assert_eq!(saved.get("prod"), Some("checkout".into()));
+        assert_eq!(saved.get("staging"), Some("web".into()));
+        assert_eq!(saved.get("all"), Some(String::new()));
+        let saved = crate::sortmem::SortMemory::load(&sort_path);
+        assert_eq!(saved.get("nodes"), Some(("CPU".into(), false)));
+        assert_eq!(saved.get("deployments"), Some(("REPLICAS".into(), true)));
+        assert_eq!(saved.get("pods"), None);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn input_saves_do_not_repeat_previous_changes() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+        for background in [false, true] {
+            let dir = scratch(if background {
+                "input-worker"
+            } else {
+                "input-inline"
+            });
+            let namespace_path = dir.join("namespaces.toml");
+            let sort_path = dir.join("sort.toml");
+            let (ui_tx, _ui_rx) = tokio::sync::mpsc::channel(1024);
+            let mut app = crate::app::App::new(crate::k8s::Cluster::fake(), ui_tx.clone());
+            app.namespace_memory_path = Some(namespace_path.clone());
+            app.sort_memory_path = Some(sort_path.clone());
+            if background {
+                app.state_writer =
+                    Some(StateWriter::with_grace(ui_tx.clone(), Duration::from_secs(5)).unwrap());
+            }
+            let press = |app: &mut crate::app::App, key| {
+                app.handle_key(KeyEvent::new(key, KeyModifiers::NONE))
+                    .unwrap();
+            };
+            app.switch_kind("pods");
+            press(&mut app, KeyCode::Char('0'));
+            for key in ['S', 'A', 'G', 'E'] {
+                press(&mut app, KeyCode::Char(key));
+            }
+            press(&mut app, KeyCode::Enter);
+            drop(app.state_writer.take());
+            assert_eq!(
+                crate::nsmem::NamespaceMemory::load(&namespace_path).get("test"),
+                Some(String::new())
+            );
+            assert_eq!(
+                crate::sortmem::SortMemory::load(&sort_path).get("pods"),
+                Some(("AGE".into(), false))
+            );
+
+            let mut namespaces = crate::nsmem::NamespaceMemory::load(&namespace_path);
+            namespaces.set("test", "payments");
+            namespaces.snapshot().save(&namespace_path).unwrap();
+            let mut sorts = crate::sortmem::SortMemory::load(&sort_path);
+            sorts.set("pods", "NAME", false);
+            sorts.snapshot().save(&sort_path).unwrap();
+            if background {
+                app.state_writer =
+                    Some(StateWriter::with_grace(ui_tx, Duration::from_secs(5)).unwrap());
+            }
+            app.cluster.context = "other".into();
+            app.namespace = "default".into();
+            app.switch_kind("deployments");
+            press(&mut app, KeyCode::Char('0'));
+            for key in ['S', 'A', 'G', 'E'] {
+                press(&mut app, KeyCode::Char(key));
+            }
+            press(&mut app, KeyCode::Enter);
+            drop(app.state_writer.take());
+
+            let saved = crate::nsmem::NamespaceMemory::load(&namespace_path);
+            assert_eq!(saved.get("test"), Some("payments".into()));
+            assert_eq!(saved.get("other"), Some(String::new()));
+            let saved = crate::sortmem::SortMemory::load(&sort_path);
+            assert_eq!(saved.get("pods"), Some(("NAME".into(), false)));
+            assert_eq!(saved.get("deployments"), Some(("AGE".into(), false)));
+            std::fs::remove_dir_all(dir).unwrap();
+        }
+    }
+
+    fn press(app: &mut crate::app::App, code: crossterm::event::KeyCode) {
+        use crossterm::event::{KeyEvent, KeyModifiers};
+        app.handle_key(KeyEvent::new(code, KeyModifiers::NONE))
+            .unwrap();
+    }
+
+    fn choose_sort(app: &mut crate::app::App, header: &str) {
+        use crossterm::event::KeyCode;
+        press(app, KeyCode::Char('S'));
+        for key in header.chars() {
+            press(app, KeyCode::Char(key));
+        }
+        press(app, KeyCode::Enter);
+    }
+
+    #[tokio::test]
+    async fn input_retries_failed_namespace_and_sort_changes() {
+        use crossterm::event::KeyCode;
+
+        for mode in ["inline", "background", "enqueue"] {
+            for clear in [false, true] {
+                let dir = scratch(&format!("retry-{mode}-{clear}"));
+                std::fs::create_dir_all(&dir).unwrap();
+                let state_dir = dir.join("state");
+                std::fs::write(&state_dir, "not a directory").unwrap();
+                let namespace_path = state_dir.join("namespaces.toml");
+                let sort_path = state_dir.join("sort.toml");
+                let (ui_tx, mut ui_rx) = tokio::sync::mpsc::channel(1024);
+                let mut app = crate::app::App::new(crate::k8s::Cluster::fake(), ui_tx.clone());
+                app.namespace_memory_path = Some(namespace_path.clone());
+                app.sort_memory_path = Some(sort_path.clone());
+                if mode != "inline" {
+                    let mut writer =
+                        StateWriter::with_grace(ui_tx.clone(), Duration::from_secs(5)).unwrap();
+                    if mode == "enqueue" {
+                        writer.tx.take();
+                    }
+                    app.state_writer = Some(writer);
+                }
+                app.switch_kind("pods");
+                press(&mut app, KeyCode::Char('0'));
+                choose_sort(&mut app, if clear { "" } else { "AGE" });
+                if mode == "background" {
+                    let mut failures = 0;
+                    tokio::time::timeout(Duration::from_secs(5), async {
+                        while failures < 2 {
+                            let msg = ui_rx.recv().await.unwrap();
+                            if matches!(&msg, Msg::StateWriteFailed { .. }) {
+                                failures += 1;
+                            }
+                            app.handle_msg(msg);
+                        }
+                    })
+                    .await
+                    .expect("both failed writes must reach the UI");
+                }
+
+                std::fs::remove_file(&state_dir).unwrap();
+                let mut external_namespaces = crate::nsmem::NamespaceMemory::default();
+                external_namespaces.set("external", "kept");
+                external_namespaces.save(&namespace_path).unwrap();
+                let mut external_sorts = crate::sortmem::SortMemory::default();
+                external_sorts.set("pods", "NAME", false);
+                external_sorts.set("nodes", "CPU", false);
+                external_sorts.save(&sort_path).unwrap();
+                if mode == "enqueue" {
+                    app.state_writer =
+                        Some(StateWriter::with_grace(ui_tx, Duration::from_secs(5)).unwrap());
+                }
+                app.cluster.context = "other".into();
+                app.namespace = "default".into();
+                app.switch_kind("deployments");
+                press(&mut app, KeyCode::Char('0'));
+                choose_sort(&mut app, "AGE");
+                drop(app.state_writer.take());
+
+                let saved = crate::nsmem::NamespaceMemory::load(&namespace_path);
+                assert_eq!(saved.get("test"), Some(String::new()), "{mode}");
+                assert_eq!(saved.get("other"), Some(String::new()));
+                assert_eq!(saved.get("external"), Some("kept".into()));
+                let saved = crate::sortmem::SortMemory::load(&sort_path);
+                assert_eq!(
+                    saved.get("pods"),
+                    if clear {
+                        None
+                    } else {
+                        Some(("AGE".into(), false))
+                    },
+                    "{mode}"
+                );
+                assert_eq!(saved.get("deployments"), Some(("AGE".into(), false)));
+                assert_eq!(saved.get("nodes"), Some(("CPU".into(), false)));
+                std::fs::remove_dir_all(dir).unwrap();
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn explicit_default_sort_removes_an_entry_added_by_another_process() {
+        for background in [false, true] {
+            let dir = scratch(&format!("external-clear-{background}"));
+            let path = dir.join("sort.toml");
+            let (ui_tx, _ui_rx) = tokio::sync::mpsc::channel(1024);
+            let mut app = crate::app::App::new(crate::k8s::Cluster::fake(), ui_tx.clone());
+            app.sort_memory_path = Some(path.clone());
+            app.sort_memory = crate::sortmem::SortMemory::load(&path);
+            app.switch_kind("pods");
+            if background {
+                app.state_writer =
+                    Some(StateWriter::with_grace(ui_tx, Duration::from_secs(5)).unwrap());
+            }
+            let mut external = crate::sortmem::SortMemory::load(&path);
+            external.set("pods", "AGE", true);
+            external.set("nodes", "CPU", false);
+            external.save(&path).unwrap();
+            assert_eq!(app.sort_memory.get("pods"), None);
+            choose_sort(&mut app, "");
+            drop(app.state_writer.take());
+
+            let saved = crate::sortmem::SortMemory::load(&path);
+            assert_eq!(saved.get("pods"), None);
+            assert_eq!(saved.get("nodes"), Some(("CPU".into(), false)));
+            std::fs::remove_dir_all(dir).unwrap();
+        }
+    }
 
     #[test]
     fn coalescing_keeps_the_latest_snapshot_on_shutdown() {

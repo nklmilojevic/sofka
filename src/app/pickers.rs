@@ -199,8 +199,8 @@ impl App {
         }
         if let Some(path) = self.namespace_memory_path.clone() {
             let result = match &self.state_writer {
-                Some(writer) => writer.save_namespace(self.namespace_memory.clone(), path),
-                None => self.namespace_memory.save(&path),
+                Some(writer) => writer.save_namespace(self.namespace_memory.snapshot(), path),
+                None => self.namespace_memory.snapshot().save(&path),
             };
             if let Err(e) = result {
                 self.flash_warn(&format!("failed to save namespace state: {e}"));
