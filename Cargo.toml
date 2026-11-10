@@ -19,7 +19,6 @@ dhat = { version = "0.3.3", optional = true }
 flate2 = "1.1.5"
 foldhash = "0.2"
 form_urlencoded = "1.2.2"
-fs2 = "0.4.3"
 futures-util = "0.3.32"
 http = "1.4.2"
 http-body-util = "0.1.3"
