@@ -1920,12 +1920,7 @@ impl ratatui::widgets::Widget for ScrollingTable<'_> {
         let selected_style = if self.selected_marked {
             theme::selected_marked_row()
         } else {
-            theme::cursor_row()
-        };
-        let marker_style = if self.selected_marked {
-            selected_style
-        } else {
-            theme::cursor_marker()
+            theme::selected_row()
         };
         for (y, cells) in std::iter::once(self.header)
             .chain(self.rows)
@@ -1943,7 +1938,7 @@ impl ratatui::widgets::Widget for ScrollingTable<'_> {
             };
             buf.set_style(Rect::new(area.x, y_pos, area.width, 1), style);
             if selected {
-                buf.set_stringn(area.x, y_pos, "▌ ", usize::from(area.width), marker_style);
+                buf.set_stringn(area.x, y_pos, "▌ ", usize::from(area.width), style);
             }
             for &(start, end, position, source_start) in &ranges {
                 let index = self.order[position];
