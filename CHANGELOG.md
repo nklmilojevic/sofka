@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.35.1 - 2026-11-10
+
+This release fixes the cursor colors in resource tables.
+
+### Fixes
+
+- The cursor row in resource tables uses the solid lavender bar again, so it matches pickers and lists. The `gruvbox-light` skin also gets its previous surface colors back.
+
 ## v0.35.0 - 2026-11-10
 
 sofka 0.34.0 adds a context picker key, line copy in logs and documents, and `:config edit`. It also fixes actions that hit the wrong target, lost failure messages, and credential leaks in files and terminal output.
