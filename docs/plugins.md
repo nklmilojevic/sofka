@@ -164,10 +164,26 @@ scopes = ["deployments"]
 dangerous = true          # confirm (showing the exact command) first
 ```
 
-- **Placeholders** are substituted as whole arguments, never spliced into a shell
-  string: `$NAME`, `$NAMESPACE`/`$NS`, `$CONTEXT`, `$CLUSTER`, `$RESOURCE`
+- **Placeholders** include `$NAME`, `$NAMESPACE`/`$NS`, `$CONTEXT`, `$CLUSTER`, `$RESOURCE`
   (plural), `$GROUP`, `$VERSION`, `$KIND`, `$FILTER`, `$SKIN`.
   `$SKIN` is the active skin name; `[skin.colors]` overrides are not passed on.
+  A placeholder that is a whole argument is passed to the program as one
+  argument. The shell does not interpret its value as script text. A placeholder
+  inside a longer argument is replaced in place. Do not put placeholders inside
+  a script passed to `sh -c` or `bash -c`. Append them after the script and read
+  them as `"$1"`, `"$2"`, and so on. The `sofka` argument sets `$0`:
+
+  ```toml
+  command = "bash"
+  args = ["-c", 'stern "$1" -n "$2"', "sofka", "$NAME", "$NAMESPACE"]
+  ```
+
+  The k9s importer converts simple shell scripts to this argument form. It keeps
+  scripts with single quotes, escapes, complex shell syntax, or existing
+  positional parameters unchanged and shows a warning. It also keeps fish
+  scripts and scripts with arguments after them unchanged. Review these warnings
+  and change the scripts manually. Config warnings do not change execution.
+
 - **`output`** selects `terminal`, `popup`, `background`, or `report`.
   `terminal` is the default. It suspends the TUI for an interactive command.
   On Unix, Ctrl-C interrupts the command. Sofka resumes when the command exits.
