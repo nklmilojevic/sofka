@@ -87,17 +87,21 @@ impl App {
             // names a node (`[views."…"].node`) drills into it. Pods name one
             // too, but they drill into containers above.
             _ => {
-                // Cluster API: MachineDeployment → Machines, same selector
-                // pattern as workload → pods. Guarded by the API group so a
-                // non-CAPI kind that happens to share the plural
-                // `machinedeployments` falls through to its configured drill
-                // or YAML instead of trying to open Cluster API Machines.
-                if self.kind_plural == "machinedeployments"
+                if let Some(drill) = self.configured_drill() {
+                    self.drill_configured(&obj, &drill);
+                } else if self.kind_plural == "machinedeployments"
                     && self
                         .kind
                         .as_ref()
                         .is_some_and(|k| k.ar.group == "cluster.x-k8s.io")
                 {
+                    // Cluster API: MachineDeployment → Machines, same selector
+                    // pattern as workload → pods. Guarded by the API group so a
+                    // non-CAPI kind that happens to share the plural
+                    // `machinedeployments` falls through to its configured drill
+                    // or YAML instead of trying to open Cluster API Machines.
+                    // A configured drill still wins, so this is not in
+                    // `views::BUILTIN_DRILLS`.
                     match label_selector(&obj, "matchLabels") {
                         Some(sel) => self.drill_to(
                             "machines.cluster.x-k8s.io",
@@ -108,8 +112,6 @@ impl App {
                         ),
                         None => self.flash_warn("no machine selector on this object"),
                     }
-                } else if let Some(drill) = self.configured_drill() {
-                    self.drill_configured(&obj, &drill);
                 } else if let Some(pointer) = self.node_pointer() {
                     self.show_node_at(&pointer);
                 } else {
