@@ -37,6 +37,91 @@ fn saved_name(path: &std::path::Path) -> String {
     path.file_name().unwrap().to_string_lossy().into_owned()
 }
 
+async fn finish_bundle_save(app: &mut App, rx: &mut Receiver<Msg>) -> std::path::PathBuf {
+    let msg = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let msg = rx.recv().await.expect("channel closed");
+            if matches!(msg, Msg::BundleSaved { .. }) {
+                break msg;
+            }
+        }
+    })
+    .await
+    .expect("bundle save did not report");
+    let Msg::BundleSaved { result, .. } = &msg else {
+        unreachable!()
+    };
+    let path = result.clone().unwrap();
+    app.handle_msg(msg);
+    assert!(!app.flash_err);
+    assert_eq!(app.flash, format!("saved bundle → {}", path.display()));
+    path
+}
+
+#[tokio::test]
+async fn bundle_save_writes_a_private_file() {
+    let (mut app, mut rx) = test_app();
+    let dir = save_dir("bundle-private");
+    assert!(!dir.exists());
+    app.save_dir = Some(dir.display().to_string());
+    app.pending_bundle = Some(("sofka-bundle-pod-web-1.md".into(), "body".into()));
+
+    palette(&mut app, "bundle-save");
+    let path = finish_bundle_save(&mut app, &mut rx).await;
+
+    assert_eq!(path, dir.join("sofka-bundle-pod-web-1.md"));
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "body");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let meta = std::fs::metadata(&path).unwrap();
+        assert_eq!(meta.permissions().mode() & 0o777, 0o600);
+    }
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[tokio::test]
+async fn bundle_save_does_not_overwrite() {
+    let (mut app, mut rx) = test_app();
+    let dir = save_dir("bundle-collision");
+    assert!(!dir.exists());
+    app.save_dir = Some(dir.display().to_string());
+    app.pending_bundle = Some(("sofka-bundle-pod-web-1.md".into(), "body".into()));
+
+    palette(&mut app, "bundle-save");
+    let first = finish_bundle_save(&mut app, &mut rx).await;
+    palette(&mut app, "bundle-save");
+    let second = finish_bundle_save(&mut app, &mut rx).await;
+
+    assert_ne!(first, second);
+    assert_eq!(first, dir.join("sofka-bundle-pod-web-1.md"));
+    assert_eq!(second, dir.join("sofka-bundle-pod-web-1-2.md"));
+    assert_eq!(std::fs::read_to_string(&first).unwrap(), "body");
+    assert_eq!(std::fs::read_to_string(&second).unwrap(), "body");
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn bundle_save_does_not_follow_a_symlink() {
+    let (mut app, mut rx) = test_app();
+    let dir = save_dir("bundle-symlink");
+    std::fs::create_dir(&dir).unwrap();
+    let target = dir.join("target.md");
+    std::fs::write(&target, "keep this body").unwrap();
+    std::os::unix::fs::symlink(&target, dir.join("sofka-bundle-pod-web-1.md")).unwrap();
+    app.save_dir = Some(dir.display().to_string());
+    app.pending_bundle = Some(("sofka-bundle-pod-web-1.md".into(), "new body".into()));
+
+    palette(&mut app, "bundle-save");
+    let path = finish_bundle_save(&mut app, &mut rx).await;
+
+    assert_eq!(path, dir.join("sofka-bundle-pod-web-1-2.md"));
+    assert_eq!(std::fs::read_to_string(target).unwrap(), "keep this body");
+    assert_eq!(std::fs::read_to_string(path).unwrap(), "new body");
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
 #[tokio::test]
 async fn ctrl_s_saves_the_whole_rendered_yaml_into_a_created_save_dir() {
     let (mut app, mut rx) = test_app();
