@@ -105,6 +105,10 @@ const ARGOCD_GROUP: &str = "argoproj.io";
 /// FluxInstance). These kinds pause through an annotation, not `spec.suspend`.
 const FLUX_OPERATOR_GROUP: &str = "fluxcd.controlplane.io";
 
+/// The tofu-controller CRD group (Terraform). Its plural is generic enough
+/// that only this group gets the Flux handling.
+const TOFU_CONTROLLER_GROUP: &str = "infra.contrib.fluxcd.io";
+
 /// Items in the Flux action menu (`t`), in display order. Deliberately a menu
 /// — not a single-key toggle — so suspending something always takes an
 /// explicit, visible choice rather than one accidental keystroke. "Reconcile

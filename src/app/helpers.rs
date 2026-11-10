@@ -612,6 +612,7 @@ impl App {
                         "imagerepositories" | "imageupdateautomations"
                     )
                     | ("notification.toolkit.fluxcd.io", "alerts" | "receivers")
+                    | (TOFU_CONTROLLER_GROUP, "terraforms")
             )
         }) || self.flux_operator_kind()
     }

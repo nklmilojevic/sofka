@@ -2244,7 +2244,7 @@ impl App {
             return;
         }
         if !self.flux_suspendable() && !self.cronjob_kind() && !self.argocd_kind() {
-            self.flash_warn("suspend/resume only applies to CronJobs, Flux resources (ks/hr/HelmCharts/git-, helm-, oci-repos, buckets, image automation, alerts, receivers, ResourceSets, input providers, FluxInstances), and ArgoCD Applications/ApplicationSets");
+            self.flash_warn("suspend/resume only applies to CronJobs, Flux resources (ks/hr/HelmCharts/git-, helm-, oci-repos, buckets, image automation, alerts, receivers, ResourceSets, input providers, FluxInstances, Terraforms), and ArgoCD Applications/ApplicationSets");
             return;
         }
         let targets = self.action_targets();

@@ -2130,6 +2130,25 @@ impl Cluster {
         self.catalog.sort();
     }
 
+    /// Register a kind the way discovery does, with the CRD's `shortNames`.
+    pub fn register_discovered_kind(
+        &mut self,
+        group: &str,
+        version: &str,
+        kind: &str,
+        plural: &str,
+        short_names: &[&str],
+    ) {
+        self.register_kind_version(group, version, kind, plural, true);
+        let mut discovery = self.fake_discovery();
+        for resource in &mut discovery.0.resources {
+            if resource.kind.ar.group == group && resource.kind.ar.kind == kind {
+                resource.short_names = short_names.iter().map(|s| s.to_string()).collect();
+            }
+        }
+        self.apply_discovery(discovery);
+    }
+
     /// The discovery a real cluster serving this fixture's kinds would return.
     pub fn fake_discovery(&self) -> Discovery {
         let mut resources: Vec<discovery::Resource> = Vec::new();

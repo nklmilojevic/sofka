@@ -51,6 +51,7 @@ impl App {
         };
         let plural = self.kind_plural.clone();
         let is_resourceset = plural == "resourcesets" && kind.ar.group == FLUX_OPERATOR_GROUP;
+        let is_terraform = gitops::is_terraform(&kind.ar.group, &kind.ar.plural);
         let group = kind.ar.group.clone();
         let name = obj.metadata.name.clone().unwrap_or_default();
         let ns = obj.metadata.namespace.clone().unwrap_or_default();
@@ -95,6 +96,13 @@ impl App {
                     gitops::is_owner_plural(&group, &plural).then(|| selection_ref.clone())
                 });
                 let self_is_owner = owner_ref.as_ref() == Some(&selection_ref);
+                // A Terraform reconciles from its own source and dependencies
+                // even when a Kustomization applied it.
+                let reconciler = (is_terraform && !self_is_owner).then(|| Node {
+                    reference: selection_ref.clone(),
+                    plural: plural.clone(),
+                    obj: Some(obj.clone()),
+                });
 
                 let mut warn = None;
                 // Owner: the selection itself, or fetched from its label
@@ -127,10 +135,14 @@ impl App {
                     }
                 };
 
-                // Source + dependencies, read from the owner object.
+                // Source + dependencies, read from the reconciling object.
                 let mut source = None;
                 let mut deps = Vec::new();
-                if let Some(owner_obj) = owner.as_ref().and_then(|n| n.obj.as_ref()) {
+                if let Some(owner_obj) = reconciler
+                    .as_ref()
+                    .or(owner.as_ref())
+                    .and_then(|n| n.obj.as_ref())
+                {
                     if let Some(sr) = gitops::source_ref(owner_obj) {
                         let (plural, obj) = fetch_flux(&client, &flux, &sr, &mut warn).await;
                         source = Some(Node {
@@ -139,7 +151,14 @@ impl App {
                             obj,
                         });
                     }
-                    if let Some(resolved) = &owner_kind {
+                    // Dependencies share the kind of the object declaring them.
+                    let deps_kind = if reconciler.is_some() {
+                        let qualified = format!("{}.{}", kind.ar.plural, kind.ar.group);
+                        Some((kind.ar.clone(), kind.namespaced, qualified))
+                    } else {
+                        owner_kind
+                    };
+                    if let Some(resolved) = &deps_kind {
                         for dr in gitops::depends_on(owner_obj) {
                             let (plural, obj) =
                                 fetch_resolved(&client, resolved, &dr, &mut warn).await;
@@ -158,6 +177,7 @@ impl App {
                     owner,
                     source,
                     deps,
+                    reconciler,
                 };
                 // The providers of the selected ResourceSet, or of the
                 // ResourceSet that applied the selection.
@@ -173,7 +193,9 @@ impl App {
                 .unwrap_or_default();
                 let mut findings = gitops::describe(&ev);
                 findings.extend(providers);
-                findings.extend(gitops::inventory_findings(&obj, &inventory_kinds));
+                if !is_terraform {
+                    findings.extend(gitops::inventory_findings(&obj, &inventory_kinds));
+                }
                 prepend_warn_finding(&mut findings, warn);
                 Ok((obj, findings))
             }
@@ -213,11 +235,15 @@ impl App {
                 m.insert(plural, entry);
             }
         }
-        // flux-operator plurals are generic enough that another group may hold
-        // the bare key, so resolve them in their group and jump by the
-        // group-qualified plural.
-        for k in ["ResourceSet", "FluxInstance"] {
-            if let Some(kind) = self.cluster.resolve_in_group(k, FLUX_OPERATOR_GROUP) {
+        // flux-operator and tofu-controller plurals are generic enough that
+        // another group may hold the bare key, so resolve them in their group
+        // and jump by the group-qualified plural.
+        for (k, group) in [
+            ("ResourceSet", FLUX_OPERATOR_GROUP),
+            ("FluxInstance", FLUX_OPERATOR_GROUP),
+            ("Terraform", TOFU_CONTROLLER_GROUP),
+        ] {
+            if let Some(kind) = self.cluster.resolve_in_group(k, group) {
                 let plural = format!("{}.{}", kind.ar.plural.to_lowercase(), kind.ar.group);
                 m.insert(
                     kind.ar.kind.to_lowercase(),
