@@ -275,7 +275,8 @@ Read-only mode and [guardrails](safety.md#guardrails) gate both actions: the
 the owner, the incident explanation, recent events, the session timeline, bounded
 recent logs, and a metrics snapshot - into one Markdown document. It's for handing
 an incident between application and platform teams. sofka gathers it off-thread
-and shows a preview, then `:bundle-save` writes it to a temp file.
+and shows a preview, then `:bundle-save` writes a private file in `save_dir`
+(the system temp directory by default).
 
 Always redacted: Secret `data`/`stringData` values, any credential-like
 annotation (a key containing `token`, `password`, `secret`, `apikey`,

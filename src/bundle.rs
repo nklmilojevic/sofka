@@ -13,12 +13,25 @@ use serde_json::Value;
 
 pub use crate::redact::REDACTED;
 
+/// Mask credentials in one pod log line. Replace control characters other
+/// than tabs with spaces. The flag is true if credentials were masked.
+pub fn clean_log_line(line: &str) -> (String, bool) {
+    let redacted = crate::redact::credentials(line);
+    let masked = redacted != line;
+    let clean = redacted
+        .chars()
+        .map(|c| if c.is_control() && c != '\t' { ' ' } else { c })
+        .collect();
+    (clean, masked)
+}
+
 /// Redact one object's JSON in place, returning human-readable notes of what
 /// was removed (for the bundle manifest). Deterministic and side-effect free.
 ///
 /// Redacts: `managedFields` (noise), the `last-applied-configuration`
 /// annotation (can embed a whole Secret), any annotation whose key looks like a
-/// credential, and — for Secrets — every `data`/`stringData` value. Env vars
+/// credential, literal env values with credential names, and every
+/// `data`/`stringData` value in Secrets. Env vars
 /// sourced from Secrets are counted and flagged (their values are references,
 /// not literals, so nothing to strip).
 pub fn redact_object(kind: &str, v: &mut Value) -> Vec<String> {
@@ -53,6 +66,13 @@ pub fn redact_object(kind: &str, v: &mut Value) -> Vec<String> {
         }
     }
 
+    let literal_env = redact_literal_env(v);
+    if literal_env > 0 {
+        notes.push(format!(
+            "{literal_env} literal env value(s) with credential-like names"
+        ));
+    }
+
     let secret_env = count_secret_env(v);
     if secret_env > 0 {
         notes.push(format!(
@@ -61,6 +81,38 @@ pub fn redact_object(kind: &str, v: &mut Value) -> Vec<String> {
     }
 
     notes
+}
+
+fn redact_literal_env(v: &mut Value) -> usize {
+    let mut n = 0;
+    match v {
+        Value::Object(map) => {
+            if let Some(env) = map.get_mut("env").and_then(Value::as_array_mut) {
+                for entry in env {
+                    if entry
+                        .get("name")
+                        .and_then(Value::as_str)
+                        .is_some_and(crate::redact::is_credential_key)
+                        && let Some(value) = entry.get_mut("value")
+                        && value.is_string()
+                    {
+                        *value = Value::String(REDACTED.into());
+                        n += 1;
+                    }
+                }
+            }
+            for value in map.values_mut() {
+                n += redact_literal_env(value);
+            }
+        }
+        Value::Array(arr) => {
+            for value in arr {
+                n += redact_literal_env(value);
+            }
+        }
+        _ => {}
+    }
+    n
 }
 
 /// Count `env[*].valueFrom.secretKeyRef` across every container list in a pod
@@ -169,6 +221,46 @@ impl Doc {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn clean_log_line_masks_credentials_and_escapes() {
+        let (clean, masked) = clean_log_line("Authorization: Bearer abc.def.ghi");
+        assert!(masked);
+        assert!(!clean.contains("abc.def.ghi"));
+        assert!(clean.contains(REDACTED));
+
+        let (clean, masked) = clean_log_line("\x1b[31mred\x1b[0m\r\0\t");
+        assert_eq!(clean, " [31mred [0m  \t");
+        assert!(!masked);
+        assert_eq!(
+            clean_log_line("connected to 10.0.0.1\tOK"),
+            ("connected to 10.0.0.1\tOK".into(), false)
+        );
+    }
+
+    #[test]
+    fn redact_object_masks_credential_named_literal_env() {
+        let mut v = json!({
+            "kind": "Deployment",
+            "spec": {"template": {"spec": {"containers": [{"env": [
+                {"name": "DB_PASSWORD", "value": "hunter2"},
+                {"name": "LOG_LEVEL", "value": "debug"},
+                {"name": "API_TOKEN", "valueFrom": {"secretKeyRef": {
+                    "name": "creds", "key": "token"
+                }}},
+                {"name": "PASSWORD", "value": 42}
+            ]}]}}}
+        });
+        let notes = redact_object("Deployment", &mut v);
+        let env = &v["spec"]["template"]["spec"]["containers"][0]["env"];
+        assert_eq!(env[0]["value"], REDACTED);
+        assert_eq!(env[1]["value"], "debug");
+        assert_eq!(env[2]["valueFrom"]["secretKeyRef"]["name"], "creds");
+        assert_eq!(env[3]["value"], 42);
+        assert!(!v.to_string().contains("hunter2"));
+        assert!(notes.contains(&"1 literal env value(s) with credential-like names".into()));
+        assert!(notes.iter().any(|note| note.contains("1 env var(s)")));
+    }
 
     #[test]
     fn redacts_secret_data_and_stringdata() {

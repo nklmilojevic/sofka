@@ -110,6 +110,7 @@ impl App {
 
             // Bounded logs for the default container of up to `max_pods` pods.
             let mut log_blocks: Vec<(String, Vec<String>)> = Vec::new();
+            let mut masked_log_lines = 0;
             if log_lines > 0 {
                 for pod in gathered.pods.iter().take(max_pods) {
                     let pname = pod.metadata.name.clone().unwrap_or_default();
@@ -124,7 +125,14 @@ impl App {
                         ..Default::default()
                     };
                     let lines = match api.logs(&pname, &lp).await {
-                        Ok(text) => text.lines().map(String::from).collect(),
+                        Ok(text) => text
+                            .lines()
+                            .map(|line| {
+                                let (clean, masked) = crate::bundle::clean_log_line(line);
+                                masked_log_lines += usize::from(masked);
+                                clean
+                            })
+                            .collect(),
                         Err(e) => vec![format!("(logs unavailable: {e})")],
                     };
                     log_blocks.push((pname, lines));
@@ -160,6 +168,11 @@ impl App {
                 kind: kind_name.clone(),
             });
             let (obj_yaml, mut redactions) = redact_to_yaml(&typed, &kind_name);
+            if masked_log_lines > 0 {
+                redactions.push(format!(
+                    "{masked_log_lines} log line(s) with credential-like text masked"
+                ));
+            }
             let owner_rendered = owner.as_ref().map(|(ok, oobj)| {
                 let (y, notes) = redact_to_yaml(oobj, ok);
                 redactions.extend(notes.into_iter().map(|n| format!("owner: {n}")));
@@ -198,7 +211,7 @@ impl App {
             doc.bullets(&manifest);
             doc.heading("Manifest — redacted");
             doc.bullets(&if redactions.is_empty() {
-                vec!["nothing sensitive found to redact".into()]
+                vec!["no known credential fields found; ConfigMap data and container args are included as-is, review before sharing".into()]
             } else {
                 redactions
             });
@@ -258,23 +271,28 @@ impl App {
         });
     }
 
-    /// `:bundle-save` — write the previewed bundle to a temp file.
+    /// `:bundle-save`: write the previewed bundle to a private file in `save_dir`.
     pub(super) fn save_bundle(&mut self) {
         let Some((filename, text)) = self.pending_bundle.clone() else {
             self.flash_warn("no bundle to save — run :bundle first");
             return;
         };
-        let path = std::env::temp_dir().join(filename);
+        let stem = filename
+            .strip_suffix(".md")
+            .unwrap_or(&filename)
+            .to_string();
+        let save_dir = self.save_dir.clone();
         // Claimed like every other async result, which needs a progress
         // message to own — the write is quick, but the bar is shared.
         let claim = self.claim_status("saving bundle…");
         let tx = self.tx.clone();
         let genr = self.generation;
         tokio::spawn(async move {
-            let result = tokio::fs::write(&path, text)
-                .await
-                .map(|_| path)
-                .map_err(|e| e.to_string());
+            let result = tokio::task::spawn_blocking(move || {
+                super::actions::write_saved(save_dir.as_deref(), &stem, "md", &text)
+            })
+            .await
+            .unwrap_or_else(|e| Err(e.to_string()));
             let _ = tx
                 .send(Msg::BundleSaved {
                     generation: genr,

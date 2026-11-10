@@ -12883,6 +12883,79 @@ async fn snapshot_captures_current_columns_and_rows() {
 }
 
 #[tokio::test]
+async fn bundle_preview_masks_credentials_and_reports_redaction_limits() {
+    for redact in [false, true] {
+        let (mut app, mut rx) = app_with_pod();
+        let (env_name, env_value, logs) = if redact {
+            (
+                "DB_PASSWORD",
+                "hunter2",
+                "Authorization: Bearer abc.def.ghi\npassword=dummy-password\n\x1b[31mred\x1b[0m",
+            )
+        } else {
+            ("LOG_LEVEL", "debug", "plain log line")
+        };
+        apply(
+            &mut app,
+            json!({"apiVersion": "v1", "kind": "Pod",
+                "metadata": {"name": "a", "namespace": "default"},
+                "spec": {"containers": [{"name": "app", "args": ["keep-this-arg"],
+                    "env": [{"name": env_name, "value": env_value}]}]}}),
+        );
+        app.cluster.client = kube::Client::new(
+            tower::service_fn(move |request: http::Request<kube::client::Body>| {
+                let (status, body) = if request.uri().path().ends_with("/log") {
+                    (200, logs.to_string())
+                } else {
+                    (
+                        404,
+                        json!({"kind": "Status", "apiVersion": "v1",
+                            "status": "Failure", "reason": "NotFound", "code": 404})
+                        .to_string(),
+                    )
+                };
+                async move {
+                    Ok::<_, std::convert::Infallible>(
+                        http::Response::builder()
+                            .status(status)
+                            .body(http_body_util::Full::new(hyper::body::Bytes::from(body)))
+                            .unwrap(),
+                    )
+                }
+            }),
+            "default",
+        );
+        palette(&mut app, "bundle");
+        let msg = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let msg = rx.recv().await.expect("channel closed");
+                if matches!(msg, Msg::Bundle { .. }) {
+                    break msg;
+                }
+            }
+        })
+        .await
+        .expect("bundle did not report");
+        app.handle_msg(msg);
+        assert_eq!(app.mode, Mode::Detail);
+        let text = &app.pending_bundle.as_ref().unwrap().1;
+        assert!(text.contains("keep-this-arg"));
+        if redact {
+            for value in ["hunter2", "abc.def.ghi", "dummy-password", "\x1b"] {
+                assert!(!text.contains(value), "{value:?}");
+            }
+            assert!(text.contains("2 log line(s) with credential-like text masked"));
+            assert!(text.contains("1 literal env value(s) with credential-like names"));
+            assert!(text.contains(crate::bundle::REDACTED));
+        } else {
+            assert!(text.contains("debug"));
+            assert!(text.contains("plain log line"));
+            assert!(text.contains("no known credential fields found; ConfigMap data and container args are included as-is, review before sharing"));
+        }
+    }
+}
+
+#[tokio::test]
 async fn bundle_save_without_a_pending_bundle_warns() {
     let (mut app, _rx) = app_with_pod();
     app.save_bundle();
