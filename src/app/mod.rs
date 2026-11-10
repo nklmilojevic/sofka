@@ -2423,6 +2423,8 @@ pub struct App {
     pub pf_picker_state: ListState,
     /// The `(ns, name)` target the port-forward picker is acting on.
     pub(super) pf_picker_target: Option<(String, String)>,
+    pub(super) action_menu_targets: Vec<(String, String)>,
+    pub(super) action_menu_objects: Vec<DynamicObject>,
     /// Saved `[[forwards]]` from config: shown in `:pf` even while stopped,
     /// startable with one keystroke, autostarted on connect when configured.
     pub forwards_cfg: Vec<crate::config::Forward>,
@@ -2900,6 +2902,8 @@ impl App {
             pf_picker_in_use: Vec::new(),
             pf_picker_state: ListState::default(),
             pf_picker_target: None,
+            action_menu_targets: Vec::new(),
+            action_menu_objects: Vec::new(),
             notify_cfg: crate::config::NotifyConfig::default(),
             keymap: Keymap::default(),
             pf_state: ListState::default(),
