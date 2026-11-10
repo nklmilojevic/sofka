@@ -3420,6 +3420,10 @@ fn build_help(app: &App, width: usize) -> (Vec<Line<'static>>, String, HelpSecti
         "reload config · config sources + warnings · runtime diagnostics",
     ));
     lines.push(bind(
+        ":config edit [base|cluster|context]",
+        "open that config file in $EDITOR, reload when it closes",
+    ));
+    lines.push(bind(
         ":check-update",
         "check for a newer sofka release and show how to upgrade",
     ));
@@ -5354,6 +5358,10 @@ fn draw_palette(frame: &mut Frame, app: &mut App, area: Rect) {
             SuggestKind::Layout => Text::from(Line::from(vec![
                 Span::styled(s.label.clone(), Style::default().fg(theme::peach())),
                 Span::styled("  layout", theme::dim()),
+            ])),
+            SuggestKind::ConfigArg => Text::from(Line::from(vec![
+                Span::styled(s.label.clone(), Style::default().fg(theme::peach())),
+                Span::styled("  config", theme::dim()),
             ])),
             // Saved bookmarks read as a distinct, high-value jump (a ★ tag).
             SuggestKind::Bookmark => Text::from(Line::from(vec![

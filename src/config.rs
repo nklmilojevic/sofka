@@ -1768,14 +1768,26 @@ impl ConfigLoader {
     /// and the `:config` view.
     pub fn override_paths(&self, context: &str, cluster: &str) -> Vec<PathBuf> {
         let mut paths = Vec::new();
-        if let (Some(dir), false) = (&self.dir, cluster.is_empty()) {
-            let cluster_dir = dir.join("clusters").join(sanitize(cluster));
+        if let Some(cluster_dir) = self.cluster_dir(cluster) {
             paths.extend(document::paths(&cluster_dir));
-            if !context.is_empty() {
-                paths.extend(document::paths(&cluster_dir.join(sanitize(context))));
+            if let Some(context_dir) = self.context_dir(context, cluster) {
+                paths.extend(document::paths(&context_dir));
             }
         }
         paths
+    }
+
+    /// `clusters/<cluster>`, or `None` without a config directory or a
+    /// cluster name.
+    pub fn cluster_dir(&self, cluster: &str) -> Option<PathBuf> {
+        let dir = self.dir.as_ref()?;
+        (!cluster.is_empty()).then(|| dir.join("clusters").join(sanitize(cluster)))
+    }
+
+    /// `clusters/<cluster>/<context>`, or `None` when either name is empty.
+    pub fn context_dir(&self, context: &str, cluster: &str) -> Option<PathBuf> {
+        let cluster_dir = self.cluster_dir(cluster)?;
+        (!context.is_empty()).then(|| cluster_dir.join(sanitize(context)))
     }
 
     /// Merge override files for the given kubeconfig cluster/context over the
@@ -2012,6 +2024,12 @@ fn state_of(result: Result<Option<toml::Value>, String>) -> &'static str {
         Ok(None) => "absent",
         Err(_) => "invalid - skipped",
     }
+}
+
+/// The one config file of the level in `dir`, existing or not: `config.toml`
+/// when the level has none yet, an error when it has more than one.
+pub fn level_file(dir: &Path) -> Result<PathBuf, String> {
+    document::select(dir)
 }
 
 /// Read an optional override file. Report conflicts, read errors, and parse errors.

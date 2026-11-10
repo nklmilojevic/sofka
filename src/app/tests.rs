@@ -21557,6 +21557,234 @@ fn write_config(dir: &std::path::Path, text: &str) {
     std::fs::write(dir.join("config.toml"), text).unwrap();
 }
 
+/// A test app whose config lives in an empty directory of its own.
+fn config_edit_app(name: &str) -> (App, Receiver<Msg>, std::path::PathBuf) {
+    let dir = std::env::temp_dir().join(format!("sofka-config-edit-{name}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let (mut app, rx) = test_app();
+    app.config = crate::config::ConfigLoader::from_dir(Some(dir.clone()));
+    (app, rx, dir)
+}
+
+/// The file `:config edit` handed to the editor.
+fn config_editor_file(app: &mut App) -> std::path::PathBuf {
+    let Some(Suspend::Shell(argv)) = app.pending.take() else {
+        panic!("no editor queued: {}", app.flash);
+    };
+    std::path::PathBuf::from(argv.last().unwrap())
+}
+
+/// Stand in for the editor: save `text`, then return from the suspend.
+fn close_config_editor(app: &mut App, path: &std::path::Path, text: &str) {
+    std::fs::write(path, text).unwrap();
+    app.handle_command_result(None, Ok(()), None);
+    app.after_suspend();
+}
+
+#[tokio::test]
+async fn config_edit_opens_each_level_for_the_current_context() {
+    let (mut app, _rx, dir) = config_edit_app("levels");
+    let cluster = dir.join("clusters").join("test-cluster");
+    for (command, expected) in [
+        ("config edit", dir.join("config.toml")),
+        ("cfg edit base", dir.join("config.toml")),
+        ("config edit cluster", cluster.join("config.toml")),
+        (
+            "config edit context",
+            cluster.join("test").join("config.toml"),
+        ),
+    ] {
+        palette(&mut app, command);
+        assert_eq!(config_editor_file(&mut app), expected, "{command}");
+        app.after_suspend();
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn config_edit_opens_an_existing_yaml_file_as_is() {
+    let (mut app, _rx, dir) = config_edit_app("yaml");
+    let cluster = dir.join("clusters").join("test-cluster");
+    std::fs::create_dir_all(&cluster).unwrap();
+    std::fs::write(cluster.join("config.yml"), "readonly: true\n").unwrap();
+    palette(&mut app, "config edit cluster");
+    let path = config_editor_file(&mut app);
+    assert_eq!(path, cluster.join("config.yml"));
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "readonly: true\n");
+    assert!(!cluster.join("config.toml").exists());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn config_edit_creates_a_missing_file_and_its_directories() {
+    let (mut app, _rx, dir) = config_edit_app("create");
+    palette(&mut app, "config edit context");
+    let path = config_editor_file(&mut app);
+    assert_eq!(path, dir.join("clusters/test-cluster/test/config.toml"));
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn config_edit_reloads_when_the_editor_closes() {
+    let (mut app, _rx, dir) = config_edit_app("reload");
+    palette(&mut app, "config edit");
+    let path = config_editor_file(&mut app);
+    close_config_editor(&mut app, &path, "favorite_namespaces = [\"kube-system\"]\n");
+    assert_eq!(app.namespace_favorites, ["kube-system"]);
+    assert_eq!(app.flash, "config reloaded");
+    assert!(app.pending.is_none());
+
+    palette(&mut app, "config edit context");
+    let path = config_editor_file(&mut app);
+    close_config_editor(&mut app, &path, "favorite_namespaces = [\"apps\"]\n");
+    assert_eq!(app.namespace_favorites, ["apps"]);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn config_edit_keeps_the_previous_config_when_the_new_one_is_invalid() {
+    let (mut app, _rx, dir) = config_edit_app("invalid");
+    palette(&mut app, "config edit");
+    let path = config_editor_file(&mut app);
+    close_config_editor(&mut app, &path, "favorite_namespaces = [\"kube-system\"]\n");
+    palette(&mut app, "config edit");
+    let path = config_editor_file(&mut app);
+    close_config_editor(&mut app, &path, "readonly = \"yes\"\n");
+    assert!(app.flash.contains("config reload failed"), "{}", app.flash);
+    assert!(!app.config_warnings.is_empty());
+    assert_eq!(app.namespace_favorites, ["kube-system"]);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn config_edit_does_not_reload_after_a_failed_editor() {
+    let (mut app, _rx, dir) = config_edit_app("failed");
+    palette(&mut app, "config edit");
+    let path = config_editor_file(&mut app);
+    std::fs::write(&path, "favorite_namespaces = [\"kube-system\"]\n").unwrap();
+    app.handle_command_result(None, Err(std::io::Error::other("exit status 1")), None);
+    app.after_suspend();
+    assert!(app.namespace_favorites.is_empty());
+    assert!(app.flash.contains("editor failed"), "{}", app.flash);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn config_edit_refuses_a_symlinked_file() {
+    let (mut app, _rx, dir) = config_edit_app("symlink");
+    let source = dir.join("source.toml");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(&source, "readonly = true\n").unwrap();
+    std::os::unix::fs::symlink(&source, dir.join("config.toml")).unwrap();
+    palette(&mut app, "config edit");
+    assert!(app.pending.is_none());
+    assert!(app.flash_err);
+    assert!(app.flash.contains("is managed"), "{}", app.flash);
+    assert!(app.flash.contains("edit it at its source"), "{}", app.flash);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn config_edit_refuses_a_file_it_cannot_write() {
+    let (mut app, _rx, dir) = config_edit_app("readonly-file");
+    let path = dir.join("config.toml");
+    write_config(&dir, "readonly = true\n");
+    let mut permissions = std::fs::metadata(&path).unwrap().permissions();
+    permissions.set_readonly(true);
+    std::fs::set_permissions(&path, permissions).unwrap();
+    // A superuser can write the file anyway; there is nothing to refuse.
+    if std::fs::OpenOptions::new().write(true).open(&path).is_err() {
+        palette(&mut app, "config edit");
+        assert!(app.pending.is_none());
+        assert!(app.flash.contains("is managed"), "{}", app.flash);
+    }
+    let mut permissions = std::fs::metadata(&path).unwrap().permissions();
+    #[allow(clippy::permissions_set_readonly_false)]
+    permissions.set_readonly(false);
+    std::fs::set_permissions(&path, permissions).unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn config_edit_refuses_conflicting_files_and_points_to_config() {
+    let (mut app, _rx, dir) = config_edit_app("conflict");
+    write_config(&dir, "readonly = true\n");
+    std::fs::write(dir.join("config.yaml"), "readonly: true\n").unwrap();
+    palette(&mut app, "config edit");
+    assert!(app.pending.is_none());
+    assert!(
+        app.flash.contains("conflicting config files"),
+        "{}",
+        app.flash
+    );
+    assert!(app.flash.contains(":config"), "{}", app.flash);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn config_edit_works_in_read_only_mode() {
+    let (mut app, _rx, dir) = config_edit_app("read-only-mode");
+    app.readonly = true;
+    palette(&mut app, "config edit");
+    assert_eq!(config_editor_file(&mut app), dir.join("config.toml"));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn config_edit_rejects_unknown_arguments() {
+    let (mut app, _rx, dir) = config_edit_app("usage");
+    for command in ["config edit prod", "config open", "config edit base extra"] {
+        palette(&mut app, command);
+        assert!(app.pending.is_none(), "{command}");
+        assert!(
+            app.flash.starts_with("usage: :config"),
+            "{command}: {}",
+            app.flash
+        );
+    }
+    assert!(!dir.exists());
+}
+
+#[tokio::test]
+async fn config_palette_completes_edit_then_the_level() {
+    let (mut app, _rx, dir) = config_edit_app("complete");
+    let labels = |app: &App| {
+        app.cmd_suggestions
+            .iter()
+            .map(|s| s.label.clone())
+            .collect::<Vec<_>>()
+    };
+    app.handle_key(press(KeyCode::Char(':'))).unwrap();
+    type_text(&mut app, "config ");
+    assert_eq!(labels(&app), ["edit"]);
+    app.handle_key(press(KeyCode::Right)).unwrap();
+    assert_eq!(app.command, "config edit");
+    type_text(&mut app, " ");
+    assert_eq!(labels(&app), ["base", "cluster", "context"]);
+    type_text(&mut app, "clu");
+    assert_eq!(labels(&app)[0], "cluster");
+    app.handle_key(press(KeyCode::Enter)).unwrap();
+    assert_eq!(
+        config_editor_file(&mut app),
+        dir.join("clusters/test-cluster/config.toml")
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn config_with_a_trailing_space_still_opens_the_sources() {
+    let (mut app, _rx, dir) = config_edit_app("bare");
+    palette(&mut app, "config ");
+    assert!(app.pending.is_none());
+    assert_eq!(app.mode, Mode::Detail);
+    assert!(app.detail.title.starts_with("config"));
+    palette(&mut app, "config edit ");
+    assert_eq!(config_editor_file(&mut app), dir.join("config.toml"));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[tokio::test]
 async fn reload_updates_columns_in_the_open_view() {
     let dir = std::env::temp_dir().join(format!("sofka-reload-columns-{}", std::process::id()));

@@ -1238,7 +1238,9 @@ read-only mode and recorded in `:journal`.
   and previews each skin as you move; `enter` keeps it, `esc` restores the
   previous one.
 - **Config file** (TOML or YAML) with per-cluster and per-context overrides and live
-  `:reload`. See [Configuration](configuration.md).
+  `:reload`. `:config edit [base|cluster|context]` opens the current context's
+  file at that level in `$EDITOR` and reloads when the editor closes. See
+  [Configuration](configuration.md#edit-config-from-the-tui).
 
 ## Diagnostics
 

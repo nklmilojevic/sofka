@@ -751,6 +751,8 @@ pub enum SuggestKind {
     Workspace,
     /// A named layout for `:layout <name>` or `:<kind> -o <name>`.
     Layout,
+    /// A word after `:config`: `edit`, then the level.
+    ConfigArg,
 }
 
 /// A built-in palette action, plus the names/aliases that select it. The first
@@ -2216,6 +2218,8 @@ pub struct App {
     document_edit_task: Option<JoinHandle<()>>,
     document_edit_request: u64,
     secret_edit: Option<secret_edit::SecretEdit>,
+    /// `:config edit` is waiting for the editor to close.
+    config_edit: bool,
     reload_after_suspend: bool,
     pub(super) refresh_generation: u64,
     document_source: Option<refresh::RefreshSource>,
@@ -2817,6 +2821,7 @@ impl App {
             document_edit_task: None,
             document_edit_request: 0,
             secret_edit: None,
+            config_edit: false,
             reload_after_suspend: false,
             refresh_generation: 0,
             document_source: None,
@@ -3173,6 +3178,7 @@ mod metrics_history;
 mod mouse;
 mod namespace_patterns;
 pub use namespace_patterns::NamespacePatternAction;
+mod config_edit;
 mod navigation;
 mod notify;
 pub mod ns_resources;
