@@ -129,6 +129,12 @@ impl App {
                 return;
             }
         };
+        if self.mode != Mode::Table {
+            self.flash_warn(&format!(
+                "namespaces for {pattern} arrived while a dialog was open; run the command again"
+            ));
+            return;
+        }
         names.sort();
         names.dedup();
         self.namespace_patterns.insert(pattern.clone(), names);

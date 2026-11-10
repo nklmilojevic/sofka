@@ -29,6 +29,9 @@ impl App {
             self.request_helm_uninstall();
             return;
         }
+        let Some(kind) = self.kind.clone() else {
+            return;
+        };
         let targets = self.action_targets();
         if targets.is_empty() {
             return;
@@ -48,6 +51,7 @@ impl App {
         };
         self.begin_guarded(
             ConfirmAction::Delete {
+                kind,
                 targets,
                 force,
                 cascade,
@@ -136,13 +140,11 @@ impl App {
 
     pub(super) fn do_delete(
         &mut self,
+        kind: Kind,
         targets: Vec<(String, String)>,
         force: bool,
         cascade: Cascade,
     ) {
-        let Some(kind) = self.kind.clone() else {
-            return;
-        };
         let label = self.action_label(&targets);
         self.note_action(if force { "force-delete" } else { "delete" }, label);
         let client = self.cluster.client.clone();
@@ -151,13 +153,13 @@ impl App {
         let progress = if targets.len() == 1 {
             format!("deleting {}…", targets[0].0)
         } else {
-            format!("deleting {} {}…", targets.len(), self.kind_plural)
+            format!("deleting {} {}…", targets.len(), kind.ar.plural)
         };
         let claim = self.claim_status(progress);
         let done_label = if targets.len() == 1 {
             format!("deleted {}", targets[0].0)
         } else {
-            format!("deleted {} {}", targets.len(), self.kind_plural)
+            format!("deleted {} {}", targets.len(), kind.ar.plural)
         };
         tokio::spawn(async move {
             let mut dp = DeleteParams {

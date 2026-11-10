@@ -97,12 +97,13 @@ impl App {
     pub(super) fn run_confirm_action(&mut self, action: ConfirmAction) {
         match action {
             ConfirmAction::Delete {
+                kind,
                 targets,
                 force,
                 cascade,
                 ..
             } => {
-                self.do_delete(targets, force, cascade);
+                self.do_delete(kind, targets, force, cascade);
                 self.clear_marks();
             }
             ConfirmAction::Edit { argv } => {
@@ -245,6 +246,7 @@ impl App {
                         force,
                         cascade,
                         managed,
+                        ..
                     }) => {
                         *force = !*force;
                         Some((targets.clone(), *force, *cascade, managed.clone()))
@@ -269,6 +271,7 @@ impl App {
                         force,
                         cascade,
                         managed,
+                        ..
                     }) => {
                         *cascade = cascade.next();
                         Some((targets.clone(), *force, *cascade, managed.clone()))

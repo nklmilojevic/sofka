@@ -347,6 +347,7 @@ impl Cascade {
 enum ConfirmAction {
     /// One or more `(name, ns)` targets to delete (bulk when marked).
     Delete {
+        kind: Kind,
         targets: Vec<(String, String)>,
         force: bool,
         cascade: Cascade,

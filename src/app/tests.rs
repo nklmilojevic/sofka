@@ -6520,6 +6520,58 @@ async fn delete_confirm_force_can_toggle() {
 }
 
 #[tokio::test]
+async fn a_confirmed_delete_uses_the_kind_it_was_requested_for() {
+    let (mut app, _rx) = test_app();
+    app.switch_kind("services");
+    apply(
+        &mut app,
+        json!({"apiVersion": "v1", "kind": "Service",
+               "metadata": {"name": "web", "namespace": "default"}}),
+    );
+    let (sent, mut requests) = mpsc::unbounded_channel();
+    app.cluster.client = kube::Client::new(
+        tower::service_fn(move |req: http::Request<kube::client::Body>| {
+            let sent = sent.clone();
+            async move {
+                let method = req.method().clone();
+                let path = req.uri().path().to_string();
+                if method == http::Method::DELETE {
+                    sent.send((method, path)).unwrap();
+                }
+                Ok::<_, std::convert::Infallible>(
+                    http::Response::builder()
+                        .status(200)
+                        .body(http_body_util::Full::new(hyper::body::Bytes::from(
+                            json!({"apiVersion":"v1","kind":"Status","status":"Success"})
+                                .to_string(),
+                        )))
+                        .unwrap(),
+                )
+            }
+        }),
+        "default",
+    );
+    app.handle_key(ctrl(KeyCode::Char('d'))).unwrap();
+    assert_eq!(app.mode, Mode::Confirm);
+
+    app.switch_kind("deployments");
+    assert_eq!(app.kind_plural, "deployments");
+    assert!(matches!(
+        app.confirm_action,
+        Some(ConfirmAction::Delete { .. })
+    ));
+    app.mode = Mode::Confirm;
+    app.handle_key(press(KeyCode::Char('y'))).unwrap();
+
+    let (method, path) = tokio::time::timeout(Duration::from_secs(2), requests.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(method, http::Method::DELETE);
+    assert_eq!(path, "/api/v1/namespaces/default/services/web");
+}
+
+#[tokio::test]
 async fn delete_confirm_cascade_can_cycle() {
     let (mut app, _rx) = test_app();
     app.switch_kind("pods");
@@ -37839,6 +37891,7 @@ async fn container_trends_follow_keys_and_reject_stale_samples() {
 async fn popups_preserve_surrounding_cells_on_open_close_and_resize() {
     use ratatui::{Terminal, backend::TestBackend};
     let (mut app, _rx) = test_app();
+    app.switch_kind("pods");
     app.compact = true;
     apply(
         &mut app,
