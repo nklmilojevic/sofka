@@ -186,6 +186,7 @@ impl App {
                             | Action::InvertSort
                             | Action::Wide
                             | Action::Namespaces
+                            | Action::Contexts
                             | Action::AllNamespaces
                             | Action::HistoryBack
                             | Action::HistoryForward

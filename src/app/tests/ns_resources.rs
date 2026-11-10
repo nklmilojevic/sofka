@@ -270,6 +270,19 @@ async fn keys_that_act_on_objects_do_nothing_on_kind_rows() {
 }
 
 #[tokio::test]
+async fn contexts_key_opens_the_picker_from_kind_rows() {
+    let (mut app, _rx) = test_app();
+    let claim = open(&mut app, "prod");
+    counted(&mut app, claim, "deployments", objects(4));
+    done(&mut app, claim);
+    use_keys(&mut app, CONTEXTS_KEY);
+
+    app.handle_key(ctrl(KeyCode::Char('y'))).unwrap();
+    assert_eq!(app.mode, Mode::Contexts);
+    assert!(!app.flash.contains("⏎ opens one"), "{}", app.flash);
+}
+
+#[tokio::test]
 async fn view_history_returns_to_ns_resources() {
     let (mut app, _rx) = test_app();
     open(&mut app, "prod");

@@ -6867,6 +6867,28 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn help_shows_the_contexts_action_unbound_until_configured() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let (tx, _rx) = tokio::sync::mpsc::channel(16);
+        let mut app = App::new(crate::k8s::Cluster::fake(), tx);
+        app.handle_key(KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE))
+            .unwrap();
+        let row = |app: &App| {
+            build_help(app, 120)
+                .0
+                .iter()
+                .map(Line::to_string)
+                .find(|line| line.ends_with("context switcher"))
+                .unwrap()
+        };
+        assert!(row(&app).contains("unbound"), "{}", row(&app));
+        let cfg: crate::config::Config =
+            toml::from_str("[keys.table]\ncontexts = 'ctrl-y'").unwrap();
+        app.keymap = crate::keymap::Keymap::compile(&cfg.keys).unwrap();
+        assert!(row(&app).contains("ctrl-y"), "{}", row(&app));
+    }
+
+    #[tokio::test]
     async fn help_cache_tracks_inputs_and_reuses_lines_when_scrolling() {
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
         use ratatui::{Terminal, backend::TestBackend};

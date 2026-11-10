@@ -466,7 +466,9 @@ include those conditions. Row filters can search the route paths.
   apply to the first successful selection only. These commands require
   interactive mode.
 - **Namespace switcher** (`n`) with pinned favourites (★) and per-context
-  session recents (·) above the rest, plus a context switcher (`:ctx`). In the
+  session recents (·) above the rest, plus a context switcher (`:ctx`, or the
+  unbound `contexts` table action; see
+  [key bindings](keybindings.md#example-a-key-for-the-context-switcher)). In the
   resource table, `1` to `9` select the first nine configured favourites in fixed
   configuration order. The picker lists these shortcuts in a column before the
   names, and while its filter is empty the same digits select the favourite
