@@ -7,8 +7,10 @@
 //! user's config, and `default_namespace` there stays the fallback for a
 //! context with no remembered pick. `-n`/`-A` on the CLI always win.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use serde::{Deserialize, Serialize};
 
@@ -23,7 +25,8 @@ const ALL: &str = "all";
 pub struct NamespaceMemory {
     pub contexts: BTreeMap<String, String>,
     #[serde(skip)]
-    dirty: BTreeSet<String>,
+    // Each edit has its own completion flag, shared with queued snapshots.
+    dirty: BTreeMap<String, Arc<AtomicBool>>,
 }
 
 impl PartialEq for NamespaceMemory {
@@ -54,25 +57,31 @@ impl NamespaceMemory {
         let mut merged = Self::load(path);
         merged.merge_pending(self);
         let text = toml::to_string(&merged).map_err(|e| e.to_string())?;
-        crate::atomicfile::write(path, &text)
+        crate::atomicfile::write(path, &text)?;
+        for saved in self.dirty.values() {
+            saved.store(true, Ordering::Relaxed);
+        }
+        Ok(())
     }
 
     /// Apply newer pending changes without losing earlier pending keys.
     pub(crate) fn merge_pending(&mut self, newer: &Self) {
-        for key in &newer.dirty {
+        for (key, saved) in &newer.dirty {
+            if saved.load(Ordering::Relaxed) {
+                continue;
+            }
             match newer.contexts.get(key) {
                 Some(value) => self.contexts.insert(key.clone(), value.clone()),
                 None => self.contexts.remove(key),
             };
+            self.dirty.insert(key.clone(), Arc::clone(saved));
         }
-        self.dirty.extend(newer.dirty.iter().cloned());
     }
 
-    /// Take the pending changes for one save.
+    /// Copy pending changes. Keep each edit until its write succeeds.
     pub fn snapshot(&mut self) -> Self {
-        let snapshot = self.clone();
-        self.dirty.clear();
-        snapshot
+        self.dirty.retain(|_, saved| !saved.load(Ordering::Relaxed));
+        self.clone()
     }
 
     /// Remember `namespace` (empty = all namespaces) for `context`. Returns
@@ -91,7 +100,8 @@ impl NamespaceMemory {
             return false;
         }
         self.contexts.insert(context.to_string(), value);
-        self.dirty.insert(context.to_string());
+        self.dirty
+            .insert(context.to_string(), Arc::new(AtomicBool::new(false)));
         true
     }
 
@@ -173,7 +183,7 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_clears_the_pending_changes() {
+    fn successful_save_clears_the_pending_changes() {
         let dir = scratch("snapshot");
         let path = dir.join("namespaces.toml");
         let mut a = NamespaceMemory::load(&path);
@@ -185,6 +195,29 @@ mod tests {
         assert!(!a.set("prod", "payments"));
         a.snapshot().save(&path).unwrap();
         assert_eq!(NamespaceMemory::load(&path).get("prod"), Some("web".into()));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn older_save_does_not_acknowledge_a_newer_edit() {
+        let dir = scratch("older-save");
+        let path = dir.join("namespaces.toml");
+        let mut memory = NamespaceMemory::default();
+        memory.set("prod", "payments");
+        let older = memory.snapshot();
+        memory.set("prod", "web");
+        memory.set("prod", "payments");
+        older.save(&path).unwrap();
+
+        let mut external = NamespaceMemory::load(&path);
+        external.set("prod", "external");
+        external.save(&path).unwrap();
+        memory.snapshot().save(&path).unwrap();
+        assert_eq!(
+            NamespaceMemory::load(&path).get("prod"),
+            Some("payments".into())
+        );
+        assert!(memory.snapshot().dirty.is_empty());
         std::fs::remove_dir_all(dir).unwrap();
     }
 

@@ -453,6 +453,132 @@ mod tests {
         }
     }
 
+    fn press(app: &mut crate::app::App, code: crossterm::event::KeyCode) {
+        use crossterm::event::{KeyEvent, KeyModifiers};
+        app.handle_key(KeyEvent::new(code, KeyModifiers::NONE))
+            .unwrap();
+    }
+
+    fn choose_sort(app: &mut crate::app::App, header: &str) {
+        use crossterm::event::KeyCode;
+        press(app, KeyCode::Char('S'));
+        for key in header.chars() {
+            press(app, KeyCode::Char(key));
+        }
+        press(app, KeyCode::Enter);
+    }
+
+    #[tokio::test]
+    async fn input_retries_failed_namespace_and_sort_changes() {
+        use crossterm::event::KeyCode;
+
+        for mode in ["inline", "background", "enqueue"] {
+            for clear in [false, true] {
+                let dir = scratch(&format!("retry-{mode}-{clear}"));
+                std::fs::create_dir_all(&dir).unwrap();
+                let state_dir = dir.join("state");
+                std::fs::write(&state_dir, "not a directory").unwrap();
+                let namespace_path = state_dir.join("namespaces.toml");
+                let sort_path = state_dir.join("sort.toml");
+                let (ui_tx, mut ui_rx) = tokio::sync::mpsc::channel(1024);
+                let mut app = crate::app::App::new(crate::k8s::Cluster::fake(), ui_tx.clone());
+                app.namespace_memory_path = Some(namespace_path.clone());
+                app.sort_memory_path = Some(sort_path.clone());
+                if mode != "inline" {
+                    let mut writer =
+                        StateWriter::with_grace(ui_tx.clone(), Duration::from_secs(5)).unwrap();
+                    if mode == "enqueue" {
+                        writer.tx.take();
+                    }
+                    app.state_writer = Some(writer);
+                }
+                app.switch_kind("pods");
+                press(&mut app, KeyCode::Char('0'));
+                choose_sort(&mut app, if clear { "" } else { "AGE" });
+                if mode == "background" {
+                    let mut failures = 0;
+                    tokio::time::timeout(Duration::from_secs(5), async {
+                        while failures < 2 {
+                            let msg = ui_rx.recv().await.unwrap();
+                            if matches!(&msg, Msg::StateWriteFailed { .. }) {
+                                failures += 1;
+                            }
+                            app.handle_msg(msg);
+                        }
+                    })
+                    .await
+                    .expect("both failed writes must reach the UI");
+                }
+
+                std::fs::remove_file(&state_dir).unwrap();
+                let mut external_namespaces = crate::nsmem::NamespaceMemory::default();
+                external_namespaces.set("external", "kept");
+                external_namespaces.save(&namespace_path).unwrap();
+                let mut external_sorts = crate::sortmem::SortMemory::default();
+                external_sorts.set("pods", "NAME", false);
+                external_sorts.set("nodes", "CPU", false);
+                external_sorts.save(&sort_path).unwrap();
+                if mode == "enqueue" {
+                    app.state_writer =
+                        Some(StateWriter::with_grace(ui_tx, Duration::from_secs(5)).unwrap());
+                }
+                app.cluster.context = "other".into();
+                app.namespace = "default".into();
+                app.switch_kind("deployments");
+                press(&mut app, KeyCode::Char('0'));
+                choose_sort(&mut app, "AGE");
+                drop(app.state_writer.take());
+
+                let saved = crate::nsmem::NamespaceMemory::load(&namespace_path);
+                assert_eq!(saved.get("test"), Some(String::new()), "{mode}");
+                assert_eq!(saved.get("other"), Some(String::new()));
+                assert_eq!(saved.get("external"), Some("kept".into()));
+                let saved = crate::sortmem::SortMemory::load(&sort_path);
+                assert_eq!(
+                    saved.get("pods"),
+                    if clear {
+                        None
+                    } else {
+                        Some(("AGE".into(), false))
+                    },
+                    "{mode}"
+                );
+                assert_eq!(saved.get("deployments"), Some(("AGE".into(), false)));
+                assert_eq!(saved.get("nodes"), Some(("CPU".into(), false)));
+                std::fs::remove_dir_all(dir).unwrap();
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn explicit_default_sort_removes_an_entry_added_by_another_process() {
+        for background in [false, true] {
+            let dir = scratch(&format!("external-clear-{background}"));
+            let path = dir.join("sort.toml");
+            let (ui_tx, _ui_rx) = tokio::sync::mpsc::channel(1024);
+            let mut app = crate::app::App::new(crate::k8s::Cluster::fake(), ui_tx.clone());
+            app.sort_memory_path = Some(path.clone());
+            app.sort_memory = crate::sortmem::SortMemory::load(&path);
+            app.switch_kind("pods");
+            if background {
+                app.state_writer =
+                    Some(StateWriter::with_grace(ui_tx, Duration::from_secs(5)).unwrap());
+            }
+            let mut external = crate::sortmem::SortMemory::load(&path);
+            external.set("pods", "AGE", true);
+            external.set("nodes", "CPU", false);
+            external.save(&path).unwrap();
+            assert_eq!(app.sort_memory.get("pods"), None);
+            choose_sort(&mut app, "");
+            drop(app.state_writer.take());
+
+            let saved = crate::sortmem::SortMemory::load(&path);
+            assert_eq!(saved.get("pods"), None);
+            assert_eq!(saved.get("nodes"), Some(("CPU".into(), false)));
+            std::fs::remove_dir_all(dir).unwrap();
+        }
+    }
+
     #[test]
     fn coalescing_keeps_the_latest_snapshot_on_shutdown() {
         let dir = std::env::temp_dir().join(format!("sofka-state-writer-{}", std::process::id()));

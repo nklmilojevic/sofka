@@ -1267,8 +1267,9 @@ impl App {
         let kind = self.kind_plural.clone();
         match header {
             Some(h) => self.sort_memory.set(&kind, &h, self.sort_desc),
-            None if self.sort_memory.clear(&kind) => {}
-            None => return, // nothing was remembered; skip the disk write
+            None => {
+                self.sort_memory.clear(&kind);
+            }
         }
         if let Some(path) = self.sort_memory_path.clone() {
             let result = match &self.state_writer {

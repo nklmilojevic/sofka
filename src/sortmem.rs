@@ -8,8 +8,10 @@
 //! rewrites the user's config, and a `[views] sort` there stays the
 //! hand-edited fallback these choices overlay.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use serde::{Deserialize, Serialize};
 
@@ -21,7 +23,8 @@ use serde::{Deserialize, Serialize};
 pub struct SortMemory {
     pub kinds: BTreeMap<String, String>,
     #[serde(skip)]
-    dirty: BTreeSet<String>,
+    // Each edit has its own completion flag, shared with queued snapshots.
+    dirty: BTreeMap<String, Arc<AtomicBool>>,
 }
 
 impl PartialEq for SortMemory {
@@ -52,25 +55,31 @@ impl SortMemory {
         let mut merged = Self::load(path);
         merged.merge_pending(self);
         let text = toml::to_string(&merged).map_err(|e| e.to_string())?;
-        crate::atomicfile::write(path, &text)
+        crate::atomicfile::write(path, &text)?;
+        for saved in self.dirty.values() {
+            saved.store(true, Ordering::Relaxed);
+        }
+        Ok(())
     }
 
     /// Apply newer pending changes without losing earlier pending keys.
     pub(crate) fn merge_pending(&mut self, newer: &Self) {
-        for key in &newer.dirty {
+        for (key, saved) in &newer.dirty {
+            if saved.load(Ordering::Relaxed) {
+                continue;
+            }
             match newer.kinds.get(key) {
                 Some(value) => self.kinds.insert(key.clone(), value.clone()),
                 None => self.kinds.remove(key),
             };
+            self.dirty.insert(key.clone(), Arc::clone(saved));
         }
-        self.dirty.extend(newer.dirty.iter().cloned());
     }
 
-    /// Take the pending changes for one save.
+    /// Copy pending changes. Keep each edit until its write succeeds.
     pub fn snapshot(&mut self) -> Self {
-        let snapshot = self.clone();
-        self.dirty.clear();
-        snapshot
+        self.dirty.retain(|_, saved| !saved.load(Ordering::Relaxed));
+        self.clone()
     }
 
     /// Remember `header` (+ direction) for `kind`.
@@ -81,15 +90,16 @@ impl SortMemory {
             header.to_string()
         };
         self.kinds.insert(kind.to_string(), spec);
-        self.dirty.insert(kind.to_string());
+        self.dirty
+            .insert(kind.to_string(), Arc::new(AtomicBool::new(false)));
     }
 
-    /// Forget `kind`'s entry. Returns whether one existed.
+    /// Record an explicit removal, even if the local entry is absent.
+    /// Returns whether a local entry existed.
     pub fn clear(&mut self, kind: &str) -> bool {
         let removed = self.kinds.remove(kind).is_some();
-        if removed {
-            self.dirty.insert(kind.to_string());
-        }
+        self.dirty
+            .insert(kind.to_string(), Arc::new(AtomicBool::new(false)));
         removed
     }
 
@@ -164,7 +174,7 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_clears_the_pending_changes() {
+    fn successful_save_clears_the_pending_changes() {
         let dir = scratch("snapshot");
         let path = dir.join("sort.toml");
         let mut a = SortMemory::load(&path);
@@ -179,6 +189,37 @@ mod tests {
             Some(("NAME".into(), false))
         );
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn older_save_does_not_acknowledge_a_newer_edit_or_removal() {
+        for clear in [false, true] {
+            let dir = scratch(if clear { "older-clear" } else { "older-set" });
+            let path = dir.join("sort.toml");
+            let mut memory = SortMemory::default();
+            memory.set("pods", "AGE", false);
+            let older = memory.snapshot();
+            memory.clear("pods");
+            if !clear {
+                memory.set("pods", "AGE", false);
+            }
+            older.save(&path).unwrap();
+
+            let mut external = SortMemory::load(&path);
+            external.set("pods", "NAME", false);
+            external.save(&path).unwrap();
+            memory.snapshot().save(&path).unwrap();
+            assert_eq!(
+                SortMemory::load(&path).get("pods"),
+                if clear {
+                    None
+                } else {
+                    Some(("AGE".into(), false))
+                }
+            );
+            assert!(memory.snapshot().dirty.is_empty());
+            std::fs::remove_dir_all(dir).unwrap();
+        }
     }
 
     #[test]
