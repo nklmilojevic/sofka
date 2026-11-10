@@ -54,6 +54,7 @@ fn test_app() -> (App, Receiver<Msg>) {
             .spawn()
     };
     app.update_fetcher = |_force| Box::pin(async { Err("no network in tests".to_string()) });
+    app.helm_runner = std::sync::Arc::new(|_argv| Box::pin(async { Ok(()) }));
     (app, rx)
 }
 
@@ -14377,6 +14378,200 @@ async fn helm_ctrl_d_opens_uninstall_confirm_not_generic_delete() {
     app.handle_key(press(KeyCode::Char('y'))).unwrap();
     assert_eq!(app.mode, Mode::Table);
     assert!(app.flash.contains("uninstalling"), "{}", app.flash);
+}
+
+#[tokio::test]
+async fn helm_uninstall_pins_the_context_and_namespace() {
+    let (mut app, _rx) = test_app();
+    let (sent, mut ran) = mpsc::unbounded_channel::<Vec<String>>();
+    app.helm_runner = std::sync::Arc::new(move |argv| {
+        let sent = sent.clone();
+        Box::pin(async move {
+            sent.send(argv).unwrap();
+            Ok(())
+        })
+    });
+    app.open_helm_releases();
+    apply(
+        &mut app,
+        helm_release_secret("myapp", "default", 1, "deployed"),
+    );
+    app.table_state.select(Some(0));
+    app.handle_key(ctrl(KeyCode::Char('d'))).unwrap();
+    assert_eq!(app.mode, Mode::Confirm);
+    app.handle_key(press(KeyCode::Char('y'))).unwrap();
+
+    let argv = tokio::time::timeout(Duration::from_secs(2), ran.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        argv,
+        [
+            "helm",
+            "--kube-context",
+            "test",
+            "uninstall",
+            "myapp",
+            "-n",
+            "default"
+        ]
+    );
+}
+
+#[tokio::test]
+async fn helm_uninstall_of_marked_releases_runs_once_per_release() {
+    let (mut app, mut rx) = test_app();
+    let (sent, mut ran) = mpsc::unbounded_channel::<Vec<String>>();
+    app.helm_runner = std::sync::Arc::new(move |argv| {
+        let sent = sent.clone();
+        Box::pin(async move {
+            sent.send(argv).unwrap();
+            Ok(())
+        })
+    });
+    app.open_helm_releases();
+    for name in ["myapp", "other"] {
+        apply(
+            &mut app,
+            helm_release_secret(name, "default", 1, "deployed"),
+        );
+    }
+    app.table_state.select(Some(0));
+    app.handle_key(press(KeyCode::Char(' '))).unwrap();
+    app.handle_key(press(KeyCode::Down)).unwrap();
+    app.handle_key(press(KeyCode::Char(' '))).unwrap();
+    app.handle_key(ctrl(KeyCode::Char('d'))).unwrap();
+    assert_eq!(app.mode, Mode::Confirm);
+    app.handle_key(press(KeyCode::Char('y'))).unwrap();
+
+    let mut commands = Vec::new();
+    for _ in 0..2 {
+        commands.push(
+            tokio::time::timeout(Duration::from_secs(2), ran.recv())
+                .await
+                .unwrap()
+                .unwrap(),
+        );
+    }
+    commands.sort();
+    for (argv, name) in commands.iter().zip(["myapp", "other"]) {
+        assert_eq!(
+            argv,
+            &[
+                "helm",
+                "--kube-context",
+                "test",
+                "uninstall",
+                name,
+                "-n",
+                "default"
+            ]
+        );
+    }
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let msg = rx.recv().await.unwrap();
+            let done = matches!(msg, Msg::Flash { .. });
+            app.handle_msg(msg);
+            if done {
+                break;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert!(!app.flash_err);
+    assert_eq!(app.flash, "uninstalled 2 Helm releases");
+    assert!(matches!(
+        ran.try_recv(),
+        Err(mpsc::error::TryRecvError::Empty)
+    ));
+}
+
+#[tokio::test]
+async fn helm_rollback_passes_the_revision() {
+    let (mut app, _rx) = test_app();
+    let (sent, mut ran) = mpsc::unbounded_channel::<Vec<String>>();
+    app.helm_runner = std::sync::Arc::new(move |argv| {
+        let sent = sent.clone();
+        Box::pin(async move {
+            sent.send(argv).unwrap();
+            Ok(())
+        })
+    });
+    app.open_helm_releases();
+    apply(
+        &mut app,
+        helm_release_secret("myapp", "default", 2, "deployed"),
+    );
+    app.table_state.select(Some(0));
+    app.handle_key(press(KeyCode::Enter)).unwrap();
+    apply(
+        &mut app,
+        helm_release_secret("myapp", "default", 1, "superseded"),
+    );
+    apply(
+        &mut app,
+        helm_release_secret("myapp", "default", 2, "deployed"),
+    );
+    let old_idx = app
+        .rows()
+        .iter()
+        .position(|o| crate::helm::revision(o) == Some(1))
+        .unwrap();
+    app.table_state.select(Some(old_idx));
+    app.handle_key(press(KeyCode::Char('r'))).unwrap();
+    assert_eq!(app.mode, Mode::Confirm);
+    app.handle_key(press(KeyCode::Char('y'))).unwrap();
+
+    let argv = tokio::time::timeout(Duration::from_secs(2), ran.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        argv,
+        [
+            "helm",
+            "--kube-context",
+            "test",
+            "rollback",
+            "myapp",
+            "1",
+            "-n",
+            "default"
+        ]
+    );
+}
+
+#[tokio::test]
+async fn helm_failure_is_reported() {
+    let (mut app, mut rx) = test_app();
+    app.helm_runner = std::sync::Arc::new(|_argv| Box::pin(async { Err("boom".into()) }));
+    app.open_helm_releases();
+    apply(
+        &mut app,
+        helm_release_secret("myapp", "default", 1, "deployed"),
+    );
+    app.table_state.select(Some(0));
+    app.handle_key(ctrl(KeyCode::Char('d'))).unwrap();
+    assert_eq!(app.mode, Mode::Confirm);
+    app.handle_key(press(KeyCode::Char('y'))).unwrap();
+
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let msg = rx.recv().await.unwrap();
+            let done = matches!(msg, Msg::Flash { .. });
+            app.handle_msg(msg);
+            if done {
+                break;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert!(app.flash_err);
+    assert!(app.flash.contains("boom"), "{}", app.flash);
 }
 
 #[tokio::test]
