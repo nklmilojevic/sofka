@@ -708,6 +708,10 @@ impl App {
         match source {
             Mode::Logs => self.stop_log_stream(),
             Mode::Events => self.stop_event_stream(),
+            Mode::FluxMenu => {
+                self.action_menu_targets.clear();
+                self.action_menu_objects.clear();
+            }
             _ => {}
         }
         self.cancel_explain_request();

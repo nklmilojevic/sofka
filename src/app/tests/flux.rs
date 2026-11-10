@@ -9,6 +9,49 @@ fn kustomization(name: &str) -> Value {
     })
 }
 
+async fn check_action_menu_palette_cleanup(through_help: bool) {
+    let (mut app, _rx) = test_app();
+    app.switch_kind("kustomizations");
+    apply(&mut app, kustomization("apps"));
+    app.handle_key(press(KeyCode::Char('t'))).unwrap();
+    assert_eq!(app.mode, Mode::FluxMenu);
+    let targets = app.action_menu_targets.clone();
+    let objects = app.action_menu_objects.clone();
+    assert_eq!(targets, vec![("apps".into(), "default".into())]);
+    assert_eq!(objects.len(), 1);
+
+    if through_help {
+        app.handle_key(press(KeyCode::Char('?'))).unwrap();
+        assert_eq!(app.mode, Mode::Help);
+    }
+    let source = app.mode;
+    app.handle_key(press(KeyCode::Char(':'))).unwrap();
+    assert_eq!(app.mode, Mode::Command);
+    app.handle_key(press(KeyCode::Esc)).unwrap();
+    assert_eq!(app.mode, source);
+    assert_eq!(app.action_menu_targets, targets);
+    assert_eq!(app.action_menu_objects, objects);
+
+    app.handle_key(press(KeyCode::Char(':'))).unwrap();
+    for c in "skin".chars() {
+        app.handle_key(press(KeyCode::Char(c))).unwrap();
+    }
+    app.handle_key(press(KeyCode::Enter)).unwrap();
+    assert_eq!(app.mode, Mode::Skins);
+    assert!(app.action_menu_targets.is_empty());
+    assert!(app.action_menu_objects.is_empty());
+}
+
+#[tokio::test]
+async fn action_menu_palette_accept_clears_targets() {
+    check_action_menu_palette_cleanup(false).await;
+}
+
+#[tokio::test]
+async fn action_menu_palette_accept_from_help_clears_targets() {
+    check_action_menu_palette_cleanup(true).await;
+}
+
 #[tokio::test]
 async fn action_menu_keeps_its_target_when_rows_shift() {
     let (mut app, _rx) = test_app();
