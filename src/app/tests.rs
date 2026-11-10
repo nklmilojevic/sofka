@@ -4637,10 +4637,15 @@ async fn adjacent_owner_actions_keep_the_api_group() {
     assert_eq!(app.adjacent_items[1].plural, "clusters.cluster.x-k8s.io");
     app.handle_key(press(KeyCode::Char('d'))).unwrap();
     let (_, argv) = app.describe_source.as_ref().unwrap();
-    assert!(
-        argv.windows(3)
-            .any(|args| args == ["describe", "clusters.postgresql.cnpg.io", "db"])
-    );
+    assert!(argv.windows(6).any(|args| args
+        == [
+            "describe",
+            "-n",
+            "default",
+            "--",
+            "clusters.postgresql.cnpg.io",
+            "db"
+        ]));
     app.handle_key(press(KeyCode::Char('q'))).unwrap();
     app.cluster.client = Cluster::fake().client;
     app.handle_key(press(KeyCode::Enter)).unwrap();
@@ -12846,8 +12851,7 @@ async fn shellouts_pin_to_active_context() {
     };
     // Pinned to the context sofka connected with, not kubectl's default.
     assert_eq!(&argv[..3], ["kubectl", "--context", "test"]);
-    assert!(argv.contains(&"edit".to_string()));
-    assert_eq!(argv.last().unwrap(), "default"); // -n <ns>
+    assert_eq!(argv[3..], ["edit", "-n", "default", "--", "pods", "p"]);
 }
 
 #[tokio::test]
@@ -14580,6 +14584,88 @@ fn edit_argv(app: &mut App) -> Vec<String> {
 }
 
 #[tokio::test]
+async fn edit_argv_ends_options_before_the_name() {
+    for name in ["-o=yaml", "-n"] {
+        for managed in [false, true] {
+            let (mut app, _rx) = test_app();
+            app.cluster.register_kind(
+                "rbac.authorization.k8s.io",
+                "ClusterRole",
+                "clusterroles",
+                false,
+            );
+            app.switch_kind("clusterroles");
+            let mut object = json!({
+                "apiVersion": "rbac.authorization.k8s.io/v1",
+                "kind": "ClusterRole",
+                "metadata": {"name": name}
+            });
+            if managed {
+                object["metadata"]["labels"] = json!({
+                    "kustomize.toolkit.fluxcd.io/name": "apps",
+                    "kustomize.toolkit.fluxcd.io/namespace": "flux-system"
+                });
+            }
+            apply(&mut app, object);
+            app.table_state.select(Some(0));
+            app.handle_key(press(KeyCode::Char('e'))).unwrap();
+            if managed {
+                assert_eq!(app.mode, Mode::Confirm);
+                assert!(app.pending.is_none());
+                assert!(app.journal.is_empty());
+                app.handle_key(press(KeyCode::Char('y'))).unwrap();
+            }
+            let argv = edit_argv(&mut app);
+            let separator = argv.iter().position(|arg| arg == "--").unwrap();
+            assert_eq!(
+                argv[separator..],
+                ["--", "clusterroles.v1.rbac.authorization.k8s.io", name]
+            );
+            assert!(separator < argv.iter().position(|arg| arg == name).unwrap());
+            assert_eq!(app.journal.len(), 1);
+            assert!(app.journal.lines()[1].ends_with(name));
+        }
+    }
+}
+
+#[tokio::test]
+async fn describe_argv_ends_options_before_the_name() {
+    let (mut app, _rx) = test_app();
+    app.cluster.register_kind(
+        "rbac.authorization.k8s.io",
+        "ClusterRole",
+        "clusterroles",
+        false,
+    );
+    app.switch_kind("clusterroles");
+    apply(
+        &mut app,
+        json!({
+            "apiVersion": "rbac.authorization.k8s.io/v1",
+            "kind": "ClusterRole",
+            "metadata": {"name": "-o=yaml"}
+        }),
+    );
+    app.table_state.select(Some(0));
+    assert!(!app.native_describe);
+    app.handle_key(press(KeyCode::Char('d'))).unwrap();
+    app.describe_task.as_ref().unwrap().abort();
+    let (_, argv) = app.describe_source.as_ref().unwrap();
+    assert_eq!(
+        argv,
+        &[
+            "kubectl",
+            "--context",
+            "test",
+            "describe",
+            "--",
+            "clusterroles.v1.rbac.authorization.k8s.io",
+            "-o=yaml"
+        ]
+    );
+}
+
+#[tokio::test]
 async fn edit_from_yaml_view_targets_the_displayed_object() {
     let (mut app, _rx) = app_with_pod();
     apply(
@@ -14595,7 +14681,7 @@ async fn edit_from_yaml_view_targets_the_displayed_object() {
     press_document_edit(&mut app);
     let argv = edit_argv(&mut app);
     let edit = argv.iter().position(|arg| arg == "edit").unwrap();
-    assert_eq!(argv[edit..], ["edit", "pods", "a", "-n", "default"]);
+    assert_eq!(argv[edit..], ["edit", "-n", "default", "--", "pods", "a"]);
     assert_eq!(app.mode, Mode::Detail);
     assert_eq!(app.journal.len(), 1);
 }
@@ -14606,7 +14692,7 @@ async fn edit_from_describe_view_opens_the_editor() {
     press_document_edit(&mut app);
     let argv = edit_argv(&mut app);
     let edit = argv.iter().position(|arg| arg == "edit").unwrap();
-    assert_eq!(argv[edit..], ["edit", "pods", "web", "-n", "default"]);
+    assert_eq!(argv[edit..], ["edit", "-n", "default", "--", "pods", "web"]);
     assert_eq!(app.mode, Mode::Detail);
 }
 
@@ -14630,6 +14716,8 @@ async fn edit_from_yaml_view_confirms_flux_managed_objects_over_the_document() {
     app.handle_key(press(KeyCode::Char('y'))).unwrap();
     assert_eq!(app.mode, Mode::Detail);
     assert!(edit_argv(&mut app).contains(&"edit".to_string()));
+    assert_eq!(app.journal.len(), 1);
+    assert!(app.journal.lines()[1].ends_with("a in default"));
     assert!(!app.confirm_over_document());
 }
 
@@ -15102,7 +15190,7 @@ async fn a_stale_edit_read_does_not_answer_the_next_document() {
         result: Ok(Box::new(second)),
     });
     let argv = edit_argv(&mut app);
-    assert_eq!(argv[argv.len() - 3], "b");
+    assert_eq!(argv.last().unwrap(), "b");
 }
 
 #[tokio::test]
@@ -34205,12 +34293,11 @@ async fn edit_and_describe_use_selected_api_resource() {
                 } else {
                     "edit".into()
                 },
-                target,
-                "example".into(),
             ];
             if namespaced {
                 expected.extend(["-n".into(), "default".into()]);
             }
+            expected.extend(["--".into(), target, "example".into()]);
             assert_eq!(argv, expected);
         }
     }
