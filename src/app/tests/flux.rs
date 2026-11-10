@@ -710,6 +710,94 @@ async fn gitops_on_another_groups_resourceset_is_not_a_flux_owner() {
 }
 
 #[tokio::test]
+async fn gitops_resolves_helmrelease_depends_on_as_helmreleases() {
+    let release = json!({
+        "apiVersion": "helm.toolkit.fluxcd.io/v2", "kind": "HelmRelease",
+        "metadata": {"name": "web", "namespace": "default"},
+        "spec": {"dependsOn": [{"name": "db"}, {"name": "cache", "namespace": "infra"}]},
+        "status": {"conditions": [{"type": "Ready", "status": "True"}]}
+    });
+    let deployment = json!({
+        "apiVersion": "apps/v1", "kind": "Deployment",
+        "metadata": {"name": "web", "namespace": "default", "labels": {
+            "helm.toolkit.fluxcd.io/name": "web",
+            "helm.toolkit.fluxcd.io/namespace": "default"
+        }}
+    });
+    let dependency = |name: &str, namespace: &str, status: &str| {
+        (
+            format!("/apis/helm.toolkit.fluxcd.io/v2/namespaces/{namespace}/helmreleases/{name}"),
+            (
+                200,
+                json!({
+                    "apiVersion": "helm.toolkit.fluxcd.io/v2", "kind": "HelmRelease",
+                    "metadata": {"name": name, "namespace": namespace},
+                    "status": {"conditions": [{"type": "Ready", "status": status}]}
+                }),
+            ),
+        )
+    };
+    for (plural, selected) in [
+        ("helmreleases", release.clone()),
+        ("deployments", deployment.clone()),
+    ] {
+        let (mut app, rx) = test_app();
+        app.cluster.register_kind_version(
+            "helm.toolkit.fluxcd.io",
+            "v2",
+            "HelmRelease",
+            "helmreleases",
+            true,
+        );
+        let (mut app, mut rx, responses, requests) =
+            health_report_app_with(app, rx, plural, selected);
+        responses.lock().unwrap().extend([
+            (
+                "/apis/helm.toolkit.fluxcd.io/v2/namespaces/default/helmreleases/web".to_string(),
+                (200, release.clone()),
+            ),
+            (
+                "/apis/apps/v1/namespaces/default/deployments/web".to_string(),
+                (200, deployment.clone()),
+            ),
+            dependency("db", "default", "True"),
+            dependency("cache", "infra", "False"),
+        ]);
+        open_health_report_key(&mut app, true);
+        receive_health_report(&mut app, &mut rx, true).await;
+        let texts: Vec<_> = app.gitops_items.iter().map(|f| f.text.as_str()).collect();
+        assert!(texts.contains(&"Depends on"), "{plural}: {texts:?}");
+        assert!(texts.contains(&"db — ready"), "{plural}: {texts:?}");
+        assert!(texts.contains(&"cache — not ready"), "{plural}: {texts:?}");
+        assert!(
+            texts.contains(&"waiting on dependency cache"),
+            "{plural}: {texts:?}"
+        );
+        assert!(
+            !requests
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|p| p.contains("kustomizations")),
+            "{plural}: HelmRelease dependency read as a Kustomization"
+        );
+
+        let db = app
+            .gitops_items
+            .iter()
+            .position(|f| f.text == "db — ready")
+            .unwrap();
+        app.gitops_state.select(Some(db));
+        app.handle_key(press(KeyCode::Enter)).unwrap();
+        assert_eq!(app.mode, Mode::Table);
+        assert_eq!(app.kind_plural, "helmreleases");
+        assert_eq!(app.kind.as_ref().unwrap().ar.version, "v2");
+        assert_eq!(app.namespace, "default");
+        assert_eq!(app.fields.as_deref(), Some("metadata.name=db"));
+    }
+}
+
+#[tokio::test]
 async fn flux_menu_requires_the_resource_api_group() {
     for (plural, kind, group) in [
         (

@@ -4,7 +4,8 @@
 //! (+`/namespace`) or `helm.toolkit.fluxcd.io/name` labels naming the
 //! Kustomization / HelmRelease that manages it. From there the chain runs
 //! owner → source (GitRepository/OCIRepository/HelmChart/…) → the revision
-//! actually applied, plus any `dependsOn` Kustomizations that gate it.
+//! actually applied, plus the `dependsOn` objects of the owner's kind that
+//! gate it.
 //!
 //! This module is pure: it extracts the references to follow (so the app knows
 //! what to fetch) and, given the fetched objects, formats the chain into
@@ -54,7 +55,7 @@ pub struct Evidence {
     pub owner: Option<Node>,
     /// The source the owner reconciles from.
     pub source: Option<Node>,
-    /// `dependsOn` Kustomizations that gate the owner.
+    /// `dependsOn` objects, of the owner's kind, that gate the owner.
     pub deps: Vec<Node>,
 }
 
@@ -137,17 +138,20 @@ pub fn source_ref(owner: &DynamicObject) -> Option<FluxRef> {
         .or_else(|| d.pointer("/spec/chart/spec/sourceRef").and_then(from))
 }
 
-/// The `dependsOn` Kustomizations gating `owner` (namespace defaults to the
-/// owner's). A ResourceSet's `dependsOn` names arbitrary objects with CEL
+/// The `dependsOn` objects gating `owner` (namespace defaults to the owner's).
+/// A Flux dependency names no kind: it is an object of the declaring owner's
+/// kind, so a Kustomization waits on Kustomizations and a HelmRelease on
+/// HelmReleases. A ResourceSet's `dependsOn` names arbitrary objects with CEL
 /// readiness checks, which this chain can't judge, so it contributes none.
 pub fn depends_on(owner: &DynamicObject) -> Vec<FluxRef> {
-    if owner
+    let Some(kind) = owner
         .types
         .as_ref()
-        .is_some_and(|t| is_operator_kind(&t.kind))
-    {
+        .map(|t| t.kind.as_str())
+        .filter(|kind| !kind.is_empty() && !is_operator_kind(kind))
+    else {
         return Vec::new();
-    }
+    };
     let owner_ns = owner.metadata.namespace.clone().unwrap_or_default();
     owner
         .data
@@ -157,7 +161,7 @@ pub fn depends_on(owner: &DynamicObject) -> Vec<FluxRef> {
             deps.iter()
                 .filter_map(|d| {
                     Some(FluxRef {
-                        kind: "Kustomization".into(),
+                        kind: kind.to_string(),
                         name: d.get("name").and_then(Value::as_str)?.to_string(),
                         namespace: d
                             .get("namespace")
@@ -745,8 +749,32 @@ mod tests {
         assert_eq!(src.namespace, "flux-system"); // defaulted to owner ns
         let deps = depends_on(&ks);
         assert_eq!(deps.len(), 2);
+        assert_eq!(deps[0].kind, "Kustomization");
         assert_eq!(deps[0].namespace, "flux-system");
         assert_eq!(deps[1].namespace, "other");
+    }
+
+    #[test]
+    fn depends_on_inherits_the_declaring_kind() {
+        let hr = obj(json!({
+            "apiVersion":"helm.toolkit.fluxcd.io/v2","kind":"HelmRelease",
+            "metadata":{"name":"web","namespace":"apps"},
+            "spec":{"dependsOn":[{"name":"db"}]}
+        }));
+        assert_eq!(
+            depends_on(&hr),
+            vec![FluxRef {
+                kind: "HelmRelease".into(),
+                name: "db".into(),
+                namespace: "apps".into(),
+            }]
+        );
+
+        let untyped = obj(json!({
+            "metadata":{"name":"web","namespace":"apps"},
+            "spec":{"dependsOn":[{"name":"db"}]}
+        }));
+        assert!(depends_on(&untyped).is_empty());
     }
 
     #[test]
