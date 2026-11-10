@@ -359,6 +359,17 @@ namespace_selected = "W"
 log_marker = "m"
 ```
 
+Line selection uses `select_lines` (`V`), `copy_lines` (`y`), and
+`selection_other_end` (`o`) in `[keys.logs]`, `[keys.detail]`, `[keys.diff]`,
+and `[keys.events]`. `copy` (`c`) also copies an open selection:
+
+```toml
+[keys.logs]
+select_lines = "v"
+copy_lines = "Y"
+selection_other_end = "O"
+```
+
 Use `[]` to disable an action. Custom keys use the normal conflict checks.
 
 ## Skins

@@ -184,6 +184,18 @@ include those conditions. Row filters can search the route paths.
   copying, and refresh still work. The document setting is kept for the current
   session, including new documents, and is separate from the Logs setting.
 
+- **Line selection** - `V` in logs, YAML, describe, diff, and events starts a
+  selection of whole lines at a cursor. The cursor starts on the current search
+  match, or on the first visible line. `j`/`k`, `g`/`G`, and `ctrl-f`/`ctrl-b`
+  extend it, and so do `n`/`N` in document views. `o` moves to the other end.
+  Selected lines have a background and a marker in a left gutter. `y` or `c`
+  copies them and ends the selection, `esc` cancels it. Lines are copied whole,
+  as `c` copies them: wrap and sideways scroll do not matter, JSON logs copy as
+  raw records, and log markers are left out. In logs the selection covers the
+  lines the filter shows. Autoscroll pauses while it is open and the stream
+  keeps filling the buffer. The selection stays on its lines when new lines
+  arrive; if trimming removes its start, it starts at the oldest kept line.
+
 - **Document wrapping** - set `detail_wrap = true` to enable line wrapping at
   startup. The `w` key changes wrapping for the session. New documents, reloads,
   and context switches keep the selected setting.

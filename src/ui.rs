@@ -2175,7 +2175,14 @@ fn draw_scrollable(
 ) {
     let inner_w = area.width.saturating_sub(if fullscreen { 0 } else { 2 }) as usize;
     let inner_h = area.height.saturating_sub(if fullscreen { 1 } else { 2 }) as usize;
-    view.set_viewport(inner_w, inner_h);
+    let selection = view.selection();
+    let content_w = if selection.is_some() {
+        inner_w.saturating_sub(SELECTION_GUTTER).max(1)
+    } else {
+        inner_w
+    };
+    view.set_viewport(content_w, inner_h);
+    view.reveal_selection();
     let (start, end, row_offset) = view.visible_source_window();
     let text: Vec<Line> = view
         .lines
@@ -2187,10 +2194,31 @@ fn draw_scrollable(
             highlight_matches(Line::from(highlight_yaml(&line)), &view.filter)
         })
         .collect();
-    let text = if view.wrap {
-        visible_wrapped_rows(text, inner_w, row_offset, inner_h)
-    } else {
-        text
+    let text = match selection {
+        Some(selection) => {
+            let range = selection.range();
+            let rows: Vec<_> = text
+                .into_iter()
+                .zip(start..)
+                .flat_map(|(line, i)| {
+                    let mark = range.contains(&i).then_some(i == selection.cursor);
+                    let rows = if view.wrap {
+                        wrap_line(line, content_w)
+                    } else {
+                        vec![skip_columns(line, view.hscroll)]
+                    };
+                    rows.into_iter()
+                        .enumerate()
+                        .map(move |(row, line)| (line, mark.map(|cursor| cursor && row == 0)))
+                })
+                .skip(row_offset)
+                .take(inner_h)
+                .map(|(line, mark)| selection_row(line, mark))
+                .collect();
+            rows
+        }
+        None if view.wrap => visible_wrapped_rows(text, inner_w, row_offset, inner_h),
+        None => text,
     };
     let block = Block::default()
         .borders(if fullscreen {
@@ -2204,7 +2232,7 @@ fn draw_scrollable(
     let p = Paragraph::new(text).block(block);
     // Wrapped lines are already sliced to the exact visible display rows;
     // otherwise honor the horizontal offset for content past the right edge.
-    let p = if view.wrap {
+    let p = if view.wrap || selection.is_some() {
         p
     } else {
         p.scroll((0, view.hscroll.min(u16::MAX as usize) as u16))
@@ -2213,6 +2241,31 @@ fn draw_scrollable(
     if !fullscreen {
         draw_document_scrollbars(frame, show_scrollbars, view, area);
     }
+}
+
+/// Columns the selection markers take at the left of logs and documents.
+const SELECTION_GUTTER: usize = 2;
+
+/// Prefix a row with its selection gutter. `mark` is `None` outside the
+/// selection, `Some(true)` on the cursor's first row and `Some(false)` on the
+/// other selected rows, which also take a background.
+fn selection_row(line: Line<'static>, mark: Option<bool>) -> Line<'static> {
+    let (gutter, style) = match mark {
+        None => ("  ", Style::default()),
+        Some(true) => (
+            "▶ ",
+            Style::default()
+                .fg(theme::lavender())
+                .add_modifier(Modifier::BOLD),
+        ),
+        Some(false) => ("▌ ", Style::default().fg(theme::lavender())),
+    };
+    let mut line = line;
+    line.spans.insert(0, Span::styled(gutter, style));
+    if mark.is_some() {
+        line = line.patch_style(Style::default().bg(theme::surface1()));
+    }
+    line
 }
 
 fn visible_wrapped_rows(
@@ -2266,12 +2319,20 @@ fn draw_logs(frame: &mut Frame, app: &mut App, area: Rect) {
         && !(filter.len() >= 2 && filter.starts_with('/') && filter.ends_with('/'));
     let highlight = if is_plain { filter.as_str() } else { "" };
 
+    // A line selection takes a gutter column for its markers.
+    let selecting = app.logs.selecting();
+    let content_w = if selecting {
+        inner_w.saturating_sub(SELECTION_GUTTER).max(1)
+    } else {
+        inner_w
+    };
+
     // Which lines pass the filter, and where each starts in display rows.
     // Maintained incrementally across frames (see `LogIndex`) rather than
     // rebuilt: the buffer runs to 100k lines while paused, and the viewport
     // shows ~40.
     let wrap = app.logs.wrap;
-    let wrap_width = if wrap { inner_w } else { 0 };
+    let wrap_width = if wrap { content_w } else { 0 };
     let total_rows = app.logs.refresh_index(wrap_width).total_rows();
 
     // Record viewport geometry (display rows) so key handlers clamp the scroll
@@ -2279,7 +2340,8 @@ fn draw_logs(frame: &mut Frame, app: &mut App, area: Rect) {
     // into rows when shifting a paused anchor.
     app.logs.viewport_rows = total_rows;
     app.logs.viewport_h = inner_h;
-    app.logs.last_wrap_width = if app.logs.wrap { inner_w } else { 0 };
+    app.logs.last_wrap_width = wrap_width;
+    app.logs.reveal_selection();
 
     // Deepest offset pins the last full page to the viewport bottom; that same
     // value is where `follow` anchors, so pausing freezes exactly in place.
@@ -2299,6 +2361,7 @@ fn draw_logs(frame: &mut Frame, app: &mut App, area: Rect) {
     // The first one is found by binary search over the index's cumulative row
     // ends, not by walking the buffer from the top.
     let mut rows: Vec<Line> = Vec::with_capacity(inner_h);
+    let mut marks: Vec<Option<bool>> = Vec::with_capacity(inner_h);
     {
         let index = app.logs.index();
         let first = index.first_at_row(scroll);
@@ -2308,9 +2371,11 @@ fn draw_logs(frame: &mut Frame, app: &mut App, area: Rect) {
                 break;
             }
             let Some(buf_idx) = index.line_at(i) else {
-                rows.push(Line::styled("-".repeat(inner_w), theme::dim()));
+                rows.push(Line::styled("-".repeat(content_w), theme::dim()));
+                marks.push(None);
                 continue;
             };
+            let selected = app.logs.line_selected(buf_idx);
             let l = app.logs.display_line(buf_idx);
             let severity = app.logs.record_severity(buf_idx);
             let record = app.logs.record_parts(buf_idx).zip(severity);
@@ -2330,23 +2395,24 @@ fn draw_logs(frame: &mut Frame, app: &mut App, area: Rect) {
                     ),
                 };
                 let parts = if wrap {
-                    wrap_line(line, inner_w)
+                    wrap_line(line, content_w)
                 } else {
                     vec![line]
                 };
                 for sub in parts {
                     let r = row + offset;
-                    offset += 1;
                     if r >= scroll && r < scroll + inner_h {
                         rows.push(sub);
+                        marks.push(selected.map(|cursor| cursor && offset == 0));
                     }
+                    offset += 1;
                 }
             }
         }
     }
 
     let flags = format!(
-        "{}{}{}{}{}{}",
+        "{}{}{}{}{}{}{}",
         match app.logs.json {
             crate::app::JsonView::Raw => "",
             crate::app::JsonView::Record => " record",
@@ -2366,6 +2432,11 @@ fn draw_logs(frame: &mut Frame, app: &mut App, area: Rect) {
         },
         if app.logs.wrap { " wrap" } else { "" },
         if app.logs.timestamps { " ts" } else { "" },
+        if selecting {
+            format!(" ▌{} selected", app.logs.selected_lines())
+        } else {
+            String::new()
+        },
         // Provider views manage the window in their own title suffix.
         match app.logs.anchor_label() {
             Some(l) if !app.provider_logs_active() => format!(" ⏱{l}"),
@@ -2397,7 +2468,7 @@ fn draw_logs(frame: &mut Frame, app: &mut App, area: Rect) {
     app.logs.max_hscroll = if wrap {
         0
     } else {
-        widest.saturating_sub(inner_w)
+        widest.saturating_sub(content_w)
     };
     let hscroll = app.logs.view.hscroll.min(app.logs.max_hscroll);
     app.logs.view.hscroll = hscroll;
@@ -2405,6 +2476,13 @@ fn draw_logs(frame: &mut Frame, app: &mut App, area: Rect) {
         rows = rows
             .into_iter()
             .map(|line| skip_columns(line, hscroll))
+            .collect();
+    }
+    if selecting {
+        rows = rows
+            .into_iter()
+            .zip(marks)
+            .map(|(line, mark)| selection_row(line, mark))
             .collect();
     }
     let block = if fullscreen {
@@ -3084,16 +3162,19 @@ fn draw_diff(
 /// Doc-view title, extended with the active search query and the current
 /// match position (` title · /query [2/5] `, or `[no matches]`), vim-style.
 fn doc_title(view: &crate::app::Scrollable) -> String {
+    let selected = view.selection().map_or_else(String::new, |selection| {
+        format!("▌{} selected ", selection.range().count())
+    });
     if view.filter.is_empty() {
-        return format!(" {} ", view.title);
+        return format!(" {} {selected}", view.title);
     }
     let matches = view.match_lines();
     if matches.is_empty() {
-        format!(" {} · /{} [no matches] ", view.title, view.filter)
+        format!(" {} · /{} [no matches] {selected}", view.title, view.filter)
     } else {
         let cur = view.match_idx.min(matches.len() - 1) + 1;
         format!(
-            " {} · /{} [{}/{}] ",
+            " {} · /{} [{}/{}] {selected}",
             view.title,
             view.filter,
             cur,
@@ -3326,6 +3407,18 @@ fn build_help(app: &App, width: usize) -> (Vec<Line<'static>>, String, HelpSecti
             "scroll left (unwrapped lines)"
         } else if scope == "logs" && action == Action::Right {
             "scroll right (unwrapped lines)"
+        } else if scope == "logs" && action == Action::SelectLines {
+            "select whole lines the filter shows; movement keys extend it and autoscroll pauses"
+        } else if action == Action::SelectLines {
+            "select whole lines; movement and match keys extend it"
+        } else if scope == "logs" && action == Action::Copy {
+            "copy the shown lines, or only the selected ones"
+        } else if action == Action::Copy && matches!(scope, "detail" | "diff" | "events") {
+            "copy the document, or only the selected lines"
+        } else if scope == "logs" && action == Action::Back {
+            "cancel the selection, or go back"
+        } else if action == Action::Back && matches!(scope, "detail" | "diff" | "events") {
+            "cancel the selection, then clear the search, then go back"
         } else if action == Action::LogMarker {
             "add visual marker at the log tail (excluded from copy/save)"
         } else if action == Action::Fullscreen {
@@ -6189,6 +6282,24 @@ fn navigation_hint(app: &App, width: u16) -> Line<'static> {
                 (Action::Accept, "start"),
                 (Action::Edit, "edit local port"),
                 (Action::Back, "back"),
+            ],
+        );
+    }
+    let selecting = match scope {
+        "logs" => app.logs.selecting(),
+        "detail" | "diff" | "events" => app.detail.selection().is_some(),
+        _ => false,
+    };
+    if selecting {
+        return key_hint(
+            app,
+            scope,
+            &[
+                (Action::Down, "extend"),
+                (Action::Up, "extend"),
+                (Action::SelectionOtherEnd, "other end"),
+                (Action::CopyLines, "copy"),
+                (Action::Back, "cancel"),
             ],
         );
     }
