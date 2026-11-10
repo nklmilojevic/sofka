@@ -4,6 +4,12 @@ use super::*;
 /// is unbounded in attempts, so this is belt and braces rather than a real path.
 const NODE_PODS_BACKOFF_CEILING: Duration = Duration::from_secs(30);
 
+enum MessageSelection {
+    Unchanged,
+    Restore,
+    FilterReselected,
+}
+
 fn node_pods_watch_forbidden(error: &watcher::Error) -> bool {
     match error {
         watcher::Error::InitialListFailed(kube::Error::Api(status))
@@ -1136,7 +1142,7 @@ impl App {
     pub fn handle_msg(&mut self, msg: Msg) {
         let faults_active = self.faults_filter_active();
         let saved = self.faults_selection();
-        if self.handle_msg_unrestored(msg) && faults_active {
+        if matches!(self.handle_msg_unrestored(msg), MessageSelection::Restore) && faults_active {
             self.restore_faults_selection(saved);
         }
     }
@@ -1144,18 +1150,26 @@ impl App {
     /// Apply a batch of messages and restore the faults filter selection once.
     pub fn handle_msgs(&mut self, msgs: impl IntoIterator<Item = Msg>) {
         let faults_active = self.faults_filter_active();
-        let saved = self.faults_selection();
+        let mut saved = self.faults_selection();
         let generation = self.generation;
         let mut restore = false;
         for msg in msgs {
-            restore |= self.handle_msg_unrestored(msg);
+            match self.handle_msg_unrestored(msg) {
+                MessageSelection::Restore => restore = true,
+                MessageSelection::FilterReselected => {
+                    // Later messages must preserve the completed selection.
+                    saved = self.faults_selection();
+                    restore = false;
+                }
+                MessageSelection::Unchanged => {}
+            }
         }
         if restore && faults_active && generation == self.generation {
             self.restore_faults_selection(saved);
         }
     }
 
-    fn handle_msg_unrestored(&mut self, msg: Msg) -> bool {
+    fn handle_msg_unrestored(&mut self, msg: Msg) -> MessageSelection {
         let refresh_containers = match &msg {
             Msg::Applied {
                 generation, key, ..
@@ -1172,7 +1186,7 @@ impl App {
             }
             _ => false,
         };
-        let restore = self.handle_msg_inner(msg);
+        let selection = self.handle_msg_inner(msg);
         if refresh_containers {
             self.sync_container_picker();
         }
@@ -1192,7 +1206,7 @@ impl App {
         if self.pvc.active && !overlay {
             self.leave_pvc_explore();
         }
-        restore
+        selection
     }
 
     fn faults_selection(&self) -> Option<(String, Option<String>)> {
@@ -1214,7 +1228,7 @@ impl App {
         self.table_state.select(index);
     }
 
-    fn handle_msg_inner(&mut self, msg: Msg) -> bool {
+    fn handle_msg_inner(&mut self, msg: Msg) -> MessageSelection {
         let preserve_selection = matches!(
             &msg,
             Msg::Applied { generation, .. }
@@ -2269,6 +2283,16 @@ impl App {
             }
             _ => {} // stale generation, drop
         }
-        !self.finish_filter_reselect() && preserve_selection
+        if self.finish_filter_reselect() {
+            if self.filter_reselect.is_none() {
+                MessageSelection::FilterReselected
+            } else {
+                MessageSelection::Unchanged
+            }
+        } else if preserve_selection {
+            MessageSelection::Restore
+        } else {
+            MessageSelection::Unchanged
+        }
     }
 }

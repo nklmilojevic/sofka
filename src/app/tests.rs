@@ -18938,6 +18938,63 @@ async fn faults_filter_keeps_the_selection_across_a_batch() {
 }
 
 #[tokio::test]
+async fn faults_filter_batch_keeps_a_completed_filter_reselect() {
+    for trailing_update in [false, true] {
+        let (mut app, _rx) = test_app();
+        app.switch_kind("pods");
+        let crash = |name: &str| {
+            let mut pod = faults_test_pod(name);
+            pod["status"]["containerStatuses"][0]["state"] =
+                json!({"waiting": {"reason": "CrashLoopBackOff"}});
+            pod
+        };
+        for name in ["b-crash", "d-crash"] {
+            apply(&mut app, crash(name));
+        }
+        app.handle_msg(Msg::Synced {
+            generation: app.generation,
+        });
+        app.handle_key(press(KeyCode::End)).unwrap();
+        type_filter(&mut app, "-l app=web");
+        apply(&mut app, crash("b-crash"));
+        app.handle_key(ctrl(KeyCode::Char('z'))).unwrap();
+        assert_eq!(selected_name(&app).as_deref(), Some("b-crash"));
+        assert_eq!(
+            app.filter_reselect
+                .as_ref()
+                .map(|pending| pending.key.as_str()),
+            Some("default/d-crash")
+        );
+
+        let generation = app.generation;
+        let applied = |name| {
+            let o = obj(crash(name));
+            Msg::Applied {
+                generation,
+                key: row_key(&o),
+                obj: Box::new(o),
+            }
+        };
+        let mut batch = vec![
+            Msg::Reset { generation },
+            applied("b-crash"),
+            applied("d-crash"),
+            Msg::Synced { generation },
+        ];
+        if trailing_update {
+            batch.push(applied("a-crash"));
+        }
+        app.handle_msgs(batch);
+        assert!(app.filter_reselect.is_none());
+        assert_eq!(
+            selected_name(&app).as_deref(),
+            Some("d-crash"),
+            "trailing update: {trailing_update}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn faults_filter_batch_drops_a_selection_that_was_deleted() {
     let (mut app, _rx) = faults_batch_app();
     let (mut single, _single_rx) = faults_batch_app();
