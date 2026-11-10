@@ -20,6 +20,9 @@ fmt-check: rust::fmt-check
 # Run clippy with the same policy as CI.
 clippy: rust::clippy
 
+# Lint the benchmarks and probes, which need the bench feature.
+clippy-bench: rust::clippy-bench
+
 # Run the unit test suite.
 test: rust::test
 
@@ -27,7 +30,7 @@ test: rust::test
 coverage: rust::coverage
 
 # Fast local confidence check.
-check: fmt-check clippy test
+check: fmt-check clippy clippy-bench test
 
 # Build the debug binary.
 build: rust::build

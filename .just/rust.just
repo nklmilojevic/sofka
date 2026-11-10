@@ -19,6 +19,10 @@ fmt-check:
 clippy:
     cd "{{ root }}" && cargo clippy --locked --all-targets -- -D warnings
 
+# Lint the targets that only build with the bench feature.
+clippy-bench:
+    cd "{{ root }}" && cargo clippy --locked --features bench,dhat-heap --benches --examples -- -D warnings
+
 # Run the unit test suite.
 test:
     cd "{{ root }}" && cargo test --locked
