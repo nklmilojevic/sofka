@@ -22,6 +22,28 @@ converted settings in memory. See [palette migration](keybindings.md#legacy-pale
 
 Everything below is optional. An empty config behaves like no config.
 
+## Edit config from the TUI
+
+`:config edit [base|cluster|context]` opens one level's config file for the
+current context in your editor: `KUBE_EDITOR`, then `EDITOR`, as for `e`.
+Without a level it opens `base`. The TUI suspends while the editor runs. When
+the editor exits, sofka reloads the config like `:reload`. An invalid file keeps
+the previous config and lists the errors in `:config`. If the editor exits with
+an error, sofka does not reload; `:reload` applies what you saved.
+
+- `base` is the config file in the config directory. Drop-in files in `conf.d/`
+  are not opened.
+- `cluster` and `context` are the
+  [override files](#per-cluster-and-per-context-overrides) of the current
+  kubeconfig cluster and context.
+
+The existing file opens as it is, TOML or YAML. A level without a file gets an
+empty `config.toml` that only you can read, and its directories are created. sofka refuses a level
+with conflicting files (`:config` lists them), and a file that is a symlink or
+not writable, such as one managed by Home Manager: edit that file at its source.
+The command also works in read-only mode, because it changes local files, not
+the cluster. sofka never writes settings into the file itself.
+
 ## Experimental native describe
 
 Describe uses kubectl by default. Opt into the experimental Rust `deskribe`
@@ -339,6 +361,8 @@ order. Recent namespace changes do not change these assignments. Extra entries
 remain available through `n`. Empty or unconfigured slots do nothing. The same
 keys work inside the namespace switcher while its filter is empty, and the
 header shows the configured favourites next to the current namespace.
+`:config edit` opens the base file to change the list, and
+`:config edit context` opens the file for the current context only.
 
 To change or disable a shortcut, use the existing key configuration:
 
@@ -414,7 +438,8 @@ color alone.
 
 The table merges key by key like other tables, so a cluster file can set
 `color` and each context file only its `label`. Changes apply on `:reload` and
-on every `:ctx` switch.
+on every `:ctx` switch. `:config edit cluster` and `:config edit context` open
+the current context's files and apply the change when the editor closes.
 
 Custom columns accept a single `path` string or an ordered list of fallback
 paths. sofka uses the first value that exists and is not `null`. See
@@ -582,7 +607,8 @@ A context file under that cluster can then change only the label, for example
 A skin in an override sets the colors for that context. A context with no skin
 keeps the session skin (config `skin.name`, the auto-detected default, or your
 last `:skin` choice). Overrides are re-read on every `:ctx` switch, so edits
-apply without a restart.
+apply without a restart. `:config edit cluster` and `:config edit context` open
+the files of the current context, creating them if needed.
 
 ## Plugin packages
 

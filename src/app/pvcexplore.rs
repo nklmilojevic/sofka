@@ -977,6 +977,7 @@ impl App {
     /// is still using it.
     pub fn after_suspend(&mut self) {
         self.finish_secret_edit();
+        self.finish_config_edit();
         if std::mem::take(&mut self.reload_after_suspend) {
             self.reload_document();
         }

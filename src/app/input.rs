@@ -664,6 +664,7 @@ impl App {
             SuggestKind::Namespace => namespace_word(&self.command).unwrap_or(1),
             SuggestKind::Context => 1,
             SuggestKind::Layout => layout_word(&self.command).unwrap_or(1),
+            SuggestKind::ConfigArg => config_edit::config_word(&self.command),
             _ => 0,
         };
         let span = self.command.split_whitespace().nth(slot).map(|word| {
@@ -791,6 +792,20 @@ impl App {
                     self.set_layout(&s.label);
                 }
             }
+            // A highlighted word replaces the one being typed. With nothing
+            // typed in its place, the line runs as it is, so `:config ` and
+            // `:config edit ` keep their bare meaning.
+            Some(SuggestKind::ConfigArg) => {
+                let slot = config_edit::config_word(&raw);
+                let mut words: Vec<&str> = raw.split_whitespace().collect();
+                if let Some(s) = picked.as_ref()
+                    && (words.len() > slot || navigated)
+                {
+                    words.truncate(slot);
+                    words.push(&s.label);
+                }
+                self.run_palette_command(&words.join(" "));
+            }
             // A name owned by a CRD resolves to the CRD even when a
             // built-in command shares it — the cluster's vocabulary
             // outranks ours, and the suggestion list already ranks the
@@ -836,7 +851,8 @@ impl App {
                         | SuggestKind::Context
                         | SuggestKind::Bookmark
                         | SuggestKind::Workspace
-                        | SuggestKind::Layout => {}
+                        | SuggestKind::Layout
+                        | SuggestKind::ConfigArg => {}
                     }
                 } else if !head.is_empty() {
                     self.switch_kind_ns(&head, ns_arg);
@@ -1015,6 +1031,14 @@ impl App {
             self.switch_kind_ns(first, parts.next());
             return true;
         }
+        // `:config edit [level]` opens a config file; bare `:config` shows
+        // the sources.
+        if let Some((first, args)) = cmd.split_once(char::is_whitespace)
+            && matches!(first, "config" | "cfg")
+        {
+            self.run_config_command(args);
+            return true;
+        }
         if let Some(args) = cmd.strip_prefix("policy ") {
             self.open_policy(args.trim());
             return true;
@@ -1095,6 +1119,10 @@ impl App {
         }) {
             if is_ctx_command(&head) {
                 self.suggest_contexts(&arg);
+                return;
+            }
+            if matches!(head.as_str(), "config" | "cfg") && self.cluster.resolve(&head).is_none() {
+                self.suggest_config_args();
                 return;
             }
             if head == "layout" && self.cluster.resolve(&head).is_none() {
