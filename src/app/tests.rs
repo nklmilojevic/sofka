@@ -10,6 +10,7 @@ use tokio::sync::mpsc::{self, Receiver};
 mod clipboard;
 mod context_badge;
 mod credentials;
+mod delete;
 mod dir;
 mod exec_auth;
 mod flux;
