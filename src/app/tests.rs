@@ -19447,6 +19447,157 @@ async fn toggling_the_faults_filter_keeps_the_selected_object() {
     );
 }
 
+fn faults_batch_app() -> (App, Receiver<Msg>) {
+    let (mut app, rx) = test_app();
+    app.switch_kind("pods");
+    for (name, faulty) in [
+        ("a-ok", false),
+        ("b-crash", true),
+        ("c-ok", false),
+        ("d-crash", true),
+    ] {
+        let mut pod = faults_test_pod(name);
+        if faulty {
+            pod["status"]["containerStatuses"][0]["state"] =
+                json!({"waiting": {"reason": "CrashLoopBackOff"}});
+        }
+        apply(&mut app, pod);
+    }
+    app.handle_key(ctrl(KeyCode::Char('z'))).unwrap();
+    app.handle_key(press(KeyCode::End)).unwrap();
+    assert_eq!(selected_name(&app).as_deref(), Some("d-crash"));
+    (app, rx)
+}
+
+#[tokio::test]
+async fn faults_filter_keeps_the_selection_across_a_batch() {
+    let (mut app, _rx) = faults_batch_app();
+    let batch: Vec<_> = ["a-crash", "b-crash", "c-ok"]
+        .into_iter()
+        .map(|name| {
+            let mut pod = faults_test_pod(name);
+            pod["status"]["containerStatuses"][0]["state"] =
+                json!({"waiting": {"reason": "CrashLoopBackOff"}});
+            let o = obj(pod);
+            Msg::Applied {
+                generation: app.generation,
+                key: row_key(&o),
+                obj: Box::new(o),
+            }
+        })
+        .collect();
+    app.handle_msgs(batch);
+    assert_eq!(selected_name(&app).as_deref(), Some("d-crash"));
+    assert_eq!(row_names(&app), ["a-crash", "b-crash", "c-ok", "d-crash"]);
+}
+
+#[tokio::test]
+async fn faults_filter_batch_keeps_a_completed_filter_reselect() {
+    for trailing_update in [false, true] {
+        let (mut app, _rx) = test_app();
+        app.switch_kind("pods");
+        let crash = |name: &str| {
+            let mut pod = faults_test_pod(name);
+            pod["status"]["containerStatuses"][0]["state"] =
+                json!({"waiting": {"reason": "CrashLoopBackOff"}});
+            pod
+        };
+        for name in ["b-crash", "d-crash"] {
+            apply(&mut app, crash(name));
+        }
+        app.handle_msg(Msg::Synced {
+            generation: app.generation,
+        });
+        app.handle_key(press(KeyCode::End)).unwrap();
+        type_filter(&mut app, "-l app=web");
+        apply(&mut app, crash("b-crash"));
+        app.handle_key(ctrl(KeyCode::Char('z'))).unwrap();
+        assert_eq!(selected_name(&app).as_deref(), Some("b-crash"));
+        assert_eq!(
+            app.filter_reselect
+                .as_ref()
+                .map(|pending| pending.key.as_str()),
+            Some("default/d-crash")
+        );
+
+        let generation = app.generation;
+        let applied = |name| {
+            let o = obj(crash(name));
+            Msg::Applied {
+                generation,
+                key: row_key(&o),
+                obj: Box::new(o),
+            }
+        };
+        let mut batch = vec![
+            Msg::Reset { generation },
+            applied("b-crash"),
+            applied("d-crash"),
+            Msg::Synced { generation },
+        ];
+        if trailing_update {
+            batch.push(applied("a-crash"));
+        }
+        app.handle_msgs(batch);
+        assert!(app.filter_reselect.is_none());
+        assert_eq!(
+            selected_name(&app).as_deref(),
+            Some("d-crash"),
+            "trailing update: {trailing_update}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn faults_filter_batch_drops_a_selection_that_was_deleted() {
+    let (mut app, _rx) = faults_batch_app();
+    let (mut single, _single_rx) = faults_batch_app();
+    single.handle_msg(Msg::Deleted {
+        generation: single.generation,
+        key: "default/d-crash".into(),
+    });
+    app.handle_msgs([Msg::Deleted {
+        generation: app.generation,
+        key: "default/d-crash".into(),
+    }]);
+    assert_eq!(selected_name(&app), selected_name(&single));
+    assert_eq!(app.table_state.selected(), single.table_state.selected());
+    assert_eq!(row_names(&app), row_names(&single));
+    assert_eq!(selected_name(&app), None);
+}
+
+#[tokio::test]
+async fn faults_filter_batch_leaves_selection_unchanged_when_filter_is_off() {
+    let (mut app, _rx) = faults_batch_app();
+    app.handle_key(ctrl(KeyCode::Char('z'))).unwrap();
+    let selected = app.table_state.selected();
+    let o = obj(faults_test_pod("b-crash"));
+    app.handle_msgs([Msg::Applied {
+        generation: app.generation,
+        key: row_key(&o),
+        obj: Box::new(o),
+    }]);
+    assert_eq!(app.table_state.selected(), selected);
+    assert_eq!(selected_name(&app).as_deref(), Some("d-crash"));
+}
+
+#[tokio::test]
+async fn faults_filter_batch_does_not_restore_after_a_generation_change() {
+    let (mut app, _rx) = faults_batch_app();
+    let generation = app.generation;
+    app.handle_msgs([
+        Msg::Synced { generation },
+        Msg::ContextSwitched {
+            generation,
+            name: "test".into(),
+            result: Ok(Box::new(Cluster::fake())),
+        },
+    ]);
+    assert_ne!(app.generation, generation);
+    assert_eq!(app.table_state.selected(), Some(0));
+    assert_eq!(selected_name(&app), None);
+}
+
 #[tokio::test]
 async fn toggling_the_faults_filter_during_a_relist_keeps_the_fallback_row() {
     let (mut app, _rx) = test_app();

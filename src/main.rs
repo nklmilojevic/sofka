@@ -1359,11 +1359,10 @@ async fn run(
                 }
             }
             Some(msg) = rx.recv() => {
-                app.handle_msg(msg);
                 // Batch any other queued updates before the next redraw.
-                while let Ok(m) = rx.try_recv() {
-                    app.handle_msg(m);
-                }
+                app.handle_msgs(
+                    std::iter::once(msg).chain(std::iter::from_fn(|| rx.try_recv().ok())),
+                );
                 if let Some(text) = app.take_notification() {
                     app.run_notify_command(&text);
                     ring_notification(&text, &app.notify_cfg);
