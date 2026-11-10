@@ -273,19 +273,34 @@ fn gitops_texts(app: &App) -> Vec<&str> {
 
 #[tokio::test]
 async fn gitops_on_a_terraform_follows_its_own_source_and_terraform_dependencies() {
-    for owner_label in [false, true] {
+    for owner in [None, Some("Kustomization"), Some("ResourceSet")] {
         let mut vpc = planned("vpc", "plan-main-def", false);
         vpc["spec"]["dependsOn"] = json!([{"name": "network"}]);
         vpc["status"]["inventory"] = json!({"entries": [
             {"n": "subnet", "t": "aws_subnet", "id": "subnet-0123"}
         ]});
-        if owner_label {
-            vpc["metadata"]["labels"] = json!({
-                "kustomize.toolkit.fluxcd.io/name": "apps",
-                "kustomize.toolkit.fluxcd.io/namespace": "flux-system"
-            });
+        match owner {
+            Some("Kustomization") => {
+                vpc["metadata"]["labels"] = json!({
+                    "kustomize.toolkit.fluxcd.io/name": "apps",
+                    "kustomize.toolkit.fluxcd.io/namespace": "flux-system"
+                });
+            }
+            Some(_) => {
+                vpc["metadata"]["labels"] = json!({
+                    "resourceset.fluxcd.controlplane.io/name": "apps",
+                    "resourceset.fluxcd.controlplane.io/namespace": "flux-system"
+                });
+            }
+            None => {}
         }
-        let (app, rx) = terraform_app();
+        let (mut app, rx) = terraform_app();
+        app.cluster.register_kind(
+            "fluxcd.controlplane.io",
+            "ResourceSet",
+            "resourcesets",
+            true,
+        );
         let (mut app, mut rx, responses, requests) =
             health_report_app_with(app, rx, "terraforms", vpc.clone());
         let tf = "/apis/infra.contrib.fluxcd.io/v1alpha2/namespaces/default/terraforms";
@@ -320,20 +335,38 @@ async fn gitops_on_a_terraform_follows_its_own_source_and_terraform_dependencies
                     }),
                 ),
             ),
+            (
+                "/apis/fluxcd.controlplane.io/v1/namespaces/flux-system/resourcesets/apps"
+                    .to_string(),
+                (
+                    200,
+                    json!({
+                        "apiVersion": "fluxcd.controlplane.io/v1", "kind": "ResourceSet",
+                        "metadata": {"name": "apps", "namespace": "flux-system"},
+                        "status": {"conditions": [{"type": "Ready", "status": "True"}]}
+                    }),
+                ),
+            ),
         ]);
         open_health_report_key(&mut app, true);
         receive_health_report(&mut app, &mut rx, true).await;
         let texts = gitops_texts(&app);
 
-        let headline = if owner_label {
-            "Terraform/vpc is managed by Kustomization/apps"
-        } else {
-            "Terraform/vpc — Flux Terraform"
+        let headline = match owner {
+            Some(kind) => format!("Terraform/vpc is managed by {kind}/apps"),
+            None => "Terraform/vpc — Flux Terraform".to_string(),
         };
         assert_eq!(texts[0], headline, "{texts:?}");
-        assert_eq!(texts.contains(&"Kustomization/apps"), owner_label);
+        // The headline follows the Terraform waiting for approval, not its
+        // healthy owner.
+        assert_eq!(app.gitops_items[0].level, crate::explain::Level::Warn);
+        if let Some(kind) = owner {
+            let owner_line = format!("{kind}/apps");
+            assert!(texts.contains(&owner_line.as_str()), "{texts:?}");
+        }
         assert!(texts.contains(&"Terraform/vpc"), "{texts:?}");
-        assert!(texts.contains(&"GitRepository/infra"), "{texts:?}");
+        let source = texts.iter().position(|t| *t == "Source").unwrap();
+        assert_eq!(texts[source + 1], "GitRepository/infra", "{texts:?}");
         assert!(!texts.contains(&"GitRepository/flux-system"), "{texts:?}");
         assert!(texts.contains(&"network — ready"), "{texts:?}");
         assert!(

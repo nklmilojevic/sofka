@@ -428,17 +428,21 @@ pub fn describe(ev: &Evidence) -> Vec<Finding> {
         return out;
     };
 
+    // The object the source, dependencies, and health belong to: the owner,
+    // or a Terraform that reconciles on its own under a label owner.
+    let chain = ev.reconciler.as_ref().unwrap_or(owner);
+
     // Headline.
     if ev.self_is_owner {
         out.push(finding(
             0,
-            owner_health_level(owner),
+            owner_health_level(chain),
             format!("{} — Flux {}", ev.subject, owner.reference.kind),
         ));
     } else {
         out.push(finding(
             0,
-            owner_health_level(owner),
+            owner_health_level(chain),
             format!(
                 "{} is managed by {}/{}",
                 ev.subject, owner.reference.kind, owner.reference.name
@@ -459,11 +463,11 @@ pub fn describe(ev: &Evidence) -> Vec<Finding> {
     }
 
     // Source block.
-    if !is_operator_kind(&owner.reference.kind) {
+    if !is_operator_kind(&chain.reference.kind) {
         out.push(finding(0, Level::Heading, "Source"));
     }
     match &ev.source {
-        None if is_operator_kind(&owner.reference.kind) => {}
+        None if is_operator_kind(&chain.reference.kind) => {}
         Some(src) => {
             let mut f = finding(1, source_level(src), source_line(src));
             if let Some(t) = src.target() {
@@ -491,7 +495,7 @@ pub fn describe(ev: &Evidence) -> Vec<Finding> {
 
     // Reconciliation summary: what, if anything, is blocking.
     out.push(finding(0, Level::Heading, "Reconciliation"));
-    for line in reconciliation_summary(ev, ev.reconciler.as_ref().unwrap_or(owner)) {
+    for line in reconciliation_summary(ev, chain) {
         out.push(finding(1, line.0, line.1));
     }
 
