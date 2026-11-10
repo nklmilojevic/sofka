@@ -2825,6 +2825,21 @@ impl App {
         }
     }
 
+    /// Report a failed action that started before the view changed.
+    /// Keep the current status claim so its action can still report its result.
+    pub(super) fn report_stale_failure(&mut self, message: String) {
+        self.last_action_error = Some(message.clone());
+        if self.flash.is_empty() || self.flash.ends_with('…') {
+            let owner = self.status_claim.take();
+            self.set_flash(message.clone());
+            self.flash_err = true;
+            self.status_claim = owner.map(|mut owner| {
+                owner.text = message;
+                owner
+            });
+        }
+    }
+
     /// Refresh a still-running operation's progress without giving up the
     /// claim its result has to present. Unlike [`Self::set_claimed_status`]
     /// the claim stays pending, so the operation still reports when it lands.

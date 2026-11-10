@@ -1333,6 +1333,9 @@ impl App {
             } if generation == self.generation => {
                 self.set_claimed_status(claim, message, err);
             }
+            Msg::Flash {
+                message, err: true, ..
+            } => self.report_stale_failure(message),
             Msg::UpdateCheck { claim, result } => self.finish_update_check(claim, result),
             Msg::Panic(error) => {
                 crate::log_error!("task.panic", error = error);
@@ -1846,6 +1849,10 @@ impl App {
                 claim,
                 result,
             } if generation == self.generation => self.secret_edit_applied(claim, result),
+            Msg::SecretEditApplied {
+                result: Err(message),
+                ..
+            } => self.report_stale_failure(message),
             Msg::NativeDescribeReady {
                 generation,
                 claim,

@@ -6766,6 +6766,126 @@ async fn refreshing_mid_action_drops_the_orphaned_progress_flash() {
 }
 
 #[tokio::test]
+async fn a_failure_that_lands_after_a_refresh_is_still_reported() {
+    let (mut app, _rx) = test_app();
+    app.switch_kind("pods");
+    let claim = app.claim_status("deleting 3 pods…");
+    let stale = app.generation;
+    app.handle_key(press(KeyCode::Char('r'))).unwrap();
+    assert_ne!(app.generation, stale);
+    assert!(app.flash.is_empty(), "{}", app.flash);
+
+    app.handle_msg(Msg::Flash {
+        generation: stale,
+        claim,
+        message: "delete web failed: forbidden".into(),
+        err: true,
+    });
+    assert!(app.flash.contains("delete web failed"), "{}", app.flash);
+    assert!(app.flash_err);
+    assert_eq!(
+        app.last_action_error.as_deref(),
+        Some("delete web failed: forbidden")
+    );
+}
+
+#[tokio::test]
+async fn a_late_failure_does_not_replace_a_finished_message() {
+    let (mut app, _rx) = test_app();
+    app.switch_kind("pods");
+    let claim = app.claim_status("deleting 3 pods…");
+    let stale = app.generation;
+    app.handle_key(press(KeyCode::Char('r'))).unwrap();
+    assert_ne!(app.generation, stale);
+    app.set_flash("something else");
+
+    app.handle_msg(Msg::Flash {
+        generation: stale,
+        claim,
+        message: "delete web failed: forbidden".into(),
+        err: true,
+    });
+    assert_eq!(app.flash, "something else");
+    assert!(!app.flash_err);
+    assert_eq!(
+        app.last_action_error.as_deref(),
+        Some("delete web failed: forbidden")
+    );
+}
+
+#[tokio::test]
+async fn a_late_failure_preserves_the_current_action_claim() {
+    let (mut app, _rx) = test_app();
+    app.switch_kind("pods");
+    let old = app.claim_status("deleting web…");
+    let stale = app.generation;
+    app.handle_key(press(KeyCode::Char('r'))).unwrap();
+    assert_ne!(app.generation, stale);
+    let current = app.claim_status("deleting api…");
+
+    app.handle_msg(Msg::Flash {
+        generation: stale,
+        claim: old,
+        message: "delete web failed: forbidden".into(),
+        err: true,
+    });
+    assert_eq!(app.flash, "delete web failed: forbidden");
+    assert!(app.flash_err);
+
+    app.handle_msg(Msg::Flash {
+        generation: app.generation,
+        claim: current,
+        message: "deleted api".into(),
+        err: false,
+    });
+    assert_eq!(app.flash, "deleted api");
+    assert!(!app.flash_err);
+    assert_eq!(
+        app.last_action_error.as_deref(),
+        Some("delete web failed: forbidden")
+    );
+}
+
+#[tokio::test]
+async fn a_late_secret_edit_reports_failure_without_reloading_the_document() {
+    let (mut app, _rx) = decoded_secret_app();
+    let object = app.document_source.as_ref().unwrap().object.clone();
+    let claim = app.claim_status("updating secret creds…");
+    let stale = app.generation;
+    app.handle_key(press(KeyCode::Esc)).unwrap();
+    app.handle_key(press(KeyCode::Char('r'))).unwrap();
+    assert_ne!(app.generation, stale);
+    apply(&mut app, serde_json::to_value(object).unwrap());
+    app.table_state.select(Some(0));
+    app.handle_key(press(KeyCode::Char('x'))).unwrap();
+    assert_eq!(app.mode, Mode::Detail);
+    assert!(app.document_source.is_some());
+    assert!(app.document_reload_task.is_none());
+
+    app.handle_msg(Msg::SecretEditApplied {
+        generation: stale,
+        claim,
+        result: Ok("secret creds updated".into()),
+    });
+    assert!(app.flash.is_empty(), "{}", app.flash);
+    assert!(app.last_action_error.is_none());
+    assert!(app.document_reload_task.is_none());
+
+    app.handle_msg(Msg::SecretEditApplied {
+        generation: stale,
+        claim,
+        result: Err("secret creds changed since it was read".into()),
+    });
+    assert_eq!(app.flash, "secret creds changed since it was read");
+    assert!(app.flash_err);
+    assert_eq!(
+        app.last_action_error.as_deref(),
+        Some("secret creds changed since it was read")
+    );
+    assert!(app.document_reload_task.is_none());
+}
+
+#[tokio::test]
 async fn action_progress_flashes_keep_the_ellipsis_convention() {
     // `expire_flash` reads the trailing `…` as "still running". An action that
     // forgets it gets its progress message blanked out mid-flight, which is
