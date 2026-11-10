@@ -49,6 +49,9 @@ jobs:
       - name: Clippy
         run: cargo clippy --locked --all-targets -- -D warnings
 
+      - name: Clippy (bench feature)
+        run: cargo clippy --locked --features bench,dhat-heap --benches --examples -- -D warnings
+
       - name: Test
         run: cargo test --locked
 
