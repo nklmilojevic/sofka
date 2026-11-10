@@ -1,5 +1,39 @@
 # Changelog
 
+## v0.35.0 - 2026-11-10
+
+sofka 0.34.0 adds a context picker key, line copy in logs and documents, and `:config edit`. It also fixes actions that hit the wrong target, lost failure messages, and credential leaks in files and terminal output.
+
+### New features
+
+- Adds a `contexts` table action. It opens the context picker and is unbound by default. Set a key under `[keys.table]` to use it.
+- Adds `V` to select a range of lines in logs, YAML, describe, diff, and events. Press `y` to copy the selected lines.
+- Adds `:config edit` to open a config file in your editor. sofka reloads the config when the editor closes.
+- Adds Terraform support in the Flux views for tofu-controller. Use `t` to reconcile, suspend, or resume a Terraform. The list shows the applied revision and the plan state.
+- Keeps the status colors on the cursor row in resource tables. You can read the status of a pod while the cursor is on it.
+- Publishes a Sigstore bundle with each release and signs `SHA256SUMS`. The release package guide shows how to verify a download.
+
+### Fixes
+
+- Keeps action menu targets when rows change. Enter acts on the object that the menu opened for. The saved targets clear when the menu closes.
+- Keeps the delete confirmation resource kind stable. A namespace lookup no longer changes the view during a delete.
+- Shows action failures after a refresh or view change. The status bar no longer hides them.
+- Saves bundles as private files. Masks known credential patterns in pod logs and in literal environment values with credential names.
+- Passes values in imported k9s shell scripts as arguments. A value can no longer run as a command. sofka warns when a script needs manual changes.
+- Quits cleanly on SIGTERM and SIGHUP. The terminal is restored before sofka exits.
+- Merges namespace and sort changes from each process. One process no longer erases the changes of another.
+- Removes credentials and control characters from text printed to the terminal, such as startup errors and plugin output.
+- Keeps the selected pod in the faults view during bursts of watch updates.
+- Ends kubectl options before resource and context names. A name that starts with `-` no longer changes the active context.
+- Uses the configured drill for Cluster API MachineDeployments when you press Enter. Machines stays the default when no drill is set.
+- Opens the default layout when you select a resource that names no layout.
+- Resolves HelmRelease `dependsOn` entries as HelmReleases in the GitOps view. Before, they showed as Kustomizations.
+
+### Other changes
+
+- Replaces the `fs2` dependency with standard library file locks. The minimum Rust version is now 1.89.
+- Explains that `:events` follows the current namespace. Press `0` to show all namespaces.
+
 ## v0.34.0 - 2026-11-01
 
 This release shows Argo CD sync progress and lets you pin table columns. It also fixes proxy login, `NO_PROXY` handling, table watches on Kubernetes 1.37, and filter selection.
