@@ -300,6 +300,16 @@ type UpdateFetcher = fn(
     Box<dyn std::future::Future<Output = Result<crate::update::Release, String>> + Send>,
 >;
 
+/// Runs one `helm` command. Tests can replace it to avoid running Helm.
+type HelmRunner = std::sync::Arc<
+    dyn Fn(
+            Vec<String>,
+        )
+            -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send>>
+        + Send
+        + Sync,
+>;
+
 fn default_update_fetcher(
     force: bool,
 ) -> std::pin::Pin<
@@ -2692,6 +2702,7 @@ pub struct App {
     /// The latest release the last update check found.
     pub latest_release: Option<crate::update::Release>,
     update_fetcher: UpdateFetcher,
+    helm_runner: HelmRunner,
     /// Active column layout for the current view; rebuilt by
     /// [`App::refresh_view_spec`] whenever kind/views/wide change.
     spec: crate::columns::ViewSpec,
@@ -3047,6 +3058,7 @@ impl App {
             save_dir: None,
             latest_release: None,
             update_fetcher: default_update_fetcher,
+            helm_runner: std::sync::Arc::new(|argv| Box::pin(actions::run_helm(argv))),
             spec: crate::columns::build_spec("", "", None, None, false),
             pinned_columns: None,
         }

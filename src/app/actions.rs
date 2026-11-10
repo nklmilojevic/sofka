@@ -3044,12 +3044,13 @@ impl App {
             ns,
         ]);
         let claim = self.claim_status(format!("rolling back {name} to revision {revision}…"));
+        let runner = self.helm_runner.clone();
         let tx = self.tx.clone();
         let genr = self.generation;
         // No manual re-watch on success: the live `secrets` watch backing the
         // helm/helmhistory view picks up the new revision Secret on its own.
         tokio::spawn(async move {
-            match run_helm(&argv).await {
+            match runner(argv).await {
                 Ok(_) => {
                     let _ = tx
                         .send(Msg::Flash {
@@ -3117,6 +3118,7 @@ impl App {
             format!("uninstalled {} Helm releases", targets.len())
         };
         let helm_base = self.helm_base();
+        let runner = self.helm_runner.clone();
         let tx = self.tx.clone();
         let genr = self.generation;
         tokio::spawn(async move {
@@ -3124,7 +3126,7 @@ impl App {
             for (name, ns) in targets {
                 let mut argv = helm_base.clone();
                 argv.extend(["uninstall".to_string(), name.clone(), "-n".to_string(), ns]);
-                if let Err(e) = run_helm(&argv).await {
+                if let Err(e) = runner(argv).await {
                     failed = true;
                     let _ = tx
                         .send(Msg::Flash {
@@ -3289,7 +3291,7 @@ fn port_label(port: i64, qualifiers: &[(&str, &str)]) -> String {
 }
 /// Run a `helm` subprocess to completion, following the same
 /// missing-binary/non-zero-exit handling as `describe()`'s `kubectl` shell-out.
-async fn run_helm(argv: &[String]) -> std::result::Result<(), String> {
+pub(super) async fn run_helm(argv: Vec<String>) -> std::result::Result<(), String> {
     match tokio::process::Command::new(&argv[0])
         .args(&argv[1..])
         .output()
