@@ -6,46 +6,89 @@ use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
 
+/// Receive termination signals before the TUI starts to read input.
+pub struct Termination {
+    requested: bool,
+    #[cfg(unix)]
+    term: tokio::signal::unix::Signal,
+    #[cfg(unix)]
+    hup: tokio::signal::unix::Signal,
+}
+
+impl Termination {
+    pub fn new() -> io::Result<Self> {
+        Ok(Self {
+            requested: false,
+            #[cfg(unix)]
+            term: tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?,
+            #[cfg(unix)]
+            hup: tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())?,
+        })
+    }
+
+    pub fn requested(&self) -> bool {
+        self.requested
+    }
+
+    pub async fn wait(&mut self) {
+        if self.requested {
+            return;
+        }
+        #[cfg(unix)]
+        tokio::select! {
+            _ = self.term.recv() => {},
+            _ = self.hup.recv() => {},
+        }
+        #[cfg(not(unix))]
+        std::future::pending::<()>().await;
+        self.requested = true;
+    }
+}
+
 /// Suspend the TUI for an interactive command, then restore its terminal modes.
 /// Call this only from the main loop, with the current mouse capture state.
-pub fn suspend_and_run(
+pub async fn suspend_and_run(
     terminal: &mut ratatui::DefaultTerminal,
     argv: &[String],
     captured: bool,
+    termination: &mut Termination,
 ) -> io::Result<()> {
     if argv.is_empty() {
         return Ok(());
     }
-    suspend_and_await(terminal, captured, run_command_async(argv))?
+    suspend_and_await(terminal, captured, run_command_async(argv, termination)).await?
 }
 
 /// Run `context`'s exec auth plugin with the TUI suspended so it can prompt,
 /// then hand the outcome to the app, which retries the connection.
-pub fn authenticate(
+pub async fn authenticate(
     terminal: &mut ratatui::DefaultTerminal,
     app: &mut crate::app::App,
     context: String,
     switch: bool,
     captured: bool,
+    termination: &mut Termination,
 ) {
     let result = suspend_and_await(
         terminal,
         captured,
-        crate::k8s::authenticate_interactively(Some(&context)),
+        crate::k8s::authenticate_interactively_until(Some(&context), termination.wait()),
     )
+    .await
     .map_err(anyhow::Error::from)
     .and_then(|result| result)
     .map_err(|e| format!("{e:#}"));
-    app.authenticated(context, switch, result);
+    if !termination.requested() {
+        app.authenticated(context, switch, result);
+    }
 }
 
 /// Suspend the TUI, give the terminal to whatever `future` runs, then restore
-/// the terminal modes. Same rules as [`suspend_and_run`]. The future runs on a
-/// runtime of its own, since the caller is inside the main loop's runtime.
-pub fn suspend_and_await<T: Send>(
+/// the terminal modes. Use the same rules as [`suspend_and_run`].
+pub async fn suspend_and_await<T>(
     terminal: &mut ratatui::DefaultTerminal,
     captured: bool,
-    future: impl std::future::Future<Output = T> + Send,
+    future: impl std::future::Future<Output = T>,
 ) -> io::Result<T> {
     // Protect the parent before normal terminal input can generate signals.
     #[cfg(unix)]
@@ -55,7 +98,7 @@ pub fn suspend_and_await<T: Send>(
     }
     let _ = disable_raw_mode();
     let _ = crossterm::execute!(io::stdout(), LeaveAlternateScreen, crossterm::cursor::Show);
-    let result = block_on_own_runtime(future);
+    let result = future.await;
     // Set the modes directly. ratatui::init would install another panic hook.
     let _ = enable_raw_mode();
     let _ = crossterm::execute!(io::stdout(), EnterAlternateScreen);
@@ -63,34 +106,19 @@ pub fn suspend_and_await<T: Send>(
         let _ = crossterm::execute!(io::stdout(), EnableMouseCapture);
     }
     let _ = terminal.clear();
-    result
+    Ok(result)
 }
 
 const ERROR_LIMIT: usize = 16 * 1024;
 
-fn block_on_own_runtime<T: Send>(
-    future: impl std::future::Future<Output = T> + Send,
-) -> io::Result<T> {
-    std::thread::scope(|scope| {
-        scope
-            .spawn(|| {
-                Ok(tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()?
-                    .block_on(future))
-            })
-            .join()
-            .map_err(|_| io::Error::other("Command runner failed."))?
-    })
-}
-
-async fn run_command_async(argv: &[String]) -> io::Result<()> {
+async fn run_command_async(argv: &[String], termination: &mut Termination) -> io::Result<()> {
     use tokio::io::AsyncReadExt;
     let mut child = tokio::process::Command::new(&argv[0])
         .args(&argv[1..])
         .stdin(Stdio::inherit())
         .stdout(Stdio::inherit())
         .stderr(Stdio::piped())
+        .kill_on_drop(true)
         .spawn()?;
     let mut stderr = child.stderr.take().expect("piped stderr");
     let mut tail = Vec::new();
@@ -99,6 +127,10 @@ async fn run_command_async(argv: &[String]) -> io::Result<()> {
     let status = loop {
         tokio::select! {
             biased;
+            _ = termination.wait() => {
+                child.kill().await?;
+                return Err(io::Error::new(io::ErrorKind::Interrupted, "Command stopped."));
+            }
             result = child.wait() => break result?,
             result = stderr.read(&mut buffer), if !closed => {
                 match result {

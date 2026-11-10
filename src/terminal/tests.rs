@@ -292,7 +292,13 @@ async fn terminal_plugin_child() {
         let Some(Suspend::Shell(argv)) = app.pending.take() else {
             panic!("plugin did not queue a terminal command: {}", app.flash);
         };
-        let result = suspend_and_run(&mut terminal, &argv, captured);
+        let result = suspend_and_run(
+            &mut terminal,
+            &argv,
+            captured,
+            &mut Termination::new().unwrap(),
+        )
+        .await;
         assert_eq!(result.is_err(), case != "exit");
         if case == "failure" {
             let error = result.unwrap_err().to_string();
@@ -456,7 +462,15 @@ async fn exec_auth_child() {
     let Some(Suspend::Authenticate { context, switch }) = app.pending.take() else {
         panic!("accepting did not queue authentication: {}", app.flash);
     };
-    authenticate(&mut terminal, &mut app, context, switch, false);
+    authenticate(
+        &mut terminal,
+        &mut app,
+        context,
+        switch,
+        false,
+        &mut Termination::new().unwrap(),
+    )
+    .await;
 
     assert!(crossterm::terminal::is_raw_mode_enabled().unwrap());
     for (signal, previous) in [libc::SIGINT, libc::SIGQUIT].into_iter().zip(&before) {
