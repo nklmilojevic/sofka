@@ -281,7 +281,9 @@ async fn count_flux_failures(
     let kinds = [
         cluster.resolve("kustomizations"),
         cluster.resolve("helmreleases"),
-        cluster.resolve_in_group("Terraform", TOFU_CONTROLLER_GROUP),
+        cluster
+            .resolve_in_group("Terraform", TOFU_CONTROLLER_GROUP)
+            .filter(|k| crate::gitops::is_terraform(&k.ar.group, &k.ar.plural)),
     ];
     let mut flux_failed = None;
     for k in kinds.into_iter().flatten() {
@@ -422,14 +424,15 @@ mod tests {
 
     #[tokio::test]
     async fn flux_failures_count_terraforms_only_when_the_crd_exists() {
-        for terraform_crd in [false, true] {
+        for plural in [None, Some("terraforms"), Some("terraformstacks")] {
+            let terraform_crd = plural == Some("terraforms");
             let mut cluster = Cluster::fake();
-            if terraform_crd {
+            if let Some(plural) = plural {
                 cluster.register_kind_version(
                     TOFU_CONTROLLER_GROUP,
                     "v1alpha2",
                     "Terraform",
-                    "terraforms",
+                    plural,
                     true,
                 );
             }
@@ -469,15 +472,20 @@ mod tests {
             );
             let mut warn = None;
             let failed = count_flux_failures(&cluster, &client, &mut warn).await;
-            assert_eq!(warn, None);
-            assert_eq!(failed, Some(if terraform_crd { 3 } else { 1 }));
+            assert_eq!(warn, None, "{plural:?}");
+            assert_eq!(
+                failed,
+                Some(if terraform_crd { 3 } else { 1 }),
+                "{plural:?}"
+            );
             assert_eq!(
                 requests
                     .lock()
                     .unwrap()
                     .iter()
-                    .any(|p| p.starts_with("/apis/infra.contrib.fluxcd.io/v1alpha2/terraforms")),
-                terraform_crd
+                    .any(|p| p.starts_with("/apis/infra.contrib.fluxcd.io/")),
+                terraform_crd,
+                "{plural:?}"
             );
         }
     }
