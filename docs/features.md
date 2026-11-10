@@ -541,6 +541,8 @@ include those conditions. Row filters can search the route paths.
   `ScaledDown`, `Terminating`), and the whole row is tinted by it - so a
   workload whose pods are crashing or whose desired replicas aren't met reads
   red/peach in the list, like k9s, instead of looking uniformly healthy.
+  The cursor row keeps its tint, STATUS badge, threshold colors, and filter
+  matches; it is bold on a subtle bar with a lavender `▌` marker.
 - **Job execution status** distinguishes pending, running, suspended, failed,
   completing, completed, and terminating jobs. Failed jobs use the error color even when
   no pod is active.

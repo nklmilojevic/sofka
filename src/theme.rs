@@ -196,7 +196,7 @@ pub fn builtin(name: &str) -> Option<Palette> {
         "gruvbox-light" => [
             "#ebdbb2", "#d5c4a1", "#b16286", "#b16286", "#cc241d", "#9d0006", "#d65d0e", "#d79921",
             "#98971a", "#689d6a", "#458588", "#076678", "#458588", "#b16286", "#282828", "#3c3836",
-            "#504945", "#665c54", "#7c6f64", "#928374", "#a89984", "#bdae93", "#fbf1c7", "#ebdbb2",
+            "#504945", "#665c54", "#7c6f64", "#bdae93", "#d5c4a1", "#ebdbb2", "#fbf1c7", "#ebdbb2",
             "#d5c4a1",
         ],
         "solarized-dark" | "solarized" => [
@@ -534,14 +534,30 @@ pub fn header_row() -> Style {
     Style::default().fg(yellow())
 }
 
-/// Cursor / selected row: a bright lavender bar with dark text, bold. Using
-/// `lavender` (light in dark themes, mid-tone in light themes) as the bg and
-/// `base` as the fg keeps the cursor high-contrast under every skin.
+/// Cursor row in pickers and lists: a bright lavender bar with dark text,
+/// bold. Using `lavender` (light in dark themes, mid-tone in light themes) as
+/// the bg and `base` as the fg keeps the cursor high-contrast under every
+/// skin. Resource tables use [`cursor_row`] instead, so their cursor row keeps
+/// its status colors.
 pub fn selected_row() -> Style {
     Style::default()
         .bg(lavender())
         .fg(base())
         .add_modifier(Modifier::BOLD)
+}
+
+/// Cursor row in resource tables: a subtle `surface0` bar, bold, with no
+/// foreground of its own, so the row tint, STATUS badge, threshold colors and
+/// filter matches show on the cursor row like on any other row. The bar is
+/// painted explicitly, so it shows with or without the skin background.
+pub fn cursor_row() -> Style {
+    Style::default().bg(surface0()).add_modifier(Modifier::BOLD)
+}
+
+/// The `▌` gutter marker on a [`cursor_row`], in `lavender` so the cursor is
+/// easy to spot.
+pub fn cursor_marker() -> Style {
+    cursor_row().fg(lavender())
 }
 
 /// Cursor on a marked row: the mark color as the bar, like k9s, so marking
@@ -753,6 +769,35 @@ mod tests {
         // gruvbox-light's `base` is cream on its cream mark color.
         set(builtin("gruvbox-light").unwrap());
         assert_eq!(selected_marked_row().fg, Some(text()));
+    }
+
+    #[test]
+    fn cursor_row_keeps_status_colors_readable_in_every_builtin_skin() {
+        for name in BUILTIN_NAMES {
+            set(builtin(name).unwrap());
+            let bar = cursor_row().bg.unwrap();
+            assert_ne!(bar, base(), "{name}: the cursor bar must differ from base");
+            for (swatch, color) in [
+                ("blue", blue()),
+                ("red", red()),
+                ("peach", peach()),
+                ("overlay0", overlay0()),
+                ("overlay1", overlay1()),
+                ("mauve", mauve()),
+                ("green", green()),
+                ("yellow", yellow()),
+                ("text", text()),
+                ("lavender", cursor_marker().fg.unwrap()),
+            ] {
+                let on_bar = contrast(color, bar);
+                let on_base = contrast(color, base());
+                assert!(
+                    on_bar >= 0.7 * on_base,
+                    "{name} {swatch}: {on_bar:.2} on the cursor bar, {on_base:.2} on base"
+                );
+            }
+        }
+        assert_eq!(cursor_row().fg, None);
     }
 
     #[test]
