@@ -28,6 +28,18 @@ or that the mode already uses is skipped there, so in the example `ctrl-d`
 moves half a page and `ctrl-u` still clears the line. A mode setting, such as
 `[keys.namespaces]`, is used as written.
 
+## Example: a key for the context switcher
+
+```toml
+[keys.table]
+contexts = "ctrl-x"
+```
+
+`contexts` opens the same context picker as `:ctx` from a resource table. It
+has no default binding, because built-in keys take priority over bookmarks,
+workspaces, plugins, and imported k9s hotkeys, and a default key could take one
+already in use. Other views open the picker with `:ctx`.
+
 ## Values and scopes
 
 - A string sets one key combination. An array sets multiple combinations.
@@ -657,6 +669,7 @@ for those operations.
 | `approve`            | `V`                  |
 | `attach`             | `a`                  |
 | `back`               | `esc`                |
+| `contexts`           | unbound              |
 | `copy_cell`          | `Y`                  |
 | `copy_name`          | `c`                  |
 | `cordon`             | `C`                  |

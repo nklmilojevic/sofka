@@ -526,6 +526,7 @@ impl App {
             // `f`/Shift-F = port-forward.
             (Some(Action::PortForward), _) => self.request_port_forward(),
             (Some(Action::Namespaces), _) => self.open_namespaces(),
+            (Some(Action::Contexts), _) => self.open_contexts(),
             (Some(Action::NamespaceSelected), _) => self.select_resource_namespace(),
             // Browser-style view history: [ back, ] forward.
             (Some(Action::HistoryBack), _) => self.history_back(),

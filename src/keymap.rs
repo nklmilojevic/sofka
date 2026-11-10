@@ -45,6 +45,7 @@ actions! {
     Close => ("close", "close view"),
     Command => ("command", "command palette"),
     Compact => ("compact", "toggle compact mode"),
+    Contexts => ("contexts", "context switcher"),
     Complete => ("complete", "fill the highlighted suggestion"),
     Copy => ("copy", "copy"),
     CopyCell => ("copy_cell", "copy cell"),
@@ -627,6 +628,7 @@ const DEFAULTS: &[(&str, Action, &[&str])] = &[
     ("table", Action::Approve, &["V"]),
     ("table", Action::Attach, &["a"]),
     ("table", Action::Back, &["esc"]),
+    ("table", Action::Contexts, &[]),
     ("table", Action::CopyCell, &["Y"]),
     ("table", Action::CopyName, &["c"]),
     ("table", Action::Cordon, &["C"]),
@@ -1176,6 +1178,30 @@ mod tests {
     #[test]
     fn defaults_have_no_conflicts() {
         assert_eq!(compile("").unwrap(), Keymap::default());
+    }
+
+    #[test]
+    fn contexts_is_an_unbound_table_action_with_normal_validation() {
+        assert_eq!(
+            Keymap::default().label("table", Action::Contexts),
+            "unbound"
+        );
+        let map = compile("[keys.table]\ncontexts = 'ctrl-y'").unwrap();
+        assert_eq!(
+            map.action(
+                "table",
+                &KeyEvent::new(KeyCode::Char('y'), KeyModifiers::CONTROL)
+            ),
+            Some(Action::Contexts)
+        );
+        assert_eq!(
+            compile("[keys.table]\ncontexts = 'n'").unwrap_err(),
+            vec!["keys.table: n conflicts between contexts and namespaces"]
+        );
+        assert_eq!(
+            compile("[keys.logs]\ncontexts = 'ctrl-y'").unwrap_err(),
+            vec!["keys.logs.contexts: unsupported action"]
+        );
     }
 
     #[test]

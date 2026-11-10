@@ -244,6 +244,25 @@ async fn enter_drills_from_a_workloads_row_and_esc_returns_to_the_view() {
 }
 
 #[tokio::test]
+async fn contexts_key_opens_the_picker_and_keeps_the_workloads_view() {
+    let (mut app, _rx) = workloads_app();
+    seed(&mut app);
+    use_keys(&mut app, CONTEXTS_KEY);
+    let index = app
+        .rows()
+        .iter()
+        .position(|o| o.types.as_ref().unwrap().kind == "Deployment")
+        .unwrap();
+    app.table_state.select(Some(index));
+
+    app.handle_key(ctrl(KeyCode::Char('y'))).unwrap();
+    assert_eq!(app.mode, Mode::Contexts);
+    assert!(app.workload_focus.is_none());
+    assert!(app.workloads_active());
+    assert_eq!(app.kind_plural, "workloads");
+}
+
+#[tokio::test]
 async fn row_actions_use_the_row_kind_and_skip_marks_of_other_kinds() {
     let (mut app, mut rx) = workloads_app();
     seed(&mut app);

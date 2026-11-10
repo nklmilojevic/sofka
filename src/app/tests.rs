@@ -36348,6 +36348,45 @@ async fn configured_paging_preserves_view_behavior_and_text_input() {
     assert_eq!(app.mode, Mode::Prompt);
 }
 
+const CONTEXTS_KEY: &str = "[keys.table]\ncontexts = \"ctrl-y\"\n";
+
+#[tokio::test]
+async fn contexts_action_is_unbound_and_leaves_its_key_to_bookmarks() {
+    let (mut app, _rx) = test_app();
+    app.switch_kind("deployments");
+    bind_bookmark(&mut app, "services", "west");
+    assert_eq!(app.keymap.label("table", Action::Contexts), "unbound");
+    app.handle_key(ctrl(KeyCode::Char('y'))).unwrap();
+    assert_ne!(app.mode, Mode::Contexts);
+    assert!(app.pending_bookmark.is_some());
+}
+
+#[tokio::test]
+async fn configured_contexts_key_opens_the_context_picker_like_ctx() {
+    let (mut app, _rx) = test_app();
+    app.all_contexts = vec!["test".into(), "west".into()];
+    app.switch_kind("deployments");
+    bind_bookmark(&mut app, "services", "west");
+    use_keys(&mut app, CONTEXTS_KEY);
+    assert_eq!(app.keymap.label("table", Action::Contexts), "ctrl-y");
+    app.handle_key(ctrl(KeyCode::Char('y'))).unwrap();
+    assert_eq!(app.mode, Mode::Contexts);
+    assert!(app.pending_bookmark.is_none());
+    app.handle_msg(Msg::Contexts {
+        generation: app.generation,
+        list: vec!["test".into(), "west".into()],
+    });
+    for c in "west".chars() {
+        app.handle_key(press(KeyCode::Char(c))).unwrap();
+    }
+    app.handle_key(press(KeyCode::Enter)).unwrap();
+    assert_eq!(
+        app.context_switch_target,
+        Some((app.generation, "west".into()))
+    );
+    assert_eq!(app.kind_plural, "deployments");
+}
+
 const HALF_PAGE_KEYS: &str = r#"
 [keys.navigation]
 half_page_up = "ctrl-u"
