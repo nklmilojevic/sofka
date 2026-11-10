@@ -1608,11 +1608,16 @@ pub fn plugin_warnings(plugins: &[Plugin]) -> Vec<String> {
             && let Some(placeholder) = p
                 .args
                 .windows(2)
-                .filter(|pair| pair[0] == "-c")
+                .filter(|pair| crate::k9s_import::shell_command_flag(shell, &pair[0]))
                 .find_map(|pair| PLUGIN_PLACEHOLDERS.iter().find(|p| pair[1].contains(**p)))
         {
+            let instruction = if shell == "fish" {
+                "append it as its own argument immediately after the script and read it as \"$argv[1]\""
+            } else {
+                "append a name for $0 after the script, then append the value as its own argument and read it as \"$1\""
+            };
             warns.push(format!(
-                "plugin {:?}: {placeholder} is pasted into the script text given to {shell} -c, where an object name is parsed as shell syntax; append it as its own argument after the script and read it as \"$1\"",
+                "plugin {:?}: {placeholder} is pasted into the script text given to {shell} -c, where an object name is parsed as shell syntax; {instruction}",
                 p.name
             ));
         }
@@ -2541,15 +2546,25 @@ mod tests {
         .unwrap();
         for shell in crate::k9s_import::SHELLS {
             cfg.plugins[0].command = format!("/bin/{shell}");
-            let w = plugin_warnings(&cfg.plugins);
-            assert_eq!(w.len(), 1, "{w:?}");
-            assert!(w[0].contains("plugin \"script\":"), "{w:?}");
-            assert!(
-                w[0].contains("$NAMESPACE is pasted into the script text"),
-                "{w:?}"
-            );
-            assert!(w[0].contains(&format!("{shell} -c")), "{w:?}");
-            assert!(w[0].contains("read it as \"$1\""), "{w:?}");
+            for flag in ["-c", "-lc", "-ec"] {
+                cfg.plugins[0].args[1] = flag.into();
+                let w = plugin_warnings(&cfg.plugins);
+                assert_eq!(w.len(), 1, "{w:?}");
+                assert!(w[0].contains("plugin \"script\":"), "{w:?}");
+                assert!(
+                    w[0].contains("$NAMESPACE is pasted into the script text"),
+                    "{w:?}"
+                );
+                assert!(w[0].contains(&format!("{shell} -c")), "{w:?}");
+                if *shell == "fish" {
+                    assert!(w[0].contains("read it as \"$argv[1]\""), "{w:?}");
+                    assert!(w[0].contains("immediately after the script"), "{w:?}");
+                    assert!(!w[0].contains("$0") && !w[0].contains("$1"), "{w:?}");
+                } else {
+                    assert!(w[0].contains("read it as \"$1\""), "{w:?}");
+                    assert!(w[0].contains("a name for $0 after the script"), "{w:?}");
+                }
+            }
         }
     }
 

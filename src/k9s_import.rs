@@ -933,6 +933,13 @@ fn chord(k9s: &str) -> Option<String> {
 
 pub(crate) const SHELLS: &[&str] = &["sh", "bash", "zsh", "dash", "ksh", "fish"];
 
+pub(crate) fn shell_command_flag(shell: &str, arg: &str) -> bool {
+    (shell == "fish" && arg == "--command")
+        || arg.strip_prefix('-').is_some_and(|flags| {
+            flags.chars().all(|c| c.is_ascii_alphabetic()) && flags.contains('c')
+        })
+}
+
 const SCRIPT_PLACEHOLDERS: &[&str] = &[
     "$NAMESPACE",
     "$RESOURCE",
@@ -977,7 +984,13 @@ fn positional_script(script: &str) -> Option<(String, Vec<&'static str>)> {
                     placeholders.len() - 1
                 }
             };
+            if !quoted {
+                out.push('"');
+            }
             out.push_str(&format!("${{{}}}", index + 1));
+            if !quoted {
+                out.push('"');
+            }
             rest = &rest[placeholder.len()..];
         } else {
             out.push(c);
@@ -1074,7 +1087,7 @@ fn convert_plugin(name: &str, p: &K9sPlugin) -> Result<(Table, Vec<String>), Str
     }
 
     if let Some(shell) = shell
-        && let Some(i) = args.iter().position(|a| a == "-c")
+        && let Some(i) = args.iter().position(|a| shell_command_flag(shell, a))
         && let Some(script) = args.get(i + 1)
         && (SCRIPT_PLACEHOLDERS.iter().any(|p| script.contains(p)) || script.contains("${input."))
     {
@@ -1923,7 +1936,7 @@ args: [-c, "stern ${NAME} -n $namespace --context $CONTEXT -o $RESOURCE_NAME.$RE
             strings(&out["args"]),
             [
                 "-c",
-                "stern ${1} -n ${2} --context ${3} -o ${4}.${5}/${6}",
+                r#"stern "${1}" -n "${2}" --context "${3}" -o "${4}"."${5}"/"${6}""#,
                 "sofka",
                 "$NAME",
                 "$NAMESPACE",
@@ -1942,7 +1955,10 @@ args: [-c, "stern ${NAME} -n $namespace --context $CONTEXT -o $RESOURCE_NAME.$RE
     fn positional_script_numbers_placeholders_by_first_use() {
         assert_eq!(
             positional_script("echo $NAMESPACE/$NAME $NAME"),
-            Some(("echo ${1}/${2} ${2}".into(), vec!["$NAMESPACE", "$NAME"]))
+            Some((
+                r#"echo "${1}"/"${2}" "${2}""#.into(),
+                vec!["$NAMESPACE", "$NAME"]
+            ))
         );
     }
 
@@ -1951,7 +1967,7 @@ args: [-c, "stern ${NAME} -n $namespace --context $CONTEXT -o $RESOURCE_NAME.$RE
         assert_eq!(positional_script("echo $HOME $1"), None);
         assert_eq!(
             positional_script("echo $HOME $NAME"),
-            Some(("echo $HOME ${1}".into(), vec!["$NAME"]))
+            Some((r#"echo $HOME "${1}""#.into(), vec!["$NAME"]))
         );
     }
 
@@ -1960,18 +1976,56 @@ args: [-c, "stern ${NAME} -n $namespace --context $CONTEXT -o $RESOURCE_NAME.$RE
         assert_eq!(
             positional_script(&SCRIPT_PLACEHOLDERS.join(" ")),
             Some((
-                "${1} ${2} ${3} ${4} ${5} ${6} ${7} ${8} ${9} ${10} ${11}".into(),
+                r#""${1}" "${2}" "${3}" "${4}" "${5}" "${6}" "${7}" "${8}" "${9}" "${10}" "${11}""#
+                    .into(),
                 SCRIPT_PLACEHOLDERS.to_vec()
             ))
         );
     }
 
     #[test]
+    fn shell_command_flags_include_combined_short_options() {
+        for shell in SHELLS {
+            for flag in ["-c", "-lc", "-ec", "-cl"] {
+                assert!(shell_command_flag(shell, flag), "{shell} {flag}");
+            }
+            for arg in ["-l", "--rcfile", "--norc", "script", "--", "-c echo"] {
+                assert!(!shell_command_flag(shell, arg), "{shell} {arg}");
+            }
+            assert_eq!(shell_command_flag(shell, "--command"), *shell == "fish");
+        }
+    }
+
+    #[test]
+    fn combined_shell_flags_convert_or_warn() {
+        for flag in ["-lc", "-ec"] {
+            for script in ["echo $NAME", "echo '$NAME'"] {
+                let mut p = plugin("shortCut: x\ncommand: bash\n");
+                p.args = vec![flag.into(), script.into()];
+                let (out, notes) = convert_plugin("combined", &p).unwrap();
+                if script.contains('\'') {
+                    assert_eq!(strings(&out["args"]), [flag, script]);
+                    assert_eq!(notes, [SCRIPT_WARNING]);
+                } else {
+                    assert_eq!(
+                        strings(&out["args"]),
+                        [flag, r#"echo "${1}""#, "sofka", "$NAME"]
+                    );
+                    assert!(notes.is_empty(), "{notes:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
     fn fish_plugins_are_left_alone_with_a_note() {
-        let p = plugin("shortCut: x\ncommand: fish\nargs: [-c, echo $NAME]\n");
-        let (out, notes) = convert_plugin("fish", &p).unwrap();
-        assert_eq!(strings(&out["args"]), ["-c", "echo $NAME"]);
-        assert_eq!(notes, [SCRIPT_WARNING]);
+        for flag in ["-c", "-lc", "--command"] {
+            let mut p = plugin("shortCut: x\ncommand: fish\n");
+            p.args = vec![flag.into(), "echo $NAME".into()];
+            let (out, notes) = convert_plugin("fish", &p).unwrap();
+            assert_eq!(strings(&out["args"]), [flag, "echo $NAME"]);
+            assert_eq!(notes, [SCRIPT_WARNING]);
+        }
     }
 
     #[test]
