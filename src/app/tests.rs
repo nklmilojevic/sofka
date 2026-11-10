@@ -6628,6 +6628,68 @@ async fn cursor_on_a_marked_row_uses_the_mark_color() {
 }
 
 #[tokio::test]
+async fn cursor_row_is_a_lavender_bar_with_base_text() {
+    use crate::theme;
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+    use ratatui::style::Modifier;
+
+    let (mut app, _rx) = test_app();
+    app.switch_kind("pods");
+    for (name, ready, state) in [
+        ("a-healthy", true, json!({"running": {}})),
+        (
+            "b-broken",
+            false,
+            json!({"waiting": {"reason": "CrashLoopBackOff"}}),
+        ),
+    ] {
+        apply(
+            &mut app,
+            json!({
+                "apiVersion": "v1", "kind": "Pod",
+                "metadata": {"name": name, "namespace": "default"},
+                "status": {
+                    "phase": "Running",
+                    "containerStatuses": [{
+                        "ready": ready, "restartCount": 0, "state": state
+                    }]
+                }
+            }),
+        );
+    }
+    app.handle_key(press(KeyCode::Down)).unwrap();
+    assert_eq!(
+        app.selected().and_then(|o| o.metadata.name).as_deref(),
+        Some("b-broken")
+    );
+
+    for background in [false, true] {
+        theme::set_background(background);
+        let mut term = Terminal::new(TestBackend::new(120, 24)).unwrap();
+        term.draw(|f| crate::ui::draw(f, &mut app)).unwrap();
+        let hit = app.table_hit.borrow().clone().unwrap();
+        let buf = term.backend().buffer();
+        let y = (hit.rows_y..hit.rows_y + hit.rows_h)
+            .find(|&y| buf[(hit.x_min, y)].symbol() == "▌")
+            .expect("cursor row marker");
+        assert_eq!(y, hit.rows_y + 1, "background={background}");
+
+        for x in hit.x_min..hit.x_max {
+            let cell = &buf[(x, y)];
+            assert_eq!(cell.bg, theme::lavender(), "x={x} background={background}");
+            assert_eq!(cell.fg, theme::base(), "x={x} background={background}");
+            assert!(cell.modifier.contains(Modifier::BOLD), "x={x}");
+        }
+
+        let other = hit.rows_y;
+        assert_ne!(buf[(hit.x_min, other)].symbol(), "▌");
+        assert!((hit.x_min..hit.x_max).all(|x| buf[(x, other)].bg != theme::lavender()));
+    }
+    theme::set_background(false);
+}
+
+#[tokio::test]
 async fn delete_confirm_force_can_toggle() {
     let (mut app, _rx) = test_app();
     app.switch_kind("pods");
