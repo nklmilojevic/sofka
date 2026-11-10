@@ -1,5 +1,8 @@
 use super::*;
+#[cfg(unix)]
 use std::os::unix::{fs::symlink, process::ExitStatusExt};
+#[cfg(windows)]
+use std::os::windows::process::ExitStatusExt;
 
 #[test]
 fn digest_matches_sha256_hex_vectors() {
@@ -99,6 +102,7 @@ fn packaging_rejects_missing_empty_symlink_and_duplicate_files() {
     fs::write(&runtime, "").unwrap();
     assert!(package(&binary, &notices, &output, &runtime).is_err());
     fs::write(&runtime, "runtime").unwrap();
+    #[cfg(unix)]
     for path in [&binary, &root.0] {
         symlink(path, notices.join("link")).unwrap();
         assert!(package(&binary, &notices, &output, &runtime).is_err());
@@ -114,7 +118,10 @@ fn packaging_rejects_missing_empty_symlink_and_duplicate_files() {
 
 fn response(exit: i32, status: &str) -> Output {
     Output {
+        #[cfg(unix)]
         status: std::process::ExitStatus::from_raw(exit << 8),
+        #[cfg(windows)]
+        status: std::process::ExitStatus::from_raw(exit as u32),
         stdout: status.as_bytes().to_vec(),
         stderr: b"TLS connection error".to_vec(),
     }

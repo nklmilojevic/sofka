@@ -2383,19 +2383,22 @@ mod tests {
         // Not there is its own answer: a copy's destination is like this
         // until `cp` creates it, and it is worth asking about again.
         assert_eq!(sized(&dir.join("nope")), Measure::Absent);
-        // A symlink counts as itself and is never followed, which is what
-        // `tar` puts on the wire — and the only way to walk a cycle.
-        std::os::unix::fs::symlink(&dir, dir.join("loop")).unwrap();
-        let link = inode(&dir.join("loop"));
-        assert_eq!(sized(&dir.join("loop")), Measure::Bytes(link));
-        // And inside a tree: counted once at its own size, never followed —
-        // following it would both double-count and, here, never finish.
-        assert_eq!(
-            sized(&dir),
-            Measure::Bytes(16 + inode(&dir) + inode(&dir.join("sub")) + link),
-            "a symlink in the tree was followed"
-        );
-        std::fs::remove_file(dir.join("loop")).unwrap();
+        #[cfg(unix)]
+        {
+            // A symlink counts as itself and is never followed, which is what
+            // `tar` puts on the wire — and the only way to walk a cycle.
+            std::os::unix::fs::symlink(&dir, dir.join("loop")).unwrap();
+            let link = inode(&dir.join("loop"));
+            assert_eq!(sized(&dir.join("loop")), Measure::Bytes(link));
+            // And inside a tree: counted once at its own size, never followed —
+            // following it would both double-count and, here, never finish.
+            assert_eq!(
+                sized(&dir),
+                Measure::Bytes(16 + inode(&dir) + inode(&dir.join("sub")) + link),
+                "a symlink in the tree was followed"
+            );
+            std::fs::remove_file(dir.join("loop")).unwrap();
+        }
         // And a tree past the cap is a third answer, not a size.
         assert_eq!(local_size_capped(&dir, 2, &go), Measure::TooBig);
         // Asked to stop, it stops — with no reading rather than a partial
@@ -2406,23 +2409,26 @@ mod tests {
             Measure::Absent
         );
 
-        // One subdirectory nobody can enter is the ordinary case on a volume,
-        // and it must not cost the whole total — `du` keeps its partial one.
-        std::fs::create_dir(dir.join("locked")).unwrap();
-        std::fs::write(dir.join("locked/c"), b"01234").unwrap();
-        let mut perms = std::fs::metadata(dir.join("locked")).unwrap().permissions();
-        std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o000);
-        std::fs::set_permissions(dir.join("locked"), perms).unwrap();
-        // Re-read: adding an entry grows the parent directory's own inode.
-        let reachable = 16 + inode(&dir) + inode(&dir.join("sub")) + inode(&dir.join("locked"));
-        assert_eq!(
-            sized(&dir),
-            Measure::Bytes(reachable),
-            "an unreadable subtree ate the total"
-        );
-        let mut perms = std::fs::metadata(dir.join("locked")).unwrap().permissions();
-        std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o755);
-        std::fs::set_permissions(dir.join("locked"), perms).unwrap();
+        #[cfg(unix)]
+        {
+            // One subdirectory nobody can enter is the ordinary case on a volume,
+            // and it must not cost the whole total — `du` keeps its partial one.
+            std::fs::create_dir(dir.join("locked")).unwrap();
+            std::fs::write(dir.join("locked/c"), b"01234").unwrap();
+            let mut perms = std::fs::metadata(dir.join("locked")).unwrap().permissions();
+            std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o000);
+            std::fs::set_permissions(dir.join("locked"), perms).unwrap();
+            // Re-read: adding an entry grows the parent directory's own inode.
+            let reachable = 16 + inode(&dir) + inode(&dir.join("sub")) + inode(&dir.join("locked"));
+            assert_eq!(
+                sized(&dir),
+                Measure::Bytes(reachable),
+                "an unreadable subtree ate the total"
+            );
+            let mut perms = std::fs::metadata(dir.join("locked")).unwrap().permissions();
+            std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o755);
+            std::fs::set_permissions(dir.join("locked"), perms).unwrap();
+        }
         std::fs::remove_dir_all(&dir).ok();
     }
 }

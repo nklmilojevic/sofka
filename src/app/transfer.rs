@@ -1344,7 +1344,14 @@ mod tests {
     }
 
     fn status() -> std::process::ExitStatus {
-        std::os::unix::process::ExitStatusExt::from_raw(1 << 8)
+        #[cfg(unix)]
+        {
+            std::os::unix::process::ExitStatusExt::from_raw(1 << 8)
+        }
+        #[cfg(windows)]
+        {
+            std::os::windows::process::ExitStatusExt::from_raw(1)
+        }
     }
 
     #[test]
