@@ -253,16 +253,7 @@ async fn gather_context(
         update_pod_counts(&mut row, &pods);
     }
 
-    // Flux failures: only report a count when the toolkit CRDs exist.
-    let mut flux_failed = None;
-    for kind in ["kustomizations", "helmreleases"] {
-        if let Some(k) = cluster.resolve(kind) {
-            let items = list_or_warn(&client, &k.ar, k.namespaced, "", &mut warn).await;
-            let failed = items.iter().filter(|o| ready_is_false(o)).count();
-            *flux_failed.get_or_insert(0) += failed;
-        }
-    }
-    row.flux_failed = flux_failed;
+    row.flux_failed = count_flux_failures(&cluster, &client, &mut warn).await;
 
     // Argo CD Applications, counted a page at a time. Unlike the Flux kinds
     // above, a cluster routinely holds thousands of these and each object runs
@@ -278,6 +269,29 @@ async fn gather_context(
         None => FleetStatus::Ok,
     };
     row
+}
+
+/// Flux objects with `Ready=False`: Kustomizations, HelmReleases, and
+/// tofu-controller Terraforms. `None` when none of their CRDs exist.
+async fn count_flux_failures(
+    cluster: &Cluster,
+    client: &Client,
+    warn: &mut Option<String>,
+) -> Option<usize> {
+    let kinds = [
+        cluster.resolve("kustomizations"),
+        cluster.resolve("helmreleases"),
+        cluster
+            .resolve_in_group("Terraform", TOFU_CONTROLLER_GROUP)
+            .filter(|k| crate::gitops::is_terraform(&k.ar.group, &k.ar.plural)),
+    ];
+    let mut flux_failed = None;
+    for k in kinds.into_iter().flatten() {
+        let items = list_or_warn(client, &k.ar, k.namespaced, "", warn).await;
+        let failed = items.iter().filter(|o| ready_is_false(o)).count();
+        *flux_failed.get_or_insert(0) += failed;
+    }
+    flux_failed
 }
 
 /// How many Applications to pull per request while counting.
@@ -406,6 +420,74 @@ mod tests {
             },
         }))
         .unwrap()
+    }
+
+    #[tokio::test]
+    async fn flux_failures_count_terraforms_only_when_the_crd_exists() {
+        for plural in [None, Some("terraforms"), Some("terraformstacks")] {
+            let terraform_crd = plural == Some("terraforms");
+            let mut cluster = Cluster::fake();
+            if let Some(plural) = plural {
+                cluster.register_kind_version(
+                    TOFU_CONTROLLER_GROUP,
+                    "v1alpha2",
+                    "Terraform",
+                    plural,
+                    true,
+                );
+            }
+            let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let seen = requests.clone();
+            let client = Client::new(
+                tower::service_fn(move |request: http::Request<kube::client::Body>| {
+                    let path = request.uri().path().to_string();
+                    seen.lock().unwrap().push(path.clone());
+                    let ready = |status: &str, reason: &str| {
+                        json!({
+                            "metadata": {"name": format!("{status}-{reason}"), "namespace": "default"},
+                            "status": {"conditions": [
+                                {"type": "Ready", "status": status, "reason": reason}
+                            ]}
+                        })
+                    };
+                    let items = match path.rsplit('/').next().unwrap() {
+                        "kustomizations" => vec![ready("False", "BuildFailed"), ready("True", "")],
+                        "helmreleases" => vec![ready("Unknown", "Progressing")],
+                        "terraforms" => vec![
+                            ready("False", "TerraformAppliedFail"),
+                            ready("False", "ArtifactFailed"),
+                            ready("Unknown", "TerraformPlannedWithChanges"),
+                        ],
+                        other => panic!("unexpected list of {other}"),
+                    };
+                    let list =
+                        json!({"apiVersion": "v1", "kind": "List", "metadata": {}, "items": items});
+                    async move {
+                        Ok::<_, std::convert::Infallible>(http::Response::new(
+                            http_body_util::Full::new(hyper::body::Bytes::from(list.to_string())),
+                        ))
+                    }
+                }),
+                "default",
+            );
+            let mut warn = None;
+            let failed = count_flux_failures(&cluster, &client, &mut warn).await;
+            assert_eq!(warn, None, "{plural:?}");
+            assert_eq!(
+                failed,
+                Some(if terraform_crd { 3 } else { 1 }),
+                "{plural:?}"
+            );
+            assert_eq!(
+                requests
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .any(|p| p.starts_with("/apis/infra.contrib.fluxcd.io/")),
+                terraform_crd,
+                "{plural:?}"
+            );
+        }
     }
 
     #[test]

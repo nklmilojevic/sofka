@@ -321,6 +321,16 @@ const FLUX_OPERATOR_COLUMNS: &[Column] = &[
     column("AGE", col_age),
 ];
 
+const TERRAFORM_COLUMNS: &[Column] = &[
+    column("NAME", col_name),
+    status_column("READY", col_flux_ready),
+    column("SUSPENDED", col_flux_suspended),
+    column("MESSAGE", col_flux_message),
+    column("REVISION", col_terraform_revision),
+    column("PLAN", col_terraform_plan),
+    column("AGE", col_age),
+];
+
 const FLUX_INPUT_PROVIDER_COLUMNS: &[Column] = &[
     column("NAME", col_name),
     status_column("READY", col_flux_ready),
@@ -431,6 +441,7 @@ fn columns_for(group: &str, plural: &str) -> &'static [Column] {
         ) => FLUX_SOURCE_COLUMNS,
         ("fluxcd.controlplane.io", "resourcesets" | "fluxinstances") => FLUX_OPERATOR_COLUMNS,
         ("fluxcd.controlplane.io", "resourcesetinputproviders") => FLUX_INPUT_PROVIDER_COLUMNS,
+        ("infra.contrib.fluxcd.io", "terraforms") => TERRAFORM_COLUMNS,
         ("argoproj.io", "applications") => ARGOCD_APP_COLUMNS,
         ("argoproj.io", "applicationsets") => ARGOCD_APPSET_COLUMNS,
         ("", "helm") => HELM_COLUMNS,
@@ -971,6 +982,7 @@ fn is_numeric_header(group: &str, plural: &str, header: &str) -> bool {
             FLUX_SOURCE_COLUMNS,
             FLUX_OPERATOR_COLUMNS,
             FLUX_INPUT_PROVIDER_COLUMNS,
+            TERRAFORM_COLUMNS,
         ]
         .iter()
         .any(|flux| cols.as_ptr() == flux.as_ptr());
@@ -1446,6 +1458,7 @@ pub fn has_faults_rule(group: &str, plural: &str) -> bool {
                 "fluxcd.controlplane.io",
                 "resourcesets" | "fluxinstances" | "resourcesetinputproviders"
             )
+            | ("infra.contrib.fluxcd.io", "terraforms")
             | ("argoproj.io", "applications" | "applicationsets")
     )
 }
@@ -1473,7 +1486,8 @@ pub fn object_faulted(group: &str, plural: &str, obj: &DynamicObject) -> Option<
         ("batch", "cronjobs") => return Some(cronjob_faulted(obj)),
         ("kustomize.toolkit.fluxcd.io", _)
         | ("helm.toolkit.fluxcd.io", _)
-        | ("source.toolkit.fluxcd.io", _) => {
+        | ("source.toolkit.fluxcd.io", _)
+        | ("infra.contrib.fluxcd.io", "terraforms") => {
             return Some(
                 terminating || bget(d, &["spec", "suspend"]) || ready_condition(d).0 != "True",
             );
@@ -1775,6 +1789,24 @@ fn col_flux_source_url<'a>(ctx: &CellContext<'a>) -> Cow<'a, str> {
 
 fn col_flux_suspended<'a>(ctx: &CellContext<'a>) -> Cow<'a, str> {
     Cow::Owned(bget(ctx.data, &["spec", "suspend"]).to_string())
+}
+
+/// Only the revision tofu-controller applied: a planned revision waiting for
+/// approval is not applied yet.
+fn col_terraform_revision<'a>(ctx: &CellContext<'a>) -> Cow<'a, str> {
+    Cow::Borrowed(sget(ctx.data, &["status", "lastAppliedRevision"]).unwrap_or_default())
+}
+
+/// The pending plan id, which `spec.approvePlan` takes, marked when the plan
+/// destroys.
+fn col_terraform_plan<'a>(ctx: &CellContext<'a>) -> Cow<'a, str> {
+    match sget(ctx.data, &["status", "plan", "pending"]).filter(|p| !p.is_empty()) {
+        Some(pending) if bget(ctx.data, &["status", "plan", "isDestroyPlan"]) => {
+            Cow::Owned(format!("{pending} (destroy)"))
+        }
+        Some(pending) => Cow::Borrowed(pending),
+        None => Cow::Borrowed(""),
+    }
 }
 
 fn col_flux_inventory<'a>(ctx: &CellContext<'a>) -> Cow<'a, str> {
@@ -4106,6 +4138,7 @@ mod tests {
             ("source.toolkit.fluxcd.io", "helmrepositories"),
             ("source.toolkit.fluxcd.io", "ocirepositories"),
             ("source.toolkit.fluxcd.io", "buckets"),
+            ("infra.contrib.fluxcd.io", "terraforms"),
             ("example.com", "widgets"),
         ];
 

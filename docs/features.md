@@ -418,8 +418,10 @@ include those conditions. Row filters can search the route paths.
   - CronJobs: suspended or terminating, or the last scheduled run finished
     without succeeding.
   - Flux Kustomizations, HelmReleases, Git/Helm/OCI repositories, Buckets,
-    ResourceSets, FluxInstances, and ResourceSetInputProviders: suspended,
-    terminating, or a `Ready` condition that is not `True`.
+    ResourceSets, FluxInstances, ResourceSetInputProviders, and tofu-controller
+    Terraforms: suspended, terminating, or a `Ready` condition that is not
+    `True`. A Terraform plan that waits for approval sets `Ready=Unknown`, so
+    it shows too.
   - Argo CD Applications: health other than `Healthy`, sync other than
     `Synced`, or terminating. ApplicationSets: any status other than `Synced`,
     or terminating.
@@ -694,7 +696,11 @@ include those conditions. Row filters can search the route paths.
   even when the specification has not changed. It sets
   `reconcile.fluxcd.io/requestedAt` and `reconcile.fluxcd.io/forceAt` to the same
   new timestamp. The status message confirms the request was sent; it does not
-  wait for the Helm operation to finish. `⏎` on a
+  wait for the Helm operation to finish. tofu-controller **Terraform** objects
+  (`tf`) get the plain menu, as `tfctl` suspends, resumes, and reconciles them.
+  Their list shows REVISION from `status.lastAppliedRevision` and PLAN, the
+  pending plan id that `spec.approvePlan` takes, with ` (destroy)` after it for
+  a destroy plan. sofka does not approve or replan. `⏎` on a
   **HelmRelease** opens the revision history of the Helm release it manages
   (resolved the way helm-controller composes `releaseName`/`storageNamespace`):
   `⏎` shows a revision's values, `y` the rendered manifest, `d` the NOTES, `r`
@@ -754,7 +760,11 @@ include those conditions. Row filters can search the route paths.
   object a ResourceSet applied finds its owner from the
   `resourceset.fluxcd.controlplane.io/name` label. An object a FluxInstance
   applied finds it from `fluxcd.controlplane.io/name`, as `flux-operator trace`
-  does.
+  does. A tofu-controller **Terraform** shows its own `sourceRef` and its
+  `dependsOn` Terraforms, also when a Kustomization applied it. That
+  Kustomization still shows as the owner, and the Terraform's state follows in
+  its own section. A Terraform has no Managed resources section, because its
+  inventory lists cloud resources, not Kubernetes objects.
 - **Argo CD view** (`:argocd` / `:argo`) - the state of the selected Application:
   sync and health, the project and destination, every source it deploys from with
   the revision actually deployed from that source, every object in
@@ -967,7 +977,9 @@ include those conditions. Row filters can search the route paths.
   mutates. See [Providers](providers.md#right-sizing-metrics-provider).
 - **Fleet dashboard** (`:fleet`) - an opt-in health summary across contexts,
   side by side: node readiness, unhealthy pods, Flux failures, and Argo CD
-  Applications that are `OutOfSync` or not `Healthy`. A cluster without the Flux
+  Applications that are `OutOfSync` or not `Healthy`. Flux failures count
+  Kustomizations, HelmReleases, and, when tofu-controller is installed,
+  Terraforms with `Ready=False`. A cluster without the Flux
   or Argo CD CRDs shows `—` rather than a zero. Contexts come from config or
   `space` in the `:ctx` switcher. `⏎` on a row with a non-zero Argo CD count
   switches to that context and lands straight on the Applications behind it,

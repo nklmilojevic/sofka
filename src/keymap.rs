@@ -184,6 +184,7 @@ impl Action {
                 "resourcesets",
                 "fluxinstances",
                 "resourcesetinputproviders",
+                "terraforms",
                 "applications",
                 "applicationsets",
             ]),

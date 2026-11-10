@@ -35,6 +35,7 @@ mod save;
 mod scale;
 mod server_table;
 mod synchronized_output;
+mod terraform;
 mod update;
 mod watch_status;
 mod workloads;

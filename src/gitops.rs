@@ -57,6 +57,10 @@ pub struct Evidence {
     pub source: Option<Node>,
     /// `dependsOn` objects, of the owner's kind, that gate the owner.
     pub deps: Vec<Node>,
+    /// The selected object when it reconciles from its own source and
+    /// dependencies while a label owner applied it (a Terraform inside a
+    /// Kustomization). `source` and `deps` are then its own.
+    pub reconciler: Option<Node>,
 }
 
 // ----- reference extraction (used by the app to know what to fetch) --------
@@ -107,7 +111,14 @@ pub fn is_owner_plural(group: &str, plural: &str) -> bool {
         ("kustomize.toolkit.fluxcd.io", "kustomizations")
             | ("helm.toolkit.fluxcd.io", "helmreleases")
             | ("fluxcd.controlplane.io", "resourcesets" | "fluxinstances")
+            | ("infra.contrib.fluxcd.io", "terraforms")
     )
+}
+
+/// Whether `group`/`plural` is tofu-controller's Terraform, whose
+/// `status.inventory.entries` are cloud resources, not Kubernetes objects.
+pub fn is_terraform(group: &str, plural: &str) -> bool {
+    (group, plural) == ("infra.contrib.fluxcd.io", "terraforms")
 }
 
 /// flux-operator owners render manifests themselves and have no source.
@@ -417,17 +428,21 @@ pub fn describe(ev: &Evidence) -> Vec<Finding> {
         return out;
     };
 
+    // The object the source, dependencies, and health belong to: the owner,
+    // or a Terraform that reconciles on its own under a label owner.
+    let chain = ev.reconciler.as_ref().unwrap_or(owner);
+
     // Headline.
     if ev.self_is_owner {
         out.push(finding(
             0,
-            owner_health_level(owner),
+            owner_health_level(chain),
             format!("{} — Flux {}", ev.subject, owner.reference.kind),
         ));
     } else {
         out.push(finding(
             0,
-            owner_health_level(owner),
+            owner_health_level(chain),
             format!(
                 "{} is managed by {}/{}",
                 ev.subject, owner.reference.kind, owner.reference.name
@@ -438,13 +453,21 @@ pub fn describe(ev: &Evidence) -> Vec<Finding> {
     // Owner block.
     out.push(finding(0, Level::Heading, "Owner"));
     push_flux_object(&mut out, owner, ev.self_is_owner);
+    if let Some(reconciler) = &ev.reconciler {
+        out.push(finding(
+            0,
+            Level::Heading,
+            reconciler.reference.kind.clone(),
+        ));
+        push_flux_object(&mut out, reconciler, true);
+    }
 
     // Source block.
-    if !is_operator_kind(&owner.reference.kind) {
+    if !is_operator_kind(&chain.reference.kind) {
         out.push(finding(0, Level::Heading, "Source"));
     }
     match &ev.source {
-        None if is_operator_kind(&owner.reference.kind) => {}
+        None if is_operator_kind(&chain.reference.kind) => {}
         Some(src) => {
             let mut f = finding(1, source_level(src), source_line(src));
             if let Some(t) = src.target() {
@@ -472,7 +495,7 @@ pub fn describe(ev: &Evidence) -> Vec<Finding> {
 
     // Reconciliation summary: what, if anything, is blocking.
     out.push(finding(0, Level::Heading, "Reconciliation"));
-    for line in reconciliation_summary(ev, owner) {
+    for line in reconciliation_summary(ev, chain) {
         out.push(finding(1, line.0, line.1));
     }
 
@@ -579,13 +602,19 @@ fn dep_line(dep: &Node) -> String {
     format!("{} — {state}", dep.reference.name)
 }
 
-/// What's blocking reconciliation, or that it's healthy.
+/// What's blocking reconciliation, or that it's healthy. `owner` is the
+/// object the source and dependencies belong to.
 fn reconciliation_summary(ev: &Evidence, owner: &Node) -> Vec<(Level, String)> {
     let mut out = Vec::new();
     if let Some(o) = owner.obj.as_ref()
         && suspended(o)
     {
-        out.push((Level::Warn, "owner is suspended — not reconciling".into()));
+        let who = if ev.reconciler.is_some() {
+            owner.reference.kind.as_str()
+        } else {
+            "owner"
+        };
+        out.push((Level::Warn, format!("{who} is suspended — not reconciling")));
     }
     if let Some(src) = &ev.source
         && !is_ready(src)
@@ -785,6 +814,7 @@ mod tests {
             owner: None,
             source: None,
             deps: vec![],
+            reconciler: None,
         };
         let f = describe(&ev);
         assert!(f[0].text.contains("not managed by Flux"));
@@ -818,6 +848,7 @@ mod tests {
             owner: Some(owner),
             source: Some(source),
             deps: vec![],
+            reconciler: None,
         };
         let f = describe(&ev);
         let all: Vec<&str> = f.iter().map(|x| x.text.as_str()).collect();
@@ -868,6 +899,7 @@ mod tests {
             owner: Some(owner),
             source: Some(source),
             deps: vec![dep],
+            reconciler: None,
         };
         let f = describe(&ev);
         let joined: String = f
@@ -900,6 +932,7 @@ mod tests {
             owner: Some(owner),
             source: None,
             deps: vec![],
+            reconciler: None,
         };
         let joined: String = describe(&ev)
             .iter()
