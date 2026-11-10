@@ -95,17 +95,29 @@ impl App {
                     gitops::is_owner_plural(&group, &plural).then(|| selection_ref.clone())
                 });
                 let self_is_owner = owner_ref.as_ref() == Some(&selection_ref);
-                let owner_inline = self_is_owner.then(|| obj.clone());
-                let owner_plural_inline = self_is_owner.then(|| plural.clone());
 
                 let mut warn = None;
-                // Owner: the selection itself, or fetched from its label reference.
+                // Owner: the selection itself, or fetched from its label
+                // reference. Its API resource also resolves its dependencies,
+                // which are objects of the same kind.
+                let owner_kind = owner_ref.as_ref().and_then(|r| {
+                    if self_is_owner {
+                        Some((kind.ar.clone(), kind.namespaced, plural.clone()))
+                    } else {
+                        flux.get(&r.kind.to_lowercase()).cloned()
+                    }
+                });
                 let owner = match owner_ref {
                     None => None,
                     Some(r) => {
-                        let (plural, obj) = match (owner_inline, owner_plural_inline) {
-                            (Some(o), Some(p)) => (p, Some(o)),
-                            _ => fetch_flux(&client, &flux, &r, &mut warn).await,
+                        let (plural, obj) = match &owner_kind {
+                            Some((_, _, plural)) if self_is_owner => {
+                                (plural.clone(), Some(obj.clone()))
+                            }
+                            Some(resolved) => {
+                                fetch_resolved(&client, resolved, &r, &mut warn).await
+                            }
+                            None => (String::new(), None),
                         };
                         Some(Node {
                             reference: r,
@@ -127,13 +139,16 @@ impl App {
                             obj,
                         });
                     }
-                    for dr in gitops::depends_on(owner_obj) {
-                        let (plural, obj) = fetch_flux(&client, &flux, &dr, &mut warn).await;
-                        deps.push(Node {
-                            reference: dr,
-                            plural,
-                            obj,
-                        });
+                    if let Some(resolved) = &owner_kind {
+                        for dr in gitops::depends_on(owner_obj) {
+                            let (plural, obj) =
+                                fetch_resolved(&client, resolved, &dr, &mut warn).await;
+                            deps.push(Node {
+                                reference: dr,
+                                plural,
+                                obj,
+                            });
+                        }
                     }
                 }
 
@@ -275,9 +290,20 @@ async fn fetch_flux(
     r: &FluxRef,
     warn: &mut Option<String>,
 ) -> (String, Option<DynamicObject>) {
-    let Some((ar, namespaced, plural)) = flux.get(&r.kind.to_lowercase()) else {
+    let Some(resolved) = flux.get(&r.kind.to_lowercase()) else {
         return (String::new(), None);
     };
+    fetch_resolved(client, resolved, r, warn).await
+}
+
+/// Fetch one Flux object by reference through an already resolved API
+/// resource, as [`fetch_flux`] does.
+async fn fetch_resolved(
+    client: &Client,
+    (ar, namespaced, plural): &(ApiResource, bool, String),
+    r: &FluxRef,
+    warn: &mut Option<String>,
+) -> (String, Option<DynamicObject>) {
     let api = crate::k8s::dynamic_api(client.clone(), ar, *namespaced, &r.namespace);
     let obj = match api.get(&r.name).await {
         Ok(o) => Some(o),
