@@ -1316,6 +1316,7 @@ fn header_hints(app: &App) -> Vec<Line<'static>> {
         }
     };
     if app.kind_plural == "machinedeployments"
+        && app.configured_drill().is_none()
         && app
             .kind
             .as_ref()
@@ -7508,6 +7509,65 @@ mod tests {
         assert!(text.contains("secrets"), "{text}");
         assert!(!text.contains("argo view"), "{text}");
         assert_eq!(text.matches("yaml").count(), 1, "{text}");
+    }
+
+    #[tokio::test]
+    async fn machinedeployment_header_hint_matches_enter_target() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+        for configured in [false, true] {
+            let (tx, _rx) = tokio::sync::mpsc::channel(16);
+            let mut app = App::new(crate::k8s::Cluster::fake(), tx);
+            app.cluster.register_kind(
+                "cluster.x-k8s.io",
+                "MachineDeployment",
+                "machinedeployments",
+                true,
+            );
+            app.cluster
+                .register_kind("cluster.x-k8s.io", "Machine", "machines", true);
+            if configured {
+                app.user_views.insert(
+                    "machinedeployments".to_string(),
+                    crate::views::View {
+                        drill: Some(crate::views::Drill {
+                            kind: "secrets".to_string(),
+                            labels: None,
+                            fields: None,
+                        }),
+                        ..Default::default()
+                    },
+                );
+            }
+            app.switch_kind("machinedeployments.cluster.x-k8s.io");
+            let obj = serde_json::from_value(serde_json::json!({
+                "apiVersion": "cluster.x-k8s.io/v1beta1",
+                "kind": "MachineDeployment",
+                "metadata": {"name": "workers", "namespace": "default"},
+                "spec": {"selector": {"matchLabels": {"app": "x"}}}
+            }))
+            .unwrap();
+            app.handle_msg(crate::store::Msg::Applied {
+                generation: app.generation,
+                key: crate::store::row_key(&obj),
+                obj: Box::new(obj),
+            });
+            app.table_state.select(Some(0));
+
+            let target = if configured { "secrets" } else { "machines" };
+            let text = header_hints(&app)
+                .iter()
+                .map(line_text)
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert!(text.contains(&format!("enter {target}")), "{text}");
+            assert_eq!(text.contains("machines"), !configured, "{text}");
+            assert_eq!(text.matches("yaml").count(), 1, "{text}");
+
+            app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+                .unwrap();
+            assert_eq!(app.kind_plural, target);
+        }
     }
 
     #[test]
