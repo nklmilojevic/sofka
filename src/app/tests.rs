@@ -16128,6 +16128,66 @@ async fn shell_plugin_script_is_not_interpolated() {
 }
 
 #[tokio::test]
+async fn imported_shell_plugin_keeps_unquoted_values_in_one_argument() {
+    let dir = std::env::temp_dir().join(format!("sofka-import-shell-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("plugins.yaml"),
+        r#"plugins:
+  print:
+    shortCut: Ctrl-G
+    command: /bin/sh
+    args: [-ec, 'printf "[%s]" $NAME prefix$NAME/suffix "$NAME"']
+"#,
+    )
+    .unwrap();
+    let sources = crate::k9s_import::Sources::at(&dir).unwrap();
+    let plan = crate::k9s_import::plan(&sources, &Default::default());
+    std::fs::remove_dir_all(&dir).unwrap();
+    assert!(plan.skipped.is_empty(), "{:?}", plan.skipped);
+    let cfg: crate::config::Config = plan.effective.unwrap().try_into().unwrap();
+    assert!(crate::config::plugin_warnings(&cfg.plugins).is_empty());
+
+    let name = "a * [x]; $(printf unexpected)";
+    let (mut app, _rx) = test_app();
+    app.switch_kind("pods");
+    apply(
+        &mut app,
+        json!({"apiVersion": "v1", "kind": "Pod",
+               "metadata": {"name": name, "namespace": "default"}}),
+    );
+    app.table_state.select(Some(0));
+    app.plugins = cfg.plugins;
+    app.handle_key(ctrl(KeyCode::Char('g'))).unwrap();
+    let Some(Suspend::Shell(argv)) = &app.pending else {
+        panic!("plugin did not run");
+    };
+    assert_eq!(
+        argv,
+        &[
+            "/bin/sh",
+            "-ec",
+            r#"printf "[%s]" "${1}" prefix"${1}"/suffix "${1}""#,
+            "sofka",
+            name
+        ]
+    );
+    #[cfg(unix)]
+    {
+        let result = std::process::Command::new(&argv[0])
+            .args(&argv[1..])
+            .output()
+            .unwrap();
+        assert!(result.status.success(), "{result:?}");
+        assert!(result.stderr.is_empty(), "{result:?}");
+        assert_eq!(
+            String::from_utf8(result.stdout).unwrap(),
+            format!("[{name}][prefix{name}/suffix][{name}]")
+        );
+    }
+}
+
+#[tokio::test]
 async fn plugin_skin_placeholder_follows_skin_switch() {
     let (mut app, _rx) = test_app();
     app.switch_kind("pods");

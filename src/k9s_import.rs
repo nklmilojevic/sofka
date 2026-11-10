@@ -931,7 +931,74 @@ fn chord(k9s: &str) -> Option<String> {
 // Plugins
 // ---------------------------------------------------------------------------
 
-const SHELLS: &[&str] = &["sh", "bash", "zsh", "dash", "ksh", "fish"];
+pub(crate) const SHELLS: &[&str] = &["sh", "bash", "zsh", "dash", "ksh", "fish"];
+
+pub(crate) fn shell_command_flag(shell: &str, arg: &str) -> bool {
+    (shell == "fish" && arg == "--command")
+        || arg.strip_prefix('-').is_some_and(|flags| {
+            flags.chars().all(|c| c.is_ascii_alphabetic()) && flags.contains('c')
+        })
+}
+
+const SCRIPT_PLACEHOLDERS: &[&str] = &[
+    "$NAMESPACE",
+    "$RESOURCE",
+    "$CONTEXT",
+    "$CLUSTER",
+    "$VERSION",
+    "$FILTER",
+    "$GROUP",
+    "$NAME",
+    "$KIND",
+    "$SKIN",
+    "$NS",
+];
+
+const SCRIPT_WARNING: &str = "object values are pasted into the shell script; rewrite it to read them as positional parameters";
+
+fn positional_script(script: &str) -> Option<(String, Vec<&'static str>)> {
+    let mut out = String::with_capacity(script.len());
+    let mut placeholders = Vec::new();
+    let mut quoted = false;
+    let mut rest = script;
+    while let Some(c) = rest.chars().next() {
+        // Only convert simple scripts. Keep other shell syntax for manual review.
+        if matches!(
+            c,
+            '\'' | '\\' | '`' | '\n' | '\r' | ';' | '|' | '&' | '(' | ')' | '<' | '>' | '{' | '}'
+        ) {
+            return None;
+        }
+        if c == '"' {
+            quoted = !quoted;
+        }
+        if c == '$' && rest[1..].starts_with(|c: char| c.is_ascii_digit() || "@*#{(\"'".contains(c))
+        {
+            return None;
+        }
+        if let Some(&placeholder) = SCRIPT_PLACEHOLDERS.iter().find(|p| rest.starts_with(**p)) {
+            let index = match placeholders.iter().position(|p| *p == placeholder) {
+                Some(index) => index,
+                None => {
+                    placeholders.push(placeholder);
+                    placeholders.len() - 1
+                }
+            };
+            if !quoted {
+                out.push('"');
+            }
+            out.push_str(&format!("${{{}}}", index + 1));
+            if !quoted {
+                out.push('"');
+            }
+            rest = &rest[placeholder.len()..];
+        } else {
+            out.push(c);
+            rest = &rest[c.len_utf8()..];
+        }
+    }
+    (!quoted && !placeholders.is_empty()).then_some((out, placeholders))
+}
 
 fn convert_plugins(plugins: &[(String, K9sPlugin)], doc: &mut Table, skipped: &mut Vec<String>) {
     for (name, plugin) in plugins {
@@ -1003,12 +1070,12 @@ fn convert_plugin(name: &str, p: &K9sPlugin) -> Result<(Table, Vec<String>), Str
     }
     leftover.sort();
     leftover.dedup();
+    let shell = Path::new(p.command.trim())
+        .file_name()
+        .and_then(|s| s.to_str())
+        .filter(|c| SHELLS.contains(c));
     if !leftover.is_empty() {
-        let shell = Path::new(p.command.trim())
-            .file_name()
-            .and_then(|s| s.to_str())
-            .is_some_and(|c| SHELLS.contains(&c));
-        let source = if shell {
+        let source = if shell.is_some() {
             "left to the shell environment"
         } else {
             "passed through unexpanded"
@@ -1017,6 +1084,23 @@ fn convert_plugin(name: &str, p: &K9sPlugin) -> Result<(Table, Vec<String>), Str
             "{} {source}; sofka has no such placeholder",
             leftover.join(", ")
         ));
+    }
+
+    if let Some(shell) = shell
+        && let Some(i) = args.iter().position(|a| shell_command_flag(shell, a))
+        && let Some(script) = args.get(i + 1)
+        && (SCRIPT_PLACEHOLDERS.iter().any(|p| script.contains(p)) || script.contains("${input."))
+    {
+        if shell != "fish"
+            && i + 2 == args.len()
+            && let Some((script, placeholders)) = positional_script(script)
+        {
+            args[i + 1] = script;
+            args.push("sofka".into());
+            args.extend(placeholders.into_iter().map(String::from));
+        } else {
+            notes.push(SCRIPT_WARNING.into());
+        }
     }
 
     let mut out = Table::new();
@@ -1833,7 +1917,7 @@ mod tests {
     }
 
     #[test]
-    fn shell_plugins_keep_their_script_with_sofka_placeholders() {
+    fn shell_plugins_read_placeholders_as_positional_parameters() {
         let p = plugin(
             r#"
 shortCut: Shift-L
@@ -1852,12 +1936,186 @@ args: [-c, "stern ${NAME} -n $namespace --context $CONTEXT -o $RESOURCE_NAME.$RE
             strings(&out["args"]),
             [
                 "-c",
-                "stern $NAME -n $NAMESPACE --context $CONTEXT -o $RESOURCE.$GROUP/$VERSION"
+                r#"stern "${1}" -n "${2}" --context "${3}" -o "${4}"."${5}"/"${6}""#,
+                "sofka",
+                "$NAME",
+                "$NAMESPACE",
+                "$CONTEXT",
+                "$RESOURCE",
+                "$GROUP",
+                "$VERSION",
             ]
         );
         assert!(!out.contains_key("scopes"), "`all` means every resource");
         assert_eq!(out["mutating"].as_bool(), Some(false));
         assert!(!out.contains_key("output"));
+    }
+
+    #[test]
+    fn positional_script_numbers_placeholders_by_first_use() {
+        assert_eq!(
+            positional_script("echo $NAMESPACE/$NAME $NAME"),
+            Some((
+                r#"echo "${1}"/"${2}" "${2}""#.into(),
+                vec!["$NAMESPACE", "$NAME"]
+            ))
+        );
+    }
+
+    #[test]
+    fn positional_script_ignores_other_dollars() {
+        assert_eq!(positional_script("echo $HOME $1"), None);
+        assert_eq!(
+            positional_script("echo $HOME $NAME"),
+            Some((r#"echo $HOME "${1}""#.into(), vec!["$NAME"]))
+        );
+    }
+
+    #[test]
+    fn positional_script_supports_all_placeholders_and_two_digit_positions() {
+        assert_eq!(
+            positional_script(&SCRIPT_PLACEHOLDERS.join(" ")),
+            Some((
+                r#""${1}" "${2}" "${3}" "${4}" "${5}" "${6}" "${7}" "${8}" "${9}" "${10}" "${11}""#
+                    .into(),
+                SCRIPT_PLACEHOLDERS.to_vec()
+            ))
+        );
+    }
+
+    #[test]
+    fn shell_command_flags_include_combined_short_options() {
+        for shell in SHELLS {
+            for flag in ["-c", "-lc", "-ec", "-cl"] {
+                assert!(shell_command_flag(shell, flag), "{shell} {flag}");
+            }
+            for arg in ["-l", "--rcfile", "--norc", "script", "--", "-c echo"] {
+                assert!(!shell_command_flag(shell, arg), "{shell} {arg}");
+            }
+            assert_eq!(shell_command_flag(shell, "--command"), *shell == "fish");
+        }
+    }
+
+    #[test]
+    fn combined_shell_flags_convert_or_warn() {
+        for flag in ["-lc", "-ec"] {
+            for script in ["echo $NAME", "echo '$NAME'"] {
+                let mut p = plugin("shortCut: x\ncommand: bash\n");
+                p.args = vec![flag.into(), script.into()];
+                let (out, notes) = convert_plugin("combined", &p).unwrap();
+                if script.contains('\'') {
+                    assert_eq!(strings(&out["args"]), [flag, script]);
+                    assert_eq!(notes, [SCRIPT_WARNING]);
+                } else {
+                    assert_eq!(
+                        strings(&out["args"]),
+                        [flag, r#"echo "${1}""#, "sofka", "$NAME"]
+                    );
+                    assert!(notes.is_empty(), "{notes:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn fish_plugins_are_left_alone_with_a_note() {
+        for flag in ["-c", "-lc", "--command"] {
+            let mut p = plugin("shortCut: x\ncommand: fish\n");
+            p.args = vec![flag.into(), "echo $NAME".into()];
+            let (out, notes) = convert_plugin("fish", &p).unwrap();
+            assert_eq!(strings(&out["args"]), [flag, "echo $NAME"]);
+            assert_eq!(notes, [SCRIPT_WARNING]);
+        }
+    }
+
+    #[test]
+    fn scripts_followed_by_arguments_are_left_alone_with_a_note() {
+        let p = plugin("shortCut: x\ncommand: bash\nargs: [-c, echo $NAME, extra]\n");
+        let (out, notes) = convert_plugin("extra", &p).unwrap();
+        assert_eq!(strings(&out["args"]), ["-c", "echo $NAME", "extra"]);
+        assert_eq!(notes, [SCRIPT_WARNING]);
+    }
+
+    #[test]
+    fn quoted_and_complex_scripts_are_left_alone_with_a_note() {
+        for script in [
+            "echo '$NAME'",
+            "echo 'prefix'\"$NAME\"",
+            "echo \"$NAME",
+            r"echo \$NAME",
+            r#"echo \"$NAME\""#,
+            "echo `echo $NAME`",
+            "echo $(echo $NAME)",
+            "cat <<'EOF'\n$NAME\nEOF",
+            "set -- other; echo $NAME",
+            "echo $NAME | cat",
+        ] {
+            let mut p = plugin("shortCut: x\ncommand: bash\n");
+            p.args = vec!["-c".into(), script.into()];
+            let (out, notes) = convert_plugin("quoted", &p).unwrap();
+            assert_eq!(strings(&out["args"]), ["-c", script], "{script}");
+            assert_eq!(notes, [SCRIPT_WARNING], "{script}");
+        }
+    }
+
+    #[test]
+    fn scripts_with_existing_positional_parameters_are_left_alone_with_a_note() {
+        for parameter in ["$0", "$1", "${1}", "$10", "$@", "$*", "$#"] {
+            let script = format!("echo {parameter} $NAME");
+            let mut p = plugin("shortCut: x\ncommand: /bin/bash\n");
+            p.args = vec!["-c".into(), script.clone().into()];
+            let (out, notes) = convert_plugin("positional", &p).unwrap();
+            assert_eq!(strings(&out["args"]), ["-c", &script], "{script}");
+            assert_eq!(notes, [SCRIPT_WARNING], "{script}");
+        }
+    }
+
+    #[test]
+    fn double_quoted_scripts_keep_quotes_and_pass_values_as_arguments() {
+        let p = plugin(
+            r#"
+shortCut: x
+command: /bin/sh
+args: [-c, 'printf "%s %s" "$NAME" "$CONTEXT"']
+"#,
+        );
+        let (out, notes) = convert_plugin("quoted", &p).unwrap();
+        assert!(notes.is_empty(), "{notes:?}");
+        assert_eq!(
+            strings(&out["args"]),
+            [
+                "-c",
+                r#"printf "%s %s" "${1}" "${2}""#,
+                "sofka",
+                "$NAME",
+                "$CONTEXT"
+            ]
+        );
+
+        #[cfg(unix)]
+        {
+            let name = "a\" b; printf injected #";
+            let context = "$(printf unexpected)`printf unexpected`";
+            let args: Vec<_> = strings(&out["args"])
+                .iter()
+                .map(|arg| {
+                    crate::plugins::replace_placeholders(
+                        arg,
+                        &[("$NAME", name), ("$CONTEXT", context)],
+                    )
+                })
+                .collect();
+            let result = std::process::Command::new("/bin/sh")
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(result.status.success(), "{result:?}");
+            assert!(result.stderr.is_empty(), "{result:?}");
+            assert_eq!(
+                String::from_utf8(result.stdout).unwrap(),
+                format!("{name} {context}")
+            );
+        }
     }
 
     #[test]
