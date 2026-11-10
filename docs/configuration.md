@@ -38,7 +38,7 @@ an error, sofka does not reload; `:reload` applies what you saved.
   kubeconfig cluster and context.
 
 The existing file opens as it is, TOML or YAML. A level without a file gets an
-empty `config.toml`, and its directories are created. sofka refuses a level
+empty `config.toml` that only you can read, and its directories are created. sofka refuses a level
 with conflicting files (`:config` lists them), and a file that is a symlink or
 not writable, such as one managed by Home Manager: edit that file at its source.
 The command also works in read-only mode, because it changes local files, not

@@ -8,7 +8,7 @@
 
 use std::path::{Path, PathBuf};
 
-use super::secret_edit::{configured_editor, editor_argv};
+use super::secret_edit::{configured_editor, create_private, editor_argv};
 use super::*;
 
 /// The palette words after `:config`, in completion order.
@@ -36,7 +36,8 @@ impl Level {
 }
 
 /// The file to open for the level in `dir`. A missing file is created empty,
-/// with its directories, so the editor has somewhere to save.
+/// with its directories, so the editor has somewhere to save. Only its owner
+/// can read it: config can hold credentials, such as provider headers.
 fn editable_file(dir: &Path) -> Result<PathBuf, String> {
     let path = crate::config::level_file(dir).map_err(|e| format!("{e} (:config for details)"))?;
     let managed = || {
@@ -54,12 +55,7 @@ fn editable_file(dir: &Path) -> Result<PathBuf, String> {
         },
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             std::fs::create_dir_all(dir)
-                .and_then(|()| {
-                    std::fs::OpenOptions::new()
-                        .write(true)
-                        .create_new(true)
-                        .open(&path)
-                })
+                .and_then(|()| create_private(&path, ""))
                 .map_err(|e| format!("{}: {e}", path.display()))?;
             Ok(path)
         }

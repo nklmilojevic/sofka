@@ -21672,6 +21672,18 @@ async fn config_edit_does_not_reload_after_a_failed_editor() {
 
 #[cfg(unix)]
 #[tokio::test]
+async fn config_edit_creates_a_missing_file_readable_only_by_its_owner() {
+    use std::os::unix::fs::PermissionsExt;
+    let (mut app, _rx, dir) = config_edit_app("private");
+    palette(&mut app, "config edit cluster");
+    let path = config_editor_file(&mut app);
+    let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+    assert_eq!(mode & 0o777, 0o600, "{mode:o}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[cfg(unix)]
+#[tokio::test]
 async fn config_edit_refuses_a_symlinked_file() {
     let (mut app, _rx, dir) = config_edit_app("symlink");
     let source = dir.join("source.toml");
