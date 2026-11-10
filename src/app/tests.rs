@@ -16,6 +16,7 @@ mod exec_auth;
 mod flux;
 mod kubeconfig;
 mod label_filter;
+mod line_select;
 mod log_follow;
 mod namespace_patterns;
 mod node_roles;

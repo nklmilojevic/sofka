@@ -79,6 +79,9 @@ impl App {
 /// this; resuming follow trims back to the configured `[logs] buffer`.
 const MAX_LOG_LINES_PAUSED: usize = 100_000;
 
+/// Lines one page key moves in a document view.
+const DOCUMENT_PAGE: usize = 20;
+
 /// Log streams batch lines before sending them through the UI channel. This
 /// avoids one wake-up/message per line under high-volume workloads while still
 /// flushing quickly for low-volume logs.
@@ -692,6 +695,10 @@ pub struct Scrollable {
     /// YAML view with a `/` search active that was thousands of allocations
     /// at up to 62 Hz.
     match_cache: RefCell<Option<MatchCache>>,
+    /// `V` line selection over source line indices.
+    selection: Option<LineSelection>,
+    /// The selection cursor moved; the next draw scrolls it into view.
+    reveal_cursor: bool,
 }
 
 struct MatchCache {
@@ -1213,6 +1220,7 @@ impl Scrollable {
             .map(|viewport| (viewport.width, viewport.height));
         self.lines = lines;
         self.scroll_h(0);
+        self.clamp_selection();
         self.revision = self.revision.wrapping_add(1);
         self.viewport = None;
         if let Some((width, height)) = dimensions {
@@ -1316,6 +1324,9 @@ pub struct LogIndex {
     consumed: usize,
     /// Buffer indices in display order. None is a visual marker row.
     shown: Vec<Option<u32>>,
+    /// Where each log line sits in [`Self::shown`], markers left out, so a
+    /// line selection finds lines by binary search.
+    lines: Vec<u32>,
     consumed_markers: usize,
     /// Cumulative display rows *through* `shown[i]`, so the first row of
     /// `shown[i]` is `ends[i-1]` (0 for i == 0).
@@ -1369,6 +1380,7 @@ impl LogIndex {
         self.consumed = 0;
         self.consumed_markers = 0;
         self.shown.clear();
+        self.lines.clear();
         self.ends.clear();
         self.total_rows = 0;
     }
@@ -1421,6 +1433,12 @@ pub struct LogsView {
     source: Option<LogSource>,
     /// Filter/wrap index over [`Self::view`], maintained incrementally.
     index: LogIndex,
+    /// `V` line selection over stable line positions, like [`Self::markers`].
+    selection: Option<LineSelection>,
+    /// Autoscroll before the selection paused it, restored when it ends.
+    selection_follow: bool,
+    /// The selection cursor moved; the next draw scrolls it into view.
+    reveal_cursor: bool,
 }
 
 impl Default for LogsView {
@@ -1448,6 +1466,9 @@ impl Default for LogsView {
             max_hscroll: 0,
             source: None,
             index: LogIndex::default(),
+            selection: None,
+            selection_follow: false,
+            reveal_cursor: false,
         }
     }
 }
@@ -1487,6 +1508,7 @@ impl LogsView {
     }
 
     fn clear_lines(&mut self) {
+        self.end_selection();
         self.view.clear_lines();
         self.line_meta.clear();
         self.json_budget = logs::JSON_CACHE_LIMIT;
@@ -1500,6 +1522,7 @@ impl LogsView {
             return;
         }
         self.line_offset += count;
+        self.clamp_selection();
         let removed_markers = self.markers.partition_point(|&pos| pos < self.line_offset);
         if !self.follow {
             let rows: usize = self
@@ -1598,6 +1621,7 @@ impl LogsView {
             {
                 continue;
             }
+            index.lines.push(index.shown.len() as u32);
             index.shown.push(Some(i as u32));
             let display = line_meta
                 .get(i)
@@ -3171,7 +3195,9 @@ mod input;
 mod journal;
 mod layouts;
 mod lifecycle;
+mod line_select;
 mod log_follow;
+pub use line_select::LineSelection;
 mod logs;
 pub use logs::{JsonView, RecordPart, RecordSpan};
 mod metrics_history;

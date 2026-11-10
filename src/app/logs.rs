@@ -809,6 +809,7 @@ impl LogsView {
                     *marker += 1;
                 }
             }
+            self.shift_selection(index);
             self.view.revision = self.view.revision.wrapping_add(1);
         }
         self.line_meta.insert(index, meta);

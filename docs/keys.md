@@ -212,8 +212,8 @@ was started from. See [Manifest browser](features.md#manifest-browser).
 
 ## Logs view
 
-`/` filter (substring · `/regex/` · `!invert`) · `s`/`f` autoscroll · `w` wrap · `←`/`→` or `h`/`l` scroll sideways (unwrapped) ·
-`J` JSON view (raw/record/pretty) · `Ctrl+Z` warning/error filter · `m` visual marker · `t` timestamps · `x` stop/resume stream · `z` clear buffer · `c` copy buffer ·
+`/` filter (substring · `/regex/` · `!invert`) · `s`/`f` autoscroll · `w` wrap · `ctrl-f`/`ctrl-b` page · `←`/`→` or `h`/`l` scroll sideways (unwrapped) ·
+`J` JSON view (raw/record/pretty) · `Ctrl+Z` warning/error filter · `m` visual marker · `t` timestamps · `x` stop/resume stream · `z` clear buffer · `c` copy buffer · `V` select lines ·
 `a` default/all containers (pods with a default-container annotation) ·
 `ctrl-s` save to a file in `save_dir` · `F` fullscreen (no chrome, clean text selection) ·
 `0`–`5` time anchors (tail · 1m · 5m · 15m · 30m · 1h) · `T` custom lookback (`s`/`m`/`h`/`d`/`w`, compound like `1h30m`, decimal like `1.5h`, or `tail` for kubelet logs)
@@ -231,6 +231,20 @@ buffer is cleared or replaced, or when their position is trimmed. Marker count
 is limited to the active log buffer cap. Manual terminal selection can include
 visible markers.
 
+`V` selects whole lines, starting on the first visible line. `j` / `k`, `g` /
+`G`, `space`, and `ctrl-f` / `ctrl-b` (or `PgDn` / `PgUp`) move the cursor and
+extend the selection. `o` moves the cursor to the other end. Selected lines
+have a background and a gutter marker, with `▶` on the cursor line. `y` or `c`
+copies the selected lines and ends the selection; the status line says how many were
+copied. `esc` or `V` cancels it and stays in the view. The selection covers the
+lines the filter shows. Copied lines are the raw lines `c` copies: wrap and
+sideways scroll do not matter, the JSON view copies raw records, and markers
+are left out. Autoscroll pauses while the selection is open and the stream
+keeps filling the buffer; it resumes when the selection ends, and `s` ends the
+selection and resumes it at once. New lines do not move the selection. If
+buffer trimming removes the start of the selection, it starts at the oldest
+kept line.
+
 ## Describe
 
 `d` uses kubectl by default. Enable the experimental `deskribe` backend with
@@ -247,6 +261,15 @@ and reload behavior. Helm rows continue to show release notes.
 highlighted. `n` / `N` go to the next or previous match. `w` wraps. `c` copies
 the document. `ctrl-s` saves it to a file. `esc` backs out - the first press
 clears an active search.
+
+`V` selects whole lines, starting on the current search match, or on the first
+visible line when no search is active. `j` / `k`, `g` / `G`, `ctrl-f` /
+`ctrl-b`, and `n` / `N` move the cursor and extend the selection. `o` moves the
+cursor to the other end. Selected lines have a background and a gutter marker,
+with `▶` on the cursor line. `y` or `c` copies the selected lines whole, whatever
+the wrap and sideways scroll, and ends the selection. `esc` or `V` cancels it;
+with a search active, the next `esc` clears the search. A refresh that shortens the document keeps the
+selection on the lines that remain.
 
 `ctrl-s` writes the whole document as rendered, whatever the search or scroll
 position. `managedFields` are included only after `m` shows them, and a Helm

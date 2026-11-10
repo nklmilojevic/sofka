@@ -1493,6 +1493,9 @@ impl App {
             ));
             return;
         }
+        if detail && self.key_doc_selection(key) {
+            return;
+        }
         let target = if detail {
             &mut self.detail
         } else {
@@ -1570,10 +1573,10 @@ impl App {
             (Some(Action::Left), _) => target.scroll_h(-5),
             (Some(Action::Right), _) => target.scroll_h(5),
             (Some(a @ (Action::PageDown | Action::HalfPageDown)), _) => {
-                target.scroll_by(a.page_size(20) as i32)
+                target.scroll_by(a.page_size(DOCUMENT_PAGE) as i32)
             }
             (Some(a @ (Action::PageUp | Action::HalfPageUp)), _) => {
-                target.scroll_by(-(a.page_size(20) as i32))
+                target.scroll_by(-(a.page_size(DOCUMENT_PAGE) as i32))
             }
             (Some(Action::First), _) => {
                 target.scroll = 0;
@@ -1592,6 +1595,9 @@ impl App {
     }
 
     pub(super) fn key_logs(&mut self, key: KeyInput) {
+        if self.key_log_selection(key) {
+            return;
+        }
         if key.action == Some(Action::LogWarnings) {
             self.logs.toggle_warnings();
             return;
