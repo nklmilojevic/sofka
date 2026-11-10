@@ -37,6 +37,28 @@ mod update;
 mod watch_status;
 mod workloads;
 
+/// Commands omitted from `docs/keys.md`, each with a reason.
+const UNDOCUMENTED_COMMANDS: &[&str] = &[];
+
+#[test]
+fn every_palette_command_is_in_the_keys_doc() {
+    let doc = include_str!("../../docs/keys.md");
+    let missing: Vec<&str> = PALETTE_COMMANDS
+        .iter()
+        .filter_map(|command| command.names.first().copied())
+        .filter(|name| !UNDOCUMENTED_COMMANDS.contains(name))
+        .filter(|name| {
+            !["`:{}`", "`:{} ", "`:{}["]
+                .iter()
+                .any(|shape| doc.contains(&shape.replace("{}", name)))
+        })
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "commands missing from docs/keys.md: {missing:?}"
+    );
+}
+
 fn obj(v: serde_json::Value) -> DynamicObject {
     serde_json::from_value(v).unwrap()
 }
