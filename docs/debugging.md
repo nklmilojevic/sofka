@@ -278,12 +278,20 @@ an incident between application and platform teams. sofka gathers it off-thread
 and shows a preview, then `:bundle-save` writes a private file in `save_dir`
 (the system temp directory by default).
 
-Always redacted: Secret `data`/`stringData` values, any credential-like
-annotation (a key containing `token`, `password`, `secret`, `apikey`,
-`credential`, and similar), and `last-applied-configuration`, all replaced with a
-placeholder. `managedFields` is dropped. Env vars sourced from Secrets are flagged
-(their values are references, not literals). Every bundle carries a manifest of
-exactly what it includes and what it withholds.
+sofka replaces these values with a placeholder:
+
+- Secret `data` and `stringData` values.
+- Annotation values and literal environment values whose keys or names contain
+  `token`, `password`, `secret`, `apikey`, `credential`, or a similar credential
+  name.
+- The `last-applied-configuration` annotation.
+- Pod log text that matches known credential patterns.
+
+Log masking uses known patterns and can miss credentials that do not match them.
+Check the bundle before you share it. sofka removes `managedFields`. Environment
+variables sourced from Secrets are flagged. They contain references, not literal
+values. Every bundle has a manifest that lists what it includes and what it
+withholds.
 
 ```toml
 [bundle]
