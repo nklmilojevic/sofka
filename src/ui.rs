@@ -3405,7 +3405,10 @@ fn build_help(app: &App, width: usize) -> (Vec<Line<'static>>, String, HelpSecti
         ":rollout-history",
         "deployment/statefulset/daemonset revisions: ⏎ diff · r rollback",
     ));
-    lines.push(bind(":events", "browse all events"));
+    lines.push(bind(
+        ":events",
+        "browse events in this namespace · 0 for all",
+    ));
     lines.push(bind(":pf", "view/stop background port-forwards"));
     lines.push(bind(":skin", "preview and switch color skin"));
     lines.push(bind(
