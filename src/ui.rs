@@ -2173,6 +2173,28 @@ fn draw_scrollable(
     area: Rect,
     accent: ratatui::style::Color,
 ) {
+    draw_document(
+        frame,
+        show_scrollbars,
+        fullscreen,
+        view,
+        area,
+        accent,
+        |line| Line::from(highlight_yaml(line)),
+    );
+}
+
+/// A scrollable document with its search highlights and `V` selection.
+/// `style` colors one source line before the highlights are applied.
+fn draw_document(
+    frame: &mut Frame,
+    show_scrollbars: bool,
+    fullscreen: bool,
+    view: &mut crate::app::Scrollable,
+    area: Rect,
+    accent: ratatui::style::Color,
+    style: impl Fn(&str) -> Line<'static>,
+) {
     let inner_w = area.width.saturating_sub(if fullscreen { 0 } else { 2 }) as usize;
     let inner_h = area.height.saturating_sub(if fullscreen { 1 } else { 2 }) as usize;
     let selection = view.selection();
@@ -2189,10 +2211,7 @@ fn draw_scrollable(
         .iter()
         .skip(start)
         .take(end - start)
-        .map(|l| {
-            let line = strip_ansi_if_present(l);
-            highlight_matches(Line::from(highlight_yaml(&line)), &view.filter)
-        })
+        .map(|l| highlight_matches(style(&strip_ansi_if_present(l)), &view.filter))
         .collect();
     let text = match selection {
         Some(selection) => {
@@ -3113,50 +3132,22 @@ fn draw_diff(
     view: &mut crate::app::Scrollable,
     area: Rect,
 ) {
-    let inner_w = area.width.saturating_sub(if fullscreen { 0 } else { 2 }) as usize;
-    let inner_h = area.height.saturating_sub(if fullscreen { 1 } else { 2 }) as usize;
-    view.set_viewport(inner_w, inner_h);
-    let (start, end, row_offset) = view.visible_source_window();
-    let lines: Vec<Line> = view
-        .lines
-        .iter()
-        .skip(start)
-        .take(end - start)
-        .map(|l| {
-            let line = strip_ansi_if_present(l);
+    draw_document(
+        frame,
+        show_scrollbars,
+        fullscreen,
+        view,
+        area,
+        theme::peach(),
+        |line| {
             let color = match line.chars().next() {
                 Some('+') => theme::green(),
                 Some('-') => theme::red(),
                 _ => theme::overlay1(),
             };
-            let line = Line::from(Span::styled(line.into_owned(), Style::default().fg(color)));
-            highlight_matches(line, &view.filter)
-        })
-        .collect();
-    let lines = if view.wrap {
-        visible_wrapped_rows(lines, inner_w, row_offset, inner_h)
-    } else {
-        lines
-    };
-    let block = Block::default()
-        .borders(if fullscreen {
-            Borders::NONE
-        } else {
-            Borders::ALL
-        })
-        .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(theme::peach()))
-        .title(Span::styled(doc_title(view), theme::title()));
-    let p = Paragraph::new(lines).block(block);
-    let p = if view.wrap {
-        p
-    } else {
-        p.scroll((0, view.hscroll.min(u16::MAX as usize) as u16))
-    };
-    frame.render_widget(p, area);
-    if !fullscreen {
-        draw_document_scrollbars(frame, show_scrollbars, view, area);
-    }
+            Line::from(Span::styled(line.to_owned(), Style::default().fg(color)))
+        },
+    );
 }
 
 /// Doc-view title, extended with the active search query and the current

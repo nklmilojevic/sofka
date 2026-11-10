@@ -300,10 +300,17 @@ async fn log_selection_moves_over_the_lines_the_filter_shows() {
     key(&mut app, KeyCode::Char('j'));
     assert_eq!(log_selection(&app), Some((0, 61)));
     assert_eq!(
-        app.selected_log_text().unwrap().lines().count(),
-        61,
+        app.logs.selected_text(),
+        (
+            (0..61)
+                .map(|i| format!("keep {i}"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+            61
+        ),
         "the hidden line is not selected"
     );
+    assert_eq!(app.logs.selected_lines(), 61);
 }
 
 #[tokio::test]
@@ -363,19 +370,19 @@ async fn log_selection_stays_on_its_lines_as_new_lines_arrive() {
     key(&mut app, KeyCode::Char('o'));
     key(&mut app, KeyCode::Char('j'));
     assert_eq!(log_selection(&app), Some((2, 1)));
-    assert_eq!(app.selected_log_text().unwrap(), "three\nfour");
+    assert_eq!(app.logs.selected_text().0, "three\nfour");
 
     push_logs(
         &mut app,
         ["2024-01-01T00:00:05Z five", "2024-01-01T00:00:00Z zero"].map(String::from),
     );
     assert_eq!(app.logs.view.lines.front().unwrap(), "zero");
-    assert_eq!(app.selected_log_text().unwrap(), "three\nfour");
+    assert_eq!(app.logs.selected_text().0, "three\nfour");
     assert_eq!(log_selection(&app), Some((3, 2)));
 
     push_logs(&mut app, ["2024-01-01T00:00:02Z two".to_string()]);
     assert_eq!(log_selection(&app), Some((4, 3)));
-    assert_eq!(app.selected_log_text().unwrap(), "three\nfour");
+    assert_eq!(app.logs.selected_text().0, "three\nfour");
 }
 
 #[tokio::test]
@@ -387,19 +394,19 @@ async fn log_selection_clamps_to_the_oldest_kept_line_when_trimmed() {
     key(&mut app, KeyCode::Char('V'));
     key(&mut app, KeyCode::Char('j'));
     key(&mut app, KeyCode::Char('j'));
-    assert_eq!(app.selected_log_text().unwrap(), "l0\nl1\nl2");
+    assert_eq!(app.logs.selected_text().0, "l0\nl1\nl2");
 
     push_logs(&mut app, ["new 1".to_string(), "new 2".to_string()]);
     assert_eq!(app.logs.view.lines.len(), MAX_LOG_LINES_PAUSED);
     assert_eq!(app.logs.view.lines.front().unwrap(), "l2");
     assert_eq!(log_selection(&app), Some((2, 2)));
-    assert_eq!(app.selected_log_text().unwrap(), "l2");
+    assert_eq!(app.logs.selected_text().0, "l2");
 
     push_logs(&mut app, ["new 3".to_string()]);
     assert_eq!(log_selection(&app), Some((3, 3)));
-    assert_eq!(app.selected_log_text().unwrap(), "l3");
+    assert_eq!(app.logs.selected_text().0, "l3");
     key(&mut app, KeyCode::Char('j'));
-    assert_eq!(app.selected_log_text().unwrap(), "l3\nl4");
+    assert_eq!(app.logs.selected_text().0, "l3\nl4");
 }
 
 #[tokio::test]
@@ -519,4 +526,52 @@ async fn selection_keys_show_in_the_footer_and_help() {
         }
         assert_eq!(app.scope_for(mode), scope);
     }
+}
+
+#[tokio::test]
+async fn diff_selection_keeps_diff_colors_and_marks_its_lines() {
+    let (mut app, _rx) = test_app();
+    document(
+        &mut app,
+        Mode::Diff,
+        [
+            "+added".to_string(),
+            "-removed".to_string(),
+            " same".to_string(),
+        ]
+        .into_iter()
+        .chain(std::iter::once(format!("+{}", "w".repeat(150))))
+        .chain(numbered(60)),
+    );
+    let mut term = Terminal::new(TestBackend::new(60, 20)).unwrap();
+    key(&mut app, KeyCode::Char('V'));
+    key(&mut app, KeyCode::Char('j'));
+    key(&mut app, KeyCode::Char('w'));
+    term.draw(|f| crate::ui::draw(f, &mut app)).unwrap();
+    let rows = screen(&term);
+    let row = |text: &str| rows.iter().position(|r| r.contains(text)).unwrap();
+    assert!(rows[row("+added")].contains("▌ +added"));
+    assert!(rows[row("-removed")].contains("▶ -removed"));
+    assert!(rows[row(" same")].contains("   same"));
+    let buffer = term.backend().buffer();
+    let x = rows[row("+added")].chars().position(|c| c == '+').unwrap() as u16;
+    let added = &buffer[(x, row("+added") as u16)];
+    assert_eq!(added.fg, theme::green());
+    assert_eq!(added.bg, theme::surface1());
+    let x = rows[row(" same")].chars().position(|c| c == 's').unwrap() as u16;
+    assert_ne!(buffer[(x, row(" same") as u16)].bg, theme::surface1());
+
+    key(&mut app, KeyCode::Char('j'));
+    key(&mut app, KeyCode::Char('j'));
+    term.draw(|f| crate::ui::draw(f, &mut app)).unwrap();
+    let rows = screen(&term);
+    let wrapped: Vec<_> = rows.iter().filter(|r| r.contains("wwww")).collect();
+    assert!(wrapped.len() > 1, "the long line wraps");
+    assert!(wrapped[0].contains("▶ +www"));
+    assert!(wrapped[1..].iter().all(|r| r.contains("▌ www")));
+
+    key(&mut app, KeyCode::Char('G'));
+    term.draw(|f| crate::ui::draw(f, &mut app)).unwrap();
+    assert!(app.detail.scroll > 0, "the cursor is scrolled into view");
+    assert!(screen(&term).iter().any(|r| r.contains("▶ line 59")));
 }

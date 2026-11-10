@@ -1322,6 +1322,9 @@ pub struct LogIndex {
     consumed: usize,
     /// Buffer indices in display order. None is a visual marker row.
     shown: Vec<Option<u32>>,
+    /// Where each log line sits in [`Self::shown`], markers left out, so a
+    /// line selection finds lines by binary search.
+    lines: Vec<u32>,
     consumed_markers: usize,
     /// Cumulative display rows *through* `shown[i]`, so the first row of
     /// `shown[i]` is `ends[i-1]` (0 for i == 0).
@@ -1375,6 +1378,7 @@ impl LogIndex {
         self.consumed = 0;
         self.consumed_markers = 0;
         self.shown.clear();
+        self.lines.clear();
         self.ends.clear();
         self.total_rows = 0;
     }
@@ -1615,6 +1619,7 @@ impl LogsView {
             {
                 continue;
             }
+            index.lines.push(index.shown.len() as u32);
             index.shown.push(Some(i as u32));
             let display = line_meta
                 .get(i)

@@ -310,11 +310,57 @@ async fn selected_document_lines_copy_whole_lines() {
     assert_eq!(app.detail.selection(), None, "copy ends the selection");
     assert_eq!(app.mode, Mode::Detail);
 
-    type_keys(&mut app, "w/d");
+    type_keys(&mut app, "wgVj");
+    assert!(app.detail.wrap);
+    let copied = copy_with(&mut app, &mut rx, KeyCode::Char('y')).await;
+    assert_eq!(copied, format!("a\n{long}"), "a wrapped line copies whole");
+    assert_eq!(app.flash, "copied 2 lines");
+
+    type_keys(&mut app, "/d");
     app.handle_key(press(KeyCode::Enter)).unwrap();
     type_keys(&mut app, "Vk");
     let copied = copy_with(&mut app, &mut rx, KeyCode::Char('c')).await;
     assert_eq!(copied, "c\nd");
     assert_eq!(app.flash, "copied 2 lines");
     assert_eq!(app.detail.selection(), None);
+}
+
+#[tokio::test]
+async fn selected_blank_lines_are_copied_and_counted() {
+    if std::env::var_os(SELECTION_CHILD).is_none() {
+        run_with_recording_pbcopy(
+            "app::tests::clipboard::selected_blank_lines_are_copied_and_counted",
+        )
+        .await;
+        return;
+    }
+    let (mut app, mut rx) = test_app();
+    app.mode = Mode::Detail;
+    app.detail = Scrollable {
+        lines: vec!["first".into(), String::new(), "last".into()].into(),
+        ..Default::default()
+    };
+    type_keys(&mut app, "Vj");
+    let copied = copy_with(&mut app, &mut rx, KeyCode::Char('y')).await;
+    assert_eq!(copied, "first\n");
+    assert_eq!(app.flash, "copied 2 lines");
+    type_keys(&mut app, "Vjoj");
+    let copied = copy_with(&mut app, &mut rx, KeyCode::Char('y')).await;
+    assert_eq!(copied, "");
+    assert_eq!(app.flash, "copied 1 lines");
+
+    app.mode = Mode::Logs;
+    app.handle_msg(Msg::LogLines {
+        generation: app.log_gen,
+        lines: vec!["first".into(), String::new(), "last".into()],
+    });
+    type_keys(&mut app, "gVj");
+    let copied = copy_with(&mut app, &mut rx, KeyCode::Char('y')).await;
+    assert_eq!(copied, "first\n");
+    assert_eq!(app.flash, "copied 2 log lines");
+    type_keys(&mut app, "Vjoj");
+    let copied = copy_with(&mut app, &mut rx, KeyCode::Char('c')).await;
+    assert_eq!(copied, "");
+    assert_eq!(app.flash, "copied 1 log lines");
+    assert!(!app.logs.selecting());
 }

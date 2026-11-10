@@ -472,17 +472,19 @@ impl App {
     /// Copy the (filtered) log buffer to the clipboard (k9s `c` in logs),
     /// or only the selected lines while a `V` selection is open.
     pub(super) fn copy_logs(&mut self) {
-        let selected = self.selected_log_text();
-        let selecting = selected.is_some();
-        let text = selected.unwrap_or_else(|| self.filtered_log_text());
-        if text.is_empty() {
+        let selecting = self.logs.selecting();
+        let (text, n) = if selecting {
+            self.logs.selected_text()
+        } else {
+            self.logs.shown_text(0..=usize::MAX)
+        };
+        if n == 0 {
             self.flash_warn("no log lines to copy");
             return;
         }
         if selecting {
             self.end_log_selection();
         }
-        let n = text.lines().count();
         self.copy_to_clipboard_async(
             text,
             format!("copied {n} log lines"),
@@ -561,7 +563,7 @@ impl App {
     }
 
     pub(super) fn filtered_log_text(&self) -> String {
-        self.logs.shown_text(0..=usize::MAX)
+        self.logs.shown_text(0..=usize::MAX).0
     }
 
     /// Copy the current single-document view (YAML/describe/diff/events) to
@@ -569,17 +571,21 @@ impl App {
     /// `/` search highlights in place, it doesn't filter, so there is no
     /// "matching subset" to copy. An open `V` selection copies only its lines.
     pub(super) fn copy_doc(&mut self) {
-        let selected = self.selected_doc_text();
-        let selecting = selected.is_some();
-        let text = selected.unwrap_or_else(|| self.doc_text());
-        if text.is_empty() {
+        let selected = self
+            .detail
+            .selection()
+            .map(|selection| selection.range().count());
+        let text = if selected.is_some() {
+            self.detail.selected_text()
+        } else {
+            self.doc_text()
+        };
+        if selected.is_none() && text.is_empty() {
             self.flash_warn("nothing to copy");
             return;
         }
-        if selecting {
-            self.detail.selection = None;
-        }
-        let n = text.lines().count();
+        self.detail.selection = None;
+        let n = selected.unwrap_or_else(|| text.lines().count());
         self.copy_to_clipboard_async(
             text,
             format!("copied {n} lines"),

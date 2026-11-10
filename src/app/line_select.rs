@@ -156,7 +156,7 @@ impl Scrollable {
         self.scroll = self.scroll.min(self.max_scroll());
     }
 
-    fn selected_text(&self) -> String {
+    pub(super) fn selected_text(&self) -> String {
         let Some(selection) = self.selection else {
             return String::new();
         };
@@ -187,28 +187,17 @@ impl LogsView {
             .then_some(position == selection.cursor)
     }
 
-    /// Selected lines the filter shows. Counts the index as it stands.
+    /// Selected lines the filter shows, counted on the index as it stands.
     pub fn selected_lines(&self) -> usize {
         let Some(selection) = self.selection else {
             return 0;
         };
         let range = selection.range();
-        self.index
-            .shown
-            .iter()
-            .flatten()
-            .filter(|&&i| range.contains(&(self.line_offset + i as usize)))
-            .count()
-    }
-
-    /// Buffer indices of the lines the filter shows, markers left out.
-    fn shown_lines(&mut self) -> Vec<usize> {
-        self.refresh_index(self.last_wrap_width)
-            .shown
-            .iter()
-            .flatten()
-            .map(|&i| i as usize)
-            .collect()
+        let Some(end) = range.end().checked_sub(self.line_offset) else {
+            return 0;
+        };
+        let start = range.start().saturating_sub(self.line_offset);
+        self.index.rank(end + 1) - self.index.rank(start)
     }
 
     /// Start on the first visible line and pause autoscroll.
@@ -220,13 +209,11 @@ impl LogsView {
         } else {
             scroll
         };
-        let first = index.first_at_row(scroll).min(index.shown.len());
-        let Some(line) = index.shown[first..]
-            .iter()
-            .flatten()
-            .next()
-            .or_else(|| index.shown[..first].iter().rev().flatten().next())
-            .map(|&i| i as usize)
+        let first = index.first_at_row(scroll);
+        let rank = index.lines.partition_point(|&slot| (slot as usize) < first);
+        let Some(line) = index
+            .line(rank)
+            .or_else(|| rank.checked_sub(1).and_then(|rank| index.line(rank)))
         else {
             return false;
         };
@@ -239,17 +226,19 @@ impl LogsView {
     }
 
     fn move_selection(&mut self, step: Step) {
-        let lines = self.shown_lines();
-        let Some(selection) = &mut self.selection else {
+        let offset = self.line_offset;
+        let Some(mut selection) = self.selection else {
             return;
         };
-        if lines.is_empty() {
+        let index = self.refresh_index(self.last_wrap_width);
+        let cursor = selection.cursor.saturating_sub(offset);
+        let rank = index.rank(cursor);
+        let on = index.line(rank) == Some(cursor);
+        let Some(line) = index.line(target(rank, on, index.lines.len(), step)) else {
             return;
-        }
-        let cursor = selection.cursor.saturating_sub(self.line_offset);
-        let rank = lines.partition_point(|&i| i < cursor);
-        let on = lines.get(rank) == Some(&cursor);
-        selection.cursor = self.line_offset + lines[target(rank, on, lines.len(), step)];
+        };
+        selection.cursor = offset + line;
+        self.selection = Some(selection);
         self.reveal_cursor = true;
     }
 
@@ -296,22 +285,19 @@ impl LogsView {
             return;
         };
         let index = &self.index;
-        let Some(shown) = index
-            .shown
-            .iter()
-            .position(|line| line.is_some_and(|i| i as usize >= cursor))
-        else {
+        let Some(&slot) = index.lines.get(index.rank(cursor)) else {
             return;
         };
-        let start = index.start_row(shown);
-        let end = start + index.height_at(shown);
+        let start = index.start_row(slot as usize);
+        let end = start + index.height_at(slot as usize);
         reveal(&mut self.view.scroll, start, end, self.viewport_h);
     }
 
     /// Raw lines the filter shows within buffer indices `lines`, as `c`
-    /// copies them.
-    pub(super) fn shown_text(&self, lines: RangeInclusive<usize>) -> String {
-        self.view
+    /// copies them, and how many there are.
+    pub(super) fn shown_text(&self, lines: RangeInclusive<usize>) -> (String, usize) {
+        let shown: Vec<_> = self
+            .view
             .lines
             .iter()
             .enumerate()
@@ -319,20 +305,35 @@ impl LogsView {
             .take_while(|(i, _)| i <= lines.end())
             .filter(|(i, line)| self.matches(line, self.line_meta.get(*i)))
             .map(|(_, line)| line.as_str())
-            .collect::<Vec<_>>()
-            .join("\n")
+            .collect();
+        (shown.join("\n"), shown.len())
     }
 
-    fn selected_text(&self) -> String {
+    pub(super) fn selected_text(&self) -> (String, usize) {
         let Some(selection) = self.selection else {
-            return String::new();
+            return (String::new(), 0);
         };
         let range = selection.range();
         let start = range.start().saturating_sub(self.line_offset);
         let Some(end) = range.end().checked_sub(self.line_offset) else {
-            return String::new();
+            return (String::new(), 0);
         };
         self.shown_text(start..=end)
+    }
+}
+
+impl LogIndex {
+    /// Log lines before buffer index `line`.
+    fn rank(&self, line: usize) -> usize {
+        self.lines
+            .partition_point(|&slot| self.shown[slot as usize].is_some_and(|i| (i as usize) < line))
+    }
+
+    /// Buffer index of the log line at `rank`.
+    fn line(&self, rank: usize) -> Option<usize> {
+        self.lines
+            .get(rank)
+            .and_then(|&slot| self.line_at(slot as usize))
     }
 }
 
@@ -381,10 +382,6 @@ impl App {
         }
     }
 
-    pub(super) fn selected_log_text(&self) -> Option<String> {
-        self.logs.selecting().then(|| self.logs.selected_text())
-    }
-
     /// `V` and the keys of an open selection in a document view. Returns
     /// whether the key was used.
     pub(super) fn key_doc_selection(&mut self, key: KeyInput) -> bool {
@@ -416,13 +413,6 @@ impl App {
             },
         }
         true
-    }
-
-    pub(super) fn selected_doc_text(&self) -> Option<String> {
-        self.detail
-            .selection
-            .is_some()
-            .then(|| self.detail.selected_text())
     }
 }
 
