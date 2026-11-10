@@ -315,11 +315,19 @@ pub fn safe(value: &str) -> Cow<'_, str> {
 }
 
 /// Prepare text for terminal output. Redact credentials and replace control
-/// characters with spaces, but keep newlines.
+/// characters and bidirectional formatting characters with spaces. Keep newlines.
 pub fn printable(value: &str) -> String {
     safe(value)
         .chars()
-        .map(|c| if c.is_control() && c != '\n' { ' ' } else { c })
+        .map(|c| {
+            if (c.is_control() && c != '\n')
+                || matches!(c, '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}')
+            {
+                ' '
+            } else {
+                c
+            }
+        })
         .collect()
 }
 
@@ -562,6 +570,17 @@ mod tests {
     #[test]
     fn printable_keeps_newlines_and_plain_text() {
         assert_eq!(printable("line one\nline two"), "line one\nline two");
+    }
+
+    #[test]
+    fn printable_replaces_bidirectional_formatting_controls() {
+        for c in ('\u{202a}'..='\u{202e}').chain('\u{2066}'..='\u{2069}') {
+            assert_eq!(
+                printable(&format!("plugin{c}publisher")),
+                "plugin publisher"
+            );
+        }
+        assert_eq!(printable("日本語 العربية\ntext"), "日本語 العربية\ntext");
     }
 
     #[test]
