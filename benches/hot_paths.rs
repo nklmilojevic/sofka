@@ -670,7 +670,7 @@ fn dependencies(c: &mut Criterion) {
 
 fn table_frames(c: &mut Criterion) {
     let mut group = c.benchmark_group("table_frames");
-    for (width, height, count) in [(80, 24, 500), (160, 48, 2000)] {
+    for (width, height, count) in [(80, 24, 500), (160, 48, 2000), (160, 48, 20_000)] {
         let (mut app, _rx) = bs::pods_app(count);
         let mut terminal =
             ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, height)).unwrap();
@@ -679,6 +679,16 @@ fn table_frames(c: &mut Criterion) {
             .unwrap();
         group.bench_function(format!("{width}x{height}/{count}"), |b| {
             b.iter(|| {
+                terminal
+                    .draw(|frame| sofka::ui::draw(frame, &mut app))
+                    .unwrap();
+            });
+        });
+        group.bench_function(format!("{width}x{height}/{count}/event_then_draw"), |b| {
+            let mut i = 0usize;
+            b.iter(|| {
+                bs::touch_one(&mut app, i % count);
+                i += 1;
                 terminal
                     .draw(|frame| sofka::ui::draw(frame, &mut app))
                     .unwrap();
