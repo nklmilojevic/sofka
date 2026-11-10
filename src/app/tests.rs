@@ -40,23 +40,76 @@ mod workloads;
 /// Commands omitted from `docs/keys.md`, each with a reason.
 const UNDOCUMENTED_COMMANDS: &[&str] = &[];
 
-#[test]
-fn every_palette_command_is_in_the_keys_doc() {
-    let doc = include_str!("../../docs/keys.md");
-    let missing: Vec<&str> = PALETTE_COMMANDS
+fn table_view_commands(doc: &str) -> Vec<&str> {
+    doc.lines()
+        .skip_while(|line| line.trim() != "## Table views")
+        .skip(1)
+        .take_while(|line| !line.starts_with("## "))
+        .filter_map(|line| {
+            let row = line.trim().strip_prefix('|')?;
+            let (end, _) = row
+                .match_indices('|')
+                .find(|(index, _)| !row[..*index].ends_with('\\'))?;
+            Some(&row[..end])
+        })
+        .flat_map(|key| key.split('`').skip(1).step_by(2))
+        .filter_map(|code| code.strip_prefix(':'))
+        .filter_map(|command| command.split([' ', '[']).next())
+        .collect()
+}
+
+fn missing_palette_commands(doc: &str) -> Vec<&'static str> {
+    let documented = table_view_commands(doc);
+    PALETTE_COMMANDS
         .iter()
         .filter_map(|command| command.names.first().copied())
         .filter(|name| !UNDOCUMENTED_COMMANDS.contains(name))
-        .filter(|name| {
-            !["`:{}`", "`:{} ", "`:{}["]
-                .iter()
-                .any(|shape| doc.contains(&shape.replace("{}", name)))
-        })
-        .collect();
+        .filter(|name| !documented.contains(name))
+        .collect()
+}
+
+#[test]
+fn every_palette_command_is_in_the_keys_doc() {
+    let missing = missing_palette_commands(include_str!("../../docs/keys.md"));
     assert!(
         missing.is_empty(),
         "commands missing from docs/keys.md: {missing:?}"
     );
+}
+
+#[test]
+fn palette_doc_parser_reads_only_table_view_keys() {
+    let doc = r#"## Table views
+Use `:prose` here.
+| Key | Action |
+| --- | --- |
+| `enter` | Open `:description`. |
+| `:gitops` / `:flux` | Show owners. |
+| `:find <text>` | Find objects. |
+| `:snapshot [text\|json\|yaml]` / `:snapshots` | Save the view. |
+| `:notify[note]` | Set a note. |
+## Other views
+| `:other` | Another command. |
+"#;
+    assert_eq!(
+        table_view_commands(doc),
+        ["gitops", "flux", "find", "snapshot", "snapshots", "notify"]
+    );
+}
+
+#[test]
+fn palette_doc_check_rejects_missing_gitops_and_argocd_rows() {
+    let doc = include_str!("../../docs/keys.md");
+    for name in ["gitops", "argocd"] {
+        let row_prefix = format!("| `:{name}`");
+        let without_row = doc
+            .lines()
+            .filter(|line| !line.starts_with(&row_prefix))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(without_row.contains(&format!("`:{name}`")));
+        assert_eq!(missing_palette_commands(&without_row), [name]);
+    }
 }
 
 fn obj(v: serde_json::Value) -> DynamicObject {
