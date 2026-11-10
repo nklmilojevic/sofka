@@ -6505,6 +6505,9 @@ async fn delete_confirm_force_can_toggle() {
         Some(ConfirmAction::Delete { force: false, .. })
     ));
 
+    app.switch_kind("deployments");
+    app.mode = Mode::Confirm;
+
     app.handle_key(press(KeyCode::Char('f'))).unwrap();
     assert!(app.confirm_label.starts_with("Force delete pod web"));
     assert!(matches!(
@@ -6518,6 +6521,99 @@ async fn delete_confirm_force_can_toggle() {
         app.confirm_action,
         Some(ConfirmAction::Delete { force: false, .. })
     ));
+}
+
+#[tokio::test]
+async fn a_confirmed_delete_uses_the_kind_it_was_requested_for() {
+    let (mut app, _rx) = test_app();
+    app.switch_kind("services");
+    apply(
+        &mut app,
+        json!({"apiVersion": "v1", "kind": "Service",
+               "metadata": {"name": "web", "namespace": "default"}}),
+    );
+    let (sent, mut requests) = mpsc::unbounded_channel();
+    app.cluster.client = kube::Client::new(
+        tower::service_fn(move |req: http::Request<kube::client::Body>| {
+            let sent = sent.clone();
+            async move {
+                let method = req.method().clone();
+                let path = req.uri().path().to_string();
+                if method == http::Method::DELETE {
+                    sent.send((method, path)).unwrap();
+                }
+                Ok::<_, std::convert::Infallible>(
+                    http::Response::builder()
+                        .status(200)
+                        .body(http_body_util::Full::new(hyper::body::Bytes::from(
+                            json!({"apiVersion":"v1","kind":"Status","status":"Success"})
+                                .to_string(),
+                        )))
+                        .unwrap(),
+                )
+            }
+        }),
+        "default",
+    );
+    app.handle_key(ctrl(KeyCode::Char('d'))).unwrap();
+    assert_eq!(app.mode, Mode::Confirm);
+
+    app.switch_kind("deployments");
+    assert_eq!(app.kind_plural, "deployments");
+    assert!(matches!(
+        app.confirm_action,
+        Some(ConfirmAction::Delete { .. })
+    ));
+    app.mode = Mode::Confirm;
+    app.handle_key(press(KeyCode::Char('y'))).unwrap();
+
+    let (method, path) = tokio::time::timeout(Duration::from_secs(2), requests.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(method, http::Method::DELETE);
+    assert_eq!(path, "/api/v1/namespaces/default/services/web");
+    assert!(
+        app.journal
+            .lines()
+            .iter()
+            .any(|line| line.ends_with("web in default"))
+    );
+}
+
+#[tokio::test]
+async fn bulk_delete_journal_uses_the_saved_kind() {
+    for force in [false, true] {
+        let (mut app, _rx) = test_app();
+        app.switch_kind("services");
+        for name in ["a", "b"] {
+            apply(
+                &mut app,
+                json!({"apiVersion": "v1", "kind": "Service",
+                       "metadata": {"name": name, "namespace": "default"}}),
+            );
+        }
+        app.handle_key(press(KeyCode::Char(' '))).unwrap();
+        app.handle_key(press(KeyCode::Down)).unwrap();
+        app.handle_key(press(KeyCode::Char(' '))).unwrap();
+        app.handle_key(ctrl(KeyCode::Char('d'))).unwrap();
+        assert_eq!(app.mode, Mode::Confirm);
+
+        app.switch_kind("deployments");
+        app.mode = Mode::Confirm;
+        if force {
+            app.handle_key(press(KeyCode::Char('f'))).unwrap();
+            assert!(app.confirm_label.starts_with("Force delete 2 services"));
+        }
+        app.handle_key(press(KeyCode::Char('y'))).unwrap();
+
+        assert_eq!(app.journal.len(), 1);
+        let journal = app.journal.lines().join("\n");
+        let action = if force { "force-delete" } else { "delete" };
+        assert!(journal.contains(action), "{journal}");
+        assert!(journal.ends_with("2 services"), "{journal}");
+        assert!(!journal.contains("deployments"), "{journal}");
+    }
 }
 
 #[tokio::test]
@@ -6543,8 +6639,12 @@ async fn delete_confirm_cascade_can_cycle() {
         })
     ));
 
+    app.switch_kind("deployments");
+    app.mode = Mode::Confirm;
+
     app.handle_key(press(KeyCode::Char('c'))).unwrap();
     assert_eq!(app.mode, Mode::Confirm, "c must cycle, not cancel");
+    assert!(app.confirm_label.starts_with("Delete pod web in default"));
     assert!(app.confirm_label.contains("(cascade: foreground)"));
     assert!(matches!(
         app.confirm_action,
@@ -6555,6 +6655,7 @@ async fn delete_confirm_cascade_can_cycle() {
     ));
 
     app.handle_key(press(KeyCode::Char('c'))).unwrap();
+    assert!(app.confirm_label.starts_with("Delete pod web in default"));
     assert!(app.confirm_label.contains("(orphan dependents)"));
     assert!(matches!(
         app.confirm_action,
@@ -6575,6 +6676,10 @@ async fn delete_confirm_cascade_can_cycle() {
 
     // Full circle back to background.
     app.handle_key(press(KeyCode::Char('c'))).unwrap();
+    assert!(
+        app.confirm_label
+            .starts_with("Force delete pod web in default")
+    );
     assert!(matches!(
         app.confirm_action,
         Some(ConfirmAction::Delete {
@@ -38227,6 +38332,7 @@ async fn container_trends_follow_keys_and_reject_stale_samples() {
 async fn popups_preserve_surrounding_cells_on_open_close_and_resize() {
     use ratatui::{Terminal, backend::TestBackend};
     let (mut app, _rx) = test_app();
+    app.switch_kind("pods");
     app.compact = true;
     apply(
         &mut app,

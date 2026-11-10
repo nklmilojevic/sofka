@@ -41,6 +41,34 @@ fn pod(app: &mut App, namespace: &str, name: &str) {
 }
 
 #[tokio::test]
+async fn a_pattern_result_does_not_switch_views_under_a_confirm() {
+    let (mut app, _rx) = test_app();
+    app.switch_kind("services");
+    apply(
+        &mut app,
+        json!({"apiVersion": "v1", "kind": "Service",
+               "metadata": {"name": "web", "namespace": "default"}}),
+    );
+    type_resource_query(&mut app, "deployments team-*");
+    app.handle_key(ctrl(KeyCode::Char('d'))).unwrap();
+    assert_eq!(app.mode, Mode::Confirm);
+
+    app.handle_msg(Msg::NamespacePattern {
+        generation: app.generation,
+        request: app.namespace_request,
+        pattern: "team-*".into(),
+        action: NamespacePatternAction::Resource("deployments".into()),
+        result: Ok(vec!["team-a".into()]),
+    });
+
+    assert_eq!(app.kind_plural, "services");
+    assert_eq!(app.namespace, "default");
+    assert_eq!(app.mode, Mode::Confirm);
+    assert!(app.flash.contains("run the command again"));
+    assert!(!app.namespace_patterns.contains_key("team-*"));
+}
+
+#[tokio::test]
 async fn namespace_patterns_keep_independent_relists_and_equal_names() {
     let (mut app, _rx) = pattern_app();
     type_resource_query(&mut app, "pods");
