@@ -164,11 +164,15 @@ leading `v`, and the archive name with the file you downloaded.
 With the GitHub CLI:
 
 ```sh
-gh attestation verify sofka-v<version>-x86_64-unknown-linux-gnu.tar.gz -R nklmilojevic/sofka
+gh attestation verify sofka-v<version>-x86_64-unknown-linux-gnu.tar.gz -R nklmilojevic/sofka \
+  --cert-identity https://github.com/nklmilojevic/sofka/.github/workflows/release.yaml@refs/tags/v<version>
 ```
 
-Add `--bundle sofka-v<version>.sigstore.json` to check the downloaded bundle
-instead of fetching the attestation from GitHub.
+`-R` only checks the repository. `--cert-identity` also requires the release
+workflow at the tag you downloaded, so an attestation from another workflow or
+tag in the repository is rejected. Add
+`--bundle sofka-v<version>.sigstore.json` to check the downloaded bundle instead
+of fetching the attestation from GitHub; keep `--cert-identity`.
 
 With cosign 3:
 
