@@ -1134,6 +1134,28 @@ impl App {
     /// report, a bundle) can displace the PVC browser without a keystroke
     /// being involved at all.
     pub fn handle_msg(&mut self, msg: Msg) {
+        let faults_active = self.faults_filter_active();
+        let saved = self.faults_selection();
+        if self.handle_msg_unrestored(msg) && faults_active {
+            self.restore_faults_selection(saved);
+        }
+    }
+
+    /// Apply a batch of messages and restore the faults filter selection once.
+    pub fn handle_msgs(&mut self, msgs: impl IntoIterator<Item = Msg>) {
+        let faults_active = self.faults_filter_active();
+        let saved = self.faults_selection();
+        let generation = self.generation;
+        let mut restore = false;
+        for msg in msgs {
+            restore |= self.handle_msg_unrestored(msg);
+        }
+        if restore && faults_active && generation == self.generation {
+            self.restore_faults_selection(saved);
+        }
+    }
+
+    fn handle_msg_unrestored(&mut self, msg: Msg) -> bool {
         let refresh_containers = match &msg {
             Msg::Applied {
                 generation, key, ..
@@ -1150,7 +1172,7 @@ impl App {
             }
             _ => false,
         };
-        self.handle_msg_inner(msg);
+        let restore = self.handle_msg_inner(msg);
         if refresh_containers {
             self.sync_container_picker();
         }
@@ -1170,24 +1192,37 @@ impl App {
         if self.pvc.active && !overlay {
             self.leave_pvc_explore();
         }
+        restore
     }
 
-    fn handle_msg_inner(&mut self, msg: Msg) {
-        let preserve_selection = self.faults_filter_active()
-            && matches!(
-                &msg,
-                Msg::Applied { generation, .. }
-                    | Msg::Deleted { generation, .. }
-                    | Msg::Reset { generation }
-                    | Msg::Synced { generation }
-                    if *generation == self.generation
-            );
-        let selected_pod = if preserve_selection {
+    fn faults_selection(&self) -> Option<(String, Option<String>)> {
+        if self.faults_filter_active() {
             self.selected_ref()
                 .map(|o| (self.key_of(o), o.metadata.uid.clone()))
         } else {
             None
-        };
+        }
+    }
+
+    fn restore_faults_selection(&mut self, saved: Option<(String, Option<String>)>) {
+        let index = saved.and_then(|(key, uid)| {
+            if self.store.get(&key)?.metadata.uid != uid {
+                return None;
+            }
+            self.row_index(&key)
+        });
+        self.table_state.select(index);
+    }
+
+    fn handle_msg_inner(&mut self, msg: Msg) -> bool {
+        let preserve_selection = matches!(
+            &msg,
+            Msg::Applied { generation, .. }
+                | Msg::Deleted { generation, .. }
+                | Msg::Reset { generation }
+                | Msg::Synced { generation }
+                if *generation == self.generation
+        );
         match msg {
             Msg::NamespacePattern {
                 generation,
@@ -2234,17 +2269,6 @@ impl App {
             }
             _ => {} // stale generation, drop
         }
-        if self.finish_filter_reselect() {
-            return;
-        }
-        if preserve_selection {
-            let index = selected_pod.and_then(|(key, uid)| {
-                if self.store.get(&key)?.metadata.uid != uid {
-                    return None;
-                }
-                self.row_index(&key)
-            });
-            self.table_state.select(index);
-        }
+        !self.finish_filter_reselect() && preserve_selection
     }
 }

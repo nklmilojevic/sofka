@@ -271,6 +271,15 @@ pub fn pods_app(n: usize) -> (App, Receiver<Msg>) {
     (a, rx)
 }
 
+/// A pods app with the faults filter active and its first row selected.
+pub fn faults_pods_app(n: usize) -> (App, Receiver<Msg>) {
+    let (mut app, rx) = pods_app(n);
+    app.faults_only = true;
+    app.bench_invalidate_rows();
+    app.table_state.select(Some(0));
+    (app, rx)
+}
+
 /// A store-shaped object map of `n` pods — what one entry of the view cache
 /// holds. Used by the memory probe to price a view snapshot directly, without
 /// driving navigation (which would spawn watches).

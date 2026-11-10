@@ -15,10 +15,11 @@
 
 use std::hint::black_box;
 
-use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
+use criterion::{BatchSize, BenchmarkId, Criterion, criterion_group, criterion_main};
 use sofka::benchsupport as bs;
 use sofka::columns;
 use sofka::logfilter::LogMatcher;
+use sofka::store::{Msg, row_key};
 
 /// 2.1 — one watch event followed by the redraw's row-count query. That pair
 /// is the real steady-state unit: after 2.1 an ordinary unsorted/unfiltered
@@ -37,6 +38,32 @@ fn rows_cache(c: &mut Criterion) {
                 i += 1;
                 black_box(app.row_count())
             });
+        });
+    }
+    for n in [2_000usize, 20_000] {
+        let (mut app, _rx) = bs::faults_pods_app(n);
+        black_box(app.row_count());
+        let generation = app.generation;
+        g.bench_with_input(BenchmarkId::new("faults_event_batch", n), &n, |b, _| {
+            b.iter_batched(
+                || {
+                    (0..1_000)
+                        .map(|i| {
+                            let obj = bs::pod(i);
+                            Msg::Applied {
+                                generation,
+                                key: row_key(&obj),
+                                obj: Box::new(obj),
+                            }
+                        })
+                        .collect::<Vec<_>>()
+                },
+                |batch| {
+                    app.handle_msgs(batch);
+                    black_box(app.row_count())
+                },
+                BatchSize::SmallInput,
+            );
         });
     }
     g.finish();
