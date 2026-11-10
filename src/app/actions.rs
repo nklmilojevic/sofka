@@ -971,7 +971,10 @@ impl App {
                 self.confirm_label = format!(
                     "⚠ Managed by {owner} — your edit will be reverted on the next reconcile. Edit anyway?"
                 );
-                self.confirm_action = Some(ConfirmAction::Edit { argv });
+                self.confirm_action = Some(ConfirmAction::Edit {
+                    argv,
+                    label: edit_label,
+                });
                 self.mode = Mode::Confirm;
             }
             None => {

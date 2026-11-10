@@ -14629,6 +14629,62 @@ async fn edit_argv_ends_options_before_the_name() {
 }
 
 #[tokio::test]
+async fn confirmed_edit_journal_uses_the_object_not_context_options() {
+    for context in ["--", "-n", "edit"] {
+        for namespaced in [false, true] {
+            let (mut app, _rx) = test_app();
+            app.cluster = Cluster::fake_with_context(context);
+            let mut object = json!({
+                "apiVersion": "rbac.authorization.k8s.io/v1",
+                "kind": "ClusterRole",
+                "metadata": {
+                    "name": "-n",
+                    "labels": {
+                        "kustomize.toolkit.fluxcd.io/name": "apps",
+                        "kustomize.toolkit.fluxcd.io/namespace": "flux-system"
+                    }
+                }
+            });
+            let (resource, label) = if namespaced {
+                object["apiVersion"] = json!("v1");
+                object["kind"] = json!("Pod");
+                object["metadata"]["name"] = json!("web");
+                object["metadata"]["namespace"] = json!("default");
+                app.switch_kind("pods");
+                ("pods", "web in default")
+            } else {
+                app.cluster.register_kind(
+                    "rbac.authorization.k8s.io",
+                    "ClusterRole",
+                    "clusterroles",
+                    false,
+                );
+                app.switch_kind("clusterroles");
+                ("clusterroles.v1.rbac.authorization.k8s.io", "-n")
+            };
+            apply(&mut app, object);
+            app.table_state.select(Some(0));
+            app.handle_key(press(KeyCode::Char('e'))).unwrap();
+            assert_eq!(app.mode, Mode::Confirm);
+            assert!(app.pending.is_none());
+            assert!(app.journal.is_empty());
+            app.handle_key(press(KeyCode::Char('y'))).unwrap();
+
+            let argv = edit_argv(&mut app);
+            let mut expected = vec!["kubectl", "--context", context, "edit"];
+            if namespaced {
+                expected.extend(["-n", "default"]);
+            }
+            expected.extend(["--", resource, if namespaced { "web" } else { "-n" }]);
+            assert_eq!(argv, expected);
+            assert_eq!(app.journal.len(), 1);
+            let entry = &app.journal.lines()[1];
+            assert!(entry.ends_with(label), "context {context:?}: {entry}");
+        }
+    }
+}
+
+#[tokio::test]
 async fn describe_argv_ends_options_before_the_name() {
     let (mut app, _rx) = test_app();
     app.cluster.register_kind(

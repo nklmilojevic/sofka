@@ -1945,6 +1945,13 @@ pub const ALIASES: &[(&str, &str)] = &[
 
 #[cfg(any(test, feature = "bench"))]
 impl Cluster {
+    pub fn fake_with_context(context: &str) -> Self {
+        let mut cluster = Self::fake();
+        cluster.context = context.into();
+        cluster.cli_context = Some(context.into());
+        cluster
+    }
+
     /// Keep `config` for credential renewal, as a connect does when the
     /// client holds an exec-issued certificate.
     pub fn keep_credential_source(&mut self, config: Config, certificate: &[u8]) {

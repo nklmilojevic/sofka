@@ -362,7 +362,7 @@ enum ConfirmAction {
     },
     /// Edit a Flux-managed object (`kubectl edit`) after warning that the edit
     /// will be reverted on the next reconcile.
-    Edit { argv: Vec<String> },
+    Edit { argv: Vec<String>, label: String },
     /// Patch the keys changed in the decoded Secret editor.
     SecretEdit {
         kind: Kind,

@@ -105,23 +105,7 @@ impl App {
                 self.do_delete(targets, force, cascade);
                 self.clear_marks();
             }
-            ConfirmAction::Edit { argv } => {
-                // argv is `<kubectl> edit [-n <ns>] -- <kind> <name>`.
-                // Read the name after `--` and the namespace before it.
-                let label = argv
-                    .iter()
-                    .position(|a| a == "--")
-                    .and_then(|i| {
-                        argv.get(i + 2)
-                            .map(|name| match argv[..i].iter().position(|a| a == "-n") {
-                                Some(j) => match argv.get(j + 1) {
-                                    Some(ns) => format!("{name} in {ns}"),
-                                    None => name.clone(),
-                                },
-                                None => name.clone(),
-                            })
-                    })
-                    .unwrap_or_default();
+            ConfirmAction::Edit { argv, label } => {
                 self.note_action("edit", label);
                 self.pending = Some(Suspend::Shell(argv));
                 self.reload_after_suspend = self.confirm_over_document();
