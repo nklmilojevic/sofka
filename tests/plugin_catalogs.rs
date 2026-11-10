@@ -133,6 +133,30 @@ impl Drop for Fixture {
 }
 
 #[test]
+fn plugin_catalog_cli_replaces_bidirectional_formatting_controls() {
+    let fixture = Fixture::new();
+    fixture.config(true, false);
+    fixture.publish("mirror", "1.0.0");
+    let path = fixture.0.join("config/sofka/mirror/index.json");
+    let mut index: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    index["plugins"][0]["description"] = "Local\u{202e} test plugin".into();
+    index["plugins"][0]["publisher"] = "team\u{2066}publisher\u{2069}".into();
+    std::fs::write(path, serde_json::to_vec(&index).unwrap()).unwrap();
+
+    let search = fixture.ok(&["search", "--offline"]);
+    let search = String::from_utf8(search.stdout).unwrap();
+    assert!(search.contains("Local  test plugin"));
+    assert!(!search.contains('\u{202e}'));
+
+    let described = fixture.ok(&["describe", "local-test", "--offline"]);
+    let described = String::from_utf8(described.stdout).unwrap();
+    assert!(described.contains("description: Local  test plugin"));
+    assert!(described.contains("publisher: team publisher "));
+    assert!(!described.contains(['\u{202e}', '\u{2066}', '\u{2069}']));
+}
+
+#[test]
 fn plugin_catalog_cli_installs_and_updates_offline_from_the_original_source() {
     let fixture = Fixture::new();
     fixture.config(true, false);
