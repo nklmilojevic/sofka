@@ -242,50 +242,52 @@ impl App {
             (Some(Action::Force), _) => {
                 let update = match self.confirm_action.as_mut() {
                     Some(ConfirmAction::Delete {
+                        kind,
                         targets,
                         force,
                         cascade,
                         managed,
-                        ..
                     }) => {
                         *force = !*force;
-                        Some((targets.clone(), *force, *cascade, managed.clone()))
+                        Some((
+                            kind.ar.plural.clone(),
+                            targets.clone(),
+                            *force,
+                            *cascade,
+                            managed.clone(),
+                        ))
                     }
                     _ => None,
                 };
-                if let Some((targets, force, cascade, managed)) = update {
-                    self.confirm_label = delete_confirm_label(
-                        &self.kind_plural,
-                        &targets,
-                        force,
-                        cascade,
-                        managed.as_deref(),
-                    );
+                if let Some((plural, targets, force, cascade, managed)) = update {
+                    self.confirm_label =
+                        delete_confirm_label(&plural, &targets, force, cascade, managed.as_deref());
                     self.confirm_label.push_str(&self.confirm_note);
                 }
             }
             (Some(Action::Cascade), _) => {
                 let update = match self.confirm_action.as_mut() {
                     Some(ConfirmAction::Delete {
+                        kind,
                         targets,
                         force,
                         cascade,
                         managed,
-                        ..
                     }) => {
                         *cascade = cascade.next();
-                        Some((targets.clone(), *force, *cascade, managed.clone()))
+                        Some((
+                            kind.ar.plural.clone(),
+                            targets.clone(),
+                            *force,
+                            *cascade,
+                            managed.clone(),
+                        ))
                     }
                     _ => None,
                 };
-                if let Some((targets, force, cascade, managed)) = update {
-                    self.confirm_label = delete_confirm_label(
-                        &self.kind_plural,
-                        &targets,
-                        force,
-                        cascade,
-                        managed.as_deref(),
-                    );
+                if let Some((plural, targets, force, cascade, managed)) = update {
+                    self.confirm_label =
+                        delete_confirm_label(&plural, &targets, force, cascade, managed.as_deref());
                     self.confirm_label.push_str(&self.confirm_note);
                 }
             }

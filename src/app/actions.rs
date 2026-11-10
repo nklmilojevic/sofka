@@ -145,7 +145,11 @@ impl App {
         force: bool,
         cascade: Cascade,
     ) {
-        let label = self.action_label(&targets);
+        let label = if targets.len() > 1 {
+            format!("{} {}", targets.len(), kind.ar.plural)
+        } else {
+            self.action_label(&targets)
+        };
         self.note_action(if force { "force-delete" } else { "delete" }, label);
         let client = self.cluster.client.clone();
         let tx = self.tx.clone();
