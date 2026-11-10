@@ -455,8 +455,9 @@ with `default` first. `-o default` returns to the default layout and
 take a `layout` field. Selecting a layout the kind doesn't have warns in the
 status bar and keeps the current one.
 
-sofka remembers the active layout per kind for the session, and `[`/`]`
-restore it. The header shows a non-default layout as `pods:images`. Wide mode
+Selecting a resource without a layout, such as `:pods` or a bookmark without
+`layout`, opens the default layout. Otherwise sofka keeps the active layout per
+kind for the session, and `[`/`]` restore the layout each view used. The header shows a non-default layout as `pods:images`. Wide mode
 works in any layout, and saved sorts stay per kind. `:reload` keeps the active
 layout if it still exists and otherwise falls back to the default with a
 warning.

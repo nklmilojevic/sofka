@@ -156,6 +156,7 @@ impl App {
                     self.save_history_filter();
                     self.namespace = pattern;
                     self.set_root_view(kind);
+                    self.reset_layout();
                     self.remember_namespace();
                     self.record_history();
                     self.start_watch();

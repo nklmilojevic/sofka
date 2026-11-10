@@ -44052,9 +44052,12 @@ async fn named_layouts_prefer_the_namespace_variant() {
     assert_eq!(app.namespace, "prod");
     assert!(has_header(&app, "PRODIMAGE"));
     assert!(!has_header(&app, "IMAGE"));
-    type_resource_query(&mut app, "pods -n dev");
+    type_resource_query(&mut app, "pods -n dev -o images");
     assert_eq!(app.active_layout(), Some("images"));
     assert!(has_header(&app, "IMAGE"));
+    type_resource_query(&mut app, "pods -n prod");
+    assert_eq!(app.active_layout(), None);
+    assert!(has_header(&app, "STATUS"));
 }
 
 #[tokio::test]
@@ -44137,14 +44140,33 @@ async fn palette_completes_layout_names_and_lists_kind_layout_entries() {
 }
 
 #[tokio::test]
+async fn selecting_a_resource_without_a_layout_opens_the_default_layout() {
+    let (mut app, _rx) = test_app();
+    install_views(&mut app, LAYOUT_VIEWS);
+    palette(&mut app, "pods:images");
+    assert_eq!(app.active_layout(), Some("images"));
+    assert!(app.flash.contains("pods:images"), "{}", app.flash);
+
+    palette(&mut app, "services");
+    palette(&mut app, "pods");
+    assert_eq!(app.active_layout(), None);
+    assert!(has_header(&app, "STATUS"));
+    assert!(!has_header(&app, "IMAGE"));
+    assert_eq!(app.flash, "Viewing pods");
+
+    palette(&mut app, "pods:images");
+    palette(&mut app, "pods");
+    assert_eq!(app.active_layout(), None);
+    assert!(has_header(&app, "STATUS"));
+}
+
+#[tokio::test]
 async fn back_navigation_restores_the_layout_of_each_view() {
     let (mut app, _rx) = test_app();
     install_views(&mut app, LAYOUT_VIEWS);
     type_resource_query(&mut app, "pods -o images");
     palette(&mut app, "deployments");
     palette(&mut app, "pods");
-    assert_eq!(app.active_layout(), Some("images"), "remembered per kind");
-    palette(&mut app, "layout default");
     palette(&mut app, "deployments");
 
     app.handle_key(press(KeyCode::Char('['))).unwrap();
@@ -44180,6 +44202,12 @@ async fn bookmark_applies_its_layout() {
             layout: Some("images".into()),
             ..Default::default()
         },
+        crate::config::Bookmark {
+            key: Some("ctrl-o".into()),
+            name: "pods".into(),
+            resource: "pods".into(),
+            ..Default::default()
+        },
     ];
     app.handle_key(ctrl(KeyCode::Char('y'))).unwrap();
     assert_eq!(app.kind_plural, "pods");
@@ -44195,6 +44223,11 @@ async fn bookmark_applies_its_layout() {
         "{}",
         app.flash
     );
+
+    app.handle_key(ctrl(KeyCode::Char('o'))).unwrap();
+    assert_eq!(app.kind_plural, "pods");
+    assert_eq!(app.active_layout(), None);
+    assert!(has_header(&app, "STATUS"));
 }
 
 #[tokio::test]
