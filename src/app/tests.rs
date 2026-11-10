@@ -5777,6 +5777,65 @@ async fn builtin_drill_list_matches_the_enter_arms() {
 }
 
 #[tokio::test]
+async fn a_configured_drill_wins_over_the_machinedeployment_drill() {
+    let (mut app, _rx) = test_app();
+    app.cluster.register_kind(
+        "cluster.x-k8s.io",
+        "MachineDeployment",
+        "machinedeployments",
+        true,
+    );
+    app.user_views = HashMap::from([(
+        "machinedeployments".to_string(),
+        crate::views::View {
+            drill: Some(crate::views::Drill {
+                kind: "secrets".to_string(),
+                labels: None,
+                fields: None,
+            }),
+            ..Default::default()
+        },
+    )]);
+    app.switch_kind("machinedeployments.cluster.x-k8s.io");
+    apply(
+        &mut app,
+        json!({"apiVersion": "cluster.x-k8s.io/v1beta1", "kind": "MachineDeployment",
+               "metadata": {"name": "workers", "namespace": "default"},
+               "spec": {"selector": {"matchLabels": {"app": "x"}}}}),
+    );
+    app.table_state.select(Some(0));
+
+    app.handle_key(press(KeyCode::Enter)).unwrap();
+    assert_eq!(app.kind_plural, "secrets");
+}
+
+#[tokio::test]
+async fn machinedeployments_still_drill_to_machines_without_a_configured_drill() {
+    let (mut app, _rx) = test_app();
+    app.cluster.register_kind(
+        "cluster.x-k8s.io",
+        "MachineDeployment",
+        "machinedeployments",
+        true,
+    );
+    app.cluster
+        .register_kind("cluster.x-k8s.io", "Machine", "machines", true);
+    app.switch_kind("machinedeployments.cluster.x-k8s.io");
+    apply(
+        &mut app,
+        json!({"apiVersion": "cluster.x-k8s.io/v1beta1", "kind": "MachineDeployment",
+               "metadata": {"name": "workers", "namespace": "default"},
+               "spec": {"selector": {"matchLabels": {"app": "x"}}}}),
+    );
+    app.table_state.select(Some(0));
+
+    app.handle_key(press(KeyCode::Enter)).unwrap();
+    assert_eq!(app.kind_plural, "machines");
+    assert_eq!(app.namespace, "default");
+    assert_eq!(app.labels.as_deref(), Some("app=x"));
+}
+
+#[tokio::test]
 async fn configured_drill_to_an_unknown_kind_warns_and_stays() {
     let (mut app, _rx) = test_app();
     app.user_views = views_with_drill("certificates", "widgets", "cert={name}");
