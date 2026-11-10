@@ -1272,8 +1272,8 @@ impl App {
         }
         if let Some(path) = self.sort_memory_path.clone() {
             let result = match &self.state_writer {
-                Some(writer) => writer.save_sort(self.sort_memory.clone(), path),
-                None => self.sort_memory.save(&path),
+                Some(writer) => writer.save_sort(self.sort_memory.snapshot(), path),
+                None => self.sort_memory.snapshot().save(&path),
             };
             if let Err(e) = result {
                 self.flash_warn(&format!("failed to save sort state: {e}"));

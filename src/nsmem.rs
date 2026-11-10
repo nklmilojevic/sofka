@@ -7,7 +7,7 @@
 //! user's config, and `default_namespace` there stays the fallback for a
 //! context with no remembered pick. `-n`/`-A` on the CLI always win.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -18,10 +18,18 @@ const ALL: &str = "all";
 
 /// Per-context namespace memory. Keys are kubeconfig context names; values
 /// are a namespace or `all`.
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct NamespaceMemory {
     pub contexts: BTreeMap<String, String>,
+    #[serde(skip)]
+    dirty: BTreeSet<String>,
+}
+
+impl PartialEq for NamespaceMemory {
+    fn eq(&self, other: &Self) -> bool {
+        self.contexts == other.contexts
+    }
 }
 
 impl NamespaceMemory {
@@ -39,12 +47,32 @@ impl NamespaceMemory {
             .unwrap_or_default()
     }
 
-    /// Persist to `path`. The file is replaced atomically, so a crash or a
-    /// second sofka writing at the same moment cannot leave a torn file that
-    /// [`Self::load`] would quietly read as empty.
+    /// Merge changed keys into the current file and replace it atomically.
+    /// Simultaneous saves from separate processes can still lose changes
+    /// between the read and the write. The file is always complete.
     pub fn save(&self, path: &Path) -> Result<(), String> {
-        let text = toml::to_string(self).map_err(|e| e.to_string())?;
+        let mut merged = Self::load(path);
+        merged.merge_pending(self);
+        let text = toml::to_string(&merged).map_err(|e| e.to_string())?;
         crate::atomicfile::write(path, &text)
+    }
+
+    /// Apply newer pending changes without losing earlier pending keys.
+    pub(crate) fn merge_pending(&mut self, newer: &Self) {
+        for key in &newer.dirty {
+            match newer.contexts.get(key) {
+                Some(value) => self.contexts.insert(key.clone(), value.clone()),
+                None => self.contexts.remove(key),
+            };
+        }
+        self.dirty.extend(newer.dirty.iter().cloned());
+    }
+
+    /// Take the pending changes for one save.
+    pub fn snapshot(&mut self) -> Self {
+        let snapshot = self.clone();
+        self.dirty.clear();
+        snapshot
     }
 
     /// Remember `namespace` (empty = all namespaces) for `context`. Returns
@@ -63,6 +91,7 @@ impl NamespaceMemory {
             return false;
         }
         self.contexts.insert(context.to_string(), value);
+        self.dirty.insert(context.to_string());
         true
     }
 
@@ -101,6 +130,63 @@ pub fn resolve_namespace(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn scratch(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("sofka-nsmem-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        dir
+    }
+
+    #[test]
+    fn two_processes_keep_each_others_contexts() {
+        let dir = scratch("two-processes");
+        let path = dir.join("namespaces.toml");
+        let mut a = NamespaceMemory::load(&path);
+        let mut b = NamespaceMemory::load(&path);
+        a.set("prod", "payments");
+        a.snapshot().save(&path).unwrap();
+        b.set("staging", "web");
+        b.snapshot().save(&path).unwrap();
+        let saved = NamespaceMemory::load(&path);
+        assert_eq!(saved.get("prod"), Some("payments".into()));
+        assert_eq!(saved.get("staging"), Some("web".into()));
+        assert!(saved.dirty.is_empty());
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "[contexts]\nprod = \"payments\"\nstaging = \"web\"\n"
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_later_writer_wins_for_the_same_context() {
+        let dir = scratch("same-context");
+        let path = dir.join("namespaces.toml");
+        let mut a = NamespaceMemory::load(&path);
+        let mut b = NamespaceMemory::load(&path);
+        a.set("prod", "payments");
+        b.set("prod", "web");
+        a.snapshot().save(&path).unwrap();
+        b.snapshot().save(&path).unwrap();
+        assert_eq!(NamespaceMemory::load(&path).get("prod"), Some("web".into()));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn snapshot_clears_the_pending_changes() {
+        let dir = scratch("snapshot");
+        let path = dir.join("namespaces.toml");
+        let mut a = NamespaceMemory::load(&path);
+        a.set("prod", "payments");
+        a.snapshot().save(&path).unwrap();
+        let mut b = NamespaceMemory::load(&path);
+        b.set("prod", "web");
+        b.snapshot().save(&path).unwrap();
+        assert!(!a.set("prod", "payments"));
+        a.snapshot().save(&path).unwrap();
+        assert_eq!(NamespaceMemory::load(&path).get("prod"), Some("web".into()));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 
     #[test]
     fn namespace_precedence_keeps_explicit_and_saved_all_namespaces() {
