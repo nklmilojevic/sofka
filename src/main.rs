@@ -377,13 +377,19 @@ async fn run_main(args: Args, proxy_warnings: Vec<String>) -> Result<()> {
             eprintln!("The exec auth plugin needs input; running it on this terminal…");
             match k8s::authenticate_interactively(args.context.as_deref()).await {
                 Ok(()) => connected = connect().await,
-                Err(auth) => eprintln!("\x1b[33mwarning:\x1b[0m authentication failed: {auth:#}"),
+                Err(auth) => eprintln!(
+                    "\x1b[33mwarning:\x1b[0m authentication failed: {}",
+                    diagnostics::printable(&format!("{auth:#}"))
+                ),
             }
         }
         match connected {
             Ok(c) => (c, None),
             Err(e) if args.check || args.snapshot => {
-                eprintln!("\x1b[31merror:\x1b[0m {e:#}");
+                eprintln!(
+                    "\x1b[31merror:\x1b[0m {}",
+                    diagnostics::printable(&format!("{e:#}"))
+                );
                 applog::shutdown();
                 std::process::exit(1);
             }
@@ -392,7 +398,10 @@ async fn run_main(args: Args, proxy_warnings: Vec<String>) -> Result<()> {
                 (Cluster::disconnected(None), None)
             }
             Err(e) => {
-                eprintln!("\x1b[33mwarning:\x1b[0m {e:#}");
+                eprintln!(
+                    "\x1b[33mwarning:\x1b[0m {}",
+                    diagnostics::printable(&format!("{e:#}"))
+                );
                 (
                     Cluster::disconnected(args.context.as_deref()),
                     Some(format!("{e:#}")),
@@ -407,7 +416,7 @@ async fn run_main(args: Args, proxy_warnings: Vec<String>) -> Result<()> {
         .iter()
         .chain(&cluster.discovery_warnings)
     {
-        eprintln!("\x1b[33mwarning:\x1b[0m {w}");
+        eprintln!("\x1b[33mwarning:\x1b[0m {}", diagnostics::printable(w));
     }
     // Per-cluster/per-context override files merge over the base config.
     let resolved = loader.resolve(&cluster.context, &cluster.cluster_name);

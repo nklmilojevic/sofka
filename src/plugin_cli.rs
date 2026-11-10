@@ -191,13 +191,13 @@ async fn search(
                 .map_or(String::new(), |reason| format!(" withdrawn: {reason}"));
             println!(
                 "{}\t{}\t{}\t{}{}{}\t{}",
-                row.catalog,
-                row.id,
-                row.latest_version.unwrap_or("-"),
+                crate::diagnostics::printable(row.catalog),
+                crate::diagnostics::printable(row.id),
+                crate::diagnostics::printable(row.latest_version.unwrap_or("-")),
                 compatibility,
-                installed,
-                withdrawn,
-                row.description
+                crate::diagnostics::printable(&installed),
+                crate::diagnostics::printable(&withdrawn),
+                crate::diagnostics::printable(row.description)
             );
         }
     }
@@ -346,21 +346,53 @@ async fn describe(
             serde_json::to_string_pretty(&description).map_err(|e| e.to_string())?
         );
     } else {
-        println!("{} ({})", description.display_name, description.id);
-        println!("catalog: {}", description.catalog);
-        println!("version: {} ({})", description.version, description.status);
+        println!(
+            "{} ({})",
+            crate::diagnostics::printable(description.display_name),
+            crate::diagnostics::printable(description.id)
+        );
+        println!(
+            "catalog: {}",
+            crate::diagnostics::printable(description.catalog)
+        );
+        println!(
+            "version: {} ({})",
+            crate::diagnostics::printable(description.version),
+            description.status
+        );
         if let Some(reason) = description.withdrawal_reason {
-            println!("withdrawal: {reason}");
+            println!("withdrawal: {}", crate::diagnostics::printable(reason));
         }
         if let Some(reason) = description.installed_withdrawal_reason {
-            println!("installed version withdrawal: {reason}");
+            println!(
+                "installed version withdrawal: {}",
+                crate::diagnostics::printable(reason)
+            );
         }
-        println!("description: {}", description.description);
-        println!("publisher: {}", description.publisher);
-        println!("repository: {}", description.repository);
-        println!("license: {}", description.license);
-        println!("requires sofka: {}", description.sofka);
-        println!("platforms: {}", description.platforms.join(", "));
+        println!(
+            "description: {}",
+            crate::diagnostics::printable(description.description)
+        );
+        println!(
+            "publisher: {}",
+            crate::diagnostics::printable(description.publisher)
+        );
+        println!(
+            "repository: {}",
+            crate::diagnostics::printable(description.repository)
+        );
+        println!(
+            "license: {}",
+            crate::diagnostics::printable(description.license)
+        );
+        println!(
+            "requires sofka: {}",
+            crate::diagnostics::printable(description.sofka)
+        );
+        println!(
+            "platforms: {}",
+            crate::diagnostics::printable(&description.platforms.join(", "))
+        );
         match description.execution {
             crate::plugin_catalog::CatalogExecution::Legacy(execution) => {
                 print_execution(execution)
@@ -369,23 +401,28 @@ async fn describe(
                 for command in commands {
                     println!(
                         "{} ({}):",
-                        command.name,
-                        command.palette.as_deref().unwrap_or("key only")
+                        crate::diagnostics::printable(&command.name),
+                        crate::diagnostics::printable(
+                            command.palette.as_deref().unwrap_or("key only")
+                        )
                     );
-                    println!("scopes: {}", command.scopes.join(", "));
+                    println!(
+                        "scopes: {}",
+                        crate::diagnostics::printable(&command.scopes.join(", "))
+                    );
                     print_execution(&command.execution);
                 }
             }
         }
         println!(
             "installed: {}",
-            description.installed_version.unwrap_or("no")
+            crate::diagnostics::printable(description.installed_version.unwrap_or("no"))
         );
         for requirement in description.requirements {
             println!(
                 "requires: {} — {}",
-                requirement_names(requirement),
-                requirement.install
+                crate::diagnostics::printable(&requirement_names(requirement)),
+                crate::diagnostics::printable(&requirement.install)
             );
         }
     }
@@ -393,9 +430,12 @@ async fn describe(
 }
 
 fn print_execution(command: &crate::plugin_catalog::Execution) {
-    println!("command: {}", command.command);
-    println!("target: {}", command.target);
-    println!("output: {}", command.output);
+    println!(
+        "command: {}",
+        crate::diagnostics::printable(&command.command)
+    );
+    println!("target: {}", crate::diagnostics::printable(&command.target));
+    println!("output: {}", crate::diagnostics::printable(&command.output));
     println!("mutating: {}", command.mutating);
     println!(
         "confirmation: {}",
@@ -451,7 +491,7 @@ async fn update(requested: &[String], offline: bool, catalog: Option<&str>) -> R
     let (mut ready, refused) = triage(&managed, ids);
     let mut unresolved = Vec::new();
     for (id, reason) in refused {
-        eprintln!("warning: {reason}");
+        eprintln!("warning: {}", crate::diagnostics::printable(&reason));
         unresolved.push(id);
     }
     ready.retain(|id| {
@@ -463,7 +503,8 @@ async fn update(requested: &[String], offline: bool, catalog: Option<&str>) -> R
             true
         } else {
             eprintln!(
-                "warning: {id}: its installed catalog is not enabled or does not match --catalog"
+                "warning: {}: its installed catalog is not enabled or does not match --catalog",
+                crate::diagnostics::printable(id)
             );
             unresolved.push(id.clone());
             false
@@ -497,17 +538,27 @@ async fn update(requested: &[String], offline: bool, catalog: Option<&str>) -> R
             .and_then(|package| package.version.as_deref())
             .and_then(|version| Version::parse(version).ok())
         else {
-            eprintln!("warning: {id} has an invalid installed version");
+            eprintln!(
+                "warning: {} has an invalid installed version",
+                crate::diagnostics::printable(&id)
+            );
             unresolved.push(id);
             continue;
         };
         match update_plan(&snapshot.catalog, &id, &current) {
             UpdatePlan::Newer => updates.push(id),
-            UpdatePlan::Current => println!("{id} is current at {current}"),
+            UpdatePlan::Current => println!(
+                "{} is current at {}",
+                crate::diagnostics::printable(&id),
+                crate::diagnostics::printable(&current.to_string())
+            ),
             UpdatePlan::Unlisted { newest } => {
                 eprintln!(
-                    "warning: {id} is installed at {current}, which the catalog no longer \
-                     lists; the newest version sofka can install is {newest}"
+                    "warning: {} is installed at {}, which the catalog no longer \
+                     lists; the newest version sofka can install is {}",
+                    crate::diagnostics::printable(&id),
+                    crate::diagnostics::printable(&current.to_string()),
+                    crate::diagnostics::printable(&newest)
                 );
                 unresolved.push(id);
             }
@@ -515,16 +566,28 @@ async fn update(requested: &[String], offline: bool, catalog: Option<&str>) -> R
             // use may since have been withdrawn, and that is the one thing an
             // update run must not stay quiet about.
             UpdatePlan::Withdrawn { reason, newest } => eprintln!(
-                "warning: {id} is installed at {current}, which was withdrawn: {reason}; \
-                 the newest version sofka can install is {newest}"
+                "warning: {} is installed at {}, which was withdrawn: {}; \
+                 the newest version sofka can install is {}",
+                crate::diagnostics::printable(&id),
+                crate::diagnostics::printable(&current.to_string()),
+                crate::diagnostics::printable(&reason),
+                crate::diagnostics::printable(&newest)
             ),
             UpdatePlan::Unavailable { error, withdrawn } => {
                 match withdrawn {
                     Some(reason) => eprintln!(
-                        "warning: {id} is installed at {current}, which was withdrawn: \
-                         {reason}; sofka has no version to replace it with: {error}"
+                        "warning: {} is installed at {}, which was withdrawn: \
+                         {}; sofka has no version to replace it with: {}",
+                        crate::diagnostics::printable(&id),
+                        crate::diagnostics::printable(&current.to_string()),
+                        crate::diagnostics::printable(&reason),
+                        crate::diagnostics::printable(&error)
                     ),
-                    None => eprintln!("warning: {id}: {error}"),
+                    None => eprintln!(
+                        "warning: {}: {}",
+                        crate::diagnostics::printable(&id),
+                        crate::diagnostics::printable(&error)
+                    ),
                 }
                 unresolved.push(id);
             }
@@ -660,26 +723,33 @@ fn activate(prepared: Vec<crate::plugin_install::PreparedPackage>) -> Activated 
         let version = package.version.clone();
         for path in &package.conflicts {
             eprintln!(
-                "warning: {id} shares a plugin name or palette command with the package at {}; \
+                "warning: {} shares a plugin name or palette command with the package at {}; \
                  sofka loads the first of the two and ignores the other",
-                path.display()
+                crate::diagnostics::printable(&id),
+                crate::diagnostics::printable(&path.display().to_string())
             );
         }
         match package.activate() {
             Ok(action) => {
                 any |= !matches!(action, Activation::Unchanged);
                 println!(
-                    "{} {id}@{version}",
+                    "{} {}@{}",
                     match action {
                         Activation::Installed => "installed",
                         Activation::Updated => "updated",
                         Activation::RolledBack => "rolled back",
                         Activation::Unchanged => "already installed",
-                    }
+                    },
+                    crate::diagnostics::printable(&id),
+                    crate::diagnostics::printable(&version)
                 );
             }
             Err(error) => {
-                eprintln!("{id}: {error}");
+                eprintln!(
+                    "{}: {}",
+                    crate::diagnostics::printable(&id),
+                    crate::diagnostics::printable(&error)
+                );
                 failed.push(id);
             }
         }
@@ -711,11 +781,12 @@ fn list(json: bool) -> Result<(), String> {
                 .withdrawal_reason
                 .map_or(String::new(), |reason| format!(" withdrawn: {reason}"));
             println!(
-                "{}\t{}\t{}\t{kind}{modified}{withdrawn}\t{}",
-                row.id,
-                row.catalog_source,
-                row.version.unwrap_or("-"),
-                row.path.display()
+                "{}\t{}\t{}\t{kind}{modified}{}\t{}",
+                crate::diagnostics::printable(row.id),
+                crate::diagnostics::printable(row.catalog_source),
+                crate::diagnostics::printable(row.version.unwrap_or("-")),
+                crate::diagnostics::printable(&withdrawn),
+                crate::diagnostics::printable(&row.path.display().to_string())
             );
         }
     }
@@ -762,7 +833,11 @@ fn remove(ids: &[String]) -> Result<(), String> {
     };
     let any = !removed.is_empty();
     for (id, path) in removed {
-        println!("removed {id} from {}", path.display());
+        println!(
+            "removed {} from {}",
+            crate::diagnostics::printable(&id),
+            crate::diagnostics::printable(&path.display().to_string())
+        );
     }
     if any {
         println!("Run :reload in an existing sofka session to load the changes.");
@@ -778,7 +853,7 @@ fn report_missing_requirements(
     requests: &[String],
 ) -> Result<(), String> {
     for warning in missing_requirements(snapshot, requests)? {
-        eprintln!("warning: {warning}");
+        eprintln!("warning: {}", crate::diagnostics::printable(&warning));
     }
     Ok(())
 }

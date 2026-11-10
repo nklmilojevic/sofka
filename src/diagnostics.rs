@@ -314,6 +314,15 @@ pub fn safe(value: &str) -> Cow<'_, str> {
     crate::redact::text(value)
 }
 
+/// Prepare text for terminal output. Redact credentials and replace control
+/// characters with spaces, but keep newlines.
+pub fn printable(value: &str) -> String {
+    safe(value)
+        .chars()
+        .map(|c| if c.is_control() && c != '\n' { ' ' } else { c })
+        .collect()
+}
+
 /// `value`, or `fallback` when it is empty — after redaction.
 pub fn safe_or<'a>(value: &'a str, fallback: &'a str) -> Cow<'a, str> {
     if value.is_empty() {
@@ -541,6 +550,29 @@ pub fn warning_lines(warnings: &[String]) -> Vec<String> {
 mod tests {
     use super::*;
     use http::Method;
+
+    #[test]
+    fn printable_drops_escape_sequences() {
+        let output = printable("ok\x1b[2J\x1b[Hbad");
+        assert!(!output.contains('\x1b'));
+        assert_eq!(output, "ok [2J [Hbad");
+        assert_eq!(printable("a\r\t\x07\x7f\u{009b}b"), "a     b");
+    }
+
+    #[test]
+    fn printable_keeps_newlines_and_plain_text() {
+        assert_eq!(printable("line one\nline two"), "line one\nline two");
+    }
+
+    #[test]
+    fn printable_redacts_url_userinfo() {
+        let output = printable("https://dummy-user:dummy-password@proxy.example:3128");
+        assert!(!output.contains("dummy-password"));
+        assert_eq!(
+            output,
+            format!("https://{}@proxy.example:3128", crate::redact::REDACTED)
+        );
+    }
 
     #[test]
     fn classifies_requests_by_shape() {
