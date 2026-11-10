@@ -880,7 +880,7 @@ impl App {
         let genr = self.generation;
         tokio::spawn(async move {
             let out = tokio::process::Command::new("kubectl")
-                .args(["config", "rename-context", &old, &new])
+                .args(["config", "rename-context", "--", &old, &new])
                 .output()
                 .await;
             let result = match out {

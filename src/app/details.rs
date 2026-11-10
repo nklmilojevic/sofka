@@ -169,11 +169,12 @@ impl App {
         let tx = self.tx.clone();
         let genr = self.generation;
         let mut argv = self.kubectl_base();
-        argv.extend(["describe".to_string(), resource, name.clone()]);
+        argv.push("describe".into());
         if let Some(ns) = &ns {
             argv.push("-n".into());
             argv.push(ns.clone());
         }
+        argv.extend(["--".into(), resource, name.clone()]);
         let claim = self.claim_status(format!("describing {name}…"));
         self.stop_resource_refresh();
         self.clear_document_source();

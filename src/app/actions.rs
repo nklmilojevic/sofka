@@ -966,17 +966,21 @@ impl App {
         // warn (and confirm) before opening the editor.
         let flux = flux_managed_by(obj);
         let mut argv = self.kubectl_base();
-        argv.extend(["edit".into(), resource, name]);
+        argv.push("edit".into());
         if !ns.is_empty() {
             argv.push("-n".into());
             argv.push(ns);
         }
+        argv.extend(["--".into(), resource, name]);
         match flux {
             Some(owner) => {
                 self.confirm_label = format!(
                     "⚠ Managed by {owner} — your edit will be reverted on the next reconcile. Edit anyway?"
                 );
-                self.confirm_action = Some(ConfirmAction::Edit { argv });
+                self.confirm_action = Some(ConfirmAction::Edit {
+                    argv,
+                    label: edit_label,
+                });
                 self.mode = Mode::Confirm;
             }
             None => {
