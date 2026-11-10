@@ -1,6 +1,7 @@
 name: CI
 
 # PRs only. Pushes to main run only nix-cache.yaml. Home Manager tests run here.
+# The platforms job compiles all targets on Windows and runs the tests on macOS.
 # The release workflow builds Nix packages for all four platforms and updates
 # the Cachix cache. Package build failures can still first appear at release.
 on:
@@ -54,6 +55,31 @@ jobs:
 
       - name: Test
         run: cargo test --locked
+
+  platforms:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            run: cargo test --locked
+          - os: windows-latest
+            run: cargo check --locked --all-targets
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+
+      - name: Cache cargo registry/build
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+
+      - name: Build and test
+        run: ${{ matrix.run }}
 
   coverage:
     runs-on: ubuntu-latest
