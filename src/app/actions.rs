@@ -2229,9 +2229,12 @@ impl App {
             self.flash_warn("suspend/resume only applies to CronJobs, Flux resources (ks/hr/HelmCharts/git-, helm-, oci-repos, buckets, image automation, alerts, receivers, ResourceSets, input providers, FluxInstances), and ArgoCD Applications/ApplicationSets");
             return;
         }
-        if self.action_targets().is_empty() {
+        let targets = self.action_targets();
+        if targets.is_empty() {
             return;
         }
+        self.action_menu_targets = targets;
+        self.action_menu_objects = self.action_target_objects();
         self.flux_menu_state.select(Some(0));
         self.mode = Mode::FluxMenu;
     }
@@ -2240,7 +2243,11 @@ impl App {
         let items = self.action_menu_items();
         let len = items.len();
         match (key.action, key.code) {
-            (Some(Action::Back), _) | (Some(Action::Close), _) => self.mode = Mode::Table,
+            (Some(Action::Back), _) | (Some(Action::Close), _) => {
+                self.action_menu_targets.clear();
+                self.action_menu_objects.clear();
+                self.mode = Mode::Table;
+            }
             (Some(Action::Down), _) => list_step(&mut self.flux_menu_state, len, true),
             (Some(Action::Up), _) => list_step(&mut self.flux_menu_state, len, false),
             (Some(a @ (Action::PageDown | Action::HalfPageDown)), _) => list_page(
@@ -2261,10 +2268,11 @@ impl App {
                     .selected()
                     .and_then(|i| items.get(i))
                     .copied();
+                let targets = std::mem::take(&mut self.action_menu_targets);
+                let objects = std::mem::take(&mut self.action_menu_objects);
                 self.mode = Mode::Table;
                 match choice {
                     Some("Suspend") => {
-                        let targets = self.action_targets();
                         if self.argocd_kind() {
                             self.do_argocd_suspend(targets, true);
                         } else {
@@ -2272,7 +2280,6 @@ impl App {
                         }
                     }
                     Some("Resume") => {
-                        let targets = self.action_targets();
                         if self.argocd_kind() {
                             self.do_argocd_suspend(targets, false);
                         } else {
@@ -2280,19 +2287,16 @@ impl App {
                         }
                     }
                     Some("Reconcile now" | "Force reconcile") => {
-                        let targets = self.action_targets();
                         self.do_flux_reconcile(targets, choice == Some("Force reconcile"));
                     }
                     Some("Refresh" | "Hard refresh") => {
-                        let targets = self.action_targets();
                         self.do_argocd_refresh(targets, choice == Some("Hard refresh"));
                     }
                     Some("Sync now") => {
-                        let targets = self.action_targets();
                         self.do_argocd_sync(targets, false);
                     }
-                    Some("Sync with prune") => self.request_argocd_sync_prune(),
-                    Some("Trigger now") => self.do_trigger_cronjobs(),
+                    Some("Sync with prune") => self.request_argocd_sync_prune(targets),
+                    Some("Trigger now") => self.do_trigger_cronjobs(objects),
                     _ => {} // "Cancel" or nothing selected — do nothing.
                 }
             }
@@ -2551,8 +2555,7 @@ impl App {
 
     /// Ask before a pruning sync: it deletes every resource the Application
     /// manages that is no longer in Git. Gated by `prune` guardrails.
-    pub(super) fn request_argocd_sync_prune(&mut self) {
-        let targets = self.action_targets();
+    pub(super) fn request_argocd_sync_prune(&mut self, targets: Vec<(String, String)>) {
         if targets.is_empty() {
             return; // see `do_flux_suspend`
         }
@@ -2586,8 +2589,7 @@ impl App {
     /// --from=cronjob/…` does, manual-instantiate annotation and owner
     /// reference included. Works on suspended CronJobs too (the suspend flag
     /// only gates the schedule, not manually created Jobs).
-    pub(super) fn do_trigger_cronjobs(&mut self) {
-        let objs = self.action_target_objects();
+    pub(super) fn do_trigger_cronjobs(&mut self, objs: Vec<DynamicObject>) {
         // Seconds-resolution suffix: unique enough for a manual action, and a
         // repeat trigger of the same CronJob within a second fails loudly
         // with AlreadyExists rather than silently double-running.

@@ -4034,11 +4034,14 @@ fn draw_copy_picker(frame: &mut Frame, app: &mut App, area: Rect) {
 /// takes an explicit, visible choice.
 fn draw_flux_menu(frame: &mut Frame, app: &mut App, area: Rect) {
     let show_scrollbars = app.scrollbars_visible();
-    let count = app.marked.len().max(1);
-    let target = if count == 1 {
-        "current selection".to_string()
+    let target = if let [(name, _)] = app.action_menu_targets.as_slice() {
+        name.clone()
     } else {
-        format!("{count} marked {}", app.kind_plural)
+        format!(
+            "{} marked {}",
+            app.action_menu_targets.len(),
+            app.kind_plural
+        )
     };
     let items: Vec<Text> = app
         .action_menu_items()

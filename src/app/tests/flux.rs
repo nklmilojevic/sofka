@@ -1,6 +1,78 @@
 use super::*;
 use http_body_util::BodyExt;
 
+fn kustomization(name: &str) -> Value {
+    json!({
+        "apiVersion": "kustomize.toolkit.fluxcd.io/v1", "kind": "Kustomization",
+        "metadata": {"name": name, "namespace": "default"},
+        "spec": {"suspend": false}
+    })
+}
+
+#[tokio::test]
+async fn action_menu_keeps_its_target_when_rows_shift() {
+    let (mut app, _rx) = test_app();
+    app.switch_kind("kustomizations");
+    apply(&mut app, kustomization("b"));
+    apply(&mut app, kustomization("c"));
+    app.table_state.select(Some(0));
+    assert_eq!(app.action_targets(), vec![("b".into(), "default".into())]);
+    let (sent, mut requests) = mpsc::unbounded_channel();
+    app.cluster.client = kube::Client::new(
+        tower::service_fn(move |req: http::Request<kube::client::Body>| {
+            let sent = sent.clone();
+            async move {
+                let method = req.method().clone();
+                let path = req.uri().path().to_string();
+                let body: Value =
+                    serde_json::from_slice(&req.into_body().collect_bytes().await.unwrap())
+                        .unwrap();
+                sent.send((method, path, body)).unwrap();
+                Ok::<_, std::convert::Infallible>(
+                    http::Response::builder()
+                        .status(200)
+                        .body(http_body_util::Full::new(hyper::body::Bytes::from(
+                            kustomization("b").to_string(),
+                        )))
+                        .unwrap(),
+                )
+            }
+        }),
+        "default",
+    );
+
+    app.handle_key(press(KeyCode::Char('t'))).unwrap();
+    assert_eq!(app.mode, Mode::FluxMenu);
+    apply(&mut app, kustomization("a"));
+    assert_eq!(app.action_targets(), vec![("a".into(), "default".into())]);
+    app.handle_key(press(KeyCode::Enter)).unwrap();
+    assert!(app.action_menu_targets.is_empty());
+    assert!(app.action_menu_objects.is_empty());
+
+    let (method, path, body) = tokio::time::timeout(Duration::from_secs(2), requests.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(method, http::Method::PATCH);
+    assert!(path.ends_with("/kustomizations/b"), "{path}");
+    assert_eq!(body, json!({"spec": {"suspend": true}}));
+}
+
+#[tokio::test]
+async fn action_menu_title_names_its_target() {
+    let (mut app, _rx) = test_app();
+    app.switch_kind("kustomizations");
+    apply(&mut app, kustomization("b"));
+    apply(&mut app, kustomization("c"));
+    app.table_state.select(Some(0));
+    app.handle_key(press(KeyCode::Char('t'))).unwrap();
+    apply(&mut app, kustomization("a"));
+
+    let screen = screen_text(&mut app, 120, 30);
+    assert!(screen.contains("Flux: b"), "{screen}");
+    assert!(!screen.contains("current selection"));
+}
+
 fn helmrelease(name: &str) -> Value {
     json!({
         "apiVersion": "helm.toolkit.fluxcd.io/v2",
@@ -773,6 +845,8 @@ async fn flux_menu_cancel_and_readonly_do_not_start_an_action() {
             assert_eq!(app.mode, Mode::Table);
             assert_eq!(app.flash, flash);
             assert_eq!(app.marked.len(), 1);
+            assert!(app.action_menu_targets.is_empty());
+            assert!(app.action_menu_objects.is_empty());
             app.readonly = true;
             app.handle_key(press(KeyCode::Char('t'))).unwrap();
             assert_eq!(app.mode, Mode::Table);
