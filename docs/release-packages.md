@@ -84,9 +84,9 @@ sudo pacman -U ./sofka-*.pkg.tar.zst
 sudo apk add --allow-untrusted ./sofka_*.apk
 ```
 
-The APK files are unsigned local packages. Check the release checksum and
-attestation before installation. Packages install `sofka` in `/usr/bin` and
-license files in `/usr/share/doc/sofka`.
+The APK files are unsigned local packages.
+[Verify the download](#verify-a-download) before installation. Packages install
+`sofka` in `/usr/bin` and license files in `/usr/share/doc/sofka`.
 
 For an update, download the new package and run the same installation command.
 For removal, use `sudo apt remove sofka`, `sudo dnf remove sofka`,
@@ -149,6 +149,62 @@ Alpine adapters still need separate musl builds.
 The new application archives do not imply that those adapters are available.
 Plugin packages keep their existing `.tar.zst` format.
 
+## Verify a download
+
+The release workflow signs every release keylessly through Sigstore, with no
+stored signing key. One SLSA v1 provenance attestation covers every archive, package,
+SBOM, and `SHA256SUMS`. Its Sigstore bundle is the release asset
+`sofka-v<version>.sigstore.json`. Releases published before the bundle asset
+was added have no bundle file and no signed `SHA256SUMS`; check their assets
+with `gh attestation verify`.
+
+In the commands below, replace `<version>` with the release version without the
+leading `v`, and the archive name with the file you downloaded.
+
+With the GitHub CLI:
+
+```sh
+gh attestation verify sofka-v<version>-x86_64-unknown-linux-gnu.tar.gz -R nklmilojevic/sofka \
+  --cert-identity https://github.com/nklmilojevic/sofka/.github/workflows/release.yaml@refs/tags/v<version>
+```
+
+`-R` only checks the repository. `--cert-identity` also requires the release
+workflow at the tag you downloaded, so an attestation from another workflow or
+tag in the repository is rejected. Add
+`--bundle sofka-v<version>.sigstore.json` to check the downloaded bundle instead
+of fetching the attestation from GitHub; keep `--cert-identity`.
+
+With cosign 3:
+
+```sh
+cosign verify-blob-attestation \
+  --bundle sofka-v<version>.sigstore.json \
+  --type slsaprovenance1 \
+  --certificate-identity https://github.com/nklmilojevic/sofka/.github/workflows/release.yaml@refs/tags/v<version> \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  sofka-v<version>-x86_64-unknown-linux-gnu.tar.gz
+```
+
+cosign prints `Verified OK` when the file's SHA-256 is one of the bundle's
+subjects and the signing certificate belongs to the release workflow at that
+tag. `--type slsaprovenance1` is required; without it cosign expects a custom
+predicate and rejects the bundle.
+
+To check several downloads at once, verify `SHA256SUMS` with the bundle, then
+check the files against it:
+
+```sh
+cosign verify-blob-attestation \
+  --bundle sofka-v<version>.sigstore.json \
+  --type slsaprovenance1 \
+  --certificate-identity https://github.com/nklmilojevic/sofka/.github/workflows/release.yaml@refs/tags/v<version> \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  SHA256SUMS
+shasum -a 256 -c --ignore-missing SHA256SUMS
+```
+
+`--ignore-missing` skips the release assets you did not download.
+
 ## Software bill of materials
 
 Each release target has an SPDX 2.3 JSON file named
@@ -183,7 +239,10 @@ Each target build runs before GoReleaser to capture Cargo build inputs.
 GNU Linux builds also derive runtime dependencies.
 GoReleaser then reuses Cargo's build cache. Dependency fields contain plain
 values because GoReleaser does not expand templates in those fields.
-`SHA256SUMS` and build attestations cover all archive, package, and SBOM files.
+`SHA256SUMS` covers all archive, package, and SBOM files. One build attestation
+covers those files and `SHA256SUMS`. Its Sigstore bundle is uploaded as
+`sofka-v<version>.sigstore.json`. The bundle is not listed in `SHA256SUMS`
+because it is created after the checksums.
 
 The release uses Rust 1.98.1. Its musl targets include musl 1.2.5; the matching
 copyright notice is in `scripts/licenses/musl-COPYRIGHT`.
