@@ -64,18 +64,21 @@ impl App {
             self.remember_namespace();
         }
         self.set_root_view(kind);
-        let layout_warning = query
-            .layout
-            .as_deref()
-            .and_then(|layout| self.select_layout(layout).err());
+        let layout_warning = match query.layout.as_deref() {
+            Some(layout) => self.select_layout(layout).err(),
+            None => {
+                self.reset_layout();
+                None
+            }
+        };
         self.filter = query.filter;
         self.record_history();
         self.start_watch();
-        self.set_flash(format!(
-            "Viewing {} in {}",
-            self.kind_plural,
-            self.namespace_label()
-        ));
+        let title = match self.active_layout() {
+            Some(layout) => format!("{}:{layout}", self.kind_plural),
+            None => self.kind_plural.clone(),
+        };
+        self.set_flash(format!("Viewing {title} in {}", self.namespace_label()));
         if let Some(warning) = layout_warning {
             self.flash_warn(&warning);
         }
@@ -140,6 +143,7 @@ impl App {
                 }
                 let title = kind.title();
                 self.set_root_view(kind);
+                self.reset_layout();
                 self.flash = if ns.is_some() {
                     format!("Viewing {title} in {}", self.namespace_label())
                 } else {

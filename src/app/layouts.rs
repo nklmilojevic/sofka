@@ -47,6 +47,15 @@ impl App {
         Ok(())
     }
 
+    /// Drop back to the current kind's default layout. An explicit resource
+    /// selection that names no layout (`:pods`, a bookmark without `layout`)
+    /// opens the default one instead of the layout remembered for the kind.
+    pub(super) fn reset_layout(&mut self) {
+        if let Some(title) = self.layout_kind().map(Kind::title) {
+            self.layouts.remove(&title);
+        }
+    }
+
     /// `:layout <name>`: switch the current kind's layout and rebuild the
     /// table. A sort the old layout configured gives way to the new one's.
     pub(super) fn set_layout(&mut self, name: &str) {
