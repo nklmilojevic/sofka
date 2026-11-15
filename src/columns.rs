@@ -1524,15 +1524,17 @@ pub fn has_faults_rule(group: &str, plural: &str) -> bool {
             )
             | ("infra.contrib.fluxcd.io", "terraforms")
             | ("argoproj.io", "applications" | "applicationsets")
+            | ("" | "events.k8s.io", "events")
     )
 }
 
 /// Whether an object needs attention, for the `Ctrl+Z` faults filter:
 /// a controller that is not fully ready, a Job that has not run cleanly,
 /// a CronJob that is suspended or whose last run did not succeed, a Flux
-/// object that is suspended or not `Ready`, or an Argo CD Application or
-/// ApplicationSet that is not healthy and synced. `None` for kinds the
-/// filter does not cover; pods have their own rules.
+/// object that is suspended or not `Ready`, an Argo CD Application or
+/// ApplicationSet that is not healthy and synced, or an Event whose type is
+/// not `Normal`. `None` for kinds the filter does not cover; pods have their
+/// own rules.
 pub fn object_faulted(group: &str, plural: &str, obj: &DynamicObject) -> Option<bool> {
     let d = &obj.data;
     let terminating = obj.metadata.deletion_timestamp.is_some();
@@ -1571,6 +1573,7 @@ pub fn object_faulted(group: &str, plural: &str, obj: &DynamicObject) -> Option<
         ("argoproj.io", "applicationsets") => {
             return Some(terminating || crate::argocd::applicationset_status(obj) != "Synced");
         }
+        ("" | "events.k8s.io", "events") => return Some(sget(d, &["type"]) != Some("Normal")),
         _ => return None,
     };
     Some(

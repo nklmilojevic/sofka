@@ -12,6 +12,7 @@ mod context_badge;
 mod credentials;
 mod delete;
 mod dir;
+mod discovery;
 mod exec_auth;
 mod flux;
 mod karpenter;
@@ -3452,6 +3453,134 @@ async fn narrow_header_drops_the_logo_before_the_key_hints() {
         );
         assert_eq!(header.contains("sofka v"), logo, "logo at width {width}");
     }
+}
+
+#[tokio::test]
+async fn header_logo_gives_way_when_the_info_would_be_cut_off() {
+    // At 130 columns the hints and the logo both fit and leave the info 56
+    // columns, of which the field labels take 12. At 80 columns the hints sit
+    // on the footer and the info gets 52 columns beside the logo.
+    fn header(width: u16, setup: impl FnOnce(&mut App)) -> String {
+        let (mut app, _rx) = test_app();
+        app.handle_key(press(KeyCode::Char(':'))).unwrap();
+        for c in "pods".chars() {
+            app.handle_key(press(KeyCode::Char(c))).unwrap();
+        }
+        app.handle_key(press(KeyCode::Enter)).unwrap();
+        assert_eq!(app.kind_plural, "pods");
+        setup(&mut app);
+        screen_text(&mut app, width, 24)
+            .lines()
+            .take(8)
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+    let badge = |label: &str| {
+        let label = label.to_string();
+        move |app: &mut App| {
+            app.readonly = true;
+            app.context_badge = Some(crate::config::ContextBadge { label, color: None });
+        }
+    };
+
+    let fits = header(130, |_| {});
+    assert!(fits.contains("prev logs"), "{fits}");
+    assert!(fits.contains("sofka v"), "{fits}");
+
+    for (case, width, logo, expected, setup) in [
+        (
+            "context at the limit",
+            130,
+            true,
+            "c".repeat(44),
+            Box::new(|app: &mut App| app.cluster.context = "c".repeat(44))
+                as Box<dyn FnOnce(&mut App)>,
+        ),
+        (
+            "context past the limit",
+            130,
+            false,
+            "c".repeat(45),
+            Box::new(|app: &mut App| app.cluster.context = "c".repeat(45)),
+        ),
+        (
+            "cluster URL at the limit",
+            130,
+            true,
+            format!("https://{}", "u".repeat(36)),
+            Box::new(|app: &mut App| {
+                app.cluster.cluster_url = format!("https://{}", "u".repeat(36));
+            }),
+        ),
+        (
+            "cluster URL past the limit",
+            130,
+            false,
+            format!("https://{}", "u".repeat(37)),
+            Box::new(|app: &mut App| {
+                app.cluster.cluster_url = format!("https://{}", "u".repeat(37));
+            }),
+        ),
+        (
+            "badge and read-only at the limit",
+            130,
+            true,
+            format!("test  [{}]  [read-only]", "b".repeat(23)),
+            Box::new(badge(&"b".repeat(23))),
+        ),
+        (
+            "badge and read-only past the limit",
+            130,
+            false,
+            format!("test  [{}]  [read-only]", "b".repeat(24)),
+            Box::new(badge(&"b".repeat(24))),
+        ),
+        (
+            "resource title at the limit",
+            130,
+            true,
+            format!("pods  ‹ {}", "s".repeat(36)),
+            Box::new(|app: &mut App| app.scope_label = Some("s".repeat(36))),
+        ),
+        (
+            "resource title past the limit",
+            130,
+            false,
+            format!("pods  ‹ {}", "s".repeat(37)),
+            Box::new(|app: &mut App| app.scope_label = Some("s".repeat(37))),
+        ),
+        (
+            "context at the limit without hints",
+            80,
+            true,
+            "c".repeat(40),
+            Box::new(|app: &mut App| app.cluster.context = "c".repeat(40)),
+        ),
+        (
+            "context past the limit without hints",
+            80,
+            false,
+            "c".repeat(41),
+            Box::new(|app: &mut App| app.cluster.context = "c".repeat(41)),
+        ),
+    ] {
+        let text = header(width, setup);
+        assert_eq!(text.contains("sofka v"), logo, "logo for {case}:\n{text}");
+        assert!(text.contains(&expected), "{case} is cut off:\n{text}");
+        assert_eq!(
+            text.contains("prev logs"),
+            width == 130,
+            "hints for {case}:\n{text}"
+        );
+    }
+
+    let favorites = header(130, |app| {
+        app.namespace_favorites = (1..=9)
+            .map(|i| format!("favourite-namespace-{i}"))
+            .collect();
+    });
+    assert!(favorites.contains("favourite-namespace-1"), "{favorites}");
+    assert!(favorites.contains("sofka v"), "{favorites}");
 }
 
 #[tokio::test]
@@ -25096,6 +25225,187 @@ async fn configured_ctrl_z_actions_take_precedence_over_faults() {
     app.plugins[0].scopes = vec!["services".into()];
     app.handle_key(ctrl(KeyCode::Char('z'))).unwrap();
     assert!(app.faults_only);
+}
+
+fn faults_test_event(api_version: &str, name: &str, typ: &str) -> Value {
+    json!({
+        "apiVersion": api_version, "kind": "Event",
+        "metadata": {"name": name, "namespace": "default", "uid": name},
+        "type": typ,
+        "reason": format!("{name}-reason"),
+    })
+}
+
+#[tokio::test]
+async fn ctrl_z_filters_events_that_are_not_normal() {
+    for (resource, api_version) in [
+        ("events", "v1"),
+        ("events.events.k8s.io", "events.k8s.io/v1"),
+    ] {
+        let (mut app, _rx) = test_app();
+        app.switch_kind(resource);
+        let event = |name: &str, typ: &str| faults_test_event(api_version, name, typ);
+        apply(&mut app, event("pulled", "Normal"));
+        apply(&mut app, event("backoff", "Warning"));
+        apply(&mut app, event("custom", "Critical"));
+        apply(&mut app, event("scheduled", "Normal"));
+
+        app.handle_key(ctrl(KeyCode::Char('z'))).unwrap();
+        assert!(app.faults_filter_active(), "{resource}");
+        let mut names = row_names(&app);
+        names.sort();
+        assert_eq!(names, ["backoff", "custom"], "{resource}");
+        assert!(
+            screen_text(&mut app, 120, 20).contains("[faults]"),
+            "{resource}"
+        );
+
+        let mut pulled = event("pulled", "Warning");
+        pulled["metadata"]["resourceVersion"] = json!("2");
+        apply(&mut app, pulled);
+        let mut backoff = event("backoff", "Normal");
+        backoff["metadata"]["resourceVersion"] = json!("2");
+        apply(&mut app, backoff);
+        let mut names = row_names(&app);
+        names.sort();
+        assert_eq!(names, ["custom", "pulled"], "{resource}");
+
+        type_filter(&mut app, "pulled");
+        assert_eq!(row_names(&app), ["pulled"], "{resource}");
+        app.handle_key(press(KeyCode::Esc)).unwrap();
+
+        app.handle_key(ctrl(KeyCode::Char('z'))).unwrap();
+        assert!(!app.faults_filter_active(), "{resource}");
+        assert_eq!(row_names(&app).len(), 4, "{resource}");
+        assert!(
+            !screen_text(&mut app, 120, 20).contains("[faults]"),
+            "{resource}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn configured_ctrl_z_actions_take_precedence_over_event_faults() {
+    let (mut app, _rx) = test_app();
+    app.switch_kind("events");
+    app.bookmarks = vec![crate::config::Bookmark {
+        key: Some("ctrl-z".into()),
+        name: "services".into(),
+        resource: "services".into(),
+        ..Default::default()
+    }];
+    app.handle_key(ctrl(KeyCode::Char('z'))).unwrap();
+    assert_eq!(app.kind_plural, "services");
+    assert!(!app.faults_only);
+
+    app.bookmarks.clear();
+    app.switch_kind("events");
+    app.handle_key(ctrl(KeyCode::Char('z'))).unwrap();
+    assert!(app.faults_filter_active());
+}
+
+fn open_pod_events(app: &mut App) {
+    app.switch_kind("pods");
+    apply(
+        app,
+        json!({
+            "apiVersion": "v1", "kind": "Pod",
+            "metadata": {"name": "web", "namespace": "default", "uid": "pod-uid"}
+        }),
+    );
+    app.handle_key(press(KeyCode::Char('E'))).unwrap();
+    assert_eq!(app.mode, Mode::Events);
+}
+
+fn send_pod_events(app: &mut App, events: &[(&str, &str)]) {
+    let events: Vec<_> = events
+        .iter()
+        .map(|(name, typ)| obj(faults_test_event("v1", name, typ)))
+        .collect();
+    app.handle_msg(Msg::Events {
+        generation: app.event_gen,
+        title: "web — events".into(),
+        lines: event_document(&events, false),
+    });
+}
+
+fn event_view_reasons(app: &App) -> Vec<String> {
+    let mut reasons: Vec<String> = app
+        .detail
+        .lines
+        .iter()
+        .skip(1)
+        .filter_map(|line| {
+            line.split_whitespace()
+                .find(|word| word.ends_with("-reason"))
+                .map(String::from)
+        })
+        .collect();
+    reasons.sort();
+    reasons
+}
+
+#[tokio::test]
+async fn ctrl_z_in_the_events_view_shows_only_events_that_are_not_normal() {
+    let (mut app, _rx) = test_app();
+    open_pod_events(&mut app);
+    send_pod_events(
+        &mut app,
+        &[
+            ("pulled", "Normal"),
+            ("backoff", "Warning"),
+            ("custom", "Critical"),
+        ],
+    );
+    assert_eq!(
+        event_view_reasons(&app),
+        ["backoff-reason", "custom-reason", "pulled-reason"]
+    );
+
+    app.handle_key(ctrl(KeyCode::Char('z'))).unwrap();
+    assert_eq!(app.mode, Mode::Events);
+    assert_eq!(app.detail.title, "web — events [faults]");
+    assert!(app.detail.lines[0].contains("LAST SEEN"));
+    assert_eq!(
+        event_view_reasons(&app),
+        ["backoff-reason", "custom-reason"]
+    );
+
+    send_pod_events(
+        &mut app,
+        &[
+            ("pulled", "Warning"),
+            ("backoff", "Normal"),
+            ("started", "Normal"),
+        ],
+    );
+    assert_eq!(app.detail.title, "web — events [faults]");
+    assert_eq!(event_view_reasons(&app), ["pulled-reason"]);
+
+    send_pod_events(&mut app, &[("started", "Normal")]);
+    assert_eq!(app.detail.lines.len(), 2);
+    assert_eq!(app.detail.lines[1], "(no events other than Normal)");
+
+    app.handle_key(ctrl(KeyCode::Char('z'))).unwrap();
+    assert_eq!(app.detail.title, "web — events");
+    assert_eq!(event_view_reasons(&app), ["started-reason"]);
+    app.stop_event_stream();
+}
+
+#[tokio::test]
+async fn events_view_faults_key_is_configurable() {
+    let (mut app, _rx) = test_app();
+    let cfg: crate::config::Config = toml::from_str("[keys.events]\nfaults = 'f6'\n").unwrap();
+    app.keymap = Keymap::compile(&cfg.keys).unwrap();
+    open_pod_events(&mut app);
+    send_pod_events(&mut app, &[("pulled", "Normal"), ("backoff", "Warning")]);
+
+    app.handle_key(ctrl(KeyCode::Char('z'))).unwrap();
+    assert_eq!(app.detail.title, "web — events");
+    app.handle_key(press(KeyCode::F(6))).unwrap();
+    assert_eq!(app.detail.title, "web — events [faults]");
+    assert_eq!(event_view_reasons(&app), ["backoff-reason"]);
+    app.stop_event_stream();
 }
 
 #[tokio::test]

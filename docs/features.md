@@ -211,6 +211,12 @@ include those conditions. Row filters can search the route paths.
 - **Optional header** - set `hide_header = true` in the configuration to hide
   the header and logo, including the one-line header in compact mode.
 
+- **Header logo makes room** - the logo on the right of the header gives up its
+  column when the key hints, the context line (with its badge and
+  `[read-only]`), the cluster URL, or the resource title would not fit beside
+  it. Namespace favourites take whatever room is left, so they do not count.
+  When everything fits, the logo stays.
+
 - **Connect** to the current kubeconfig context, including exec credential
   plugins (GKE, EKS, and friends).
 - **MFA prompts from exec plugins** - a plugin that asks for input, such as
@@ -233,6 +239,9 @@ include those conditions. Row filters can search the route paths.
   Resource names and built-in aliases take priority over discovered short names.
   Shared short names use group priority, then alphabetical group and resource
   order. User aliases override discovered aliases.
+  When a group serves one kind under two names, the name that can be listed is
+  the one sofka shows: OpenShift's `templates`, not the create-only
+  `processedtemplates`.
   Discovery runs at connect. When a `:` lookup matches no known kind, sofka runs
   discovery again in the background and retries the lookup, so a CRD installed
   while sofka runs opens without a restart. It does this at most once every 5
@@ -426,6 +435,8 @@ include those conditions. Row filters can search the route paths.
   - Argo CD Applications: health other than `Healthy`, sync other than
     `Synced`, or terminating. ApplicationSets: any status other than `Synced`,
     or terminating.
+  - Events (core and `events.k8s.io`): every type other than `Normal`, so
+    `Warning` and custom types stay visible.
 
   The table title shows `[faults]` while the filter is on. It works with the
   text filter and current namespace or drill scope. Press `Ctrl+Z` again to
@@ -998,6 +1009,10 @@ include those conditions. Row filters can search the route paths.
   StatefulSet policies, Pod scheduling groups, and Node-local ResourceSlice
   summaries. Node resource accounting includes Pod-level budgets and resize
   status; older API compatibility paths remain available.
+- **Events faults filter** - `Ctrl+Z` in the events view (`E`) shows only
+  events that are not `Normal` and adds `[faults]` to the title. Live updates
+  keep the filter applied, and it stays on for later events views during the
+  session. Press `Ctrl+Z` again to show every event.
 - **Edit from a document** - `e` in the YAML or describe view edits the
   displayed resource with `kubectl edit`, so a table row that moved while the
   watch was filling cannot change the target. The document is read again when
@@ -1173,8 +1188,8 @@ lifetime, and resources are configurable:
 
 ```toml
 [pvc_explore]
-image = "busybox:1.37"   # helper-pod image
-ttl = "30m"              # how long it lives before deleting itself
+image = "busybox:1.37" # helper-pod image
+ttl = "30m" # how long it lives before deleting itself
 cpu_request = "100m"
 cpu_limit = "100m"
 memory_request = "128Mi"

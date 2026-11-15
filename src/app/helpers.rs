@@ -874,7 +874,7 @@ pub(super) async fn send_event_snapshot(
     tx.send(Msg::Events {
         generation,
         title: title.to_string(),
-        lines: format_event_lines(items.values(), events_v1),
+        lines: event_document(items.values(), events_v1),
     })
     .await
     .is_ok()
@@ -884,23 +884,40 @@ pub(super) fn format_event_lines<'a, I>(events: I, events_v1: bool) -> Vec<Strin
 where
     I: IntoIterator<Item = &'a DynamicObject>,
 {
-    let mut rows: Vec<(String, String)> = events
+    event_document(events, events_v1)
+        .into_iter()
+        .map(|line| line.text)
+        .collect()
+}
+
+/// The events document, newest first, with each row marked by whether its
+/// Event is `Normal`.
+pub(super) fn event_document<'a, I>(events: I, events_v1: bool) -> Vec<EventLine>
+where
+    I: IntoIterator<Item = &'a DynamicObject>,
+{
+    let mut rows: Vec<(String, EventLine)> = events
         .into_iter()
         .map(|event| {
             let seen = event_time(event, events_v1);
-            (seen.clone(), event_line(event, events_v1, &seen))
+            let line = EventLine {
+                text: event_line(event, events_v1, &seen),
+                normal: svalue(&event.data, &["type"]).as_deref() == Some("Normal"),
+            };
+            (seen, line)
         })
         .collect();
-    // Unstable: the comparator orders on both tuple fields, i.e. the whole
-    // element, so a tie means the two rows are indistinguishable.
-    rows.sort_unstable_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+    // Unstable: the comparator orders on the time and the whole line, and a
+    // line includes the type, so a tie means the two rows are
+    // indistinguishable.
+    rows.sort_unstable_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.text.cmp(&b.1.text)));
 
-    let mut lines = vec![format!(
+    let mut lines = vec![EventLine::status(format!(
         "{:<20} {:<8} {:<24} {:>5} {}",
         "LAST SEEN", "TYPE", "REASON", "COUNT", "MESSAGE"
-    )];
+    ))];
     if rows.is_empty() {
-        lines.push("(no events)".into());
+        lines.push(EventLine::status("(no events)"));
     } else {
         lines.extend(rows.into_iter().map(|(_, line)| line));
     }

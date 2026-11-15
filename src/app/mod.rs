@@ -32,7 +32,8 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::k8s::{Cluster, Kind};
 use crate::store::{
-    Msg, Pulse, RowKey, StatusClaim, Store, StoreMutation, WatchFailure, XrayItem, row_key,
+    EventLine, Msg, Pulse, RowKey, StatusClaim, Store, StoreMutation, WatchFailure, XrayItem,
+    row_key,
 };
 
 pub(crate) use guardrails::ConfirmLevel;
@@ -2676,6 +2677,12 @@ pub struct App {
     log_wake: tokio::sync::watch::Sender<u64>,
     event_gen: u64,
     event_task: Option<JoinHandle<()>>,
+    /// The latest live events document and its title, kept whole so the
+    /// faults filter can be toggled without waiting for the next update.
+    events_doc: Vec<EventLine>,
+    events_title: String,
+    /// `Ctrl+Z` in the events view: show only events that are not `Normal`.
+    events_faults_only: bool,
 
     pub pending: Option<Suspend>,
     pub shell_target: Option<ShellTarget>,
@@ -3056,6 +3063,9 @@ impl App {
             log_wake: tokio::sync::watch::channel(0).0,
             event_gen: 0,
             event_task: None,
+            events_doc: Vec::new(),
+            events_title: String::new(),
+            events_faults_only: false,
             pending: None,
             shell_target: None,
             command_failure: None,
