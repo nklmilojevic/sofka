@@ -307,7 +307,7 @@ pub enum Msg {
     Events {
         generation: u64,
         title: String,
-        lines: Vec<String>,
+        lines: Vec<EventLine>,
     },
     /// How far a background `kubectl cp` has got: bytes that have landed at
     /// the destination, and the source's total when anything could measure
@@ -563,6 +563,25 @@ pub struct AdjacentItem {
     pub namespace: Option<String>,
     pub name: String,
     pub object: Box<DynamicObject>,
+}
+
+/// One line of the live events document.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EventLine {
+    pub text: String,
+    /// Whether the line is an Event of type `Normal`, which the events view's
+    /// faults filter hides. Headers and status lines are never `Normal`.
+    pub normal: bool,
+}
+
+impl EventLine {
+    /// A header or status line, which the faults filter always shows.
+    pub fn status(text: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            normal: false,
+        }
+    }
 }
 
 /// One hit from the global fuzzy find (`:find <text>`).

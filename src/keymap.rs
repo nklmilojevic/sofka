@@ -187,6 +187,7 @@ impl Action {
                 "terraforms",
                 "applications",
                 "applicationsets",
+                "events",
             ]),
             Self::PortForward => Some(&["pods", "services"]),
             Self::Inspect => Some(&["secrets", "persistentvolumeclaims"]),
@@ -454,6 +455,7 @@ const DEFAULTS: &[(&str, Action, &[&str])] = &[
     ("events", Action::Copy, &["c"]),
     ("events", Action::CopyLines, &["y"]),
     ("events", Action::Down, &["j", "down"]),
+    ("events", Action::Faults, &["ctrl-z"]),
     ("events", Action::Filter, &["/"]),
     ("events", Action::First, &["g", "home"]),
     ("events", Action::Fullscreen, &["F"]),
@@ -1218,6 +1220,21 @@ mod tests {
             compile("[keys.logs]\ncontexts = 'ctrl-y'").unwrap_err(),
             vec!["keys.logs.contexts: unsupported action"]
         );
+    }
+
+    #[test]
+    fn faults_is_configurable_in_the_events_view_but_no_other_document_view() {
+        let map = compile("[keys.events]\nfaults = 'f6'").unwrap();
+        assert_eq!(
+            map.action("events", &KeyEvent::new(KeyCode::F(6), KeyModifiers::NONE)),
+            Some(Action::Faults)
+        );
+        for scope in ["detail", "diff"] {
+            assert_eq!(
+                compile(&format!("[keys.{scope}]\nfaults = 'f6'")).unwrap_err(),
+                vec![format!("keys.{scope}.faults: unsupported action")]
+            );
+        }
     }
 
     #[test]

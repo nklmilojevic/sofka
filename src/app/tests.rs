@@ -25097,6 +25097,187 @@ async fn configured_ctrl_z_actions_take_precedence_over_faults() {
     assert!(app.faults_only);
 }
 
+fn faults_test_event(api_version: &str, name: &str, typ: &str) -> Value {
+    json!({
+        "apiVersion": api_version, "kind": "Event",
+        "metadata": {"name": name, "namespace": "default", "uid": name},
+        "type": typ,
+        "reason": format!("{name}-reason"),
+    })
+}
+
+#[tokio::test]
+async fn ctrl_z_filters_events_that_are_not_normal() {
+    for (resource, api_version) in [
+        ("events", "v1"),
+        ("events.events.k8s.io", "events.k8s.io/v1"),
+    ] {
+        let (mut app, _rx) = test_app();
+        app.switch_kind(resource);
+        let event = |name: &str, typ: &str| faults_test_event(api_version, name, typ);
+        apply(&mut app, event("pulled", "Normal"));
+        apply(&mut app, event("backoff", "Warning"));
+        apply(&mut app, event("custom", "Critical"));
+        apply(&mut app, event("scheduled", "Normal"));
+
+        app.handle_key(ctrl(KeyCode::Char('z'))).unwrap();
+        assert!(app.faults_filter_active(), "{resource}");
+        let mut names = row_names(&app);
+        names.sort();
+        assert_eq!(names, ["backoff", "custom"], "{resource}");
+        assert!(
+            screen_text(&mut app, 120, 20).contains("[faults]"),
+            "{resource}"
+        );
+
+        let mut pulled = event("pulled", "Warning");
+        pulled["metadata"]["resourceVersion"] = json!("2");
+        apply(&mut app, pulled);
+        let mut backoff = event("backoff", "Normal");
+        backoff["metadata"]["resourceVersion"] = json!("2");
+        apply(&mut app, backoff);
+        let mut names = row_names(&app);
+        names.sort();
+        assert_eq!(names, ["custom", "pulled"], "{resource}");
+
+        type_filter(&mut app, "pulled");
+        assert_eq!(row_names(&app), ["pulled"], "{resource}");
+        app.handle_key(press(KeyCode::Esc)).unwrap();
+
+        app.handle_key(ctrl(KeyCode::Char('z'))).unwrap();
+        assert!(!app.faults_filter_active(), "{resource}");
+        assert_eq!(row_names(&app).len(), 4, "{resource}");
+        assert!(
+            !screen_text(&mut app, 120, 20).contains("[faults]"),
+            "{resource}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn configured_ctrl_z_actions_take_precedence_over_event_faults() {
+    let (mut app, _rx) = test_app();
+    app.switch_kind("events");
+    app.bookmarks = vec![crate::config::Bookmark {
+        key: Some("ctrl-z".into()),
+        name: "services".into(),
+        resource: "services".into(),
+        ..Default::default()
+    }];
+    app.handle_key(ctrl(KeyCode::Char('z'))).unwrap();
+    assert_eq!(app.kind_plural, "services");
+    assert!(!app.faults_only);
+
+    app.bookmarks.clear();
+    app.switch_kind("events");
+    app.handle_key(ctrl(KeyCode::Char('z'))).unwrap();
+    assert!(app.faults_filter_active());
+}
+
+fn open_pod_events(app: &mut App) {
+    app.switch_kind("pods");
+    apply(
+        app,
+        json!({
+            "apiVersion": "v1", "kind": "Pod",
+            "metadata": {"name": "web", "namespace": "default", "uid": "pod-uid"}
+        }),
+    );
+    app.handle_key(press(KeyCode::Char('E'))).unwrap();
+    assert_eq!(app.mode, Mode::Events);
+}
+
+fn send_pod_events(app: &mut App, events: &[(&str, &str)]) {
+    let events: Vec<_> = events
+        .iter()
+        .map(|(name, typ)| obj(faults_test_event("v1", name, typ)))
+        .collect();
+    app.handle_msg(Msg::Events {
+        generation: app.event_gen,
+        title: "web — events".into(),
+        lines: event_document(&events, false),
+    });
+}
+
+fn event_view_reasons(app: &App) -> Vec<String> {
+    let mut reasons: Vec<String> = app
+        .detail
+        .lines
+        .iter()
+        .skip(1)
+        .filter_map(|line| {
+            line.split_whitespace()
+                .find(|word| word.ends_with("-reason"))
+                .map(String::from)
+        })
+        .collect();
+    reasons.sort();
+    reasons
+}
+
+#[tokio::test]
+async fn ctrl_z_in_the_events_view_shows_only_events_that_are_not_normal() {
+    let (mut app, _rx) = test_app();
+    open_pod_events(&mut app);
+    send_pod_events(
+        &mut app,
+        &[
+            ("pulled", "Normal"),
+            ("backoff", "Warning"),
+            ("custom", "Critical"),
+        ],
+    );
+    assert_eq!(
+        event_view_reasons(&app),
+        ["backoff-reason", "custom-reason", "pulled-reason"]
+    );
+
+    app.handle_key(ctrl(KeyCode::Char('z'))).unwrap();
+    assert_eq!(app.mode, Mode::Events);
+    assert_eq!(app.detail.title, "web — events [faults]");
+    assert!(app.detail.lines[0].contains("LAST SEEN"));
+    assert_eq!(
+        event_view_reasons(&app),
+        ["backoff-reason", "custom-reason"]
+    );
+
+    send_pod_events(
+        &mut app,
+        &[
+            ("pulled", "Warning"),
+            ("backoff", "Normal"),
+            ("started", "Normal"),
+        ],
+    );
+    assert_eq!(app.detail.title, "web — events [faults]");
+    assert_eq!(event_view_reasons(&app), ["pulled-reason"]);
+
+    send_pod_events(&mut app, &[("started", "Normal")]);
+    assert_eq!(app.detail.lines.len(), 2);
+    assert_eq!(app.detail.lines[1], "(no events other than Normal)");
+
+    app.handle_key(ctrl(KeyCode::Char('z'))).unwrap();
+    assert_eq!(app.detail.title, "web — events");
+    assert_eq!(event_view_reasons(&app), ["started-reason"]);
+    app.stop_event_stream();
+}
+
+#[tokio::test]
+async fn events_view_faults_key_is_configurable() {
+    let (mut app, _rx) = test_app();
+    let cfg: crate::config::Config = toml::from_str("[keys.events]\nfaults = 'f6'\n").unwrap();
+    app.keymap = Keymap::compile(&cfg.keys).unwrap();
+    open_pod_events(&mut app);
+    send_pod_events(&mut app, &[("pulled", "Normal"), ("backoff", "Warning")]);
+
+    app.handle_key(ctrl(KeyCode::Char('z'))).unwrap();
+    assert_eq!(app.detail.title, "web — events");
+    app.handle_key(press(KeyCode::F(6))).unwrap();
+    assert_eq!(app.detail.title, "web — events [faults]");
+    assert_eq!(event_view_reasons(&app), ["backoff-reason"]);
+    app.stop_event_stream();
+}
+
 #[tokio::test]
 async fn faults_watch_changes_preserve_pod_identity_or_clear_selection() {
     let (mut app, _rx) = test_app();

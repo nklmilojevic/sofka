@@ -351,10 +351,9 @@ impl App {
         let genr = self.event_gen;
         self.detail = Scrollable {
             wrap: self.detail.wrap,
-            title: title.clone(),
-            lines: vec!["loading events…".into()].into(),
             ..Default::default()
         };
+        self.show_events(title.clone(), vec![EventLine::status("loading events…")]);
         self.flash = format!("events: {name}");
         self.flash_err = false;
         self.mode = Mode::Events;
@@ -390,7 +389,7 @@ impl App {
                             .send(Msg::Events {
                                 generation: genr,
                                 title: title.clone(),
-                                lines: vec![format!("error: {e}")],
+                                lines: vec![EventLine::status(format!("error: {e}"))],
                             })
                             .await;
                         continue;
@@ -403,6 +402,48 @@ impl App {
             }
         });
         self.event_task = Some(handle);
+    }
+
+    /// Replace the events document and show it through the faults filter.
+    pub(super) fn show_events(&mut self, title: String, lines: Vec<EventLine>) {
+        self.events_title = title;
+        self.events_doc = lines;
+        self.render_events();
+    }
+
+    /// `Ctrl+Z` in the events view: show only events that are not `Normal`,
+    /// or all of them again.
+    pub(super) fn toggle_events_faults(&mut self) {
+        self.events_faults_only = !self.events_faults_only;
+        self.render_events();
+    }
+
+    fn render_events(&mut self) {
+        let mut title = self.events_title.clone();
+        let lines: Vec<String> = if self.events_faults_only {
+            title.push_str(" [faults]");
+            let mut lines: Vec<String> = self
+                .events_doc
+                .iter()
+                .filter(|line| !line.normal)
+                .map(|line| line.text.clone())
+                .collect();
+            if lines.len() == 1 && self.events_doc.len() > 1 {
+                lines.push("(no events other than Normal)".into());
+            }
+            lines
+        } else {
+            self.events_doc
+                .iter()
+                .map(|line| line.text.clone())
+                .collect()
+        };
+        self.detail.title = title;
+        // Through `replace_lines`, not a direct assignment: a refreshed or
+        // refiltered list can have the same line count as the one it
+        // replaces, which would otherwise leave a stale search-match cache
+        // behind.
+        self.detail.replace_lines(lines.into());
     }
 
     pub(super) fn stop_event_stream(&mut self) {

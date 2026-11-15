@@ -3386,6 +3386,10 @@ fn build_help(app: &App, width: usize) -> (Vec<Line<'static>>, String, HelpSecti
             "restart workloads (marked rows, or current); force-sync external secrets; rollback Helm or rollout history; refresh elsewhere"
         } else if scope == "table" && action == Action::SetImage {
             "set container image; Flux HelmRelease: set chart version"
+        } else if scope == "table" && action == Action::Faults {
+            "toggle faults filter: pods, workloads, Flux, Argo CD, and Events that are not Normal"
+        } else if scope == "events" && action == Action::Faults {
+            "toggle faults filter: show only events that are not Normal"
         } else if scope == "table" && action == Action::Logs {
             "logs (marked pods, or current row)"
         } else if scope == "table" && action == Action::ActionMenu {
@@ -6328,7 +6332,20 @@ fn navigation_hint(app: &App, width: u16) -> Line<'static> {
             Action::PageUp,
             Action::PageDown,
         ][..],
-        "detail" | "diff" | "events" => &[
+        "events" => &[
+            Action::Back,
+            Action::Filter,
+            Action::Faults,
+            Action::NextMatch,
+            Action::PreviousMatch,
+            Action::Wrap,
+            Action::Fullscreen,
+            Action::Copy,
+            Action::Save,
+            Action::PageUp,
+            Action::PageDown,
+        ][..],
+        "detail" | "diff" => &[
             Action::Back,
             Action::Filter,
             Action::NextMatch,
