@@ -564,15 +564,24 @@ fn diagnostic_value<'a>(app: &App, value: &'a str) -> std::borrow::Cow<'a, str> 
     }
 }
 
+fn header_columns(area: Rect, logo_width: u16) -> std::rc::Rc<[Rect]> {
+    Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Min(30), Constraint::Length(logo_width)])
+        .split(area)
+}
+
 fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
     let hints = header_hints(app);
     let show_hints = !hints.is_empty() && header_hints_fit(area.width);
-    let show_logo = !show_hints || header_logo_fits(area.width);
-    let logo_width = if show_logo { HEADER_LOGO_WIDTH } else { 0 };
-    let cols = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Min(30), Constraint::Length(logo_width)])
-        .split(area);
+    let info_width_in = |box_width: u16| {
+        let inner = box_width.saturating_sub(2);
+        if show_hints {
+            inner.saturating_sub(HEADER_HINTS_WIDTH)
+        } else {
+            inner
+        }
+    };
 
     let ns = if app.all_namespaces() {
         "<all>".to_string()
@@ -597,6 +606,35 @@ fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
         ])
     };
 
+    let mut context_line = field("Context:", app.cluster.context.clone(), theme::mauve());
+    let cluster_line = field(
+        "Cluster:",
+        app.cluster.cluster_url.clone(),
+        theme::sapphire(),
+    );
+    let resource_line = field("Resource:", kind, theme::peach());
+    let readonly_width = if app.readonly {
+        "  [read-only]".width()
+    } else {
+        0
+    };
+    let badge_width = app.context_badge.as_ref().map_or(0, |badge| {
+        "  []".width() + diagnostic_value(app, &badge.label).width()
+    });
+    // The logo gives up its column before the hints do, and before the
+    // context line, the cluster URL or the resource title would be cut off.
+    // Namespace favourites take whatever room is left, so they do not count.
+    let info_needed = (context_line.width() + badge_width + readonly_width)
+        .max(cluster_line.width())
+        .max(resource_line.width());
+    let mut cols = header_columns(area, HEADER_LOGO_WIDTH);
+    let show_logo = (!show_hints || header_logo_fits(area.width))
+        && info_needed <= usize::from(info_width_in(cols[0].width));
+    if !show_logo {
+        cols = header_columns(area, 0);
+    }
+    let info_width = info_width_in(cols[0].width);
+
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
@@ -609,18 +647,6 @@ fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
     let inner = block.inner(cols[0]);
     frame.render_widget(block, cols[0]);
 
-    let info_width = if show_hints {
-        inner.width.saturating_sub(HEADER_HINTS_WIDTH)
-    } else {
-        inner.width
-    };
-
-    let mut context_line = field("Context:", app.cluster.context.clone(), theme::mauve());
-    let readonly_width = if app.readonly {
-        "  [read-only]".width()
-    } else {
-        0
-    };
     let room = usize::from(info_width).saturating_sub(context_line.width() + 2 + readonly_width);
     if let Some(badge) = app
         .context_badge
@@ -650,13 +676,9 @@ fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
     }
     let info = vec![
         context_line,
-        field(
-            "Cluster:",
-            app.cluster.cluster_url.clone(),
-            theme::sapphire(),
-        ),
+        cluster_line,
         namespace_line,
-        field("Resource:", kind, theme::peach()),
+        resource_line,
         count_line,
     ];
 

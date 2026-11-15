@@ -298,7 +298,9 @@ async fn a_long_badge_never_hides_the_read_only_marker() {
     app.switch_kind("pods");
     palette(&mut app, "reload");
     assert!(app.readonly);
-    for (compact, width) in [(false, 80), (true, 60)] {
+    // The logo gives up its column first, so the full header only clips the
+    // badge once the info is too narrow even without the logo.
+    for (compact, width) in [(false, 60), (true, 60)] {
         app.compact = compact;
         let screen = screen_text(&mut app, width, 20);
         let marker = if compact { "[ro]" } else { "[read-only]" };
@@ -311,7 +313,7 @@ async fn a_long_badge_never_hides_the_read_only_marker() {
     }
     // Too narrow for even a clipped badge: it gives way to the marker.
     app.compact = false;
-    let screen = screen_text(&mut app, 60, 20);
+    let screen = screen_text(&mut app, 34, 20);
     let line = screen
         .lines()
         .find(|line| line.contains("Context:"))

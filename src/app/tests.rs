@@ -3454,6 +3454,134 @@ async fn narrow_header_drops_the_logo_before_the_key_hints() {
 }
 
 #[tokio::test]
+async fn header_logo_gives_way_when_the_info_would_be_cut_off() {
+    // At 130 columns the hints and the logo both fit and leave the info 56
+    // columns, of which the field labels take 12. At 80 columns the hints sit
+    // on the footer and the info gets 52 columns beside the logo.
+    fn header(width: u16, setup: impl FnOnce(&mut App)) -> String {
+        let (mut app, _rx) = test_app();
+        app.handle_key(press(KeyCode::Char(':'))).unwrap();
+        for c in "pods".chars() {
+            app.handle_key(press(KeyCode::Char(c))).unwrap();
+        }
+        app.handle_key(press(KeyCode::Enter)).unwrap();
+        assert_eq!(app.kind_plural, "pods");
+        setup(&mut app);
+        screen_text(&mut app, width, 24)
+            .lines()
+            .take(8)
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+    let badge = |label: &str| {
+        let label = label.to_string();
+        move |app: &mut App| {
+            app.readonly = true;
+            app.context_badge = Some(crate::config::ContextBadge { label, color: None });
+        }
+    };
+
+    let fits = header(130, |_| {});
+    assert!(fits.contains("prev logs"), "{fits}");
+    assert!(fits.contains("sofka v"), "{fits}");
+
+    for (case, width, logo, expected, setup) in [
+        (
+            "context at the limit",
+            130,
+            true,
+            "c".repeat(44),
+            Box::new(|app: &mut App| app.cluster.context = "c".repeat(44))
+                as Box<dyn FnOnce(&mut App)>,
+        ),
+        (
+            "context past the limit",
+            130,
+            false,
+            "c".repeat(45),
+            Box::new(|app: &mut App| app.cluster.context = "c".repeat(45)),
+        ),
+        (
+            "cluster URL at the limit",
+            130,
+            true,
+            format!("https://{}", "u".repeat(36)),
+            Box::new(|app: &mut App| {
+                app.cluster.cluster_url = format!("https://{}", "u".repeat(36));
+            }),
+        ),
+        (
+            "cluster URL past the limit",
+            130,
+            false,
+            format!("https://{}", "u".repeat(37)),
+            Box::new(|app: &mut App| {
+                app.cluster.cluster_url = format!("https://{}", "u".repeat(37));
+            }),
+        ),
+        (
+            "badge and read-only at the limit",
+            130,
+            true,
+            format!("test  [{}]  [read-only]", "b".repeat(23)),
+            Box::new(badge(&"b".repeat(23))),
+        ),
+        (
+            "badge and read-only past the limit",
+            130,
+            false,
+            format!("test  [{}]  [read-only]", "b".repeat(24)),
+            Box::new(badge(&"b".repeat(24))),
+        ),
+        (
+            "resource title at the limit",
+            130,
+            true,
+            format!("pods  ‹ {}", "s".repeat(36)),
+            Box::new(|app: &mut App| app.scope_label = Some("s".repeat(36))),
+        ),
+        (
+            "resource title past the limit",
+            130,
+            false,
+            format!("pods  ‹ {}", "s".repeat(37)),
+            Box::new(|app: &mut App| app.scope_label = Some("s".repeat(37))),
+        ),
+        (
+            "context at the limit without hints",
+            80,
+            true,
+            "c".repeat(40),
+            Box::new(|app: &mut App| app.cluster.context = "c".repeat(40)),
+        ),
+        (
+            "context past the limit without hints",
+            80,
+            false,
+            "c".repeat(41),
+            Box::new(|app: &mut App| app.cluster.context = "c".repeat(41)),
+        ),
+    ] {
+        let text = header(width, setup);
+        assert_eq!(text.contains("sofka v"), logo, "logo for {case}:\n{text}");
+        assert!(text.contains(&expected), "{case} is cut off:\n{text}");
+        assert_eq!(
+            text.contains("prev logs"),
+            width == 130,
+            "hints for {case}:\n{text}"
+        );
+    }
+
+    let favorites = header(130, |app| {
+        app.namespace_favorites = (1..=9)
+            .map(|i| format!("favourite-namespace-{i}"))
+            .collect();
+    });
+    assert!(favorites.contains("favourite-namespace-1"), "{favorites}");
+    assert!(favorites.contains("sofka v"), "{favorites}");
+}
+
+#[tokio::test]
 async fn scrolling_pods_keeps_column_positions_stable() {
     use ratatui::{Terminal, backend::TestBackend};
 

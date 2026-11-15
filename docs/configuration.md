@@ -242,23 +242,23 @@ namespace.
 ## Base options
 
 ```toml
-default_namespace = "kube-system"  # fallback only: the last namespace picked in a
-                                   # context is remembered across restarts
+default_namespace = "kube-system" # fallback only: the last namespace picked in a
+# context is remembered across restarts
 prefer_context_namespace = false # true gives the kubeconfig namespace priority over history
-default_resource  = "deployments"
-readonly          = false  # true disables every mutating action (delete, edit,
-                           # scale, shell, plugins, …); --readonly/--write win
+default_resource = "deployments"
+readonly = false # true disables every mutating action (delete, edit,
+# scale, shell, plugins, …); --readonly/--write win
 hide_header = false # true hides the header and logo
 compact_mode = false # true starts with a one-line header and no footer
 detail_wrap = false # true starts with document line wrapping enabled
 rbac_rule_list = false # true opens RBAC rules as the per-rule list, not the matrix
-mouse             = false  # default; :mouse switches it for this session
-                           # false keeps the terminal's native mouse behavior
-                           # (text selection) instead of scroll/click/sort
-mouse_scroll_lines = 3     # steps per wheel event in captured views; 1 for one step
+mouse = false # default; :mouse switches it for this session
+# false keeps the terminal's native mouse behavior
+# (text selection) instead of scroll/click/sort
+mouse_scroll_lines = 3 # steps per wheel event in captured views; 1 for one step
 terminal_title = true # false disables terminal title changes
-remember_sort     = true   # save and restore sort choices per resource kind
-                           # false makes sort changes temporary
+remember_sort = true # save and restore sort choices per resource kind
+# false makes sort changes temporary
 update_check = true # false turns off the daily check for a newer release
 save_dir = "~/k8s/saves" # ctrl-s target for logs and documents; default: temp dir
 
@@ -300,6 +300,9 @@ Set `hide_header = true` to remove the header and logo and give more space to
 the active view. The default is `false`. This option supports cluster and
 context overrides and `:reload`. It also hides the one-line header in compact
 mode (`Ctrl-E`). The footer and command input keep their existing behavior.
+There is no separate logo setting: the logo already gives up its column on its
+own when the key hints, context, cluster URL, or resource title would not fit
+beside it.
 
 Set `compact_mode = true` to start with a one-line header containing resource,
 namespace, context, and live status, with the footer hidden. The default is
@@ -406,10 +409,10 @@ Use `[]` to disable an action. Custom keys use the normal conflict checks.
 # tokyo-night, one-dark, rose-pine, rose-pine-dawn, monokai, flexoki-dark,
 # flexoki-light.
 name = "gruvbox-dark"
-background = true        # fill views with the skin's own background swatch
-                         # (default: false = inherit the terminal background)
+background = true # fill views with the skin's own background swatch
+# (default: false = inherit the terminal background)
 
-[skin.colors]            # optional per-swatch overrides
+[skin.colors] # optional per-swatch overrides
 red = "#fb4934"
 ```
 
@@ -425,8 +428,8 @@ context is obvious at a glance. Set it in a
 
 ```toml
 [context_badge]
-label = "prod"   # required
-color = "red"    # optional skin color name
+label = "prod" # required
+color = "red" # optional skin color name
 ```
 
 The badge shows as `[prod]` after the context name in the header and in the
