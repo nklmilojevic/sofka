@@ -93,12 +93,68 @@ pub async fn suspend_and_await<T>(
     // Protect the parent before normal terminal input can generate signals.
     #[cfg(unix)]
     let _signals = SignalGuard::new()?;
+    release(captured);
+    let result = future.await;
+    restore(terminal, captured);
+    Ok(result)
+}
+
+/// How long [`stop`] waits for a stop that `kill` did not apply before it
+/// returned. An orphaned process group discards `SIGTSTP`, and the TUI must
+/// come back then too.
+#[cfg(unix)]
+const STOP_GRACE: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// Release the terminal and stop with `SIGTSTP`, as the terminal's suspend key
+/// would, then take the terminal back when `SIGCONT` resumes the process. Use
+/// the same rules as [`suspend_and_run`].
+///
+/// The signal goes to the whole process group, like the one the terminal
+/// sends: `kubectl port-forward` children pause too, and a wrapper such as
+/// `cargo run` stops with sofka, so the shell sees the job stop.
+#[cfg(unix)]
+pub async fn stop(terminal: &mut ratatui::DefaultTerminal, captured: bool) -> io::Result<()> {
+    use tokio::signal::unix::{SignalKind, signal};
+
+    if signal_action(libc::SIGTSTP)?.sa_sigaction == libc::SIG_IGN {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "SIGTSTP is ignored, so this shell has no job control",
+        ));
+    }
+    // Listen first: the process can stop and resume before `kill` returns.
+    let mut resumed = signal(SignalKind::from_raw(libc::SIGCONT))?;
+    let signals = SignalGuard::new()?;
+    release(captured);
+    // SAFETY: kill has no memory preconditions. Process group 0 is this
+    // process's own group.
+    let sent = if unsafe { libc::kill(0, libc::SIGTSTP) } == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    };
+    if sent.is_ok() {
+        // Another thread can take the stop after `kill` returns.
+        let _ = tokio::time::timeout(STOP_GRACE, resumed.recv()).await;
+    }
+    restore(terminal, captured);
+    drop(signals);
+    sent
+}
+
+/// Hand the terminal back to the shell: no mouse capture, cooked input, the
+/// main screen, and a visible cursor.
+fn release(captured: bool) {
     if captured {
         let _ = crossterm::execute!(io::stdout(), DisableMouseCapture);
     }
     let _ = disable_raw_mode();
     let _ = crossterm::execute!(io::stdout(), LeaveAlternateScreen, crossterm::cursor::Show);
-    let result = future.await;
+}
+
+/// Take the terminal back after [`release`] and repaint all of it on the next
+/// draw.
+fn restore(terminal: &mut ratatui::DefaultTerminal, captured: bool) {
     // Set the modes directly. ratatui::init would install another panic hook.
     let _ = enable_raw_mode();
     let _ = crossterm::execute!(io::stdout(), EnterAlternateScreen);
@@ -106,7 +162,6 @@ pub async fn suspend_and_await<T>(
         let _ = crossterm::execute!(io::stdout(), EnableMouseCapture);
     }
     let _ = terminal.clear();
-    Ok(result)
 }
 
 const ERROR_LIMIT: usize = 16 * 1024;
@@ -198,6 +253,18 @@ async fn drain_stderr(
             }
             _ = tokio::time::sleep_until(deadline) => break,
         }
+    }
+}
+
+#[cfg(unix)]
+fn signal_action(signal: libc::c_int) -> io::Result<libc::sigaction> {
+    // SAFETY: A null action pointer queries the current action into valid memory.
+    unsafe {
+        let mut action = std::mem::zeroed();
+        if libc::sigaction(signal, std::ptr::null(), &mut action) == -1 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(action)
     }
 }
 

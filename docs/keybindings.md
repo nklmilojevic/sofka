@@ -40,6 +40,27 @@ has no default binding, because built-in keys take priority over bookmarks,
 workspaces, plugins, and imported k9s hotkeys, and a default key could take one
 already in use. Other views open the picker with `:ctx`.
 
+## Example: Ctrl+Z to suspend to the shell
+
+```toml
+[keys.global]
+suspend = "ctrl-z"
+
+[keys.table]
+faults = "Z"
+
+[keys.logs]
+log_warnings = "Z"
+```
+
+`suspend` gives the terminal back to the shell and stops sofka, as Ctrl+Z does
+in other terminal programs. `fg` resumes it and redraws the screen. The whole
+process stops, so port-forwards, watches, and log streams pause until then.
+`suspend` has no default binding because `ctrl-z` toggles the faults filter in
+tables and warning logs in the log view. Binding it to `ctrl-z` without moving
+`faults` and `log_warnings` reports a conflict. Windows has no job control, so
+there the action only shows a message.
+
 ## Values and scopes
 
 - A string sets one key combination. An array sets multiple combinations.
@@ -47,7 +68,8 @@ already in use. Other views open the picker with `:ctx`.
   the default keys in the array if you want to keep them.
 - An omitted action keeps its inherited bindings. An empty array (`[]`)
   disables all keyboard bindings for that action.
-- `[keys.global]` sets `quit`, `compact`, and `plugin_activity` in every mode.
+- `[keys.global]` sets `quit`, `compact`, `plugin_activity`, and `suspend` in
+  every mode.
 - `[keys.navigation]` sets shared navigation actions in modes that support them.
   It does not affect text input modes, except for the half-page actions
   described above. The shared actions are `up`, `down`,
@@ -197,8 +219,9 @@ Key sequences such as `gg`, macros, and new movement actions are not supported.
 
 The tables below list local defaults without the shifted navigation aliases. Every mode also has `quit = "ctrl-c"` and
 `compact = "ctrl-e"`, plus `plugin_activity = "ctrl-alt-t"` to toggle the
-plugin activity popup without cancelling its job. Override these under
-`[keys.global]`; an empty list disables a binding.
+plugin activity popup without cancelling its job, and `suspend`, unbound, to
+stop sofka for the shell's job control. Override these under `[keys.global]`;
+an empty list disables a binding.
 Each text input mode also has `clear_line = "ctrl-u"` and
 `delete_word = ["ctrl-w", "alt-backspace", "ctrl-backspace"]`.
 

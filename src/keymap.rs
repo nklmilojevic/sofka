@@ -135,6 +135,7 @@ actions! {
     SortAge => ("sort_age", "sort by age; repeat to invert"),
     Start => ("start", "start"),
     Stream => ("stream", "stream"),
+    Suspend => ("suspend", "suspend sofka to the shell; fg resumes it"),
     SwitchPane => ("switch_pane", "switch pane"),
     Timeline => ("timeline", "timeline"),
     Json => ("json", "JSON view: raw/record/pretty"),
@@ -279,6 +280,7 @@ const GLOBAL: &[(Action, &[&str])] = &[
     (Action::Quit, &["ctrl-c"]),
     (Action::Compact, &["ctrl-e"]),
     (Action::PluginActivity, &["ctrl-alt-t"]),
+    (Action::Suspend, &[]),
 ];
 const INPUT: &[(Action, &[&str])] = &[
     (Action::Back, &["esc"]),

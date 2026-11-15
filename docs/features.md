@@ -529,6 +529,11 @@ include those conditions. Row filters can search the route paths.
 - **Compact mode** (`ctrl-e`) - collapse the seven-line header and the footer
   into one info line (kind · count · namespace · context, with a flash and the
   live indicator), so a tiled pane is almost all table.
+- **Suspend to the shell** (`suspend`, unbound by default) - give the terminal
+  back to the shell and stop sofka for job control; `fg` resumes it and redraws.
+  Port-forwards, watches, and log streams pause while it is stopped. See
+  [key bindings](keybindings.md#example-ctrlz-to-suspend-to-the-shell) to put it
+  on `ctrl-z`.
 
 ## Metrics and health
 

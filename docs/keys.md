@@ -50,6 +50,7 @@ ownership scope are cleared. Startup still uses the configured default resource.
 | `S` / `I`                                                    | sort-column picker (fuzzy; ⏎ on the active column inverts) / invert sort direction; saved per kind by default (`remember_sort = false` disables this)                                                                 |
 | `A`                                                          | sort by `AGE`; press again to invert; uses the sort memory setting                                                                                                                                                    |
 | `ctrl-e`                                                     | compact mode: collapse the header + footer (for tiled/multiplexed panes)                                                                                                                                              |
+| `suspend`                                                    | stop sofka and return to the shell; `fg` resumes it; unbound by default, see [key bindings](keybindings.md#example-ctrlz-to-suspend-to-the-shell)                                                                     |
 | `space`                                                      | mark/unmark row for bulk actions                                                                                                                                                                                      |
 | `shift-up` / `shift-down`                                    | extend or reduce the marked range from the starting row                                                                                                                                                               |
 | `ctrl-space`                                                 | mark every row from the last `space` mark to the cursor                                                                                                                                                               |
@@ -445,6 +446,12 @@ configs, conflicts, and invalid values.
 Interactive actions (`e`, `s` for shell, `a`) suspend the TUI and shell out to
 `kubectl`. `e` in the manifest browser suspends it for your editor. Delete, scale, restart, set-image, suspend, resume, reconcile, and
 port-forward go through the kube API (or a backgrounded process) directly.
+
+The `suspend` action, when bound, gives the terminal back to the shell and
+stops sofka with `SIGTSTP`, so the shell's job control takes over. `fg` resumes
+it and redraws the screen. Port-forwards, watches, and log streams pause while
+sofka is stopped. Windows has no job control; there the action only shows a
+message.
 
 If the first PVC listing fails because required tools are missing, sofka tries
 other suitable containers, then offers a helper pod. Accept or cancel the
