@@ -27,9 +27,10 @@ struct Column {
     is_status: bool,
     /// Only shown in wide mode (`w`), like kubectl's `-o wide` extras.
     wide: bool,
-    /// A `used/limit (N%)` cell: sorts by the used quantity, and the table
-    /// tints it by the utilization thresholds the percentage crosses.
-    usage: bool,
+    /// A `used/limit (N%)` cell for this resource of a NodePool's
+    /// `status.resources`: sorts by the raw quantity used, and the table tints
+    /// it by the utilization thresholds the percentage crosses.
+    usage: Option<&'static str>,
 }
 
 /// Per-row scratch space shared by every column extractor for that row.
@@ -96,7 +97,7 @@ const fn column(header: &'static str, extract: CellFn) -> Column {
         extract,
         is_status: false,
         wide: false,
-        usage: false,
+        usage: None,
     }
 }
 
@@ -106,7 +107,7 @@ const fn status_column(header: &'static str, extract: CellFn) -> Column {
         extract,
         is_status: true,
         wide: false,
-        usage: false,
+        usage: None,
     }
 }
 
@@ -116,17 +117,17 @@ const fn wide_column(header: &'static str, extract: CellFn) -> Column {
         extract,
         is_status: false,
         wide: true,
-        usage: false,
+        usage: None,
     }
 }
 
-const fn usage_column(header: &'static str, extract: CellFn) -> Column {
+const fn usage_column(header: &'static str, resource: &'static str, extract: CellFn) -> Column {
     Column {
         header,
         extract,
         is_status: false,
         wide: false,
-        usage: true,
+        usage: Some(resource),
     }
 }
 
@@ -363,8 +364,8 @@ const NODEPOOL_COLUMNS: &[Column] = &[
     column("NAME", col_name),
     column("NODECLASS", col_nodepool_nodeclass),
     column("NODES", col_nodepool_nodes),
-    usage_column("CPU", col_nodepool_cpu),
-    usage_column("MEMORY", col_nodepool_memory),
+    usage_column("CPU", "cpu", col_nodepool_cpu),
+    usage_column("MEMORY", "memory", col_nodepool_memory),
     column("BUDGET", col_nodepool_budget),
     status_column("READY", col_flux_ready),
     column("AGE", col_age),
@@ -556,7 +557,7 @@ struct SpecColumn {
     align: Option<crate::views::Align>,
     is_status: bool,
     wide: bool,
-    usage: bool,
+    usage: Option<&'static str>,
 }
 
 enum SpecSource {
@@ -593,7 +594,7 @@ fn spec_user(uc: &crate::views::UserColumn) -> SpecColumn {
         original_header: uc.header.clone(),
         width: uc.width,
         align: uc.align,
-        usage: false,
+        usage: None,
     }
 }
 
@@ -770,7 +771,7 @@ pub fn build_table_spec(
                 align: column.numeric().then_some(crate::views::Align::Right),
                 is_status: false,
                 wide: column.priority > 0,
-                usage: false,
+                usage: None,
             }
         })
         .collect();
@@ -811,7 +812,7 @@ impl ViewSpec {
 
     /// Whether the column at `idx` is a curated `used/limit (N%)` cell.
     pub fn usage_at(&self, idx: usize) -> bool {
-        self.columns.get(idx).is_some_and(|c| c.usage)
+        self.columns.get(idx).is_some_and(|c| c.usage.is_some())
     }
 
     pub fn metric(&self, header: &str) -> Option<MetricColumn> {
@@ -995,12 +996,13 @@ impl ViewSpec {
             SpecSource::Server { index, column } => {
                 column.sort_value(server.and_then(|cells| cells.get(*index)))
             }
+            SpecSource::Curated(_) if let Some(resource) = col.usage => {
+                crate::views::SortValue::Num(nodepool_used(&obj.data, resource))
+            }
             SpecSource::Curated(extract) => {
                 let ctx = self.cell_context(obj, now);
                 let v = extract(&ctx);
-                if col.usage {
-                    crate::views::SortValue::Num(usage_sort_value(&v))
-                } else if is_numeric_header(&self.group, &self.plural, &col.original_header) {
+                if is_numeric_header(&self.group, &self.plural, &col.original_header) {
                     crate::views::SortValue::Num(parse_leading_num(&v))
                 } else {
                     crate::views::SortValue::Text(v.to_lowercase().to_string())
@@ -1923,21 +1925,12 @@ fn col_nodepool_memory<'a>(ctx: &CellContext<'a>) -> Cow<'a, str> {
 /// for it — a percentage of nothing would read as an empty pool. The
 /// percentage is floored, so `100%` means the limit is reached.
 fn nodepool_usage(d: &Value, resource: &str, fmt: fn(f64) -> String) -> String {
-    let quantity = |path: &str| {
-        d.pointer(path)
-            .and_then(|v| match v {
-                Value::String(s) => crate::views::parse_quantity(s),
-                Value::Number(n) => n.as_f64(),
-                _ => None,
-            })
-            .filter(|v| v.is_finite() && *v >= 0.0)
-    };
-    let used = quantity(&format!("/status/resources/{resource}")).unwrap_or(0.0);
+    let used = nodepool_used(d, resource);
     let shown = |v: f64| {
         let s = fmt(v);
         if s == "-" { "0".to_string() } else { s }
     };
-    match quantity(&format!("/spec/limits/{resource}")) {
+    match nodepool_quantity(d, &format!("/spec/limits/{resource}")) {
         Some(limit) => {
             let pct = if limit > 0.0 {
                 (used / limit * 100.0).floor() as i64
@@ -1950,10 +1943,20 @@ fn nodepool_usage(d: &Value, resource: &str, fmt: fn(f64) -> String) -> String {
     }
 }
 
-/// The used quantity a `used/limit (N%)` cell leads with, for sorting.
-fn usage_sort_value(cell: &str) -> f64 {
-    let used = cell.split('/').next().unwrap_or_default();
-    crate::views::parse_quantity(used.split_whitespace().next().unwrap_or_default()).unwrap_or(0.0)
+/// How much of `resource` a pool holds, from `status.resources`, before any
+/// rounding for display: the cell and its sort key both start here.
+fn nodepool_used(d: &Value, resource: &str) -> f64 {
+    nodepool_quantity(d, &format!("/status/resources/{resource}")).unwrap_or(0.0)
+}
+
+fn nodepool_quantity(d: &Value, path: &str) -> Option<f64> {
+    d.pointer(path)
+        .and_then(|v| match v {
+            Value::String(s) => crate::views::parse_quantity(s),
+            Value::Number(n) => n.as_f64(),
+            _ => None,
+        })
+        .filter(|v| v.is_finite() && *v >= 0.0)
 }
 
 /// The utilization percentage a `used/limit (N%)` cell carries, if the pool

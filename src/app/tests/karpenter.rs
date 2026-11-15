@@ -414,3 +414,36 @@ async fn user_columns_still_overlay_the_karpenter_columns() {
     let weight = headers.iter().position(|h| h == "WEIGHT").unwrap();
     assert_eq!(rows[0][weight], "10");
 }
+
+#[tokio::test]
+async fn nodepool_usage_sorts_by_the_raw_quantity_not_the_rounded_cell() {
+    let (mut app, _rx) = test_app();
+    karpenter_kinds(&mut app);
+    type_resource_query(&mut app, "nodepools");
+    // Name order is the reverse of the amounts, which render alike.
+    for (name, cpu, memory) in [
+        ("a-more", "1002m", "536870913"),
+        ("b-less", "1001m", "512Mi"),
+    ] {
+        apply(
+            &mut app,
+            node_pool(
+                name,
+                json!({}),
+                json!({"resources": {"cpu": cpu, "memory": memory}}),
+            ),
+        );
+    }
+    let (headers, rows) = app.snapshot_table();
+    let (cpu, memory) = (
+        headers.iter().position(|h| h == "CPU").unwrap(),
+        headers.iter().position(|h| h == "MEMORY").unwrap(),
+    );
+    assert_eq!(rows[0][cpu], rows[1][cpu]);
+    assert_eq!(rows[0][memory], rows[1][memory]);
+
+    select_sort_with_keys(&mut app, "CPU");
+    assert_eq!(row_names(&app), ["b-less", "a-more"]);
+    select_sort_with_keys(&mut app, "MEMORY");
+    assert_eq!(row_names(&app), ["b-less", "a-more"]);
+}
