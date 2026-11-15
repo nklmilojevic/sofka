@@ -1178,8 +1178,8 @@ lifetime, and resources are configurable:
 
 ```toml
 [pvc_explore]
-image = "busybox:1.37" # helper-pod image
-ttl = "30m" # how long it lives before deleting itself
+image = "busybox:1.37"   # helper-pod image
+ttl = "30m"              # how long it lives before deleting itself
 cpu_request = "100m"
 cpu_limit = "100m"
 memory_request = "128Mi"
