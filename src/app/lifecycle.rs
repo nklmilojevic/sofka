@@ -2053,14 +2053,7 @@ impl App {
                 generation,
                 title,
                 lines,
-            } if generation == self.event_gen => {
-                self.detail.title = title;
-                // Through `replace_lines`, not a direct assignment: a
-                // refreshed events list can have the same line count as the
-                // one it replaces, which would otherwise leave a stale
-                // search-match cache behind.
-                self.detail.replace_lines(lines.into());
-            }
+            } if generation == self.event_gen => self.show_events(title, lines),
             Msg::TransferProgress {
                 generation,
                 claim,

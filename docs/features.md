@@ -425,6 +425,8 @@ include those conditions. Row filters can search the route paths.
   - Argo CD Applications: health other than `Healthy`, sync other than
     `Synced`, or terminating. ApplicationSets: any status other than `Synced`,
     or terminating.
+  - Events (core and `events.k8s.io`): every type other than `Normal`, so
+    `Warning` and custom types stay visible.
 
   The table title shows `[faults]` while the filter is on. It works with the
   text filter and current namespace or drill scope. Press `Ctrl+Z` again to
@@ -997,6 +999,10 @@ include those conditions. Row filters can search the route paths.
   StatefulSet policies, Pod scheduling groups, and Node-local ResourceSlice
   summaries. Node resource accounting includes Pod-level budgets and resize
   status; older API compatibility paths remain available.
+- **Events faults filter** - `Ctrl+Z` in the events view (`E`) shows only
+  events that are not `Normal` and adds `[faults]` to the title. Live updates
+  keep the filter applied, and it stays on for later events views during the
+  session. Press `Ctrl+Z` again to show every event.
 - **Edit from a document** - `e` in the YAML or describe view edits the
   displayed resource with `kubectl edit`, so a table row that moved while the
   watch was filling cannot change the target. The document is read again when
@@ -1172,8 +1178,8 @@ lifetime, and resources are configurable:
 
 ```toml
 [pvc_explore]
-image = "busybox:1.37"   # helper-pod image
-ttl = "30m"              # how long it lives before deleting itself
+image = "busybox:1.37" # helper-pod image
+ttl = "30m" # how long it lives before deleting itself
 cpu_request = "100m"
 cpu_limit = "100m"
 memory_request = "128Mi"

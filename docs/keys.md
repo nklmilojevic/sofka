@@ -54,7 +54,7 @@ ownership scope are cleared. Startup still uses the configured default resource.
 | `shift-up` / `shift-down`                                    | extend or reduce the marked range from the starting row                                                                                                                                                               |
 | `ctrl-space`                                                 | mark every row from the last `space` mark to the cursor                                                                                                                                                               |
 | `/`                                                          | filter: text · `a\|b` · `~fuzzy` · `/regex/` · `!inverse` · `label:text` local label search · `-l`/`-f` selectors (server-side on ⏎) · `status=X` `cpu>500m` `age<2h`                                                 |
-| `Ctrl+Z`                                                     | toggle faults filter in pod, workload, Flux, and Argo CD views; configured actions take precedence; combine with `/`; press again to turn off                                                                         |
+| `Ctrl+Z`                                                     | toggle faults filter in pod, workload, Flux, Argo CD, and Events views; configured actions take precedence; combine with `/`; press again to turn off                                                                 |
 | `:workloads [ns]` / `:wk`                                    | deployments, statefulsets, daemonsets, cronjobs, jobs and pods in one table; row keys act on the row's own kind                                                                                                       |
 | `:ns-resources [ns]`                                         | namespaced kinds with objects in the namespace (default: current; `all`/`*` = all namespaces) and how many; `⏎` opens the kind in that namespace, `r` counts again                                                    |
 | `R` (namespaces view)                                        | open `:ns-resources` for the selected namespace                                                                                                                                                                       |
@@ -261,6 +261,11 @@ and reload behavior. Helm rows continue to show release notes.
 highlighted. `n` / `N` go to the next or previous match. `w` wraps. `c` copies
 the document. `ctrl-s` saves it to a file. `esc` backs out - the first press
 clears an active search.
+
+In the events view, `ctrl-z` shows only events whose type is not `Normal`, and
+the title shows `[faults]`. Live updates keep the filter applied, and it stays
+on for later events views during the session. Press `ctrl-z` again to show
+every event. Use `keys.events.faults` to change the key binding.
 
 `V` selects whole lines, starting on the current search match, or on the first
 visible line when no search is active. `j` / `k`, `g` / `G`, `ctrl-f` /
