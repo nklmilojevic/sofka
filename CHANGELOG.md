@@ -1,5 +1,20 @@
 # Changelog
 
+## v0.36.0 - 2026-11-15
+
+This release gives you a faults filter for Events, built-in Karpenter views, and a suspend action for shell job control. It also fixes template lists on OpenShift.
+
+### New features
+
+- The Events table and the events view (`E`) have a faults filter on `Ctrl+Z`. Only events with a type other than `Normal` stay visible.
+- NodePools and NodeClaims now have built-in columns, including CPU and MEMORY usage against each limit. Pressing `enter` on a NodePool now opens its NodeClaims instead of the YAML.
+- A new `suspend` action lets you send sofka to the background with shell job control. The action has no default key, so bind it in `[keys.global]` to use it.
+- The header now hides its logo when a context name, cluster URL or resource title would be cut off. The logo stays when all the text fits.
+
+### Fixes
+
+- On OpenShift, `templates.template.openshift.io` now lists template objects. The `processedtemplates` entry is removed because it only accepts create.
+
 ## v0.35.1 - 2026-11-10
 
 This release fixes the cursor colors in resource tables.
