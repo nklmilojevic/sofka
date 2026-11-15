@@ -1223,6 +1223,21 @@ mod tests {
     }
 
     #[test]
+    fn faults_is_configurable_in_the_events_view_but_no_other_document_view() {
+        let map = compile("[keys.events]\nfaults = 'f6'").unwrap();
+        assert_eq!(
+            map.action("events", &KeyEvent::new(KeyCode::F(6), KeyModifiers::NONE)),
+            Some(Action::Faults)
+        );
+        for scope in ["detail", "diff"] {
+            assert_eq!(
+                compile(&format!("[keys.{scope}]\nfaults = 'f6'")).unwrap_err(),
+                vec![format!("keys.{scope}.faults: unsupported action")]
+            );
+        }
+    }
+
+    #[test]
     fn custom_ctrl_h_bindings_override_only_the_inherited_alias() {
         let ctrl_h = KeyEvent::new(KeyCode::Char('h'), KeyModifiers::CONTROL);
         for (text, scope, action) in [

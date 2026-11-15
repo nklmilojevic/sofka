@@ -6332,10 +6332,22 @@ fn navigation_hint(app: &App, width: u16) -> Line<'static> {
             Action::PageUp,
             Action::PageDown,
         ][..],
-        "detail" | "diff" | "events" => &[
+        "events" => &[
             Action::Back,
             Action::Filter,
             Action::Faults,
+            Action::NextMatch,
+            Action::PreviousMatch,
+            Action::Wrap,
+            Action::Fullscreen,
+            Action::Copy,
+            Action::Save,
+            Action::PageUp,
+            Action::PageDown,
+        ][..],
+        "detail" | "diff" => &[
+            Action::Back,
+            Action::Filter,
             Action::NextMatch,
             Action::PreviousMatch,
             Action::Wrap,
