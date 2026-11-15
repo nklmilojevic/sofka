@@ -196,7 +196,7 @@ async fn document_selection_follows_a_shorter_refreshed_document() {
     app.handle_msg(Msg::Events {
         generation: app.event_gen,
         title: "events".into(),
-        lines: numbered(3).collect(),
+        lines: numbered(3).map(crate::store::EventLine::status).collect(),
     });
     assert_eq!(doc_selection(&app), Some((0, 2)));
 

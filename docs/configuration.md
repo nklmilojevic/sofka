@@ -300,6 +300,9 @@ Set `hide_header = true` to remove the header and logo and give more space to
 the active view. The default is `false`. This option supports cluster and
 context overrides and `:reload`. It also hides the one-line header in compact
 mode (`Ctrl-E`). The footer and command input keep their existing behavior.
+There is no separate logo setting: the logo already gives up its column on its
+own when the key hints, context, cluster URL, or resource title would not fit
+beside it.
 
 Set `compact_mode = true` to start with a one-line header containing resource,
 namespace, context, and live status, with the footer hidden. The default is

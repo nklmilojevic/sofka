@@ -1554,6 +1554,9 @@ impl App {
             // when no search is active.
             (Some(Action::NextMatch), _) if detail => target.step_match(true),
             (Some(Action::PreviousMatch), _) if detail => target.step_match(false),
+            (Some(Action::Faults), _) if self.mode == Mode::Events => {
+                self.toggle_events_faults();
+            }
             (Some(Action::AutoRefresh), _) if matches!(self.mode, Mode::Detail | Mode::Diff) => {
                 self.toggle_resource_refresh()
             }

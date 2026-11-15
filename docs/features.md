@@ -211,6 +211,12 @@ include those conditions. Row filters can search the route paths.
 - **Optional header** - set `hide_header = true` in the configuration to hide
   the header and logo, including the one-line header in compact mode.
 
+- **Header logo makes room** - the logo on the right of the header gives up its
+  column when the key hints, the context line (with its badge and
+  `[read-only]`), the cluster URL, or the resource title would not fit beside
+  it. Namespace favourites take whatever room is left, so they do not count.
+  When everything fits, the logo stays.
+
 - **Connect** to the current kubeconfig context, including exec credential
   plugins (GKE, EKS, and friends).
 - **MFA prompts from exec plugins** - a plugin that asks for input, such as
@@ -428,6 +434,8 @@ include those conditions. Row filters can search the route paths.
   - Argo CD Applications: health other than `Healthy`, sync other than
     `Synced`, or terminating. ApplicationSets: any status other than `Synced`,
     or terminating.
+  - Events (core and `events.k8s.io`): every type other than `Normal`, so
+    `Warning` and custom types stay visible.
 
   The table title shows `[faults]` while the filter is on. It works with the
   text filter and current namespace or drill scope. Press `Ctrl+Z` again to
@@ -1005,6 +1013,10 @@ include those conditions. Row filters can search the route paths.
   StatefulSet policies, Pod scheduling groups, and Node-local ResourceSlice
   summaries. Node resource accounting includes Pod-level budgets and resize
   status; older API compatibility paths remain available.
+- **Events faults filter** - `Ctrl+Z` in the events view (`E`) shows only
+  events that are not `Normal` and adds `[faults]` to the title. Live updates
+  keep the filter applied, and it stays on for later events views during the
+  session. Press `Ctrl+Z` again to show every event.
 - **Edit from a document** - `e` in the YAML or describe view edits the
   displayed resource with `kubectl edit`, so a table row that moved while the
   watch was filling cannot change the target. The document is read again when

@@ -411,6 +411,7 @@ for those operations.
 | `copy`                | `c`                           |
 | `copy_lines`          | `y`                           |
 | `down`                | `j`, `down`                   |
+| `faults`              | `ctrl-z`                      |
 | `filter`              | `/`                           |
 | `first`               | `g`, `home`                   |
 | `half_page_down`      | unbound                       |
