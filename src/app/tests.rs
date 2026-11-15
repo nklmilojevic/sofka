@@ -36,6 +36,7 @@ mod rollout;
 mod save;
 mod scale;
 mod server_table;
+mod suspend;
 mod synchronized_output;
 mod terraform;
 mod update;

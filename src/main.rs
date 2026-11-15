@@ -1256,6 +1256,16 @@ async fn take_suspend(
                 terminal_title::set(app.terminal_title().as_deref());
                 continue;
             }
+            app::Suspend::Stop => {
+                // The shell owns the terminal until `fg`, so drop sofka's title.
+                terminal_title::clear();
+                #[cfg(unix)]
+                if let Err(error) = terminal::stop(terminal, captured).await {
+                    app.stop_failed(&error);
+                }
+                terminal_title::set(app.terminal_title().as_deref());
+                continue;
+            }
         };
         let target = app.shell_target.take();
         let result = terminal::suspend_and_run(terminal, &argv, captured, termination).await;

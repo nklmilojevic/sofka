@@ -17,11 +17,15 @@ impl App {
     // ----- key handling --------------------------------------------------
 
     pub fn handle_key(&mut self, key: KeyEvent) -> Result<()> {
+        let action = self.keymap.action(self.key_scope(), &key);
+        if action == Some(Action::Suspend) {
+            self.request_stop();
+            return Ok(());
+        }
         if self.command_failure_visible() {
             self.key_command_failure(key);
             return Ok(());
         }
-        let action = self.keymap.action(self.key_scope(), &key);
         if action == Some(Action::PluginActivity) {
             self.toggle_plugin_activity();
             return Ok(());
@@ -31,6 +35,21 @@ impl App {
             return Ok(());
         }
         self.handle_input(KeyInput::new(action, key))
+    }
+
+    /// Queue a job-control stop for the run loop. Suspending leaves every view
+    /// and overlay as it was, so it works the same from any mode.
+    fn request_stop(&mut self) {
+        if self.job_control {
+            self.pending = Some(Suspend::Stop);
+        } else {
+            self.flash_warn("suspend is not supported on Windows");
+        }
+    }
+
+    /// Report a job-control stop that could not be sent.
+    pub fn stop_failed(&mut self, error: &std::io::Error) {
+        self.flash_warn(&format!("suspend failed: {error}"));
     }
 
     pub(super) fn handle_input(&mut self, key: KeyInput) -> Result<()> {

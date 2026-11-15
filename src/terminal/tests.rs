@@ -15,6 +15,8 @@ const CHILD_TEST: &str = "terminal::tests::terminal_plugin_child";
 const COMMAND_TEST: &str = "terminal::tests::terminal_plugin_command";
 const CASE_ENV: &str = "SOFKA_TERMINAL_TEST_CASE";
 const AUTH_TEST: &str = "terminal::tests::exec_auth_child";
+const SHELL_TEST: &str = "terminal::tests::job_control_shell";
+const STOP_TEST: &str = "terminal::tests::job_control_child";
 
 struct Session {
     child: Child,
@@ -93,11 +95,12 @@ impl Session {
         }
     }
 
-    fn expect(&mut self, marker: &str) {
+    /// Wait for `marker` and return the output before it.
+    fn expect(&mut self, marker: &str) -> Vec<u8> {
         let deadline = Instant::now() + Duration::from_secs(15);
         let mut output = std::mem::take(&mut self.unread);
         if self.consume(&mut output, marker) {
-            return;
+            return output;
         }
         while Instant::now() < deadline {
             let mut fd = libc::pollfd {
@@ -116,14 +119,15 @@ impl Session {
                     Err(_) => break,
                 }
                 if self.consume(&mut output, marker) {
-                    return;
+                    return output;
                 }
             }
         }
         panic!("missing {marker}: {}", String::from_utf8_lossy(&output));
     }
 
-    /// Whether `output` holds `marker`; what follows it is kept for later.
+    /// Whether `output` holds `marker`. What follows it is kept for later,
+    /// and `output` keeps what precedes it.
     fn consume(&mut self, output: &mut Vec<u8>, marker: &str) -> bool {
         let Some(at) = output
             .windows(marker.len())
@@ -132,6 +136,7 @@ impl Session {
             return false;
         };
         self.unread = output.split_off(at + marker.len());
+        output.truncate(at);
         true
     }
 
@@ -205,15 +210,6 @@ fn terminal_plugin_restores_tui_after_exit_interrupt_quit_and_spawn_error() {
     }
 }
 
-fn signal_action(signal: libc::c_int) -> libc::sigaction {
-    // SAFETY: A null action pointer queries the current action into valid memory.
-    unsafe {
-        let mut action = std::mem::zeroed();
-        assert_eq!(libc::sigaction(signal, std::ptr::null(), &mut action), 0);
-        action
-    }
-}
-
 fn read_key() -> KeyEvent {
     loop {
         assert!(crossterm::event::poll(Duration::from_secs(10)).unwrap());
@@ -230,7 +226,7 @@ fn terminal_plugin_command() {
     };
     // Check the dispositions after exec, before the parent can send a signal.
     for signal in [libc::SIGINT, libc::SIGQUIT] {
-        assert_eq!(signal_action(signal).sa_sigaction, libc::SIG_DFL);
+        assert_eq!(signal_action(signal).unwrap().sa_sigaction, libc::SIG_DFL);
     }
     println!("PLUGIN_READY");
     io::stdout().flush().unwrap();
@@ -280,7 +276,10 @@ async fn terminal_plugin_child() {
         ..Default::default()
     }];
     let mut terminal = ratatui::init();
-    let before = [signal_action(libc::SIGINT), signal_action(libc::SIGQUIT)];
+    let before = [
+        signal_action(libc::SIGINT).unwrap(),
+        signal_action(libc::SIGQUIT).unwrap(),
+    ];
     for captured in [false, true] {
         if captured {
             crossterm::execute!(io::stdout(), EnableMouseCapture).unwrap();
@@ -308,7 +307,7 @@ async fn terminal_plugin_child() {
         app.after_suspend();
         assert!(crossterm::terminal::is_raw_mode_enabled().unwrap());
         for (signal, previous) in [libc::SIGINT, libc::SIGQUIT].into_iter().zip(&before) {
-            let restored = signal_action(signal);
+            let restored = signal_action(signal).unwrap();
             assert_eq!(restored.sa_sigaction, previous.sa_sigaction);
             // The kernel can add internal flags when an action is restored.
             let flags = libc::SA_RESTART
@@ -449,7 +448,10 @@ async fn exec_auth_child() {
     let mut app = App::new(Cluster::fake(), tx);
     app.switch_kind("pods");
     let mut terminal = ratatui::init();
-    let before = [signal_action(libc::SIGINT), signal_action(libc::SIGQUIT)];
+    let before = [
+        signal_action(libc::SIGINT).unwrap(),
+        signal_action(libc::SIGQUIT).unwrap(),
+    ];
     let generation = app.generation;
     app.handle_msg(crate::store::Msg::WatchError {
         generation: app.generation,
@@ -474,7 +476,10 @@ async fn exec_auth_child() {
 
     assert!(crossterm::terminal::is_raw_mode_enabled().unwrap());
     for (signal, previous) in [libc::SIGINT, libc::SIGQUIT].into_iter().zip(&before) {
-        assert_eq!(signal_action(signal).sa_sigaction, previous.sa_sigaction);
+        assert_eq!(
+            signal_action(signal).unwrap().sa_sigaction,
+            previous.sa_sigaction
+        );
     }
     assert_eq!(app.mode, Mode::Table);
     match case.as_str() {
@@ -499,4 +504,200 @@ async fn exec_auth_child() {
     println!("INPUT_OK");
     ratatui::restore();
     println!("ALL_DONE");
+}
+
+/// Whether the terminal on stdin echoes and reads lines, as a shell leaves it.
+fn cooked() -> bool {
+    // SAFETY: tcgetattr writes the settings of the valid stdin descriptor.
+    let mut settings: libc::termios = unsafe { std::mem::zeroed() };
+    assert_eq!(unsafe { libc::tcgetattr(0, &mut settings) }, 0);
+    settings.c_lflag & (libc::ICANON | libc::ECHO) == (libc::ICANON | libc::ECHO)
+}
+
+/// A bound `suspend` key releases the terminal and stops the TUI so the
+/// shell's job control sees it stop; `fg` brings the TUI back with its
+/// terminal modes, with and without mouse capture. The second stop is resumed
+/// with `bg` first: the TUI leaves the shell's terminal alone until `fg`, also
+/// when its stdout is not the terminal.
+#[test]
+fn job_control_suspend_stops_and_resumes_the_tui() {
+    for case in ["tty", "redirected"] {
+        let tty = case == "tty";
+        let mut session = Session::start_test(SHELL_TEST, case, &[]);
+        for captured in [false, true] {
+            session.expect("TUI_READY");
+            session.send(b"\x1a");
+            if tty && captured {
+                session.expect("\x1b[?1000l");
+            }
+            if tty {
+                session.expect("\x1b[?1049l");
+            }
+            session.expect("JOB_STOPPED");
+            if captured {
+                let background = session.expect("JOB_BACKGROUND");
+                assert!(
+                    !background.contains(&0x1b),
+                    "{case}: the background job wrote to the terminal: {}",
+                    String::from_utf8_lossy(&background)
+                );
+            }
+            if tty {
+                session.expect("\x1b[?1049h");
+            }
+            if tty && captured {
+                session.expect("\x1b[?1000h");
+            }
+            session.expect("TUI_RESUMED");
+            session.send(b"?");
+            session.expect("INPUT_OK");
+            session.send(b"\x1b");
+        }
+        session.expect("ALL_DONE");
+        session.finish();
+    }
+}
+
+/// A minimal job-control shell: it runs the TUI as the foreground job in its
+/// own process group, and on a stop takes the terminal back and checks it.
+/// It resumes the first stop the way `fg` does. It resumes the second with
+/// `bg`, checks that the job keeps running without taking the terminal, then
+/// hands it the terminal without a `SIGCONT`, as bash's `fg` does for a running
+/// job. The TUI cannot be the session leader the harness starts: that group
+/// has no parent in the session, and the kernel discards `SIGTSTP` sent to such
+/// an orphaned group. The `redirected` case sends the TUI's stdout elsewhere.
+#[test]
+fn job_control_shell() {
+    let Ok(case) = std::env::var(CASE_ENV) else {
+        return;
+    };
+    // SAFETY: Ignoring SIGTTOU lets this background shell set the foreground
+    // group, as interactive shells do.
+    unsafe { libc::signal(libc::SIGTTOU, libc::SIG_IGN) };
+    let mut command = Command::new(std::env::current_exe().unwrap());
+    command
+        .args(["--exact", STOP_TEST, "--nocapture"])
+        .env(CASE_ENV, &case);
+    if case == "redirected" {
+        command.stdout(Stdio::null());
+    }
+    // SAFETY: The child only calls signal-safe functions before exec.
+    unsafe {
+        command.pre_exec(|| {
+            libc::signal(libc::SIGTTOU, libc::SIG_DFL);
+            if libc::setpgid(0, 0) == -1 {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    let job = command.spawn().unwrap().id() as libc::pid_t;
+    // SAFETY: Both calls take plain integers. The parent sets the group too,
+    // so the terminal never goes to a group that does not exist yet.
+    unsafe {
+        libc::setpgid(job, job);
+        assert_eq!(libc::tcsetpgrp(0, job), 0);
+    }
+    let mut stops = 0;
+    loop {
+        let mut status = 0;
+        // SAFETY: waitpid writes the status of this shell's own child.
+        assert_eq!(
+            unsafe { libc::waitpid(job, &mut status, libc::WUNTRACED) },
+            job
+        );
+        if libc::WIFSTOPPED(status) {
+            assert_eq!(libc::WSTOPSIG(status), libc::SIGTSTP);
+            stops += 1;
+            // SAFETY: These calls take plain integers for this session.
+            unsafe { assert_eq!(libc::tcsetpgrp(0, libc::getpgrp()), 0) };
+            assert!(cooked(), "the stopped TUI kept the terminal in raw mode");
+            println!("JOB_STOPPED");
+            io::stdout().flush().unwrap();
+            if stops == 1 {
+                // SAFETY: As above; SIGCONT resumes the stopped job's group.
+                unsafe {
+                    assert_eq!(libc::tcsetpgrp(0, job), 0);
+                    assert_eq!(libc::kill(-job, libc::SIGCONT), 0);
+                }
+                continue;
+            }
+            // SAFETY: As above.
+            unsafe { assert_eq!(libc::kill(-job, libc::SIGCONT), 0) };
+            std::thread::sleep(Duration::from_millis(500));
+            // SAFETY: A background job that touches the terminal stops with
+            // SIGTTOU, which waitpid would report here.
+            assert_eq!(
+                unsafe { libc::waitpid(job, &mut status, libc::WNOHANG | libc::WUNTRACED) },
+                0,
+                "the background job stopped or exited: {status}"
+            );
+            assert!(cooked(), "the background job changed the terminal");
+            // SAFETY: Plain integers for this session.
+            unsafe { assert_eq!(libc::tcgetpgrp(0), libc::getpgrp()) };
+            println!("JOB_BACKGROUND");
+            io::stdout().flush().unwrap();
+            // SAFETY: As above.
+            unsafe { assert_eq!(libc::tcsetpgrp(0, job), 0) };
+            continue;
+        }
+        assert!(
+            libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0,
+            "TUI failed: {status}"
+        );
+        break;
+    }
+    // SAFETY: Take the terminal back from the finished job.
+    unsafe { assert_eq!(libc::tcsetpgrp(0, libc::getpgrp()), 0) };
+    assert_eq!(stops, 2);
+    println!("ALL_DONE");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn job_control_child() {
+    if std::env::var(CASE_ENV).is_err() {
+        return;
+    }
+    // Markers go to stderr, which stays on the terminal when stdout does not.
+    let (tx, _rx) = tokio::sync::mpsc::channel(32);
+    let mut app = App::new(Cluster::fake(), tx);
+    let config: crate::config::Config =
+        toml::from_str("[keys.global]\nsuspend = 'ctrl-z'\n[keys.table]\nfaults = 'Z'\n[keys.logs]\nlog_warnings = 'Z'\n[keys.events]\nfaults = 'Z'").unwrap();
+    app.keymap = crate::keymap::Keymap::compile(&config.keys).unwrap();
+    let mut terminal = ratatui::init();
+    let before = [
+        signal_action(libc::SIGINT).unwrap(),
+        signal_action(libc::SIGQUIT).unwrap(),
+    ];
+    for captured in [false, true] {
+        if captured {
+            crossterm::execute!(io::stdout(), EnableMouseCapture).unwrap();
+        }
+        eprintln!("TUI_READY");
+        let key = read_key();
+        assert_eq!(
+            key,
+            KeyEvent::new(KeyCode::Char('z'), KeyModifiers::CONTROL)
+        );
+        app.handle_key(key).unwrap();
+        let Some(Suspend::Stop) = app.pending.take() else {
+            panic!("suspend did not queue a stop: {}", app.flash);
+        };
+        stop(&mut terminal, captured).await.unwrap();
+        assert!(!cooked(), "the resumed TUI is not in raw mode");
+        for (signal, previous) in [libc::SIGINT, libc::SIGQUIT].into_iter().zip(&before) {
+            assert_eq!(
+                signal_action(signal).unwrap().sa_sigaction,
+                previous.sa_sigaction
+            );
+        }
+        eprintln!("TUI_RESUMED");
+        app.handle_key(read_key()).unwrap();
+        assert_eq!(app.mode, Mode::Help);
+        eprintln!("INPUT_OK");
+        app.handle_key(read_key()).unwrap();
+        assert_eq!(app.mode, Mode::Table);
+    }
+    crossterm::execute!(io::stdout(), DisableMouseCapture).unwrap();
+    ratatui::restore();
 }

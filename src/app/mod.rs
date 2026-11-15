@@ -265,6 +265,9 @@ pub enum Suspend {
         context: String,
         switch: bool,
     },
+    /// Release the terminal and stop the process with `SIGTSTP`, so the
+    /// shell's job control can resume it. The TUI returns on `fg`.
+    Stop,
 }
 
 /// A `kubectl port-forward` running in the background (not `Suspend::Shell`
@@ -2685,6 +2688,8 @@ pub struct App {
     events_faults_only: bool,
 
     pub pending: Option<Suspend>,
+    /// Whether the platform has shell job control for the `suspend` action.
+    pub job_control: bool,
     pub shell_target: Option<ShellTarget>,
     pub command_failure: Option<CommandFailure>,
     /// Mode to return to when leaving a transient view (logs/detail/diff).
@@ -3067,6 +3072,7 @@ impl App {
             events_title: String::new(),
             events_faults_only: false,
             pending: None,
+            job_control: cfg!(unix),
             shell_target: None,
             command_failure: None,
             return_mode: Mode::Table,
