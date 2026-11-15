@@ -265,7 +265,7 @@ pub enum Suspend {
         switch: bool,
     },
     /// Release the terminal and stop the process with `SIGTSTP`, so the
-    /// shell's `fg` / `bg` can resume it.
+    /// shell's job control can resume it. The TUI returns on `fg`.
     Stop,
 }
 

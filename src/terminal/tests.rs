@@ -95,11 +95,12 @@ impl Session {
         }
     }
 
-    fn expect(&mut self, marker: &str) {
+    /// Wait for `marker` and return the output before it.
+    fn expect(&mut self, marker: &str) -> Vec<u8> {
         let deadline = Instant::now() + Duration::from_secs(15);
         let mut output = std::mem::take(&mut self.unread);
         if self.consume(&mut output, marker) {
-            return;
+            return output;
         }
         while Instant::now() < deadline {
             let mut fd = libc::pollfd {
@@ -118,14 +119,15 @@ impl Session {
                     Err(_) => break,
                 }
                 if self.consume(&mut output, marker) {
-                    return;
+                    return output;
                 }
             }
         }
         panic!("missing {marker}: {}", String::from_utf8_lossy(&output));
     }
 
-    /// Whether `output` holds `marker`; what follows it is kept for later.
+    /// Whether `output` holds `marker`. What follows it is kept for later,
+    /// and `output` keeps what precedes it.
     fn consume(&mut self, output: &mut Vec<u8>, marker: &str) -> bool {
         let Some(at) = output
             .windows(marker.len())
@@ -134,6 +136,7 @@ impl Session {
             return false;
         };
         self.unread = output.split_off(at + marker.len());
+        output.truncate(at);
         true
     }
 
@@ -513,7 +516,8 @@ fn cooked() -> bool {
 
 /// A bound `suspend` key releases the terminal and stops the TUI so the
 /// shell's job control sees it stop; `fg` brings the TUI back with its
-/// terminal modes, with and without mouse capture.
+/// terminal modes, with and without mouse capture. The second stop is resumed
+/// with `bg` first: the TUI leaves the shell's terminal alone until `fg`.
 #[test]
 fn job_control_suspend_stops_and_resumes_the_tui() {
     let mut session = Session::start_test(SHELL_TEST, "stop", &[]);
@@ -525,6 +529,14 @@ fn job_control_suspend_stops_and_resumes_the_tui() {
         }
         session.expect("\x1b[?1049l");
         session.expect("JOB_STOPPED");
+        if captured {
+            let background = session.expect("JOB_BACKGROUND");
+            assert!(
+                !background.contains(&0x1b),
+                "the background job wrote to the terminal: {}",
+                String::from_utf8_lossy(&background)
+            );
+        }
         session.expect("\x1b[?1049h");
         if captured {
             session.expect("\x1b[?1000h");
@@ -539,10 +551,13 @@ fn job_control_suspend_stops_and_resumes_the_tui() {
 }
 
 /// A minimal job-control shell: it runs the TUI as the foreground job in its
-/// own process group, and on a stop takes the terminal back, checks it, and
-/// resumes the job the way `fg` does. The TUI cannot be the session leader the
-/// harness starts: that group has no parent in the session, and the kernel
-/// discards `SIGTSTP` sent to such an orphaned group.
+/// own process group, and on a stop takes the terminal back and checks it.
+/// It resumes the first stop the way `fg` does. It resumes the second with
+/// `bg`, checks that the job keeps running without taking the terminal, then
+/// hands it the terminal without a `SIGCONT`, as bash's `fg` does for a running
+/// job. The TUI cannot be the session leader the harness starts: that group
+/// has no parent in the session, and the kernel discards `SIGTSTP` sent to such
+/// an orphaned group.
 #[test]
 fn job_control_shell() {
     let Ok(case) = std::env::var(CASE_ENV) else {
@@ -588,11 +603,31 @@ fn job_control_shell() {
             assert!(cooked(), "the stopped TUI kept the terminal in raw mode");
             println!("JOB_STOPPED");
             io::stdout().flush().unwrap();
-            // SAFETY: As above; SIGCONT resumes the stopped job's group.
-            unsafe {
-                assert_eq!(libc::tcsetpgrp(0, job), 0);
-                assert_eq!(libc::kill(-job, libc::SIGCONT), 0);
+            if stops == 1 {
+                // SAFETY: As above; SIGCONT resumes the stopped job's group.
+                unsafe {
+                    assert_eq!(libc::tcsetpgrp(0, job), 0);
+                    assert_eq!(libc::kill(-job, libc::SIGCONT), 0);
+                }
+                continue;
             }
+            // SAFETY: As above.
+            unsafe { assert_eq!(libc::kill(-job, libc::SIGCONT), 0) };
+            std::thread::sleep(Duration::from_millis(500));
+            // SAFETY: A background job that touches the terminal stops with
+            // SIGTTOU, which waitpid would report here.
+            assert_eq!(
+                unsafe { libc::waitpid(job, &mut status, libc::WNOHANG | libc::WUNTRACED) },
+                0,
+                "the background job stopped or exited: {status}"
+            );
+            assert!(cooked(), "the background job changed the terminal");
+            // SAFETY: Plain integers for this session.
+            unsafe { assert_eq!(libc::tcgetpgrp(0), libc::getpgrp()) };
+            println!("JOB_BACKGROUND");
+            io::stdout().flush().unwrap();
+            // SAFETY: As above.
+            unsafe { assert_eq!(libc::tcsetpgrp(0, job), 0) };
             continue;
         }
         assert!(

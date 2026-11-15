@@ -105,9 +105,14 @@ pub async fn suspend_and_await<T>(
 #[cfg(unix)]
 const STOP_GRACE: std::time::Duration = std::time::Duration::from_millis(250);
 
+/// How often a job resumed in the background checks whether it has the
+/// terminal again. bash's `fg` sends no `SIGCONT` to a job that is running.
+#[cfg(unix)]
+const FOREGROUND_POLL: std::time::Duration = std::time::Duration::from_millis(100);
+
 /// Release the terminal and stop with `SIGTSTP`, as the terminal's suspend key
-/// would, then take the terminal back when `SIGCONT` resumes the process. Use
-/// the same rules as [`suspend_and_run`].
+/// would, then take the terminal back once the process runs in the foreground
+/// again. Use the same rules as [`suspend_and_run`].
 ///
 /// The signal goes to the whole process group, like the one the terminal
 /// sends: `kubectl port-forward` children pause too, and a wrapper such as
@@ -136,6 +141,11 @@ pub async fn stop(terminal: &mut ratatui::DefaultTerminal, captured: bool) -> io
     if sent.is_ok() {
         // Another thread can take the stop after `kill` returns.
         let _ = tokio::time::timeout(STOP_GRACE, resumed.recv()).await;
+        // `bg` resumes the job while the shell keeps the terminal. Restoring
+        // then would change the shell's terminal modes, so wait for `fg`.
+        while !foreground() {
+            let _ = tokio::time::timeout(FOREGROUND_POLL, resumed.recv()).await;
+        }
     }
     restore(terminal, captured);
     drop(signals);
@@ -254,6 +264,15 @@ async fn drain_stderr(
             _ = tokio::time::sleep_until(deadline) => break,
         }
     }
+}
+
+/// Whether this process group owns the terminal. Without a controlling
+/// terminal there is nothing to wait for, so that also counts.
+#[cfg(unix)]
+fn foreground() -> bool {
+    // SAFETY: Both calls take or return plain integers.
+    let group = unsafe { libc::tcgetpgrp(libc::STDOUT_FILENO) };
+    group == -1 || group == unsafe { libc::getpgrp() }
 }
 
 #[cfg(unix)]
