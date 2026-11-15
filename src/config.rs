@@ -979,11 +979,11 @@ pub struct ViewConfig {
 /// rows naming it.
 ///
 /// ```toml
-/// [[views."karpenter.sh/v1/nodeclaims".refs]]
-/// path = "/spec/nodeClassRef/name"   # JSON Pointer; `*` fans out over an array
-/// kind = "ec2nodeclasses"
-/// relation = "shaped by"             # row label; default "references"
-/// reverse = "cluster"                # usages listed: namespace (default) | cluster | none
+/// [[views."postgresql.cnpg.io/v1/clusters".refs]]
+/// path = "/spec/storage/storageClass" # JSON Pointer; `*` fans out over an array
+/// kind = "storageclasses"
+/// relation = "stores on"              # row label; default "references"
+/// reverse = "cluster"                 # usages listed: namespace (default) | cluster | none
 /// ```
 #[derive(Debug, Default, Clone, Deserialize)]
 #[serde(default)]
@@ -1005,8 +1005,8 @@ pub struct RefConfig {
 /// `{namespace}` filled in from the row.
 ///
 /// ```toml
-/// [views."karpenter.sh/v1/nodepools"]
-/// drill = { kind = "nodeclaims", labels = "karpenter.sh/nodepool={name}" }
+/// [views."postgresql.cnpg.io/v1/clusters"]
+/// drill = { kind = "pods", labels = "cnpg.io/cluster={name}" }
 ///
 /// [views.externalsecrets]
 /// drill = { kind = "secrets", fields = "metadata.name={name}" }
