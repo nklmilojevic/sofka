@@ -51,14 +51,17 @@ faults = "Z"
 
 [keys.logs]
 log_warnings = "Z"
+
+[keys.events]
+faults = "Z"
 ```
 
 `suspend` gives the terminal back to the shell and stops sofka, as Ctrl+Z does
 in other terminal programs. `fg` resumes it and redraws the screen. The whole
 process stops, so port-forwards, watches, and log streams pause until then.
 `suspend` has no default binding because `ctrl-z` toggles the faults filter in
-tables and warning logs in the log view. Binding it to `ctrl-z` without moving
-`faults` and `log_warnings` reports a conflict. Windows has no job control, so
+tables and the events view, and warning logs in the log view. Binding it to
+`ctrl-z` without moving `faults` and `log_warnings` reports a conflict. Windows has no job control, so
 there the action only shows a message.
 
 ## Values and scopes

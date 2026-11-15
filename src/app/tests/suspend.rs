@@ -10,6 +10,9 @@ faults = "Z"
 
 [keys.logs]
 log_warnings = "Z"
+
+[keys.events]
+faults = "Z"
 "#;
 
 fn keymap(text: &str) -> Result<Keymap, Vec<String>> {
@@ -72,6 +75,11 @@ async fn bound_suspend_queues_a_stop_from_every_mode() {
     assert!(!app.logs.warnings_only);
     app.mode = Mode::Table;
 
+    open_pod_events(&mut app);
+    assert_stop_queued(&mut app, Mode::Events);
+    assert!(!app.events_faults_only);
+    app.handle_key(press(KeyCode::Esc)).unwrap();
+
     app.handle_command_result(None, Err(std::io::Error::other("exit status: 1")), None);
     assert!(app.command_failure_visible());
     assert_stop_queued(&mut app, Mode::Table);
@@ -88,6 +96,14 @@ async fn ctrl_z_recipe_moves_faults_and_log_warnings_to_shift_z() {
     app.handle_key(press(KeyCode::Char('Z'))).unwrap();
     assert!(app.logs.warnings_only);
     assert!(app.pending.is_none());
+    app.mode = Mode::Table;
+    // The faults filter would hide the healthy pod the events open from.
+    app.handle_key(press(KeyCode::Char('Z'))).unwrap();
+    assert!(!app.faults_only);
+    open_pod_events(&mut app);
+    app.handle_key(press(KeyCode::Char('Z'))).unwrap();
+    assert!(app.events_faults_only);
+    assert!(app.pending.is_none());
 }
 
 #[test]
@@ -96,6 +112,7 @@ fn suspend_on_ctrl_z_without_moving_faults_reports_conflicts() {
     for expected in [
         "keys.table: ctrl-z conflicts between faults and suspend",
         "keys.logs: ctrl-z conflicts between log_warnings and suspend",
+        "keys.events: ctrl-z conflicts between faults and suspend",
     ] {
         assert!(errors.iter().any(|e| e == expected), "{errors:?}");
     }

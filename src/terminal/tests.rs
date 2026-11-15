@@ -650,7 +650,7 @@ async fn job_control_child() {
     let (tx, _rx) = tokio::sync::mpsc::channel(32);
     let mut app = App::new(Cluster::fake(), tx);
     let config: crate::config::Config =
-        toml::from_str("[keys.global]\nsuspend = 'ctrl-z'\n[keys.table]\nfaults = 'Z'\n[keys.logs]\nlog_warnings = 'Z'").unwrap();
+        toml::from_str("[keys.global]\nsuspend = 'ctrl-z'\n[keys.table]\nfaults = 'Z'\n[keys.logs]\nlog_warnings = 'Z'\n[keys.events]\nfaults = 'Z'").unwrap();
     app.keymap = crate::keymap::Keymap::compile(&config.keys).unwrap();
     let mut terminal = ratatui::init();
     let before = [
