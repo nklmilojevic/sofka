@@ -517,37 +517,45 @@ fn cooked() -> bool {
 /// A bound `suspend` key releases the terminal and stops the TUI so the
 /// shell's job control sees it stop; `fg` brings the TUI back with its
 /// terminal modes, with and without mouse capture. The second stop is resumed
-/// with `bg` first: the TUI leaves the shell's terminal alone until `fg`.
+/// with `bg` first: the TUI leaves the shell's terminal alone until `fg`, also
+/// when its stdout is not the terminal.
 #[test]
 fn job_control_suspend_stops_and_resumes_the_tui() {
-    let mut session = Session::start_test(SHELL_TEST, "stop", &[]);
-    for captured in [false, true] {
-        session.expect("TUI_READY");
-        session.send(b"\x1a");
-        if captured {
-            session.expect("\x1b[?1000l");
+    for case in ["tty", "redirected"] {
+        let tty = case == "tty";
+        let mut session = Session::start_test(SHELL_TEST, case, &[]);
+        for captured in [false, true] {
+            session.expect("TUI_READY");
+            session.send(b"\x1a");
+            if tty && captured {
+                session.expect("\x1b[?1000l");
+            }
+            if tty {
+                session.expect("\x1b[?1049l");
+            }
+            session.expect("JOB_STOPPED");
+            if captured {
+                let background = session.expect("JOB_BACKGROUND");
+                assert!(
+                    !background.contains(&0x1b),
+                    "{case}: the background job wrote to the terminal: {}",
+                    String::from_utf8_lossy(&background)
+                );
+            }
+            if tty {
+                session.expect("\x1b[?1049h");
+            }
+            if tty && captured {
+                session.expect("\x1b[?1000h");
+            }
+            session.expect("TUI_RESUMED");
+            session.send(b"?");
+            session.expect("INPUT_OK");
+            session.send(b"\x1b");
         }
-        session.expect("\x1b[?1049l");
-        session.expect("JOB_STOPPED");
-        if captured {
-            let background = session.expect("JOB_BACKGROUND");
-            assert!(
-                !background.contains(&0x1b),
-                "the background job wrote to the terminal: {}",
-                String::from_utf8_lossy(&background)
-            );
-        }
-        session.expect("\x1b[?1049h");
-        if captured {
-            session.expect("\x1b[?1000h");
-        }
-        session.expect("TUI_RESUMED");
-        session.send(b"?");
-        session.expect("INPUT_OK");
-        session.send(b"\x1b");
+        session.expect("ALL_DONE");
+        session.finish();
     }
-    session.expect("ALL_DONE");
-    session.finish();
 }
 
 /// A minimal job-control shell: it runs the TUI as the foreground job in its
@@ -557,7 +565,7 @@ fn job_control_suspend_stops_and_resumes_the_tui() {
 /// hands it the terminal without a `SIGCONT`, as bash's `fg` does for a running
 /// job. The TUI cannot be the session leader the harness starts: that group
 /// has no parent in the session, and the kernel discards `SIGTSTP` sent to such
-/// an orphaned group.
+/// an orphaned group. The `redirected` case sends the TUI's stdout elsewhere.
 #[test]
 fn job_control_shell() {
     let Ok(case) = std::env::var(CASE_ENV) else {
@@ -569,7 +577,10 @@ fn job_control_shell() {
     let mut command = Command::new(std::env::current_exe().unwrap());
     command
         .args(["--exact", STOP_TEST, "--nocapture"])
-        .env(CASE_ENV, case);
+        .env(CASE_ENV, &case);
+    if case == "redirected" {
+        command.stdout(Stdio::null());
+    }
     // SAFETY: The child only calls signal-safe functions before exec.
     unsafe {
         command.pre_exec(|| {
@@ -647,6 +658,7 @@ async fn job_control_child() {
     if std::env::var(CASE_ENV).is_err() {
         return;
     }
+    // Markers go to stderr, which stays on the terminal when stdout does not.
     let (tx, _rx) = tokio::sync::mpsc::channel(32);
     let mut app = App::new(Cluster::fake(), tx);
     let config: crate::config::Config =
@@ -661,7 +673,7 @@ async fn job_control_child() {
         if captured {
             crossterm::execute!(io::stdout(), EnableMouseCapture).unwrap();
         }
-        println!("TUI_READY");
+        eprintln!("TUI_READY");
         let key = read_key();
         assert_eq!(
             key,
@@ -679,10 +691,10 @@ async fn job_control_child() {
                 previous.sa_sigaction
             );
         }
-        println!("TUI_RESUMED");
+        eprintln!("TUI_RESUMED");
         app.handle_key(read_key()).unwrap();
         assert_eq!(app.mode, Mode::Help);
-        println!("INPUT_OK");
+        eprintln!("INPUT_OK");
         app.handle_key(read_key()).unwrap();
         assert_eq!(app.mode, Mode::Table);
     }

@@ -129,6 +129,9 @@ pub async fn stop(terminal: &mut ratatui::DefaultTerminal, captured: bool) -> io
     }
     // Listen first: the process can stop and resume before `kill` returns.
     let mut resumed = signal(SignalKind::from_raw(libc::SIGCONT))?;
+    // Job control hands out the controlling terminal, whichever standard
+    // streams are redirected. Without one there is no `fg` to wait for.
+    let controlling = std::fs::File::open("/dev/tty").ok();
     let signals = SignalGuard::new()?;
     release(captured);
     // SAFETY: kill has no memory preconditions. Process group 0 is this
@@ -143,7 +146,7 @@ pub async fn stop(terminal: &mut ratatui::DefaultTerminal, captured: bool) -> io
         let _ = tokio::time::timeout(STOP_GRACE, resumed.recv()).await;
         // `bg` resumes the job while the shell keeps the terminal. Restoring
         // then would change the shell's terminal modes, so wait for `fg`.
-        while !foreground() {
+        while controlling.as_ref().is_some_and(|tty| !foreground(tty)) {
             let _ = tokio::time::timeout(FOREGROUND_POLL, resumed.recv()).await;
         }
     }
@@ -266,12 +269,15 @@ async fn drain_stderr(
     }
 }
 
-/// Whether this process group owns the terminal. Without a controlling
-/// terminal there is nothing to wait for, so that also counts.
+/// Whether this process group owns the terminal `tty`. A terminal that
+/// reports no foreground group cannot be waited for, so that also counts.
 #[cfg(unix)]
-fn foreground() -> bool {
-    // SAFETY: Both calls take or return plain integers.
-    let group = unsafe { libc::tcgetpgrp(libc::STDOUT_FILENO) };
+fn foreground(tty: &std::fs::File) -> bool {
+    use std::os::fd::AsRawFd;
+
+    // SAFETY: tcgetpgrp takes a valid open descriptor; getpgrp has no
+    // preconditions.
+    let group = unsafe { libc::tcgetpgrp(tty.as_raw_fd()) };
     group == -1 || group == unsafe { libc::getpgrp() }
 }
 
