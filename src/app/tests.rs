@@ -12,6 +12,7 @@ mod context_badge;
 mod credentials;
 mod delete;
 mod dir;
+mod discovery;
 mod exec_auth;
 mod flux;
 mod kubeconfig;

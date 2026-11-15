@@ -25,7 +25,7 @@ pub(super) struct Discovered {
 pub(super) async fn discover(client: &Client) -> Result<Discovered> {
     let mut skipped = Vec::new();
     let mut fallback = None;
-    let mut resources = match aggregated(client).await {
+    let resources = match aggregated(client).await {
         Ok(Some(resources)) => resources,
         Ok(None) => legacy(client, &mut skipped).await?,
         Err(e) => {
@@ -35,24 +35,37 @@ pub(super) async fn discover(client: &Client) -> Result<Discovered> {
             legacy(client, &mut skipped).await?
         }
     };
-    // Select the most stable served version of each kind, including kinds absent
-    // from the group's preferred version.
+    Ok(select(resources, skipped, fallback))
+}
+
+// Keep one resource per kind in each group, because the registry resolves a kind
+// in a group to a single resource. A group can serve one kind under two names:
+// OpenShift's template.openshift.io serves Template as create-only
+// `processedtemplates` and as listable `templates`. A resource that can be listed
+// wins, then the most stable served version, including kinds absent from the
+// group's preferred version.
+pub(super) fn select(
+    mut resources: Vec<Resource>,
+    skipped: Vec<String>,
+    fallback: Option<String>,
+) -> Discovered {
     resources.sort_by_cached_key(|r| {
         (
             r.kind.ar.group.clone(),
             r.kind.ar.kind.clone(),
+            Reverse(r.listable),
             Reverse(Version::parse(&r.kind.ar.version).priority()),
         )
     });
     let child_kinds = child_candidates(&resources);
     resources
         .dedup_by(|a, b| a.kind.ar.group == b.kind.ar.group && a.kind.ar.kind == b.kind.ar.kind);
-    Ok(Discovered {
+    Discovered {
         resources,
         child_kinds,
         skipped,
         fallback,
-    })
+    }
 }
 
 async fn aggregated(client: &Client) -> Result<Option<Vec<Resource>>> {
@@ -238,6 +251,26 @@ fn append_legacy(out: &mut Vec<Resource>, list: APIResourceList) -> Result<()> {
     Ok(())
 }
 
+#[cfg(test)]
+impl super::Discovery {
+    /// The discovery of a cluster that serves these legacy `APIResourceList`s.
+    pub fn from_legacy(lists: Vec<serde_json::Value>) -> Self {
+        let mut resources = Vec::new();
+        for list in lists {
+            append_legacy(&mut resources, serde_json::from_value(list).unwrap()).unwrap();
+        }
+        Self(select(resources, Vec::new(), None))
+    }
+
+    /// The discovery of a cluster that serves this aggregated
+    /// `APIGroupDiscoveryList`.
+    pub fn from_aggregated(document: serde_json::Value) -> Self {
+        let mut resources = Vec::new();
+        append_aggregated(&mut resources, parse_aggregated(document).unwrap()).unwrap();
+        Self(select(resources, Vec::new(), None))
+    }
+}
+
 fn api_version(group: &str, version: &str) -> String {
     if group.is_empty() {
         version.to_string()
@@ -339,6 +372,52 @@ mod tests {
         let kinds = child_candidates(&resources);
         assert_eq!(kinds.len(), 1);
         assert_eq!(kinds[0].ar.plural, "widgets");
+    }
+
+    #[test]
+    fn a_listable_resource_represents_a_kind_served_under_two_names() {
+        let processed = json!({"name":"processedtemplates", "kind":"Template", "namespaced":true, "verbs":["create"]});
+        let templates = json!({"name":"templates", "kind":"Template", "namespaced":true, "verbs":["get","list","watch"]});
+        for order in [
+            [processed.clone(), templates.clone()],
+            [templates.clone(), processed.clone()],
+        ] {
+            let mut resources = Vec::new();
+            append_legacy(
+                &mut resources,
+                serde_json::from_value(json!({
+                    "groupVersion": "template.openshift.io/v1", "resources": order
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+            let selected = select(resources, Vec::new(), None).resources;
+            assert_eq!(selected.len(), 1);
+            assert_eq!(selected[0].kind.ar.plural, "templates");
+        }
+    }
+
+    #[test]
+    fn a_listable_resource_wins_over_a_more_stable_version() {
+        let mut resources = Vec::new();
+        for (version, name, verbs) in [
+            ("v1", "processedwidgets", json!(["create"])),
+            ("v1beta1", "widgets", json!(["list"])),
+        ] {
+            append_legacy(
+                &mut resources,
+                serde_json::from_value(json!({
+                    "groupVersion": format!("example.io/{version}"),
+                    "resources": [{"name":name, "kind":"Widget", "namespaced":true, "verbs":verbs}]
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+        }
+        let selected = select(resources, Vec::new(), None).resources;
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].kind.ar.plural, "widgets");
+        assert_eq!(selected[0].kind.ar.version, "v1beta1");
     }
 
     #[test]

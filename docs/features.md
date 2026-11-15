@@ -233,6 +233,9 @@ include those conditions. Row filters can search the route paths.
   Resource names and built-in aliases take priority over discovered short names.
   Shared short names use group priority, then alphabetical group and resource
   order. User aliases override discovered aliases.
+  When a group serves one kind under two names, the name that can be listed is
+  the one sofka shows: OpenShift's `templates`, not the create-only
+  `processedtemplates`.
   Discovery runs at connect. When a `:` lookup matches no known kind, sofka runs
   discovery again in the background and retries the lookup, so a CRD installed
   while sofka runs opens without a restart. It does this at most once every 5
