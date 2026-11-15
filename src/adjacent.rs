@@ -108,6 +108,9 @@ struct BuiltinRef {
     path: &'static str,
     namespace_path: Option<&'static str>,
     kind: &'static str,
+    kind_path: Option<&'static str>,
+    kinds: &'static [&'static str],
+    group_path: Option<&'static str>,
     relation: &'static str,
     reverse: Reverse,
 }
@@ -119,9 +122,9 @@ impl BuiltinRef {
             path: self.path.to_string(),
             namespace_path: self.namespace_path.map(str::to_string),
             kind: self.kind.to_string(),
-            kind_path: None,
-            kinds: Vec::new(),
-            group_path: None,
+            kind_path: self.kind_path.map(str::to_string),
+            kinds: self.kinds.iter().map(|k| k.to_string()).collect(),
+            group_path: self.group_path.map(str::to_string),
             group: None,
             relation: self.relation.to_string(),
             reverse: self.reverse,
@@ -141,6 +144,9 @@ const fn r(
         path,
         namespace_path: None,
         kind,
+        kind_path: None,
+        kinds: &[],
+        group_path: None,
         relation,
         reverse,
     }
@@ -267,6 +273,9 @@ const BUILTIN_REFS: &[BuiltinRef] = &[
         path: "/spec/claimRef/name",
         namespace_path: Some("/spec/claimRef/namespace"),
         kind: "persistentvolumeclaims",
+        kind_path: None,
+        kinds: &[],
+        group_path: None,
         relation: "bound to",
         reverse: Reverse::None,
     },
@@ -319,6 +328,22 @@ const BUILTIN_REFS: &[BuiltinRef] = &[
         "became",
         Reverse::Cluster,
     ),
+    // The NodeClass is the cloud provider's: the claim names its kind and
+    // group beside the name, so each provider's class resolves to its own.
+    BuiltinRef {
+        from: "karpenter.sh/nodeclaims",
+        path: "/spec/nodeClassRef/name",
+        namespace_path: None,
+        kind: "",
+        kind_path: Some("/spec/nodeClassRef/kind"),
+        kinds: &[
+            "ec2nodeclasses.karpenter.k8s.aws",
+            "aksnodeclasses.karpenter.azure.com",
+        ],
+        group_path: Some("/spec/nodeClassRef/group"),
+        relation: "shaped by",
+        reverse: Reverse::Cluster,
+    },
 ];
 
 /// Kinds owned through `ownerReferences` by objects of a kind — where a

@@ -27,6 +27,9 @@ struct Column {
     is_status: bool,
     /// Only shown in wide mode (`w`), like kubectl's `-o wide` extras.
     wide: bool,
+    /// A `used/limit (N%)` cell: sorts by the used quantity, and the table
+    /// tints it by the utilization thresholds the percentage crosses.
+    usage: bool,
 }
 
 /// Per-row scratch space shared by every column extractor for that row.
@@ -93,6 +96,7 @@ const fn column(header: &'static str, extract: CellFn) -> Column {
         extract,
         is_status: false,
         wide: false,
+        usage: false,
     }
 }
 
@@ -102,6 +106,7 @@ const fn status_column(header: &'static str, extract: CellFn) -> Column {
         extract,
         is_status: true,
         wide: false,
+        usage: false,
     }
 }
 
@@ -111,6 +116,17 @@ const fn wide_column(header: &'static str, extract: CellFn) -> Column {
         extract,
         is_status: false,
         wide: true,
+        usage: false,
+    }
+}
+
+const fn usage_column(header: &'static str, extract: CellFn) -> Column {
+    Column {
+        header,
+        extract,
+        is_status: false,
+        wide: false,
+        usage: true,
     }
 }
 
@@ -341,6 +357,34 @@ const FLUX_INPUT_PROVIDER_COLUMNS: &[Column] = &[
     column("AGE", col_age),
 ];
 
+/// Karpenter NodePools: what they launch, how much of their limits they hold,
+/// and how many nodes a disruption may take at once.
+const NODEPOOL_COLUMNS: &[Column] = &[
+    column("NAME", col_name),
+    column("NODECLASS", col_nodepool_nodeclass),
+    column("NODES", col_nodepool_nodes),
+    usage_column("CPU", col_nodepool_cpu),
+    usage_column("MEMORY", col_nodepool_memory),
+    column("BUDGET", col_nodepool_budget),
+    status_column("READY", col_flux_ready),
+    column("AGE", col_age),
+];
+
+/// Karpenter NodeClaims: which pool launched what, where, and whether
+/// disruption has its eye on it.
+const NODECLAIM_COLUMNS: &[Column] = &[
+    column("NAME", col_name),
+    column("POOL", col_nodeclaim_pool),
+    column("INSTANCE", col_nodeclaim_instance),
+    column("CAPACITY", col_nodeclaim_capacity),
+    column("ZONE", col_nodeclaim_zone),
+    column("NODE", col_nodeclaim_node),
+    status_column("READY", col_flux_ready),
+    column("DRIFTED", col_nodeclaim_drifted),
+    column("CONSOLIDATABLE", col_nodeclaim_consolidatable),
+    column("AGE", col_age),
+];
+
 const DEFAULT_COLUMNS: &[Column] = &[column("NAME", col_name), column("AGE", col_age)];
 
 /// The `:workloads` view lists several kinds at once; each cell reads the
@@ -442,6 +486,8 @@ fn columns_for(group: &str, plural: &str) -> &'static [Column] {
         ("fluxcd.controlplane.io", "resourcesets" | "fluxinstances") => FLUX_OPERATOR_COLUMNS,
         ("fluxcd.controlplane.io", "resourcesetinputproviders") => FLUX_INPUT_PROVIDER_COLUMNS,
         ("infra.contrib.fluxcd.io", "terraforms") => TERRAFORM_COLUMNS,
+        ("karpenter.sh", "nodepools") => NODEPOOL_COLUMNS,
+        ("karpenter.sh", "nodeclaims") => NODECLAIM_COLUMNS,
         ("argoproj.io", "applications") => ARGOCD_APP_COLUMNS,
         ("argoproj.io", "applicationsets") => ARGOCD_APPSET_COLUMNS,
         ("", "helm") => HELM_COLUMNS,
@@ -510,6 +556,7 @@ struct SpecColumn {
     align: Option<crate::views::Align>,
     is_status: bool,
     wide: bool,
+    usage: bool,
 }
 
 enum SpecSource {
@@ -530,6 +577,7 @@ fn spec_curated(c: &Column) -> SpecColumn {
         align: None,
         is_status: c.is_status,
         wide: c.wide,
+        usage: c.usage,
     }
 }
 
@@ -545,6 +593,7 @@ fn spec_user(uc: &crate::views::UserColumn) -> SpecColumn {
         original_header: uc.header.clone(),
         width: uc.width,
         align: uc.align,
+        usage: false,
     }
 }
 
@@ -721,6 +770,7 @@ pub fn build_table_spec(
                 align: column.numeric().then_some(crate::views::Align::Right),
                 is_status: false,
                 wide: column.priority > 0,
+                usage: false,
             }
         })
         .collect();
@@ -757,6 +807,11 @@ impl ViewSpec {
             },
             _ => None,
         }
+    }
+
+    /// Whether the column at `idx` is a curated `used/limit (N%)` cell.
+    pub fn usage_at(&self, idx: usize) -> bool {
+        self.columns.get(idx).is_some_and(|c| c.usage)
     }
 
     pub fn metric(&self, header: &str) -> Option<MetricColumn> {
@@ -943,7 +998,9 @@ impl ViewSpec {
             SpecSource::Curated(extract) => {
                 let ctx = self.cell_context(obj, now);
                 let v = extract(&ctx);
-                if is_numeric_header(&self.group, &self.plural, &col.original_header) {
+                if col.usage {
+                    crate::views::SortValue::Num(usage_sort_value(&v))
+                } else if is_numeric_header(&self.group, &self.plural, &col.original_header) {
                     crate::views::SortValue::Num(parse_leading_num(&v))
                 } else {
                     crate::views::SortValue::Text(v.to_lowercase().to_string())
@@ -983,6 +1040,8 @@ fn is_numeric_header(group: &str, plural: &str, header: &str) -> bool {
             FLUX_OPERATOR_COLUMNS,
             FLUX_INPUT_PROVIDER_COLUMNS,
             TERRAFORM_COLUMNS,
+            NODEPOOL_COLUMNS,
+            NODECLAIM_COLUMNS,
         ]
         .iter()
         .any(|flux| cols.as_ptr() == flux.as_ptr());
@@ -994,6 +1053,9 @@ fn is_numeric_header(group: &str, plural: &str, header: &str) -> bool {
     // flux-operator kinds' own columns are known to hold numbers.
     if matches!(header, "RESOURCES" | "INPUTS") {
         return group == "fluxcd.controlplane.io";
+    }
+    if header == "NODES" {
+        return group == "karpenter.sh";
     }
     matches!(
         header,
@@ -1819,6 +1881,164 @@ fn col_flux_exported_revision<'a>(ctx: &CellContext<'a>) -> Cow<'a, str> {
 
 fn col_flux_exported_inputs<'a>(ctx: &CellContext<'a>) -> Cow<'a, str> {
     Cow::Owned(count_arr(ctx.data, &["status", "exportedInputs"]).to_string())
+}
+
+fn col_nodepool_nodeclass<'a>(ctx: &CellContext<'a>) -> Cow<'a, str> {
+    Cow::Borrowed(
+        sget(
+            ctx.data,
+            &["spec", "template", "spec", "nodeClassRef", "name"],
+        )
+        .unwrap_or_default(),
+    )
+}
+
+/// `status.nodes` from Karpenter v1.1 on, else the `nodes` entry Karpenter
+/// keeps among the pool's `status.resources`.
+fn col_nodepool_nodes<'a>(ctx: &CellContext<'a>) -> Cow<'a, str> {
+    let nodes = iopt(ctx.data, &["status", "nodes"]).or_else(|| {
+        ctx.data
+            .pointer("/status/resources/nodes")
+            .and_then(Value::as_str)
+            .and_then(crate::views::parse_quantity)
+            .map(|n| n as i64)
+    });
+    Cow::Owned(nodes.unwrap_or(0).to_string())
+}
+
+fn col_nodepool_cpu<'a>(ctx: &CellContext<'a>) -> Cow<'a, str> {
+    Cow::Owned(nodepool_usage(ctx.data, "cpu", |v| {
+        fmt_cpu((v * 1000.0).round() as i64)
+    }))
+}
+
+fn col_nodepool_memory<'a>(ctx: &CellContext<'a>) -> Cow<'a, str> {
+    Cow::Owned(nodepool_usage(ctx.data, "memory", |v| {
+        fmt_mem(v.ceil() as i64)
+    }))
+}
+
+/// What a pool holds of `resource` against its `spec.limits`:
+/// `used/limit (N%)`, or the used amount alone when the pool has no limit
+/// for it — a percentage of nothing would read as an empty pool. The
+/// percentage is floored, so `100%` means the limit is reached.
+fn nodepool_usage(d: &Value, resource: &str, fmt: fn(f64) -> String) -> String {
+    let quantity = |path: &str| {
+        d.pointer(path)
+            .and_then(|v| match v {
+                Value::String(s) => crate::views::parse_quantity(s),
+                Value::Number(n) => n.as_f64(),
+                _ => None,
+            })
+            .filter(|v| v.is_finite() && *v >= 0.0)
+    };
+    let used = quantity(&format!("/status/resources/{resource}")).unwrap_or(0.0);
+    let shown = |v: f64| {
+        let s = fmt(v);
+        if s == "-" { "0".to_string() } else { s }
+    };
+    match quantity(&format!("/spec/limits/{resource}")) {
+        Some(limit) => {
+            let pct = if limit > 0.0 {
+                (used / limit * 100.0).floor() as i64
+            } else {
+                100
+            };
+            format!("{}/{} ({pct}%)", shown(used), shown(limit))
+        }
+        None => shown(used),
+    }
+}
+
+/// The used quantity a `used/limit (N%)` cell leads with, for sorting.
+fn usage_sort_value(cell: &str) -> f64 {
+    let used = cell.split('/').next().unwrap_or_default();
+    crate::views::parse_quantity(used.split_whitespace().next().unwrap_or_default()).unwrap_or(0.0)
+}
+
+/// The utilization percentage a `used/limit (N%)` cell carries, if the pool
+/// has a limit.
+pub fn usage_percent(cell: &str) -> Option<i64> {
+    let start = cell.rfind('(')? + 1;
+    let end = start + cell[start..].find("%)")?;
+    cell[start..end].parse().ok()
+}
+
+/// The disruption budgets of a pool: how many nodes each allows to be
+/// disrupted at once, with any schedule or reasons it is limited to.
+fn col_nodepool_budget<'a>(ctx: &CellContext<'a>) -> Cow<'a, str> {
+    let Some(budgets) = ctx
+        .data
+        .pointer("/spec/disruption/budgets")
+        .and_then(Value::as_array)
+    else {
+        return Cow::Borrowed("");
+    };
+    let parts: Vec<String> = budgets
+        .iter()
+        .filter_map(|b| {
+            let nodes = b.get("nodes").and_then(Value::as_str)?;
+            let mut part = nodes.to_string();
+            if let Some(reasons) = b.get("reasons").and_then(Value::as_array) {
+                let reasons: Vec<&str> = reasons.iter().filter_map(Value::as_str).collect();
+                if !reasons.is_empty() {
+                    part.push_str(&format!(" {}", reasons.join("+")));
+                }
+            }
+            if let Some(schedule) = b.get("schedule").and_then(Value::as_str) {
+                let duration = b.get("duration").and_then(Value::as_str).unwrap_or("?");
+                part.push_str(&format!(" @{schedule} for {duration}"));
+            }
+            Some(part)
+        })
+        .collect();
+    Cow::Owned(parts.join(", "))
+}
+
+fn label<'a>(obj: &'a DynamicObject, key: &str) -> &'a str {
+    obj.metadata
+        .labels
+        .as_ref()
+        .and_then(|labels| labels.get(key))
+        .map(String::as_str)
+        .unwrap_or_default()
+}
+
+fn col_nodeclaim_pool<'a>(ctx: &CellContext<'a>) -> Cow<'a, str> {
+    Cow::Borrowed(label(ctx.obj, "karpenter.sh/nodepool"))
+}
+
+fn col_nodeclaim_instance<'a>(ctx: &CellContext<'a>) -> Cow<'a, str> {
+    Cow::Borrowed(label(ctx.obj, "node.kubernetes.io/instance-type"))
+}
+
+fn col_nodeclaim_capacity<'a>(ctx: &CellContext<'a>) -> Cow<'a, str> {
+    Cow::Borrowed(label(ctx.obj, "karpenter.sh/capacity-type"))
+}
+
+fn col_nodeclaim_zone<'a>(ctx: &CellContext<'a>) -> Cow<'a, str> {
+    Cow::Borrowed(label(ctx.obj, "topology.kubernetes.io/zone"))
+}
+
+fn col_nodeclaim_node<'a>(ctx: &CellContext<'a>) -> Cow<'a, str> {
+    Cow::Borrowed(sget(ctx.data, &["status", "nodeName"]).unwrap_or_default())
+}
+
+fn col_nodeclaim_drifted<'a>(ctx: &CellContext<'a>) -> Cow<'a, str> {
+    Cow::Borrowed(condition_flag(ctx.data, "Drifted"))
+}
+
+fn col_nodeclaim_consolidatable<'a>(ctx: &CellContext<'a>) -> Cow<'a, str> {
+    Cow::Borrowed(condition_flag(ctx.data, "Consolidatable"))
+}
+
+/// A condition Karpenter only sets while it holds: its status when present,
+/// `False` when Karpenter has cleared it.
+fn condition_flag<'a>(d: &'a Value, ty: &str) -> &'a str {
+    condition(d, ty)
+        .and_then(|c| c.get("status"))
+        .and_then(Value::as_str)
+        .unwrap_or("False")
 }
 
 /// flux-operator kinds pause through `fluxcd.controlplane.io/reconcile:

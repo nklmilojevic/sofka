@@ -1444,6 +1444,12 @@ fn draw_table(frame: &mut Frame, app: &mut App, area: Rect) {
                 .and_then(|si| app.view_spec().metric_at(si))
         })
         .collect();
+    let usage_columns: Vec<bool> = (0..headers.len())
+        .map(|i| {
+            i.checked_sub(ns_off)
+                .is_some_and(|si| app.view_spec().usage_at(si))
+        })
+        .collect();
 
     let count = app.row_count();
     let visible_rows = area.height.saturating_sub(3).max(1) as usize;
@@ -1663,6 +1669,14 @@ fn draw_table(frame: &mut Frame, app: &mut App, area: Rect) {
                         let color = thresholds
                             .restarts
                             .severity(n)
+                            .map(theme::severity_fg)
+                            .unwrap_or(row_color);
+                        Style::default().fg(color)
+                    } else if usage_columns[i] {
+                        // The cell spells the percentage out, so the tint
+                        // only repeats what the text already says.
+                        let color = columns::usage_percent(c.as_str())
+                            .and_then(|p| thresholds.utilization.severity(p))
                             .map(theme::severity_fg)
                             .unwrap_or(row_color);
                         Style::default().fg(color)

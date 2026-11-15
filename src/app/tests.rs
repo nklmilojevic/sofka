@@ -14,6 +14,7 @@ mod delete;
 mod dir;
 mod exec_auth;
 mod flux;
+mod karpenter;
 mod kubeconfig;
 mod label_filter;
 mod line_select;
@@ -5735,11 +5736,8 @@ async fn enter_on_nodepool_drills_into_its_nodeclaims() {
         .register_kind("karpenter.sh", "NodePool", "nodepools", false);
     app.cluster
         .register_kind("karpenter.sh", "NodeClaim", "nodeclaims", false);
-    app.user_views = views_with_drill(
-        "karpenter.sh/v1/nodepools",
-        "nodeclaims",
-        "karpenter.sh/nodepool={name}",
-    );
+    // Built in: no `[views."karpenter.sh/v1/nodepools"].drill` needed.
+    assert!(app.user_views.is_empty());
     app.switch_kind("nodepools");
     apply(
         &mut app,
@@ -5750,6 +5748,10 @@ async fn enter_on_nodepool_drills_into_its_nodeclaims() {
 
     app.handle_key(press(KeyCode::Enter)).unwrap();
     assert_eq!(app.kind_plural, "nodeclaims");
+    assert_eq!(
+        app.kind.as_ref().map(|k| k.ar.group.as_str()),
+        Some("karpenter.sh")
+    );
     assert_eq!(app.labels.as_deref(), Some("karpenter.sh/nodepool=default"));
     assert_eq!(app.fields, None);
     assert_eq!(app.namespace, "");

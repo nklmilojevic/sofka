@@ -292,7 +292,7 @@ include those conditions. Row filters can search the route paths.
 - **Curated columns** for common kinds (pods, deployments, replicasets,
   statefulsets, daemonsets, services, nodes, namespaces, configmaps, secrets,
   jobs, cronjobs, PVC/PV, ingresses, endpoints, CustomResourceDefinitions,
-  Flux and flux-operator objects), with
+  Flux and flux-operator objects, Karpenter NodePools and NodeClaims), with
   a NAME/AGE fallback for everything else. STATUS columns use a fixed width of
   26 characters, or 27 for Nodes, so status changes do not move adjacent
   columns. A configured column width takes priority. Column widths use the full filtered list so
@@ -347,8 +347,9 @@ include those conditions. Row filters can search the route paths.
   [Views and thresholds](views.md).
 - **Drill-down navigation** with a breadcrumb stack: workload/service → pods,
   cronjob → its jobs, node → its pods, pod → containers, namespace → re-scope,
-  CRD → its custom resources, Argo CD Application or ApplicationSet → the Argo
-  CD view, unless a `[views."applications"].drill` is configured. `esc` goes back.
+  CRD → its custom resources, Karpenter NodePool → its NodeClaims, Argo CD
+  Application or ApplicationSet → the Argo CD view. A configured
+  `[views."…"].drill` replaces the NodePool and Argo CD drills. `esc` goes back.
   Workload pod selection includes both `matchLabels` and `matchExpressions`.
   Drill-down, logs, Explain, and diagnostic bundles apply all requirements,
   including `In`, `NotIn`, `Exists`, and `DoesNotExist`. Services use their
