@@ -211,6 +211,12 @@ include those conditions. Row filters can search the route paths.
 - **Optional header** - set `hide_header = true` in the configuration to hide
   the header and logo, including the one-line header in compact mode.
 
+- **Header logo makes room** - the logo on the right of the header gives up its
+  column when the key hints, the context line (with its badge and
+  `[read-only]`), the cluster URL, or the resource title would not fit beside
+  it. Namespace favourites take whatever room is left, so they do not count.
+  When everything fits, the logo stays.
+
 - **Connect** to the current kubeconfig context, including exec credential
   plugins (GKE, EKS, and friends).
 - **MFA prompts from exec plugins** - a plugin that asks for input, such as
