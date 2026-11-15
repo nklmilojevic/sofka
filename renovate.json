@@ -1,8 +1,6 @@
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
-  "extends": ["config:recommended", "helpers:pinGitHubActionDigests"],
-  "timezone": "Europe/Belgrade",
-  "labels": ["dependencies"],
+  "extends": ["local>nklmilojevic/renovate-config", "helpers:pinGitHubActionDigests"],
   "nix": {
     "enabled": true
   },
@@ -13,11 +11,8 @@
   "packageRules": [
     {
       "matchManagers": ["github-actions"],
-      "groupName": "github actions"
-    },
-    {
-      "matchManagers": ["cargo"],
-      "groupName": "rust dependencies"
+      "groupName": "github actions",
+      "separateMinorPatch": false
     },
     {
       "matchPackageNames": ["kube", "/^kube-/", "k8s-openapi", "deskribe"],
@@ -26,7 +21,13 @@
     },
     {
       "matchManagers": ["nix"],
-      "groupName": "nix dependencies"
+      "groupName": "nix dependencies",
+      "separateMinorPatch": false
+    },
+    {
+      "description": "The workflows hold the package signing keys and the tap token, and run the setup-nix composite action: Action updates are reviewed, never merged automatically.",
+      "matchFileNames": [".github/workflows/**", ".github/actions/**"],
+      "automerge": false
     }
   ]
 }
