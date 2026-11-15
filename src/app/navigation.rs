@@ -82,10 +82,11 @@ impl App {
             {
                 self.open_gitops()
             }
-            // Everything else is configuration: a `[views."…"].drill` opens
-            // another kind scoped to this row; failing that, anything that
-            // names a node (`[views."…"].node`) drills into it. Pods name one
-            // too, but they drill into containers above.
+            // Everything else is view data: a `[views."…"].drill`, or the
+            // built-in one for a Karpenter NodePool, opens another kind scoped
+            // to this row; failing that, anything that names a node
+            // (`[views."…"].node`) drills into it. Pods name one too, but they
+            // drill into containers above.
             _ => {
                 if let Some(drill) = self.configured_drill() {
                     self.drill_configured(&obj, &drill);
@@ -130,7 +131,7 @@ impl App {
     /// The `[views."…"].drill` for the current kind, if one is configured.
     pub(crate) fn configured_drill(&self) -> Option<crate::views::Drill> {
         let ar = &self.kind.as_ref()?.ar;
-        crate::views::drill_for(&self.user_views, ar, self.view_namespace()).cloned()
+        crate::views::drill_for(&self.user_views, ar, self.view_namespace()).map(Cow::into_owned)
     }
 
     /// Drill from a row into the kind its view's `drill` names, scoped by the

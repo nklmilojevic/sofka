@@ -555,8 +555,8 @@ both, with `{name}` and `{namespace}` filled in from the row:
 
 ```toml
 # children carry the parent's name in a label
-[views."karpenter.sh/v1/nodepools"]
-drill = { kind = "nodeclaims", labels = "karpenter.sh/nodepool={name}" }
+[views."postgresql.cnpg.io/v1/clusters"]
+drill = { kind = "pods", labels = "cnpg.io/cluster={name}" }
 
 # the target is a single object with a known name and nothing labelling it back
 [views.externalsecrets]
@@ -572,24 +572,27 @@ kind warns and stays put. A namespaced target opens in the row's namespace; a
 cluster-scoped one ignores it.
 
 Kinds with a built-in drill-down keep it - a `drill` on pods won't replace the
-container picker, and `:config` warns that the stanza is ignored. When a view
-sets both `drill` and `node`, `enter` drills and `o` still jumps to the node.
+container picker, and `:config` warns that the stanza is ignored. The
+[Karpenter](#karpenter) NodePool drill is the exception: it is built-in view
+data, so a `drill` on `karpenter.sh/v1/nodepools` replaces it without a
+warning. When a view sets both `drill` and `node`, `enter` drills and `o` still
+jumps to the node.
 
 **Everything connected to a row** - `u` opens the adjacent view: the row's
 owners, the objects it owns, the objects its spec names, and the objects whose
 specs name it, each one `⏎` away. Core kinds are built in (a pod's node, claims,
 ConfigMaps, Secrets and service account; a claim's storage class, attributes
-class and volume; an ingress's services and TLS secrets). A CRD declares its
-own references and owned kinds:
+class and volume; an ingress's services and TLS secrets), and so are
+[Karpenter's](#karpenter). A CRD declares its own references and owned kinds:
 
 ```toml
-[views."karpenter.sh/v1/nodeclaims"]
-children = ["nodes"]                 # kinds to scan for ownerReferences to the row
+[views."postgresql.cnpg.io/v1/clusters"]
+children = ["pods", "persistentvolumeclaims"]  # kinds to scan for ownerReferences
 
-[[views."karpenter.sh/v1/nodeclaims".refs]]
-path = "/spec/nodeClassRef/name"     # JSON Pointer; `*` fans out over an array
-kind = "ec2nodeclasses"
-relation = "shaped by"               # row label; default "references"
+[[views."postgresql.cnpg.io/v1/clusters".refs]]
+path = "/spec/storage/storageClass"  # JSON Pointer; `*` fans out over an array
+kind = "storageclasses"
+relation = "stores on"               # row label; default "references"
 reverse = "cluster"                  # usages listed: namespace (default) | cluster | none
 ```
 
@@ -671,6 +674,63 @@ Both settings are resolved key by key across the view keys for a kind
 (`apiVersion/plural`, `group/plural`, plural, kind), not off the single most
 specific view the way `columns` and `sort` are. A specific view that only sets
 columns therefore doesn't hide a `node` or `drill` set under a broader key.
+
+### Karpenter
+
+Karpenter's `karpenter.sh` NodePools and NodeClaims work without a view:
+
+- NodePools show NAME, NODECLASS, NODES, CPU, MEMORY, BUDGET, READY, and AGE.
+  CPU and MEMORY compare `status.resources` with `spec.limits` as
+  `used/limit (N%)`. The percentage is rounded down, so `100%` means the pool
+  has reached its limit. It takes the [utilization](#thresholds) warning and
+  critical colors as well. A pool with no limit for a resource shows the
+  amount used alone. BUDGET lists the `nodes` of each disruption budget, with
+  the reasons and the schedule and duration it is limited to.
+- NodeClaims show NAME, POOL, INSTANCE, CAPACITY (the capacity type), ZONE,
+  NODE, READY, DRIFTED, CONSOLIDATABLE, and AGE. DRIFTED and CONSOLIDATABLE
+  are the `Drifted` and `Consolidatable` conditions, `False` when Karpenter has
+  cleared one.
+- `enter` on a NodePool opens its NodeClaims, selected by
+  `karpenter.sh/nodepool={name}`. `esc` returns. A configured `drill` replaces
+  it.
+- `enter` or `o` on a NodeClaim opens its node from `status.nodeName`.
+- `u` on a NodeClaim lists its node and its NodeClass. The NodeClass is read
+  from `spec.nodeClassRef`, whose kind and group pick an `EC2NodeClass`
+  (`karpenter.k8s.aws`) or an `AKSNodeClass` (`karpenter.azure.com`). `u` on a
+  NodeClass lists the NodeClaims across the cluster that it shapes, and `u` on
+  a NodePool lists the NodeClaims it owns.
+
+Columns in a `[views."karpenter.sh/v1/nodepools"]` or
+`[views."karpenter.sh/v1/nodeclaims"]` view overlay these, or replace them with
+`replace = true`, as for any curated kind.
+
+A workspace keeps the views a Karpenter investigation moves between one key
+away. sofka does not ship it; add it to your configuration and adjust the key
+and the NodeClass kind for your provider:
+
+```toml
+[[workspaces]]
+key = "alt-k"
+name = "Karpenter"
+
+[[workspaces.views]]
+name = "NodePools"
+resource = "nodepools"
+
+[[workspaces.views]]
+name = "NodeClaims"
+resource = "nodeclaims"
+
+[[workspaces.views]]
+name = "Pending pods"
+resource = "pods"
+namespace = "all"
+filter = "status=Pending"
+
+[[workspaces.views]]
+name = "EC2NodeClasses"
+resource = "ec2nodeclasses"
+```
 
 ### CRD printer columns
 

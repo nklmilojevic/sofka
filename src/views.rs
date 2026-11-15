@@ -10,6 +10,7 @@
 //! load time; problems become warnings, never panics, so a bad view can't
 //! take down the TUI.
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 
 use k8s_openapi::jiff::Timestamp;
@@ -277,6 +278,17 @@ const NODE_REFS: &[(&str, &str)] = &[
     ("karpenter.sh/nodeclaims", "/status/nodeName"),
 ];
 
+/// Kinds whose rows select objects of another kind, as a `drill` would:
+/// `(view key, target kind, label selector)`. Like [`NODE_REFS`], data for a
+/// kind common enough to ship, keyed `group/plural` so another group's
+/// `nodepools` keeps its own `enter`. A configured `[views."…"].drill` wins,
+/// so these aren't in [`BUILTIN_DRILLS`].
+const DRILL_REFS: &[(&str, &str, &str)] = &[(
+    "karpenter.sh/nodepools",
+    "nodeclaims.karpenter.sh",
+    "karpenter.sh/nodepool={name}",
+)];
+
 /// A per-kind setting, resolved key by key in [`lookup`]'s precedence rather
 /// than off whichever single view `lookup` picks: a more specific view that
 /// sets only columns mustn't mask a setting on a broader key, which would
@@ -292,15 +304,29 @@ fn setting<'a, T: ?Sized>(
         .find_map(|k| views.get(&k).and_then(&pick))
 }
 
-/// Where `enter` drills for a kind, per `[views."…"].drill`. Kinds with a
-/// built-in drill-down (workloads to pods, CRDs to their resources, …) never
-/// consult this.
+/// Where `enter` drills for a kind: a configured `[views."…"].drill` wins
+/// over the built-in table. Kinds with a built-in drill-down (workloads to
+/// pods, CRDs to their resources, …) never consult this.
 pub fn drill_for<'a>(
     views: &'a HashMap<String, View>,
     ar: &ApiResource,
     namespace: Option<&str>,
-) -> Option<&'a Drill> {
-    setting(views, ar, namespace, |v| v.drill.as_ref())
+) -> Option<Cow<'a, Drill>> {
+    if let Some(drill) = setting(views, ar, namespace, |v| v.drill.as_ref()) {
+        return Some(Cow::Borrowed(drill));
+    }
+    lookup_keys(ar, None).into_iter().find_map(|key| {
+        DRILL_REFS
+            .iter()
+            .find(|(row, _, _)| *row == key)
+            .map(|(_, kind, labels)| {
+                Cow::Owned(Drill {
+                    kind: kind.to_string(),
+                    labels: Some(labels.to_string()),
+                    fields: None,
+                })
+            })
+    })
 }
 
 /// The pointer to a kind's node name: an explicit `[views."…"].node` wins over
