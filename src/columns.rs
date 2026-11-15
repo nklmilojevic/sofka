@@ -1895,8 +1895,8 @@ fn col_nodepool_nodeclass<'a>(ctx: &CellContext<'a>) -> Cow<'a, str> {
     )
 }
 
-/// `status.nodes` from Karpenter v1.1 on, else the `nodes` entry Karpenter
-/// keeps among the pool's `status.resources`.
+/// `status.nodes` from Karpenter v1.8 on, else the `nodes` entry Karpenter
+/// has kept among the pool's `status.resources` since v1.0.
 fn col_nodepool_nodes<'a>(ctx: &CellContext<'a>) -> Cow<'a, str> {
     let nodes = iopt(ctx.data, &["status", "nodes"]).or_else(|| {
         ctx.data
