@@ -171,8 +171,8 @@ include those conditions. Row filters can search the route paths.
   [Views](views.md#built-in-and-metric-columns).
 
 - **Scroll position** appears on the borders of long resource tables, document
-  views, logs, and pickers. Tables and unwrapped documents also show horizontal
-  position. Wrapped views use display rows. Scrollbars use thin lines. They
+  views, logs, and pickers. Tables, unwrapped documents, and unwrapped logs also
+  show horizontal position. Wrapped views use display rows. Scrollbars use thin lines. They
   appear during keyboard or mouse scrolling and hide after 700 ms without
   scrolling. They stay hidden when content fits. Fullscreen logs and documents
   keep their borderless layout for text selection.
