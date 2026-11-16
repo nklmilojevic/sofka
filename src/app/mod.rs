@@ -303,6 +303,12 @@ impl Drop for PortForward {
 /// so the unit suite doesn't require `kubectl` on PATH.
 type PortForwardSpawner = fn(&[String]) -> std::io::Result<tokio::process::Child>;
 
+/// Test-binds one local address before a port-forward starts. Overridable in
+/// tests: a port a test releases stays bound while a concurrently spawned
+/// child still holds its inherited copy of the socket.
+type PortBinder =
+    std::sync::Arc<dyn Fn(std::net::IpAddr, u16) -> std::io::Result<()> + Send + Sync>;
+
 /// Looks up the latest release (`force` skips the daily cache). Overridable
 /// in tests so the unit suite never reaches GitHub.
 type UpdateFetcher = fn(
@@ -327,6 +333,10 @@ fn default_update_fetcher(
     Box<dyn std::future::Future<Output = Result<crate::update::Release, String>> + Send>,
 > {
     Box::pin(crate::update::check(force))
+}
+
+fn default_port_binder(address: std::net::IpAddr, port: u16) -> std::io::Result<()> {
+    std::net::TcpListener::bind((address, port)).map(drop)
 }
 
 fn default_pf_spawner(argv: &[String]) -> std::io::Result<tokio::process::Child> {
@@ -2460,6 +2470,8 @@ pub struct App {
     /// Injectable spawner for `kubectl port-forward` children. Tests override
     /// this to avoid depending on `kubectl` being on PATH.
     pf_spawner: PortForwardSpawner,
+    /// Injectable local-port check for the port-forward preflight.
+    pf_port_binder: PortBinder,
     pub pf_state: ListState,
     /// Port-forward picker (`f`): the declared ports of the selected object,
     /// each as a `LOCAL:REMOTE` string, plus a trailing "Custom…" entry.
@@ -2954,6 +2966,7 @@ impl App {
             auth_offered: None,
             port_forwards: Vec::new(),
             pf_spawner: default_pf_spawner,
+            pf_port_binder: std::sync::Arc::new(default_port_binder),
             forwards_cfg: Vec::new(),
             pf_picker_items: Vec::new(),
             pf_picker_in_use: Vec::new(),
