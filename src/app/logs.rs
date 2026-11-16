@@ -214,7 +214,7 @@ impl RecordTime {
         } else {
             jiff::tz::TimeZone::UTC
         };
-        let text = jiff::fmt::strtime::format(format, &time.to_zoned(zone)).ok()?;
+        let text = jiff::fmt::strtime::format(format, &time.to_zoned_datetime(zone)).ok()?;
         Some(record_text(&text).into_owned())
     }
 }

@@ -42906,7 +42906,7 @@ async fn log_record_time_format_follows_config_and_reload() {
     let local = "2026-10-08T15:00:20.444Z"
         .parse::<jiff::Timestamp>()
         .unwrap()
-        .to_zoned(jiff::tz::TimeZone::system())
+        .to_zoned_datetime(jiff::tz::TimeZone::system())
         .strftime("%H:%M:%S")
         .to_string();
     assert_eq!(app.logs.display_line(0), format!("{local} INFO  ready"));
