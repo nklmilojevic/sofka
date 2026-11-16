@@ -23176,6 +23176,87 @@ async fn logs_sideways_scroll_reaches_the_end_of_a_line_past_u16_columns() {
 }
 
 #[tokio::test]
+async fn logs_show_a_horizontal_scrollbar_for_long_unwrapped_lines() {
+    use ratatui::{Terminal, backend::TestBackend};
+    let (mut app, _rx) = test_app();
+    app.compact = true;
+    app.mode = Mode::Logs;
+    app.return_mode = Mode::Table;
+    app.handle_msg(Msg::LogLines {
+        generation: app.log_gen,
+        lines: vec![format!("{}END", "x".repeat(100))],
+    });
+    let mut term = Terminal::new(TestBackend::new(40, 10)).unwrap();
+    let thumb = |term: &Terminal<TestBackend>| -> Vec<u16> {
+        (1..39)
+            .filter(|&x| {
+                let cell = &term.backend().buffer()[(x, 9)];
+                cell.symbol() == "─" && cell.fg == crate::theme::text()
+            })
+            .collect()
+    };
+
+    term.draw(|f| crate::ui::draw(f, &mut app)).unwrap();
+    assert!(thumb(&term).is_empty(), "hidden until scrolling");
+
+    app.handle_key(press(KeyCode::Right)).unwrap();
+    term.draw(|f| crate::ui::draw(f, &mut app)).unwrap();
+    let start = thumb(&term);
+    assert!(!start.is_empty(), "{:?}", term.backend().buffer());
+    assert!(start.len() < 38, "thumb is a fraction of the track");
+
+    for _ in 0..30 {
+        app.handle_key(press(KeyCode::Right)).unwrap();
+    }
+    term.draw(|f| crate::ui::draw(f, &mut app)).unwrap();
+    assert_eq!(app.logs.view.hscroll, app.logs.max_hscroll);
+    let end = thumb(&term);
+    assert!(end[0] > start[0], "{start:?} -> {end:?}");
+    assert_eq!(end.last(), Some(&38), "thumb reaches the right edge");
+
+    app.scrollbar_activity =
+        Some(std::time::Instant::now() - std::time::Duration::from_millis(701));
+    term.draw(|f| crate::ui::draw(f, &mut app)).unwrap();
+    assert!(thumb(&term).is_empty(), "hides when idle");
+
+    app.handle_key(press(KeyCode::Char('w'))).unwrap();
+    app.handle_key(press(KeyCode::Right)).unwrap();
+    term.draw(|f| crate::ui::draw(f, &mut app)).unwrap();
+    assert!(
+        thumb(&term).is_empty(),
+        "wrapped lines have no sideways scroll"
+    );
+
+    app.handle_key(press(KeyCode::Char('w'))).unwrap();
+    app.handle_key(press(KeyCode::Char('F'))).unwrap();
+    assert!(app.logs.fullscreen);
+    term.draw(|f| crate::ui::draw(f, &mut app)).unwrap();
+    app.handle_key(press(KeyCode::Right)).unwrap();
+    term.draw(|f| crate::ui::draw(f, &mut app)).unwrap();
+    assert!(app.logs.view.hscroll > 0);
+    assert!(thumb(&term).is_empty(), "fullscreen stays borderless");
+}
+
+#[tokio::test]
+async fn logs_hide_the_horizontal_scrollbar_when_lines_fit() {
+    use ratatui::{Terminal, backend::TestBackend};
+    let (mut app, _rx) = test_app();
+    app.compact = true;
+    app.mode = Mode::Logs;
+    app.return_mode = Mode::Table;
+    app.handle_msg(Msg::LogLines {
+        generation: app.log_gen,
+        lines: vec!["short line".into()],
+    });
+    let mut term = Terminal::new(TestBackend::new(40, 10)).unwrap();
+    term.draw(|f| crate::ui::draw(f, &mut app)).unwrap();
+    app.handle_key(press(KeyCode::Right)).unwrap();
+    term.draw(|f| crate::ui::draw(f, &mut app)).unwrap();
+    assert!(app.scrollbars_visible());
+    assert!((1..39).all(|x| term.backend().buffer()[(x, 9)].fg != crate::theme::text()));
+}
+
+#[tokio::test]
 async fn logs_fullscreen_toggles_with_shift_f() {
     let (mut app, _rx) = test_app();
     app.mode = Mode::Logs;

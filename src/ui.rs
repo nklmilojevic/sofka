@@ -2562,6 +2562,15 @@ fn draw_logs(frame: &mut Frame, app: &mut App, area: Rect) {
             inner_h,
             false,
         );
+        draw_border_scrollbar(
+            frame,
+            show_scrollbars,
+            area,
+            hscroll,
+            app.logs.max_hscroll,
+            content_w,
+            true,
+        );
     }
 }
 
