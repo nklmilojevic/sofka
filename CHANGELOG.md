@@ -1,5 +1,17 @@
 # Changelog
 
+## v0.37.0 - 2026-11-16
+
+This release shows your position along long log lines. It also fixes plugin cancellation on NixOS and in Nix build sandboxes.
+
+### New features
+
+- The logs view now shows a horizontal scrollbar for long log lines that do not wrap. You can see where the view sits along a line while you scroll with the arrow keys.
+
+### Fixes
+
+- Cancelling a plugin now stops all processes that the plugin started. Before, the cancel failed on NixOS and in Nix build sandboxes, so some processes kept running.
+
 ## v0.36.0 - 2026-11-15
 
 This release gives you a faults filter for Events, built-in Karpenter views, and a suspend action for shell job control. It also fixes template lists on OpenShift.
