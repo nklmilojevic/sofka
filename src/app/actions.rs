@@ -1401,9 +1401,12 @@ impl App {
             .map(|item| {
                 let ports = item.split_whitespace().next().unwrap_or(item);
                 let local = ports.split_once(':').map_or(ports, |(local, _)| local);
-                local
-                    .parse::<u16>()
-                    .is_ok_and(|port| matches!(probe_local_port(port), LocalPort::InUse))
+                local.parse::<u16>().is_ok_and(|port| {
+                    matches!(
+                        probe_local_port(&*self.pf_port_binder, port),
+                        LocalPort::InUse
+                    )
+                })
             })
             .collect();
         items.push("Custom…".into());
@@ -1464,7 +1467,7 @@ impl App {
         if port == 0 {
             return true;
         }
-        match probe_local_port(port) {
+        match probe_local_port(&*self.pf_port_binder, port) {
             LocalPort::Available => true,
             LocalPort::InUse => {
                 self.flash_warn(&format!("port {port} is already in use"));
@@ -3207,15 +3210,18 @@ enum LocalPort {
 
 /// Test-bind `port` on both loopback addresses, as `kubectl port-forward`
 /// does: the port is usable when either address binds.
-fn probe_local_port(port: u16) -> LocalPort {
+fn probe_local_port(
+    bind: &dyn Fn(std::net::IpAddr, u16) -> std::io::Result<()>,
+    port: u16,
+) -> LocalPort {
     let mut in_use = false;
     let mut last_error = None;
     for address in [
         std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
         std::net::IpAddr::V6(std::net::Ipv6Addr::LOCALHOST),
     ] {
-        match std::net::TcpListener::bind((address, port)) {
-            Ok(_listener) => return LocalPort::Available,
+        match bind(address, port) {
+            Ok(()) => return LocalPort::Available,
             Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => in_use = true,
             Err(error) => last_error = Some(error),
         }

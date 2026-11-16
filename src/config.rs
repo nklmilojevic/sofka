@@ -410,7 +410,7 @@ pub const JSON_VIEWS: &[&str] = &["raw", "record", "pretty"];
 /// Formats a sample time, so a directive jiff does not support is reported
 /// at load instead of on every record.
 pub fn check_record_time_format(format: &str) -> Result<(), jiff::Error> {
-    let sample = jiff::Timestamp::UNIX_EPOCH.to_zoned(jiff::tz::TimeZone::UTC);
+    let sample = jiff::Timestamp::UNIX_EPOCH.to_zoned_datetime(jiff::tz::TimeZone::UTC);
     jiff::fmt::strtime::format(format, &sample).map(drop)
 }
 

@@ -134,6 +134,7 @@ fn test_app() -> (App, Receiver<Msg>) {
             .stderr(std::process::Stdio::null())
             .spawn()
     };
+    app.pf_port_binder = std::sync::Arc::new(|_, _| Ok(()));
     app.update_fetcher = |_force| Box::pin(async { Err("no network in tests".to_string()) });
     app.helm_runner = std::sync::Arc::new(|_argv| Box::pin(async { Ok(()) }));
     (app, rx)
@@ -2379,9 +2380,7 @@ async fn port_forward_handle_key_f_opens_picker() {
 
 #[tokio::test]
 async fn port_forward_picker_select_port_starts_forward() {
-    let listener = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
-    let port = listener.local_addr().unwrap().port();
-    drop(listener);
+    let port = 8080;
     let (mut app, _rx) = test_app();
     app.switch_kind("services");
     apply(
@@ -2402,29 +2401,50 @@ async fn port_forward_picker_select_port_starts_forward() {
     assert_eq!(app.port_forwards[0].target, "svc/web");
 }
 
-fn occupy_forward_port() -> (std::net::TcpListener, Option<std::net::TcpListener>) {
-    let ipv4 = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
-    let port = ipv4.local_addr().unwrap().port();
-    let ipv6 = match std::net::TcpListener::bind((std::net::Ipv6Addr::LOCALHOST, port)) {
-        Ok(listener) => Some(listener),
-        Err(error)
-            if matches!(
-                error.kind(),
-                std::io::ErrorKind::AddrNotAvailable | std::io::ErrorKind::Unsupported
-            ) =>
-        {
-            None
+type BusyPorts =
+    std::sync::Arc<std::sync::Mutex<std::collections::HashSet<(std::net::IpAddr, u16)>>>;
+
+const LOOPBACKS: [std::net::IpAddr; 2] = [
+    std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+    std::net::IpAddr::V6(std::net::Ipv6Addr::LOCALHOST),
+];
+
+/// Stubs the port-forward preflight with local addresses the test marks as
+/// taken. Real sockets would make these tests flaky: a released port stays
+/// bound while a child spawned by a sibling test still holds its copy.
+fn stub_busy_ports(app: &mut App) -> BusyPorts {
+    let busy = BusyPorts::default();
+    let taken = busy.clone();
+    app.pf_port_binder = std::sync::Arc::new(move |address, port| {
+        if taken.lock().unwrap().contains(&(address, port)) {
+            Err(std::io::ErrorKind::AddrInUse.into())
+        } else {
+            Ok(())
         }
-        Err(error) => panic!("IPv6 listener failed: {error}"),
-    };
-    (ipv4, ipv6)
+    });
+    busy
+}
+
+fn occupy_port(busy: &BusyPorts, port: u16) {
+    busy.lock()
+        .unwrap()
+        .extend(LOOPBACKS.map(|address| (address, port)));
+}
+
+#[test]
+fn default_port_binder_reports_a_held_port_in_use() {
+    let listener = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let error = super::default_port_binder(LOOPBACKS[0], port).unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::AddrInUse);
 }
 
 #[tokio::test]
 async fn port_forward_picker_keeps_selection_when_local_port_is_in_use() {
-    let listeners = occupy_forward_port();
-    let port = listeners.0.local_addr().unwrap().port();
+    let port = 8080;
     let (mut app, _rx) = test_app();
+    let busy = stub_busy_ports(&mut app);
+    occupy_port(&busy, port);
     app.switch_kind("services");
     apply(
         &mut app,
@@ -2444,7 +2464,7 @@ async fn port_forward_picker_keeps_selection_when_local_port_is_in_use() {
     assert!(app.flash_err);
     assert!(app.port_forwards.is_empty());
 
-    drop(listeners);
+    busy.lock().unwrap().clear();
     app.handle_key(press(KeyCode::Enter)).unwrap();
     assert_eq!(app.mode, Mode::Table);
     assert_eq!(app.port_forwards.len(), 1);
@@ -2453,9 +2473,9 @@ async fn port_forward_picker_keeps_selection_when_local_port_is_in_use() {
 
 #[tokio::test]
 async fn port_forward_conflict_can_be_fixed_by_editing_only_the_local_port() {
-    let listeners = occupy_forward_port();
-    let remote = listeners.0.local_addr().unwrap().port();
+    let remote = 8080;
     let (mut app, _rx) = test_app();
+    occupy_port(&stub_busy_ports(&mut app), remote);
     app.switch_kind("services");
     apply(
         &mut app,
@@ -2481,9 +2501,7 @@ async fn port_forward_conflict_can_be_fixed_by_editing_only_the_local_port() {
     assert_eq!(app.flash, format!("port {remote} is already in use"));
     assert!(app.port_forwards.is_empty());
 
-    let free = occupy_forward_port();
-    let local = free.0.local_addr().unwrap().port();
-    drop(free);
+    let local = 18080;
     for _ in 0..app.prompt_input.len() {
         app.handle_key(press(KeyCode::Backspace)).unwrap();
     }
@@ -2521,9 +2539,7 @@ async fn port_forward_local_edit_preserves_input_after_spawn_failure() {
     app.handle_key(press(KeyCode::Char('f'))).unwrap();
     app.handle_key(press(KeyCode::Down)).unwrap();
     app.handle_key(press(KeyCode::Char('e'))).unwrap();
-    let free = occupy_forward_port();
-    let local = free.0.local_addr().unwrap().port().to_string();
-    drop(free);
+    let local = "19090".to_string();
     for _ in 0..app.prompt_input.len() {
         app.handle_key(press(KeyCode::Backspace)).unwrap();
     }
@@ -2630,12 +2646,10 @@ fn type_prompt(app: &mut App, input: &str) {
 
 #[tokio::test]
 async fn port_forward_custom_asks_remote_then_prefilled_local_port() {
-    let listeners = occupy_forward_port();
-    let busy = listeners.0.local_addr().unwrap().port();
-    let free = occupy_forward_port();
-    let local = free.0.local_addr().unwrap().port();
-    drop(free);
+    let busy = 8080;
+    let local = 18080;
     let (mut app, _rx) = test_app();
+    occupy_port(&stub_busy_ports(&mut app), busy);
     app.switch_kind("services");
     apply(
         &mut app,
@@ -2697,9 +2711,7 @@ async fn port_forward_custom_asks_remote_then_prefilled_local_port() {
 
 #[tokio::test]
 async fn port_forward_custom_named_remote_port_leaves_local_empty() {
-    let free = occupy_forward_port();
-    let local = free.0.local_addr().unwrap().port();
-    drop(free);
+    let local = 18080;
     let (mut app, _rx) = test_app();
     app.switch_kind("pods");
     apply(
@@ -2766,12 +2778,10 @@ async fn port_forward_custom_prompts_return_to_picker_on_esc() {
 
 #[tokio::test]
 async fn port_forward_picker_marks_local_ports_already_in_use() {
-    let listeners = occupy_forward_port();
-    let busy = listeners.0.local_addr().unwrap().port();
-    let free = occupy_forward_port();
-    let open = free.0.local_addr().unwrap().port();
-    drop(free);
+    let busy = 8080;
+    let open = 9090;
     let (mut app, _rx) = test_app();
+    occupy_port(&stub_busy_ports(&mut app), busy);
     app.switch_kind("pods");
     apply(
         &mut app,
@@ -2821,20 +2831,13 @@ async fn port_forward_picker_marks_local_ports_already_in_use() {
 
 #[tokio::test]
 async fn port_forward_picker_allows_one_available_loopback_family() {
-    for occupy_ipv4 in [true, false] {
-        let (ipv4, ipv6) = occupy_forward_port();
-        let Some(ipv6) = ipv6 else {
-            return;
-        };
-        let port = ipv4.local_addr().unwrap().port();
-        let _occupied = if occupy_ipv4 {
-            drop(ipv6);
-            ipv4
-        } else {
-            drop(ipv4);
-            ipv6
-        };
+    let port = 8080;
+    for occupied in LOOPBACKS {
         let (mut app, _rx) = test_app();
+        stub_busy_ports(&mut app)
+            .lock()
+            .unwrap()
+            .insert((occupied, port));
         app.switch_kind("pods");
         apply(
             &mut app,
@@ -2856,9 +2859,7 @@ async fn port_forward_picker_allows_one_available_loopback_family() {
 
 #[tokio::test]
 async fn port_forward_picker_pod_target_no_svc_prefix() {
-    let listener = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
-    let port = listener.local_addr().unwrap().port();
-    drop(listener);
+    let port = 8080;
     let (mut app, _rx) = test_app();
     app.switch_kind("pods");
     apply(
@@ -3131,9 +3132,7 @@ async fn port_forward_marker_renders_in_table() {
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
 
-    let listener = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
-    let port = listener.local_addr().unwrap().port();
-    drop(listener);
+    let port = 8080;
     let (mut app, _rx) = test_app();
     app.switch_kind("services");
     apply(
@@ -42906,7 +42905,7 @@ async fn log_record_time_format_follows_config_and_reload() {
     let local = "2026-10-08T15:00:20.444Z"
         .parse::<jiff::Timestamp>()
         .unwrap()
-        .to_zoned(jiff::tz::TimeZone::system())
+        .to_zoned_datetime(jiff::tz::TimeZone::system())
         .strftime("%H:%M:%S")
         .to_string();
     assert_eq!(app.logs.display_line(0), format!("{local} INFO  ready"));
