@@ -24106,7 +24106,7 @@ async fn network_load_plugins_confirm_and_obey_readonly_and_guardrails() {
 #[tokio::test]
 async fn context_plugin_runs_without_selection_and_receives_request() {
     let (mut app, mut rx) = test_app();
-    let mut plugin = named_plugin("/bin/cat", &[]);
+    let mut plugin = named_plugin("cat", &[]);
     plugin.target = Some("context".into());
     plugin.output = Some("popup".into());
     plugin.package_dir = Some(std::env::temp_dir());
@@ -24125,7 +24125,7 @@ async fn context_plugin_runs_without_selection_and_receives_request() {
 async fn package_report_renders_tables_and_remains_searchable() {
     let (mut app, mut rx) = app_with_pod();
     let report = r#"{"schema_version":1,"title":"Scan","sections":[{"title":"Findings","columns":["Resource","Severity"],"rows":[["api","high"],["certificate","low"]]}]}"#;
-    let mut plugin = named_plugin("/bin/echo", &[report]);
+    let mut plugin = named_plugin("echo", &[report]);
     plugin.output = Some("report".into());
     app.plugins = vec![plugin];
     plugin_command(&mut app, "example-plugin");
@@ -24170,7 +24170,7 @@ async fn package_report_renders_tables_and_remains_searchable() {
 #[tokio::test]
 async fn invalid_report_is_a_visible_failure() {
     let (mut app, mut rx) = app_with_pod();
-    let mut plugin = named_plugin("/bin/echo", &[r#"{"schema_version":8,"title":"Future"}"#]);
+    let mut plugin = named_plugin("echo", &[r#"{"schema_version":8,"title":"Future"}"#]);
     plugin.output = Some("report".into());
     app.plugins = vec![plugin];
     plugin_command(&mut app, "example-plugin");
@@ -24187,7 +24187,7 @@ async fn invalid_report_is_a_visible_failure() {
 #[tokio::test]
 async fn cancelling_and_replacing_plugins_rejects_stale_results() {
     let (mut app, _rx) = app_with_pod();
-    let mut plugin = named_plugin("/bin/sleep", &["20"]);
+    let mut plugin = named_plugin("sleep", &["20"]);
     plugin.output = Some("popup".into());
     app.plugins = vec![plugin];
     plugin_command(&mut app, "example-plugin");
@@ -24219,7 +24219,7 @@ async fn cancelling_and_replacing_plugins_rejects_stale_results() {
 #[tokio::test]
 async fn context_switch_and_quit_cancel_plugin_tasks() {
     let (mut app, _rx) = app_with_pod();
-    let mut plugin = named_plugin("/bin/sleep", &["20"]);
+    let mut plugin = named_plugin("sleep", &["20"]);
     plugin.output = Some("popup".into());
     app.plugins = vec![plugin];
     plugin_command(&mut app, "example-plugin");
@@ -24245,7 +24245,7 @@ schema_version = 2
 [[commands]]
 name = "Read status"
 palette = "example-status"
-command = "/bin/cat"
+command = "cat"
 scopes = ["pods"]
 output = "popup"
 mutating = false
@@ -24255,7 +24255,7 @@ default = "false"
 [[commands]]
 name = "Renew"
 palette = "example-renew"
-command = "/bin/cat"
+command = "cat"
 scopes = ["services"]
 output = "popup"
 mutating = true
@@ -24368,7 +24368,7 @@ async fn plugin_package_reload_loads_valid_packages_and_isolates_invalid_ones() 
         [plugin]
         name = "Example"
         palette = "example-plugin"
-        command = "/bin/cat"
+        command = "cat"
         output = "popup"
         target = "context"
         mutating = false
@@ -24407,7 +24407,7 @@ async fn reload_loads_a_managed_install_and_keeps_the_first_of_two_palette_comma
         [plugin]
         name = "Resource summary"
         palette = "resource-summary"
-        command = "/bin/cat"
+        command = "cat"
         output = "popup"
         target = "context"
         mutating = false
@@ -24497,7 +24497,7 @@ async fn reload_keeps_a_package_published_for_a_target_this_build_does_not_know(
         [plugin]
         name = "Resource summary"
         palette = "resource-summary"
-        command = "/bin/cat"
+        command = "cat"
         output = "popup"
         target = "context"
         mutating = false
@@ -24540,7 +24540,7 @@ async fn reload_keeps_a_package_published_for_a_target_this_build_does_not_know(
 #[tokio::test]
 async fn plugin_forward_uses_selected_target_and_requires_valid_port_before_launch() {
     let (mut app, _rx) = app_with_pod();
-    let mut plugin = named_plugin("/bin/cat", &[]);
+    let mut plugin = named_plugin("cat", &[]);
     plugin.output = Some("report".into());
     plugin.package_dir = Some(std::env::temp_dir());
     plugin.port_forward = Some("8080".into());
@@ -24592,7 +24592,7 @@ async fn context_plugin_cannot_bypass_namespace_guardrails_in_all_namespaces_mod
 #[tokio::test]
 async fn package_request_uses_the_selected_snapshot_and_limits_large_objects() {
     let (mut app, mut rx) = app_with_pod();
-    let mut plugin = named_plugin("/bin/cat", &[]);
+    let mut plugin = named_plugin("cat", &[]);
     plugin.package_dir = Some(std::env::temp_dir());
     plugin.output = Some("popup".into());
     app.plugins = vec![plugin];
@@ -24628,7 +24628,7 @@ async fn package_request_uses_the_selected_snapshot_and_limits_large_objects() {
 #[tokio::test]
 async fn plugin_timeout_is_visible_through_the_command_path() {
     let (mut app, mut rx) = app_with_pod();
-    let mut plugin = named_plugin("/bin/sleep", &["30"]);
+    let mut plugin = named_plugin("sleep", &["30"]);
     plugin.output = Some("popup".into());
     plugin.timeout = Some("1s".into());
     app.plugins = vec![plugin];
@@ -40210,7 +40210,7 @@ async fn document_fullscreen_survives_plugin_and_yaml_replacement() {
     app.handle_key(press(KeyCode::Char('F'))).unwrap();
     app.handle_key(press(KeyCode::Char('q'))).unwrap();
     assert_eq!(app.mode, Mode::Table);
-    let mut plugin = named_plugin("/bin/echo", &["plugin output"]);
+    let mut plugin = named_plugin("echo", &["plugin output"]);
     plugin.output = Some("popup".into());
     app.plugins = vec![plugin];
     plugin_command(&mut app, "example-plugin");
@@ -41373,7 +41373,7 @@ async fn plugin_activity_opens_immediately_and_hides_reopens_and_scrolls_without
 async fn plugin_activity_hidden_completion_preserves_palette_and_reopens_report() {
     let (mut app, mut rx) = app_with_pod();
     let mut plugin = named_plugin(
-        "/bin/echo",
+        "echo",
         &[r#"{"schema_version":1,"title":"Finished","sections":[]}"#],
     );
     plugin.output = Some("report".into());
@@ -41489,7 +41489,7 @@ async fn plugin_activity_ctrl_c_kills_descendants_and_rejects_stale_completion_a
     assert!(app.detail.lines.is_empty());
     assert!(app.plugin_activity_visible());
     app.handle_key(press(KeyCode::Esc)).unwrap();
-    app.plugins[0].command = "/bin/sleep".into();
+    app.plugins[0].command = "sleep".into();
     app.plugins[0].args = vec!["20".into()];
     plugin_command(&mut app, "example-plugin");
     assert!(
@@ -41632,7 +41632,7 @@ async fn plugin_activity_toggle_preserves_running_job_and_typed_input_and_can_be
             KeyCode::Char(if binding.ends_with('t') { 't' } else { 'y' }),
             KeyModifiers::CONTROL | KeyModifiers::ALT,
         );
-        let mut plugin = named_plugin("/bin/sleep", &["20"]);
+        let mut plugin = named_plugin("sleep", &["20"]);
         plugin.output = Some("popup".into());
         app.plugins = vec![plugin];
         plugin_command(&mut app, "example-plugin");
@@ -41670,7 +41670,7 @@ async fn plugin_activity_toggle_restores_completed_diagnostics_and_enter_opens_r
     );
     app.handle_key(toggle).unwrap();
     assert!(app.flash.contains("no plugin activity"));
-    let mut plugin = named_plugin("/bin/echo", &["done"]);
+    let mut plugin = named_plugin("echo", &["done"]);
     plugin.output = Some("popup".into());
     app.plugins = vec![plugin];
     plugin_command(&mut app, "example-plugin");
@@ -41696,7 +41696,7 @@ async fn plugin_activity_colon_preserves_an_existing_palette_and_its_return_view
         KeyCode::Char('t'),
         KeyModifiers::CONTROL | KeyModifiers::ALT,
     );
-    let mut plugin = named_plugin("/bin/sleep", &["20"]);
+    let mut plugin = named_plugin("sleep", &["20"]);
     plugin.output = Some("popup".into());
     app.plugins = vec![plugin];
     plugin_command(&mut app, "example-plugin");
@@ -41725,7 +41725,7 @@ async fn plugin_activity_ctrl_c_preserves_completed_outcome_and_duration() {
         KeyCode::Char('t'),
         KeyModifiers::CONTROL | KeyModifiers::ALT,
     );
-    let mut plugin = named_plugin("/bin/echo", &["done"]);
+    let mut plugin = named_plugin("echo", &["done"]);
     plugin.output = Some("popup".into());
     app.plugins = vec![plugin];
     plugin_command(&mut app, "example-plugin");
@@ -43704,7 +43704,7 @@ async fn context_namespace_policy_preserves_bookmarks_workspaces_and_launch_scop
 
 fn kubeconfig_reload_plugin() -> crate::config::Plugin {
     let mut plugin = named_plugin(
-        "/bin/echo",
+        "echo",
         &[r#"{"schema_version":1,"title":"Cluster ready","action":"reload-kubeconfig"}"#],
     );
     plugin.target = Some("context".into());

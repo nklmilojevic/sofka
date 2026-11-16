@@ -1204,7 +1204,7 @@ mod tests {
         "[plugin]\n",
         "name = \"Resource summary\"\n",
         "palette = \"resource-summary\"\n",
-        "command = \"/bin/echo\"\n",
+        "command = \"echo\"\n",
         "output = \"report\"\n",
         // Declared, not omitted: the catalog entry says false, and an omitted
         // `mutating` means true, which is exactly the divergence `reconcile`
@@ -1244,7 +1244,7 @@ mod tests {
                     "license": "MIT",
                     "readme": "https://example.invalid/readme",
                     "requirements": [],
-                    "command": "/bin/echo",
+                    "command": "echo",
                     "target": "selection",
                     "output": "report",
                     "mutating": false,
@@ -1347,7 +1347,7 @@ mod tests {
 [[commands]]
 name = "Renew"
 palette = "cert-manager-renew"
-command = "/bin/echo"
+command = "echo"
 args = ["renew"]
 scopes = ["certificates"]
 output = "report"
@@ -1721,7 +1721,7 @@ confirm = true
             &cache,
             "resource-summary",
             "1.0.0",
-            "schema_version = 1\n[plugin]\nname = \"X\"\ncommand = \"/bin/echo\"\nshell = true\n",
+            "schema_version = 1\n[plugin]\nname = \"X\"\ncommand = \"echo\"\nshell = true\n",
         );
         let error = prepare_below(
             &config,
@@ -2740,7 +2740,7 @@ confirm = true
             "[plugin]\n",
             "name = \"Resource summary\"\n",
             "palette = \"resource-summary\"\n",
-            "command = \"/bin/echo\"\n",
+            "command = \"echo\"\n",
             "output = \"report\"\n",
         );
         std::fs::write(manual.join("plugin.toml"), manifest).unwrap();
@@ -2912,7 +2912,7 @@ confirm = true
             "[plugin]\n",
             "name = \"Resource summary\"\n",
             "palette = \"resource-summary\"\n",
-            "command = \"/bin/echo\"\n",
+            "command = \"echo\"\n",
             "output = \"report\"\n",
             "mutating = false\n",
         );

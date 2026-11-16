@@ -4,6 +4,21 @@ use std::os::unix::fs::PermissionsExt;
 const CHILD: &str = "SOFKA_CLIPBOARD_TEST_CHILD";
 const TEXT: &str = "a\né Ж 中 😀\n'\" $() `command` \\";
 
+const CAT: &str = "SOFKA_CLIPBOARD_TEST_CAT";
+
+/// The fake tools run with a `PATH` that holds only themselves, and `cat` is
+/// not under `/bin` everywhere (NixOS, Nix build sandboxes), so they get the
+/// parent's `cat` through [`CAT`].
+fn cat() -> std::path::PathBuf {
+    std::env::split_paths(&std::env::var_os("PATH").unwrap())
+        .map(|dir| dir.join("cat"))
+        .find(|path| {
+            path.metadata()
+                .is_ok_and(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
+        })
+        .expect("executable cat on PATH")
+}
+
 #[tokio::test]
 async fn copy_key_selects_clipboard_tools_and_preserves_text() {
     if std::env::var_os(CHILD).is_some() {
@@ -88,7 +103,7 @@ async fn copy_key_selects_clipboard_tools_and_preserves_text() {
                 continue;
             }
             let script = format!(
-                "#!/bin/sh\nprintf '%s\\n' '{tool}' >> \"$SOFKA_CLIPBOARD_TEST_DIR/order\"\nprintf '%s\\n' \"$@\" > \"$SOFKA_CLIPBOARD_TEST_DIR/{tool}.args\"\n/bin/cat > \"$SOFKA_CLIPBOARD_TEST_DIR/{tool}.input\"\nexit {}\n",
+                "#!/bin/sh\nprintf '%s\\n' '{tool}' >> \"$SOFKA_CLIPBOARD_TEST_DIR/order\"\nprintf '%s\\n' \"$@\" > \"$SOFKA_CLIPBOARD_TEST_DIR/{tool}.args\"\n\"$SOFKA_CLIPBOARD_TEST_CAT\" > \"$SOFKA_CLIPBOARD_TEST_DIR/{tool}.input\"\nexit {}\n",
                 if tool == succeeds { 0 } else { 1 }
             );
             let executable = path.join(tool);
@@ -105,6 +120,7 @@ async fn copy_key_selects_clipboard_tools_and_preserves_text() {
             .env(CHILD, "1")
             .env("PATH", &path)
             .env("SOFKA_CLIPBOARD_TEST_DIR", &path)
+            .env(CAT, cat())
             .env_remove("WSL_INTEROP")
             .env_remove("WSL_DISTRO_NAME")
             .kill_on_drop(true);
@@ -173,7 +189,7 @@ async fn run_with_recording_pbcopy(name: &str) {
     let pbcopy = directory.join("pbcopy");
     std::fs::write(
         &pbcopy,
-        "#!/bin/sh\n/bin/cat > \"$SOFKA_CLIPBOARD_TEST_DIR/pbcopy.input\"\n",
+        "#!/bin/sh\n\"$SOFKA_CLIPBOARD_TEST_CAT\" > \"$SOFKA_CLIPBOARD_TEST_DIR/pbcopy.input\"\n",
     )
     .unwrap();
     std::fs::set_permissions(&pbcopy, std::fs::Permissions::from_mode(0o700)).unwrap();
@@ -182,6 +198,7 @@ async fn run_with_recording_pbcopy(name: &str) {
         .env(SELECTION_CHILD, "1")
         .env("PATH", &directory)
         .env("SOFKA_CLIPBOARD_TEST_DIR", &directory)
+        .env(CAT, cat())
         .env_remove("WSL_INTEROP")
         .env_remove("WSL_DISTRO_NAME")
         .kill_on_drop(true)
