@@ -95,6 +95,7 @@ jobs:
           version: v2.1.1 # renovate: depName=kunobi-ninja/kache
           cache-key-prefix: ci-platforms-${{ steps.toolchain.outputs.cachekey }}
           cache-dir: ${{ runner.temp }}/kache
+          cache-executables: ${{ runner.os == 'Windows' }}
           save-cache: true
           pr-comment: false
 
