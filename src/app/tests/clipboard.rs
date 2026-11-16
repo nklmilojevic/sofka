@@ -4,6 +4,17 @@ use std::os::unix::fs::PermissionsExt;
 const CHILD: &str = "SOFKA_CLIPBOARD_TEST_CHILD";
 const TEXT: &str = "a\né Ж 中 😀\n'\" $() `command` \\";
 
+/// The fake tools run with a `PATH` that holds only themselves, and `cat` is
+/// not under `/bin` everywhere (NixOS, Nix build sandboxes).
+fn cat() -> String {
+    std::env::split_paths(&std::env::var_os("PATH").unwrap())
+        .map(|dir| dir.join("cat"))
+        .find(|path| path.is_file())
+        .expect("cat on PATH")
+        .to_string_lossy()
+        .into_owned()
+}
+
 #[tokio::test]
 async fn copy_key_selects_clipboard_tools_and_preserves_text() {
     if std::env::var_os(CHILD).is_some() {
@@ -88,8 +99,9 @@ async fn copy_key_selects_clipboard_tools_and_preserves_text() {
                 continue;
             }
             let script = format!(
-                "#!/bin/sh\nprintf '%s\\n' '{tool}' >> \"$SOFKA_CLIPBOARD_TEST_DIR/order\"\nprintf '%s\\n' \"$@\" > \"$SOFKA_CLIPBOARD_TEST_DIR/{tool}.args\"\n/bin/cat > \"$SOFKA_CLIPBOARD_TEST_DIR/{tool}.input\"\nexit {}\n",
-                if tool == succeeds { 0 } else { 1 }
+                "#!/bin/sh\nprintf '%s\\n' '{tool}' >> \"$SOFKA_CLIPBOARD_TEST_DIR/order\"\nprintf '%s\\n' \"$@\" > \"$SOFKA_CLIPBOARD_TEST_DIR/{tool}.args\"\n'{cat}' > \"$SOFKA_CLIPBOARD_TEST_DIR/{tool}.input\"\nexit {}\n",
+                if tool == succeeds { 0 } else { 1 },
+                cat = cat()
             );
             let executable = path.join(tool);
             std::fs::write(&executable, script).unwrap();
@@ -173,7 +185,10 @@ async fn run_with_recording_pbcopy(name: &str) {
     let pbcopy = directory.join("pbcopy");
     std::fs::write(
         &pbcopy,
-        "#!/bin/sh\n/bin/cat > \"$SOFKA_CLIPBOARD_TEST_DIR/pbcopy.input\"\n",
+        format!(
+            "#!/bin/sh\n'{}' > \"$SOFKA_CLIPBOARD_TEST_DIR/pbcopy.input\"\n",
+            cat()
+        ),
     )
     .unwrap();
     std::fs::set_permissions(&pbcopy, std::fs::Permissions::from_mode(0o700)).unwrap();

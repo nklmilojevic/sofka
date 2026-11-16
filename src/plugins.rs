@@ -828,12 +828,12 @@ impl Drop for Process {
     fn drop(&mut self) {
         // Adapters may launch scanners; cancel the whole private process group.
         #[cfg(unix)]
-        if self.group > 0 {
-            let _ = std::process::Command::new("/bin/kill")
-                .args(["-KILL", "--", &format!("-{}", self.group)])
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status();
+        if let Ok(group) = libc::pid_t::try_from(self.group)
+            && group > 0
+        {
+            // SAFETY: kill has no memory preconditions. A negative pid names
+            // the process group this adapter leads.
+            unsafe { libc::kill(-group, libc::SIGKILL) };
         }
         let _ = self.child.start_kill();
     }
@@ -1093,7 +1093,7 @@ mod tests {
 name = "Renew"
 palette = "cert-manager-renew"
 key = "ctrl-r"
-command = "/bin/echo"
+command = "echo"
 args = ["renew"]
 scopes = ["certificates"]
 output = "report"
@@ -1281,7 +1281,7 @@ default = "false"
     #[test]
     fn a_manifest_without_a_package_table_stays_valid() {
         let (plugin, package) = read_manifest(
-            "schema_version = 1\n[plugin]\nname = \"Local\"\npalette = \"local\"\ncommand = \"/bin/echo\"\noutput = \"popup\"\n",
+            "schema_version = 1\n[plugin]\nname = \"Local\"\npalette = \"local\"\ncommand = \"echo\"\noutput = \"popup\"\n",
         )
         .unwrap();
         assert_eq!(plugin[0].name, "Local");
@@ -1380,7 +1380,7 @@ default = "false"
             "[plugin]\n",
             "name = \"Scan\"\n",
             "palette = \"scan\"\n",
-            "command = \"/bin/echo\"\n",
+            "command = \"echo\"\n",
             "output = \"popup\"\n",
         );
         let package = read_manifest(minimal).unwrap().1.unwrap();
@@ -1393,7 +1393,7 @@ default = "false"
 
     #[test]
     fn manifests_reject_unknown_versions_fields_commands_and_invalid_inputs() {
-        let valid = "schema_version = 1\n[plugin]\nname = 'Demo'\npalette = 'demo'\ncommand = '/bin/cat'\noutput = 'report'\n";
+        let valid = "schema_version = 1\n[plugin]\nname = 'Demo'\npalette = 'demo'\ncommand = 'cat'\noutput = 'report'\n";
         assert!(package(valid).is_ok());
         assert!(
             package(&valid.replace("schema_version = 1", "schema_version = 3"))
@@ -1612,7 +1612,7 @@ default = "false"
 
     #[tokio::test]
     async fn managed_forward_waits_for_readiness_and_supplies_local_port() {
-        let mut command = job("/bin/cat", &[]);
+        let mut command = job("cat", &[]);
         command.request = Some(serde_json::json!({"schema_version":1}));
         command.forward = Some(Forward {
             argv: vec![
@@ -1639,7 +1639,7 @@ default = "false"
 
     #[tokio::test]
     async fn existing_forward_does_not_spawn_another_process() {
-        let mut command = job("/bin/cat", &[]);
+        let mut command = job("cat", &[]);
         command.request = Some(serde_json::json!({}));
         command.forward = Some(Forward {
             argv: vec!["does-not-exist".into()],
