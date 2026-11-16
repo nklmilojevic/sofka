@@ -115,9 +115,14 @@ def capture_build(config, target, stage, environment):
         run(build["tool"], build["command"], "--target=" + target,
             *build["flags"], "--message-format=json-render-diagnostics",
             cwd=ROOT, env=environment, stdout=stream)
+    # Proc macros and build scripts compile for the host, so their
+    # platform-specific dependencies resolve against the host triple.
+    host = run("rustc", "--print", "host-tuple", env=environment,
+               capture_output=True, text=True).stdout.strip()
     metadata = json.loads(run(
         build["tool"], "metadata", "--locked", "--format-version=1",
-        "--filter-platform", target, cwd=ROOT, env=environment,
+        "--filter-platform", target, "--filter-platform", host,
+        cwd=ROOT, env=environment,
         capture_output=True, text=True, encoding="utf-8",
     ).stdout)
     binary = ROOT / "target" / target / "release" / (
