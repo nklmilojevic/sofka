@@ -54,7 +54,7 @@ jobs:
           version: v2.1.1 # renovate: depName=kunobi-ninja/kache
           cache-key-prefix: ci-rust-${{ steps.toolchain.outputs.cachekey }}
           cache-dir: ${{ runner.temp }}/kache
-          save-cache: ${{ github.event_name == 'push' }}
+          save-cache: true
           pr-comment: false
 
       - name: Format check
@@ -95,7 +95,7 @@ jobs:
           version: v2.1.1 # renovate: depName=kunobi-ninja/kache
           cache-key-prefix: ci-platforms-${{ steps.toolchain.outputs.cachekey }}
           cache-dir: ${{ runner.temp }}/kache
-          save-cache: ${{ github.event_name == 'push' }}
+          save-cache: true
           pr-comment: false
 
       - name: Build and test
@@ -121,7 +121,7 @@ jobs:
           version: v2.1.1 # renovate: depName=kunobi-ninja/kache
           cache-key-prefix: ci-coverage-${{ steps.toolchain.outputs.cachekey }}
           cache-dir: ${{ runner.temp }}/kache
-          save-cache: ${{ github.event_name == 'push' }}
+          save-cache: true
           pr-comment: false
 
       - name: Install coverage tool
