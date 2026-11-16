@@ -1,17 +1,23 @@
 name: CI
 
-# PRs only. Pushes to main run only nix-cache.yaml. Home Manager tests run here.
+# Home Manager tests run on PRs only. The Rust jobs also run on pushes to main:
+# a GitHub cache saved on a PR ref is visible only to that PR, so main is the
+# only place a kache store can be saved for every PR to restore. PR runs restore
+# without saving, which keeps them from filling the repository's cache quota.
 # The platforms job compiles all targets on Windows and runs the tests on macOS.
 # The release workflow builds Nix packages for all four platforms and updates
 # the Cachix cache. Package build failures can still first appear at release.
 on:
   pull_request:
+  push:
+    branches: [main]
 
 permissions:
   contents: read
 
 jobs:
   home-manager:
+    if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -37,12 +43,19 @@ jobs:
           persist-credentials: false
 
       - name: Install Rust
+        id: toolchain
         uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
         with:
           components: clippy, rustfmt
 
-      - name: Cache cargo registry/build
-        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - name: Cache Rust compilation
+        uses: kunobi-ninja/kache-action@ad7317540dcdd71c904f7a60a87b620a0c0e67ed # v1
+        with:
+          version: v2.1.1 # renovate: depName=kunobi-ninja/kache
+          cache-key-prefix: ci-rust-${{ steps.toolchain.outputs.cachekey }}
+          cache-dir: ${{ runner.temp }}/kache
+          save-cache: ${{ github.event_name == 'push' }}
+          pr-comment: false
 
       - name: Format check
         run: cargo fmt --all -- --check
@@ -73,10 +86,17 @@ jobs:
           persist-credentials: false
 
       - name: Install Rust
+        id: toolchain
         uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
 
-      - name: Cache cargo registry/build
-        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - name: Cache Rust compilation
+        uses: kunobi-ninja/kache-action@ad7317540dcdd71c904f7a60a87b620a0c0e67ed # v1
+        with:
+          version: v2.1.1 # renovate: depName=kunobi-ninja/kache
+          cache-key-prefix: ci-platforms-${{ steps.toolchain.outputs.cachekey }}
+          cache-dir: ${{ runner.temp }}/kache
+          save-cache: ${{ github.event_name == 'push' }}
+          pr-comment: false
 
       - name: Build and test
         run: ${{ matrix.run }}
@@ -90,15 +110,19 @@ jobs:
           persist-credentials: false
 
       - name: Install Rust
+        id: toolchain
         uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
         with:
           components: llvm-tools-preview
 
-      - name: Cache coverage build
-        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - name: Cache Rust compilation
+        uses: kunobi-ninja/kache-action@ad7317540dcdd71c904f7a60a87b620a0c0e67ed # v1
         with:
-          key: coverage
-          workspaces: . -> target/llvm-cov-target
+          version: v2.1.1 # renovate: depName=kunobi-ninja/kache
+          cache-key-prefix: ci-coverage-${{ steps.toolchain.outputs.cachekey }}
+          cache-dir: ${{ runner.temp }}/kache
+          save-cache: ${{ github.event_name == 'push' }}
+          pr-comment: false
 
       - name: Install coverage tool
         uses: taiki-e/install-action@ab49d3c64680143e184118bed66a46419fc15519 # v2.90.5
