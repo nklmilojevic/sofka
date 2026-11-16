@@ -74,6 +74,8 @@ class ReleasePackagesTest(unittest.TestCase):
                 config = release.configure(target, stage, stage / "dist")
                 build = config["builds"][0]
                 def fake_run(*args, **kwargs):
+                    if args[0] == "rustc":
+                        return subprocess.CompletedProcess(args, 0, stdout="host-triple\n")
                     if args[1] == "metadata":
                         return subprocess.CompletedProcess(args, 0, stdout='{"packages": []}')
                     kwargs["stdout"].write('{"reason":"build-finished","success":true}\n')
@@ -84,9 +86,11 @@ class ReleasePackagesTest(unittest.TestCase):
                                                *build["flags"], "--message-format=json-render-diagnostics"))
                 self.assertEqual(capture.kwargs["env"], {"PATH": "test", **dict(
                     entry.split("=", 1) for entry in build.get("env", []))})
-                self.assertEqual(run.call_args_list[1].kwargs["env"], capture.kwargs["env"])
-                self.assertIn(target, run.call_args_list[1].args)
-                self.assertEqual(run.call_args_list[1].kwargs["encoding"], "utf-8")
+                self.assertEqual(run.call_args_list[1].args, ("rustc", "--print", "host-tuple"))
+                query = run.call_args_list[2]
+                self.assertEqual(query.kwargs["env"], capture.kwargs["env"])
+                self.assertEqual(query.args[-4:], ("--filter-platform", target, "--filter-platform", "host-triple"))
+                self.assertEqual(query.kwargs["encoding"], "utf-8")
                 self.assertEqual(json.loads(messages.read_text())["success"], True)
                 self.assertEqual(metadata, {"packages": []})
                 self.assertEqual(binary.name, "sofka.exe" if target.endswith("msvc") else "sofka")
