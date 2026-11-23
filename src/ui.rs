@@ -1483,7 +1483,10 @@ fn draw_table(frame: &mut Frame, app: &mut App, area: Rect) {
             app.table_state.select(Some(count - 1));
         }
         let selected = app.table_state.selected();
-        let mut offset = app.table_state.offset().min(count.saturating_sub(1));
+        let mut offset = app
+            .table_state
+            .offset()
+            .min(count.saturating_sub(visible_rows));
         if let Some(sel) = selected {
             if sel < offset {
                 offset = sel;
@@ -8012,6 +8015,107 @@ mod tests {
                 !r.contains('╭') && !r.contains('│') && !r.contains('╰'),
                 "no border glyphs in fullscreen: {r:?}"
             );
+        }
+    }
+
+    #[tokio::test]
+    async fn narrowing_a_scrolled_table_pulls_earlier_rows_into_view() {
+        use crate::k8s::Cluster;
+        use crate::store::{Msg, row_key};
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        use ratatui::{Terminal, backend::TestBackend};
+
+        let (tx, _rx) = tokio::sync::mpsc::channel(16);
+        let mut app = App::new(Cluster::fake(), tx);
+        app.switch_kind("pods");
+
+        let generation = app.generation;
+        let pod = |name: &str| {
+            let obj: kube::core::DynamicObject = serde_json::from_value(serde_json::json!({
+                "apiVersion": "v1",
+                "kind": "Pod",
+                "metadata": { "name": name, "namespace": "default" },
+                "status": { "phase": "Running" }
+            }))
+            .unwrap();
+            Msg::Applied {
+                generation,
+                key: row_key(&obj),
+                obj: Box::new(obj),
+            }
+        };
+
+        // 10 pods matching `a` plus 4 pods matching `ap`, all sorted in order.
+        for i in 0..10 {
+            app.handle_msg(pod(&format!("alpha-{i:02}")));
+        }
+        for i in 1..=4 {
+            app.handle_msg(pod(&format!("api-{i}")));
+        }
+        app.handle_msg(Msg::Synced { generation });
+
+        // 18 rows = 7 header + 9 table (6 data rows) + 1 prompt + 1 status.
+        let mut term = Terminal::new(TestBackend::new(80, 18)).unwrap();
+        let render = |term: &mut Terminal<TestBackend>, app: &mut App| {
+            term.draw(|f| draw(f, app)).unwrap();
+            let buffer = term.backend().buffer();
+            (0..buffer.area.height)
+                .map(|y| {
+                    (0..buffer.area.width)
+                        .map(|x| buffer[(x, y)].symbol())
+                        .collect::<String>()
+                })
+                .collect::<Vec<String>>()
+                .join("\n")
+        };
+        let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
+
+        // Scroll to the last pod (`api-4`) so the table has a non-zero offset.
+        render(&mut term, &mut app);
+        for _ in 0..13 {
+            app.handle_key(key(KeyCode::Down)).unwrap();
+            render(&mut term, &mut app);
+        }
+        assert_eq!(app.table_state.selected(), Some(13));
+        assert!(app.table_state.offset() > 0);
+
+        // `/a` keeps all 14 pods; all 4 `api-*` pods remain in the viewport.
+        app.handle_key(key(KeyCode::Char('/'))).unwrap();
+        app.handle_key(key(KeyCode::Char('a'))).unwrap();
+        let screen = render(&mut term, &mut app);
+        for i in 1..=4 {
+            assert!(screen.contains(&format!("api-{i}")), "{screen}");
+        }
+
+        // `/ap` narrows to the 4 `api-*` pods while keeping `api-4` selected:
+        // the offset must pull back to 0 so earlier matches stay visible.
+        app.handle_key(key(KeyCode::Char('p'))).unwrap();
+        let screen = render(&mut term, &mut app);
+        assert_eq!(app.table_state.selected(), Some(3));
+        assert_eq!(app.table_state.offset(), 0);
+        for i in 1..=4 {
+            assert!(screen.contains(&format!("api-{i}")), "{screen}");
+        }
+
+        // Deleting rows from a scrolled table with more rows than the viewport
+        // still keeps the viewport filled instead of leaving blank lines below.
+        app.handle_key(key(KeyCode::Esc)).unwrap();
+        render(&mut term, &mut app);
+        for _ in 0..13 {
+            app.handle_key(key(KeyCode::Down)).unwrap();
+            render(&mut term, &mut app);
+        }
+        assert_eq!(app.table_state.offset(), 8);
+        for i in 0..6 {
+            app.handle_msg(Msg::Deleted {
+                generation,
+                key: format!("default/alpha-{i:02}"),
+            });
+        }
+        let screen = render(&mut term, &mut app);
+        assert_eq!(app.table_state.offset(), 2);
+        for name in ["alpha-08", "alpha-09", "api-1", "api-2", "api-3", "api-4"] {
+            assert!(screen.contains(name), "missing {name}:\n{screen}");
         }
     }
 }
