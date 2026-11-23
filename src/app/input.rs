@@ -1645,11 +1645,10 @@ impl App {
         match (key.action, key.code) {
             // k9s: `s` toggles autoscroll/follow (we also accept `f`).
             (Some(Action::Follow), _) => {
-                self.logs.follow = !self.logs.follow;
                 if self.logs.follow {
-                    self.logs.view.scroll =
-                        self.logs.viewport_rows.saturating_sub(self.logs.viewport_h);
-                    self.trim_log_buffer();
+                    self.logs.follow = false;
+                } else {
+                    self.resume_log_follow();
                 }
                 self.flash = format!(
                     "autoscroll: {}",
@@ -1754,8 +1753,6 @@ impl App {
         // keeps it on. Scroll is clamped in display-row units (`viewport_rows`)
         // so a wrapped buffer doesn't jump to a stale line index when paused.
         let page = self.logs.viewport_h.max(1);
-        // Deepest useful offset: last full page pinned to the viewport bottom.
-        let max = self.logs.viewport_rows.saturating_sub(self.logs.viewport_h);
         let cur = self.logs.view.scroll;
         match (key.action, key.code) {
             (Some(Action::Back), _) | (Some(Action::Close), _) => {
@@ -1766,20 +1763,22 @@ impl App {
                 }
             }
             (Some(a @ (Action::Down | Action::PageDown | Action::HalfPageDown)), _) => {
-                let step = match a {
-                    Action::Down => 1,
-                    _ => a.page_size(page),
-                };
-                let next = cur.saturating_add(step).min(max);
-                self.logs.view.scroll = next;
-                if next >= max {
-                    let was_following = self.logs.follow;
-                    self.logs.follow = true;
-                    if !was_following {
-                        self.trim_log_buffer();
-                    }
+                // Refresh from the current buffer so lines appended since the
+                // last draw extend the bottom before deciding whether follow
+                // should resume and trim.
+                let max = self.log_max_scroll();
+                if self.logs.follow {
+                    self.logs.view.scroll = max;
                 } else {
-                    self.logs.follow = false;
+                    let step = match a {
+                        Action::Down => 1,
+                        _ => a.page_size(page),
+                    };
+                    let next = cur.saturating_add(step).min(max);
+                    self.logs.view.scroll = next;
+                    if next >= max {
+                        self.resume_log_follow();
+                    }
                 }
             }
             (Some(Action::Up), _) => {
@@ -1802,12 +1801,25 @@ impl App {
             }
             (Some(Action::Last), _) => {
                 // Resume autoscroll; the next draw anchors to the bottom.
-                self.logs.follow = true;
-                self.logs.view.scroll = max;
-                self.trim_log_buffer();
+                self.resume_log_follow();
             }
             _ => {}
         }
+    }
+
+    fn log_max_scroll(&mut self) -> usize {
+        let total_rows = self
+            .logs
+            .refresh_index(self.logs.last_wrap_width)
+            .total_rows();
+        self.logs.viewport_rows = total_rows;
+        total_rows.saturating_sub(self.logs.viewport_h)
+    }
+
+    fn resume_log_follow(&mut self) {
+        self.logs.follow = true;
+        self.trim_log_buffer();
+        self.logs.view.scroll = self.log_max_scroll();
     }
 
     pub(super) fn key_log_filter(&mut self, key: KeyInput) {

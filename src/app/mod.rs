@@ -1532,6 +1532,7 @@ impl LogsView {
         self.json_budget = logs::JSON_CACHE_LIMIT;
         self.markers.clear();
         self.line_offset = 0;
+        self.viewport_rows = 0;
         self.reset_index();
     }
 

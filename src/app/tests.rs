@@ -5424,6 +5424,10 @@ async fn logs_pause_freezes_and_survives_new_lines() {
     let (mut app, _rx) = test_app();
     app.mode = Mode::Logs;
     app.return_mode = Mode::Table;
+    app.handle_msg(Msg::LogLines {
+        generation: app.log_gen,
+        lines: (0..100).map(|i| format!("initial {i}")).collect(),
+    });
     // Simulate a drawn frame: 100 display rows, 40-high viewport → the
     // follow anchor (and deepest offset) is row 60.
     app.logs.follow = true;
@@ -5451,16 +5455,16 @@ async fn logs_pause_freezes_and_survives_new_lines() {
     assert!(!app.logs.follow);
     assert_eq!(app.logs.view.scroll, 0);
 
-    // `G` re-arms autoscroll (the next draw will re-anchor to the bottom).
+    // `G` re-arms autoscroll and anchors to the current bottom (600 - 40).
     app.handle_key(press(KeyCode::Char('G'))).unwrap();
     assert!(app.logs.follow);
+    assert_eq!(app.logs.view.scroll, 560);
 
     // Down-scroll at the bottom stays clamped to the deepest offset
-    // (rows - height = 60) and keeps autoscroll active.
-    app.logs.view.scroll = 60;
+    // (rows - height = 560) and keeps autoscroll active.
     app.handle_key(press(KeyCode::Char('j'))).unwrap();
     assert!(app.logs.follow);
-    assert_eq!(app.logs.view.scroll, 60);
+    assert_eq!(app.logs.view.scroll, 560);
 }
 
 #[tokio::test]
@@ -5470,9 +5474,13 @@ async fn logs_scroll_down_to_bottom_resumes_autoscroll_and_trims() {
     app.logs_cfg.buffer = 50;
     app.mode = Mode::Logs;
     app.return_mode = Mode::Table;
+    app.handle_msg(Msg::LogLines {
+        generation: app.log_gen,
+        lines: (0..50).map(|i| format!("initial {i}")).collect(),
+    });
     app.logs.follow = true;
-    app.logs.view.scroll = 60;
-    app.logs.viewport_rows = 100;
+    app.logs.view.scroll = 10;
+    app.logs.viewport_rows = 50;
     app.logs.viewport_h = 40;
 
     // Scrolling down while already following at the bottom keeps autoscroll on.
@@ -5484,51 +5492,89 @@ async fn logs_scroll_down_to_bottom_resumes_autoscroll_and_trims() {
     ] {
         app.handle_key(key).unwrap();
         assert!(app.logs.follow);
-        assert_eq!(app.logs.view.scroll, 60);
+        assert_eq!(app.logs.view.scroll, 10);
     }
 
-    // Scroll up two rows → paused; stepping down one row stays paused.
+    // Scrolling down while following after new lines arrive (before a redraw)
+    // stays in follow mode instead of pausing against the stale scroll offset.
+    app.logs_cfg.buffer = 60;
+    app.handle_msg(Msg::LogLines {
+        generation: app.log_gen,
+        lines: (0..5).map(|i| format!("live {i}")).collect(),
+    });
+    app.handle_key(press(KeyCode::Down)).unwrap();
+    assert!(app.logs.follow);
+    assert_eq!(app.logs.view.scroll, 15);
+    assert_eq!(app.logs.viewport_rows, 55);
+    app.logs_cfg.buffer = 50;
+    app.trim_log_buffer();
+    app.logs.viewport_rows = 50;
+    app.logs.view.scroll = 10;
+
+    // Scroll up two rows → paused at 8 (old bottom was 10).
     app.handle_key(press(KeyCode::Up)).unwrap();
     app.handle_key(press(KeyCode::Up)).unwrap();
     assert!(!app.logs.follow);
-    assert_eq!(app.logs.view.scroll, 58);
+    assert_eq!(app.logs.view.scroll, 8);
 
-    // Fill past the follow buffer cap while paused so resuming must trim.
+    // Append 30 lines while paused without redrawing: buffer is now 80 lines
+    // (actual bottom is 40, stale `viewport_rows` is still 50 / bottom 10).
     app.handle_msg(Msg::LogLines {
         generation: app.log_gen,
-        lines: (0..80).map(|i| format!("line {i}")).collect(),
+        lines: (0..30).map(|i| format!("paused {i}")).collect(),
     });
     assert_eq!(app.logs.view.lines.len(), 80);
 
-    app.handle_key(press(KeyCode::Down)).unwrap();
-    assert!(!app.logs.follow);
-    assert_eq!(app.logs.view.scroll, 59);
-    assert_eq!(app.logs.view.lines.len(), 80);
+    // Stepping across the stale bottom (10) must keep autoscroll paused and
+    // leave the paused buffer untrimmed until the actual bottom (40).
+    for expected in 9..40 {
+        app.handle_key(press(KeyCode::Down)).unwrap();
+        assert!(!app.logs.follow, "must stay paused at row {expected}");
+        assert_eq!(app.logs.view.scroll, expected);
+        assert_eq!(app.logs.view.lines.len(), 80);
+    }
 
-    // Reaching the bottom via Down resumes autoscroll and trims the buffer.
+    // Reaching the actual bottom (40) resumes autoscroll, trims back to 50,
+    // and anchors to the post-trim bottom (50 - 40 = 10).
     app.handle_key(press(KeyCode::Down)).unwrap();
     assert!(app.logs.follow);
-    assert_eq!(app.logs.view.scroll, 60);
     assert_eq!(app.logs.view.lines.len(), 50);
+    assert_eq!(app.logs.viewport_rows, 50);
+    assert_eq!(app.logs.view.scroll, 10);
 
-    // Reaching the bottom via PageDown and HalfPageDown also resumes and trims.
-    for (up_key, down_key) in [
-        (press(KeyCode::PageUp), press(KeyCode::PageDown)),
-        (ctrl(KeyCode::Char('u')), ctrl(KeyCode::Char('d'))),
-    ] {
-        app.handle_key(up_key).unwrap();
-        assert!(!app.logs.follow);
-        app.handle_msg(Msg::LogLines {
-            generation: app.log_gen,
-            lines: (0..30).map(|i| format!("extra {i}")).collect(),
-        });
-        assert_eq!(app.logs.view.lines.len(), 80);
+    // Reaching the actual bottom via PageDown and HalfPageDown also stays
+    // paused above the appended lines and resumes + trims once it lands.
+    app.handle_key(press(KeyCode::Up)).unwrap();
+    assert!(!app.logs.follow);
+    assert_eq!(app.logs.view.scroll, 9);
+    app.handle_msg(Msg::LogLines {
+        generation: app.log_gen,
+        lines: (0..30).map(|i| format!("half {i}")).collect(),
+    });
+    assert_eq!(app.logs.view.lines.len(), 80);
+    // HalfPageDown (20 rows): 9 -> 29 < 40 stays paused and untrimmed.
+    app.handle_key(ctrl(KeyCode::Char('d'))).unwrap();
+    assert!(!app.logs.follow);
+    assert_eq!(app.logs.view.scroll, 29);
+    assert_eq!(app.logs.view.lines.len(), 80);
+    // Next HalfPageDown reaches 40 -> resumes and trims.
+    app.handle_key(ctrl(KeyCode::Char('d'))).unwrap();
+    assert!(app.logs.follow);
+    assert_eq!(app.logs.view.lines.len(), 50);
+    assert_eq!(app.logs.view.scroll, 10);
 
-        app.handle_key(down_key).unwrap();
-        assert!(app.logs.follow);
-        assert_eq!(app.logs.view.scroll, 60);
-        assert_eq!(app.logs.view.lines.len(), 50);
-    }
+    app.handle_key(press(KeyCode::PageUp)).unwrap();
+    assert!(!app.logs.follow);
+    assert_eq!(app.logs.view.scroll, 0);
+    app.handle_msg(Msg::LogLines {
+        generation: app.log_gen,
+        lines: (0..30).map(|i| format!("page {i}")).collect(),
+    });
+    // PageDown (40 rows): 0 -> 40 reaches actual bottom -> resumes and trims.
+    app.handle_key(press(KeyCode::PageDown)).unwrap();
+    assert!(app.logs.follow);
+    assert_eq!(app.logs.view.lines.len(), 50);
+    assert_eq!(app.logs.view.scroll, 10);
 
     // Jumping back to the bottom with `G` or toggling follow back on with `s`
     // anchors scroll so an immediate Down before the next draw keeps follow on.
@@ -5539,12 +5585,18 @@ async fn logs_scroll_down_to_bottom_resumes_autoscroll_and_trims() {
 
         app.handle_key(resume_key).unwrap();
         assert!(app.logs.follow);
+        assert_eq!(app.logs.view.scroll, 10);
         app.handle_key(press(KeyCode::Down)).unwrap();
         assert!(app.logs.follow);
-        assert_eq!(app.logs.view.scroll, 60);
+        assert_eq!(app.logs.view.scroll, 10);
     }
 
     // Buffer shorter than the viewport (`max == 0`): Up pauses, Down resumes.
+    app.logs.clear_lines();
+    app.handle_msg(Msg::LogLines {
+        generation: app.log_gen,
+        lines: (0..10).map(|i| format!("short {i}")).collect(),
+    });
     app.logs.viewport_rows = 10;
     app.logs.viewport_h = 40;
     app.logs.view.scroll = 0;
@@ -5565,6 +5617,10 @@ async fn rapid_log_wheel_down_clamps_without_leaving_logs() {
     let (mut app, _rx) = test_app();
     app.mode = Mode::Logs;
     app.return_mode = Mode::Table;
+    app.handle_msg(Msg::LogLines {
+        generation: app.log_gen,
+        lines: (0..100).map(|i| format!("line {i}")).collect(),
+    });
     app.logs.follow = true;
     app.logs.view.scroll = 60;
     app.logs.viewport_rows = 100;
@@ -37117,9 +37173,10 @@ async fn configured_paging_preserves_view_behavior_and_text_input() {
         assert_eq!(app.detail.scroll, 0, "{mode:?}");
     }
     app.mode = Mode::Logs;
+    app.logs.view.lines = (0..100).map(|n| n.to_string()).collect();
     app.logs.viewport_h = 7;
     app.logs.viewport_rows = 100;
-    app.logs.follow = true;
+    app.logs.follow = false;
     app.handle_key(ctrl(KeyCode::Char('d'))).unwrap();
     assert_eq!(app.logs.view.scroll, 7);
     assert!(!app.logs.follow);
@@ -37257,9 +37314,10 @@ async fn configured_half_page_keys_scroll_half_a_page_in_text_views() {
         assert_eq!(app.detail.scroll, 0, "{mode:?}");
     }
     app.mode = Mode::Logs;
+    app.logs.view.lines = (0..100).map(|n| n.to_string()).collect();
     app.logs.viewport_h = 9;
     app.logs.viewport_rows = 100;
-    app.logs.follow = true;
+    app.logs.follow = false;
     app.handle_key(ctrl(KeyCode::Char('d'))).unwrap();
     assert_eq!(app.logs.view.scroll, 4);
     assert!(!app.logs.follow);
@@ -37496,9 +37554,11 @@ fn key_action_fixture(scope: &str) -> (App, Receiver<Msg>) {
         scroll: 5,
         ..Default::default()
     };
+    app.logs.view.lines = (0..60).map(|n| format!("line {n}")).collect();
     app.logs.viewport_rows = 60;
     app.logs.viewport_h = 5;
     app.logs.view.scroll = 10;
+    app.logs.follow = false;
     app.help_scroll = 5;
     app.help_max_scroll = 60;
     app.help_viewport_h = 5;
