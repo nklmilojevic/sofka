@@ -3200,6 +3200,27 @@ impl App {
         self.action_menu_return == Mode::Argocd && self.argocd_source.is_some()
     }
 
+    /// Whether `:argocd` is currently on screen, or sits underneath overlays
+    /// (action menu, confirmation, help, palette) that return to it.
+    pub(super) fn argocd_view_active(&self) -> bool {
+        if self.argocd_source.is_none() {
+            return false;
+        }
+        let mut mode = self.mode;
+        for _ in 0..5 {
+            mode = match mode {
+                Mode::Argocd => return true,
+                Mode::FluxMenu if self.action_menu_over_argocd() => Mode::Argocd,
+                Mode::Confirm | Mode::Prompt if self.over_argocd_view() => Mode::Argocd,
+                Mode::Command => self.palette_return,
+                Mode::Help => self.help_return,
+                Mode::DocFilter => self.doc_filter_return,
+                _ => break,
+            };
+        }
+        false
+    }
+
     /// Whether the open dialog belongs to the manifest browser, so the
     /// renderer keeps the listing underneath it.
     pub fn over_dir_browser(&self) -> bool {

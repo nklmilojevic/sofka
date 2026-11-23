@@ -31198,6 +31198,68 @@ async fn argocd_view_supports_child_applicationset_menu() {
     assert_eq!(app.action_menu_items(), ARGOCD_APPSET_MENU_ITEMS);
 }
 
+/// Opening another `t` menu (or help) before a child sync's patch finishes
+/// must not drop the quiet refresh: closing the overlay still shows `Syncing`
+/// and starts the follow loop.
+#[tokio::test]
+async fn argocd_view_refreshes_child_sync_while_another_overlay_is_open() {
+    let mut root = app_of_apps_root(
+        json!({"server": "https://kubernetes.default.svc", "namespace": "argocd"}),
+    );
+    root["status"]["resources"] = json!([
+        {"group": "argoproj.io", "version": "v1alpha1", "kind": "Application",
+         "namespace": "argocd", "name": "child-a", "status": "Synced"},
+        {"group": "argoproj.io", "version": "v1alpha1", "kind": "Application",
+         "namespace": "argocd", "name": "child-b", "status": "Synced"}
+    ]);
+    let (mut app, mut rx, _, _, _) = argocd_child_action_app(
+        "applications",
+        root.clone(),
+        vec![
+            ("applications", "argocd", "root", root),
+            (
+                "applications",
+                "argocd",
+                "child-a",
+                child_application("child-a", "OutOfSync", "Healthy", false),
+            ),
+            (
+                "applications",
+                "argocd",
+                "child-b",
+                child_application("child-b", "OutOfSync", "Healthy", false),
+            ),
+        ],
+    );
+
+    app.handle_key(press(KeyCode::Enter)).unwrap();
+    receive_argocd_report(&mut app, &mut rx).await;
+
+    // Trigger sync on child-a, then immediately open the `t` menu on child-b
+    // before child-a's Msg::Flash has been processed.
+    select_argocd_row(&mut app, "Application/child-a:");
+    choose_argocd_menu_item(&mut app, "Sync now");
+    select_argocd_row(&mut app, "Application/child-b:");
+    app.handle_key(press(KeyCode::Char('t'))).unwrap();
+    assert_eq!(app.mode, Mode::FluxMenu);
+
+    drain_until(&mut app, &mut rx, |app| {
+        app.flash.contains("sync requested: child-a")
+    })
+    .await;
+    receive_argocd_report(&mut app, &mut rx).await;
+
+    // Dismiss child-b's menu and verify child-a's sync is reflected and followed.
+    app.handle_key(press(KeyCode::Esc)).unwrap();
+    assert_eq!(app.mode, Mode::Argocd);
+    assert!(
+        argocd_texts(&app).contains(&"Application/child-a: Syncing / Healthy".to_string()),
+        "{:?}",
+        argocd_texts(&app)
+    );
+    assert!(app.argocd_following);
+}
+
 /// Leaving the view must drop a report still in flight, not let it land on a
 /// list the user has already walked away from.
 #[tokio::test]

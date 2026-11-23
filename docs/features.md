@@ -868,12 +868,13 @@ include those conditions. Row filters can search the route paths.
   each listed child `Application` row reads that child Application's own live
   sync and health state (showing `Syncing` while an operation is in flight and
   `(suspended)` when auto-sync is suspended), while `Blocking` continues to
-  reflect the parent's own status. Press `t` on a local child `Application` or
-  `ApplicationSet` row to open the Argo CD action menu in place (suspend,
-  resume, refresh, hard refresh, sync now, or sync with prune with the usual
-  confirmations and guardrails) without leaving the parent view; once the
-  patch lands, the view refreshes quietly in place and follows any syncing
-  child every 2 seconds until it finishes.
+  reflect the parent's own status. Press `t` on a local child `Application` row
+  to open its action menu in place (suspend, resume, refresh, hard refresh,
+  sync now, or sync with prune with the usual confirmations and guardrails), or
+  on a local child `ApplicationSet` row for suspend and resume, without leaving
+  the parent view; once the patch lands, the view refreshes quietly in place and
+  follows any syncing child every 2 seconds until it finishes (pausing while an
+  owned-child expansion opened with `c` is open and resuming when it closes).
 - **Native Helm inspector** (`:helm` / `:hm`) - sofka decodes Helm's release
   storage Secrets directly (double base64 → gunzip → JSON, same as Helm) and
   lists one row per release at its latest revision, like `helm list`. `⏎` opens
