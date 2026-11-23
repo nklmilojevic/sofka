@@ -219,7 +219,8 @@ was started from. See [Manifest browser](features.md#manifest-browser).
 `ctrl-s` save to a file in `save_dir` · `F` fullscreen (no chrome, clean text selection) ·
 `0`–`5` time anchors (tail · 1m · 5m · 15m · 30m · 1h) · `T` custom lookback (`s`/`m`/`h`/`d`/`w`, compound like `1h30m`, decimal like `1.5h`, or `tail` for kubelet logs)
 (VictoriaLogs views) · `esc` back. The newest line anchors to the bottom of the
-viewport.
+viewport. Scrolling up pauses autoscroll; scrolling back to the bottom (or
+pressing `G`) resumes it.
 
 `t` shows or hides timestamps in the current buffer without restarting the
 streams. Log lines keep their timestamp order in both display settings.
