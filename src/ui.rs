@@ -395,6 +395,10 @@ fn draw_base(frame: &mut Frame, app: &mut App) {
         Mode::PvcExplore => draw_pvc_explore(frame, app, chunks[1]),
         Mode::Dir => draw_dir(frame, app, chunks[1]),
         Mode::Confirm | Mode::Prompt if app.over_dir_browser() => draw_dir(frame, app, chunks[1]),
+        Mode::FluxMenu if app.action_menu_over_argocd() => draw_argocd(frame, app, chunks[1]),
+        Mode::Confirm | Mode::Prompt if app.over_argocd_view() => {
+            draw_argocd(frame, app, chunks[1])
+        }
         // A transfer confirmation or a guardrail prompt raised from the PVC
         // browser keeps the two panes underneath it, so you can still see what
         // is being copied where. Only that dialog: drawing an unrelated one
@@ -460,11 +464,19 @@ fn draw_base(frame: &mut Frame, app: &mut App) {
                 draw_containers(frame, app, chunks[1]);
             }
             Mode::Confirm => {
-                draw_table(frame, app, chunks[1]);
+                if app.over_argocd_view() {
+                    draw_argocd(frame, app, chunks[1]);
+                } else {
+                    draw_table(frame, app, chunks[1]);
+                }
                 draw_confirm(frame, app, chunks[1]);
             }
             Mode::FluxMenu => {
-                draw_table(frame, app, chunks[1]);
+                if app.action_menu_over_argocd() {
+                    draw_argocd(frame, app, chunks[1]);
+                } else {
+                    draw_table(frame, app, chunks[1]);
+                }
                 draw_flux_menu(frame, app, chunks[1]);
             }
             Mode::TransferMenu => {
@@ -3442,6 +3454,8 @@ fn build_help(app: &App, width: usize) -> (Vec<Line<'static>>, String, HelpSecti
             "logs (marked pods, or current row)"
         } else if scope == "table" && action == Action::ActionMenu {
             "action menu: Flux suspend/resume/reconcile (includes HelmChart, flux-operator kinds, and tofu-controller Terraform; HelmRelease, ResourceSetInputProvider, FluxInstance: + force reconcile); Argo CD suspend/resume (Application: + refresh, hard refresh, sync, sync with prune); CronJobs trigger/suspend/resume; pods file transfer"
+        } else if scope == "argocd" && action == Action::ActionMenu {
+            "action menu for the selected child Application (suspend/resume/refresh/hard refresh/sync/sync with prune) or ApplicationSet (suspend/resume)"
         } else if scope == "port_forward_picker" && action == Action::Edit {
             "edit local port of the selected mapping"
         } else if scope == "logs" && action == Action::Lookback {
@@ -4199,13 +4213,7 @@ fn draw_flux_menu(frame: &mut Frame, app: &mut App, area: Rect) {
             Text::from(Span::styled(*label, Style::default().fg(color)))
         })
         .collect();
-    let subject = if app.cronjob_kind() {
-        "CronJob"
-    } else if app.argocd_kind() {
-        "ArgoCD"
-    } else {
-        "Flux"
-    };
+    let subject = app.action_menu_subject();
     app.picker_page_items = render_popup_list(
         frame,
         show_scrollbars,
@@ -5867,9 +5875,14 @@ fn draw_explain(frame: &mut Frame, app: &mut App, area: Rect) {
 
 fn draw_argocd(frame: &mut Frame, app: &mut App, area: Rect) {
     let show_scrollbars = app.scrollbars_visible();
-    // The expansion is only discoverable from the title, the way the adjacent
-    // view advertises the same key.
-    let title = format!(" {} (c discover children) ", app.argocd_title);
+    // The expansion and child-app actions are only discoverable from the
+    // title, the way the adjacent view advertises `c`.
+    let hints = if app.argocd_has_child_actions() {
+        "c discover children · t actions"
+    } else {
+        "c discover children"
+    };
+    let title = format!(" {} ({hints}) ", app.argocd_title);
     let jumps: Vec<bool> = (0..app.argocd_items.len())
         .map(|i| app.argocd_row_jumps(i))
         .collect();

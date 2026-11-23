@@ -732,6 +732,8 @@ impl App {
             Mode::FluxMenu => {
                 self.action_menu_targets.clear();
                 self.action_menu_objects.clear();
+                self.action_menu_kind = None;
+                self.action_menu_return = Mode::Table;
             }
             _ => {}
         }

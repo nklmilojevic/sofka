@@ -159,8 +159,12 @@ impl App {
             } => {
                 self.do_rollout_undo(kind, workload, name, uid, revision, *rev);
             }
-            ConfirmAction::ArgocdSyncPrune { targets } => {
-                self.do_argocd_sync(targets, true);
+            ConfirmAction::ArgocdSyncPrune {
+                kind,
+                targets,
+                from_argocd,
+            } => {
+                self.do_argocd_sync(kind, targets, true, from_argocd);
             }
             ConfirmAction::HelmUninstall { targets } => {
                 self.do_helm_uninstall(targets);
@@ -323,6 +327,8 @@ impl App {
                     Mode::PvcExplore
                 } else if self.over_dir_browser() {
                     Mode::Dir
+                } else if self.over_argocd_view() {
+                    Mode::Argocd
                 } else if self.prompt_over_document() {
                     Mode::Detail
                 } else {
@@ -365,6 +371,8 @@ impl App {
                     Mode::PvcExplore
                 } else if self.over_dir_browser() {
                     Mode::Dir
+                } else if self.over_argocd_view() {
+                    Mode::Argocd
                 } else if self.prompt_over_document() {
                     Mode::Detail
                 } else {

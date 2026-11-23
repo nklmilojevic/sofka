@@ -506,6 +506,7 @@ const DEFAULTS: &[(&str, Action, &[&str])] = &[
     ("flux_menu", Action::PageDown, &["pagedown"]),
     ("flux_menu", Action::PageUp, &["pageup"]),
     ("argocd", Action::Accept, &["enter"]),
+    ("argocd", Action::ActionMenu, &["t"]),
     ("argocd", Action::Back, &["esc"]),
     ("argocd", Action::Close, &["q"]),
     ("argocd", Action::DiscoverChildren, &["c"]),

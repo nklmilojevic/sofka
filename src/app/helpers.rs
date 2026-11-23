@@ -628,28 +628,51 @@ impl App {
         })
     }
 
+    /// Whether `kind` is an ArgoCD CRD (Application or ApplicationSet, group
+    /// `argoproj.io`). The plurals are generic, so the group is checked too —
+    /// only the real ArgoCD CRDs get the `t` menu.
+    pub(super) fn is_argocd_kind(kind: &Kind) -> bool {
+        matches!(kind.ar.plural.as_str(), "applications" | "applicationsets")
+            && kind.ar.group == ARGOCD_GROUP
+    }
+
+    /// Whether `kind` is an ArgoCD Application (not ApplicationSet). Gates
+    /// "Sync now", which patches the `operation` field — ApplicationSet has no
+    /// such field.
+    pub(super) fn is_argocd_app_kind(kind: &Kind) -> bool {
+        kind.ar.plural == "applications" && kind.ar.group == ARGOCD_GROUP
+    }
+
     /// Whether the current kind is an ArgoCD CRD (Application or
     /// ApplicationSet, group `argoproj.io`). The plurals are generic, so the
     /// group is checked too — only the real ArgoCD CRDs get the `t` menu.
     pub fn argocd_kind(&self) -> bool {
-        matches!(
-            self.kind_plural.as_str(),
-            "applications" | "applicationsets"
-        ) && self
-            .kind
-            .as_ref()
-            .is_some_and(|k| k.ar.group == ARGOCD_GROUP)
+        self.kind.as_ref().is_some_and(Self::is_argocd_kind)
     }
 
     /// Whether the current kind is an ArgoCD Application (not ApplicationSet).
     /// Gates "Sync now", which patches the `operation` field — ApplicationSet
     /// has no such field.
     pub fn argocd_app_kind(&self) -> bool {
-        self.kind_plural == "applications"
-            && self
-                .kind
-                .as_ref()
-                .is_some_and(|k| k.ar.group == ARGOCD_GROUP)
+        self.kind.as_ref().is_some_and(Self::is_argocd_app_kind)
+    }
+
+    /// The kind targeted by the `t` action menu: an explicit override when
+    /// opened from `:argocd`, otherwise the table's current kind.
+    pub(super) fn action_menu_target_kind(&self) -> Option<&Kind> {
+        self.action_menu_kind.as_ref().or(self.kind.as_ref())
+    }
+
+    /// Title prefix for the `t` action menu popup.
+    pub fn action_menu_subject(&self) -> &'static str {
+        let kind = self.action_menu_target_kind();
+        if kind.is_some_and(|k| k.ar.plural == "cronjobs") {
+            "CronJob"
+        } else if kind.is_some_and(Self::is_argocd_kind) {
+            "ArgoCD"
+        } else {
+            "Flux"
+        }
     }
 
     /// Whether the current kind is CronJobs, which get their own `t` menu
@@ -658,15 +681,16 @@ impl App {
         self.kind_plural == "cronjobs"
     }
 
-    /// The items shown in the `t` action menu for the current kind.
+    /// The items shown in the `t` action menu for the target kind.
     pub fn action_menu_items(&self) -> &'static [&'static str] {
-        if self.cronjob_kind() {
+        let kind = self.action_menu_target_kind();
+        if kind.is_some_and(|k| k.ar.plural == "cronjobs") {
             CRONJOB_MENU_ITEMS
-        } else if self.argocd_app_kind() {
+        } else if kind.is_some_and(Self::is_argocd_app_kind) {
             ARGOCD_MENU_ITEMS
-        } else if self.argocd_kind() {
+        } else if kind.is_some_and(Self::is_argocd_kind) {
             ARGOCD_APPSET_MENU_ITEMS
-        } else if self.kind.as_ref().is_some_and(|kind| {
+        } else if kind.is_some_and(|kind| {
             matches!(
                 (kind.ar.group.as_str(), kind.ar.plural.as_str()),
                 ("helm.toolkit.fluxcd.io", "helmreleases")

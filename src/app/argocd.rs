@@ -1,5 +1,7 @@
 use super::*;
 
+use futures_util::stream::{self, StreamExt};
+
 use crate::argocd::{self, Destination, Evidence};
 use crate::explain::{Finding, Level, Target};
 use crate::store::ArgocdReport;
@@ -105,6 +107,14 @@ impl App {
         }
     }
 
+    /// Quiet re-gather triggered after a child Application action lands, so
+    /// the cursor stays on its row and the updated sync state appears in place.
+    pub(super) fn refresh_argocd_quiet(&mut self) {
+        if self.argocd_source.is_some() {
+            self.spawn_argocd(true);
+        }
+    }
+
     /// Called every second: while the Application in the open Argo CD view is
     /// syncing, re-read it so the Sync operation section follows along.
     pub fn follow_argocd_operation(&mut self) {
@@ -189,9 +199,21 @@ impl App {
                             r.plural = plural;
                         }
                     }
+                    let child_syncing = match &app_kind {
+                        Some(kind) => {
+                            enrich_child_applications(&client, &kind.ar, &mut resources).await
+                        }
+                        None => false,
+                    };
                     let findings =
                         argocd::describe_applicationset(&selection, &subject, &resources);
-                    return Ok((selection, findings, Destination::Current, resources, false));
+                    return Ok((
+                        selection,
+                        findings,
+                        Destination::Current,
+                        resources,
+                        child_syncing,
+                    ));
                 }
                 let Some(app_kind) = app_kind else {
                     return Err("this cluster has no Argo CD Application CRD".to_string());
@@ -239,6 +261,11 @@ impl App {
                         r.plural = plural;
                     }
                 }
+                let child_syncing = if destination == Destination::Current {
+                    enrich_child_applications(&client, &app_kind.ar, &mut resources).await
+                } else {
+                    false
+                };
                 let mut sync_results = app.as_ref().map(argocd::sync_results).unwrap_or_default();
                 // These rows open through the plural alone, and kind names
                 // collide across groups, so the group goes with it.
@@ -251,7 +278,8 @@ impl App {
                         };
                     }
                 }
-                let following = app.as_ref().is_some_and(argocd::operation_in_flight);
+                let following =
+                    app.as_ref().is_some_and(argocd::operation_in_flight) || child_syncing;
                 let ev = Evidence {
                     subject,
                     via,
@@ -307,6 +335,7 @@ impl App {
         self.argocd_request = self.argocd_request.wrapping_add(1);
         self.argocd_pending = false;
         self.argocd_reselect = None;
+        self.argocd_refresh_claims.clear();
         if let Some(claim) = self.argocd_claim.take() {
             self.clear_claimed_status(claim);
         }
@@ -352,6 +381,7 @@ impl App {
             (Some(Action::Refresh), _) => self.refresh_argocd(),
             (Some(Action::Wrap), _) => self.toggle_findings_wrap(),
             (Some(Action::DiscoverChildren), _) => self.toggle_argocd_children(),
+            (Some(Action::ActionMenu), _) => self.request_argocd_child_action_menu(),
             (Some(Action::Accept), _) => {
                 let selected = self
                     .argocd_state
@@ -371,9 +401,85 @@ impl App {
             }
             _ => {}
         }
-        if self.mode != Mode::Argocd {
+        if !matches!(self.mode, Mode::Argocd | Mode::FluxMenu) {
             self.cancel_argocd_request();
         }
+    }
+
+    /// `t` in the Argo CD view: open the Argo CD action menu for the selected
+    /// child Application (app-of-apps or ApplicationSet) or child
+    /// ApplicationSet without leaving the parent's view.
+    fn request_argocd_child_action_menu(&mut self) {
+        if self.deny_readonly() {
+            return;
+        }
+        let Some(resource) = self
+            .argocd_state
+            .selected()
+            .and_then(|index| self.managed_row_ordinal(index))
+            .and_then(|ordinal| self.argocd_resources.get(ordinal))
+            .filter(|r| {
+                r.group == ARGOCD_GROUP
+                    && matches!(r.kind.as_str(), "Application" | "ApplicationSet")
+            })
+            .cloned()
+        else {
+            self.flash_warn("select an Argo CD Application or ApplicationSet row for actions");
+            return;
+        };
+        match &self.argocd_destination {
+            Destination::Current => {}
+            Destination::Context(ctx) => {
+                self.flash_warn(&format!(
+                    "{} lives in {ctx}; press ⏎ to open it there first",
+                    resource.name
+                ));
+                return;
+            }
+            Destination::Unresolved(server) if !server.is_empty() => {
+                self.flash_warn(&format!(
+                    "{} lives in {server}, which no kubeconfig context serves",
+                    resource.name
+                ));
+                return;
+            }
+            Destination::Unresolved(_) => {
+                self.flash_warn(&format!("{} does not live in this cluster", resource.name));
+                return;
+            }
+        }
+        if resource.namespace.is_empty() {
+            self.flash_warn(&format!("{} has no namespace", resource.name));
+            return;
+        }
+        let Some(kind) = self.cluster.resolve_in_group(&resource.kind, ARGOCD_GROUP) else {
+            self.flash_warn(&format!(
+                "this cluster has no Argo CD {} CRD",
+                resource.kind
+            ));
+            return;
+        };
+        self.action_menu_targets = vec![(resource.name, resource.namespace)];
+        self.action_menu_objects.clear();
+        self.action_menu_kind = Some(kind);
+        self.action_menu_return = Mode::Argocd;
+        self.flux_menu_state.select(Some(0));
+        self.mode = Mode::FluxMenu;
+    }
+
+    /// Whether the open Argo CD view lists any local child Application or
+    /// ApplicationSet that `t` can act on.
+    pub fn argocd_has_child_actions(&self) -> bool {
+        self.argocd_destination == Destination::Current
+            && self
+                .argocd_resources
+                .iter()
+                .take(argocd::MAX_LISTED)
+                .any(|r| {
+                    r.group == ARGOCD_GROUP
+                        && matches!(r.kind.as_str(), "Application" | "ApplicationSet")
+                        && !r.namespace.is_empty()
+                })
     }
 
     /// Switch to the destination context and open the selected managed
@@ -696,10 +802,61 @@ struct Descendant {
     depth: u8,
 }
 
+fn is_argocd_resource_heading(text: &str) -> bool {
+    text.starts_with("Managed resources") || text.starts_with("Applications (")
+}
+
+/// Read the live `Application` objects for listed child Applications in this
+/// cluster so their rows show `Syncing` and their own sync/health state. Any
+/// unreadable child falls back to the parent's `status.resources[]` entry.
+/// Returns `true` when at least one child has an operation in flight.
+async fn enrich_child_applications(
+    client: &Client,
+    app_ar: &ApiResource,
+    resources: &mut [argocd::ManagedResource],
+) -> bool {
+    let indices: Vec<(usize, String, String)> = resources
+        .iter()
+        .take(argocd::MAX_LISTED)
+        .enumerate()
+        .filter(|(_, r)| {
+            r.group == ARGOCD_GROUP && r.kind == "Application" && !r.namespace.is_empty()
+        })
+        .map(|(i, r)| (i, r.namespace.clone(), r.name.clone()))
+        .collect();
+    if indices.is_empty() {
+        return false;
+    }
+    let results: Vec<(usize, Option<argocd::ChildAppState>)> = stream::iter(indices)
+        .map(|(i, ns, name)| {
+            let client = client.clone();
+            async move {
+                let api: Api<DynamicObject> = Api::namespaced_with(client, &ns, app_ar);
+                let state = api
+                    .get(&name)
+                    .await
+                    .ok()
+                    .map(|obj| argocd::ChildAppState::from_app(&obj));
+                (i, state)
+            }
+        })
+        .buffer_unordered(8)
+        .collect()
+        .await;
+    let mut syncing = false;
+    for (i, state) in results {
+        if let Some(state) = state {
+            syncing |= state.syncing;
+            resources[i].child_state = Some(state);
+        }
+    }
+    syncing
+}
+
 impl App {
     /// A managed-resource row's identity, stable across re-gathers.
     /// Which entry of `status.resources[]` the row at `index` is, by position
-    /// in the managed-resource block.
+    /// in the managed-resource block (or the ApplicationSet `Applications` block).
     ///
     /// Position rather than name: two managed resources can share a kind,
     /// namespace and name when their API groups differ, so no string built from
@@ -708,10 +865,7 @@ impl App {
         let heading = self.argocd_items[..index]
             .iter()
             .rposition(|f| f.level == Level::Heading)?;
-        if !self.argocd_items[heading]
-            .text
-            .starts_with("Managed resources")
-        {
+        if !is_argocd_resource_heading(&self.argocd_items[heading].text) {
             return None;
         }
         if self.argocd_items[index].indent != 1 {
@@ -730,7 +884,7 @@ impl App {
         let heading = self
             .argocd_items
             .iter()
-            .position(|f| f.level == Level::Heading && f.text.starts_with("Managed resources"))?;
+            .position(|f| f.level == Level::Heading && is_argocd_resource_heading(&f.text))?;
         self.argocd_items[heading + 1..]
             .iter()
             .enumerate()
