@@ -322,6 +322,48 @@ pub fn resolve_skin(name: Option<&str>, colors: &HashMap<String, String>) -> Pal
     p
 }
 
+/// How the cursor row is highlighted in resource tables.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum CursorStyle {
+    /// Solid `lavender` bar with `base` text, bold (default).
+    #[default]
+    Bar,
+    /// Lavender-tinted background (`base` blended toward `lavender`), bold,
+    /// with a `lavender` `▌ ` gutter marker and no foreground override so row
+    /// tint, `STATUS` badge, threshold colors and filter matches stay visible.
+    Tint,
+}
+
+/// Parse `[skin] cursor`: `None` or `"bar"` is [`CursorStyle::Bar`], `"tint"`
+/// is [`CursorStyle::Tint`], anything else is `None`.
+pub fn parse_cursor_style(value: Option<&str>) -> Option<CursorStyle> {
+    let Some(raw) = value else {
+        return Some(CursorStyle::Bar);
+    };
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "bar" => Some(CursorStyle::Bar),
+        "tint" => Some(CursorStyle::Tint),
+        _ => None,
+    }
+}
+
+/// Resolve `[skin] cursor`, falling back to [`CursorStyle::Bar`] on an unknown
+/// value.
+pub fn resolve_cursor_style(value: Option<&str>) -> CursorStyle {
+    parse_cursor_style(value).unwrap_or_default()
+}
+
+/// Validate `[skin] cursor`, returning a warning when set to an unknown value.
+pub fn validate_cursor_style(value: Option<&str>) -> Option<String> {
+    if parse_cursor_style(value).is_some() {
+        return None;
+    }
+    let raw = value.unwrap_or_default();
+    Some(format!(
+        "skin.cursor: unknown cursor style '{raw}' (expected bar or tint); using bar"
+    ))
+}
+
 /// Check a skin selection without applying it: an unknown built-in name, an
 /// unknown swatch key under `[skin.colors]`, or a malformed hex value. One
 /// human-readable warning per problem (sorted for stable output), empty when
@@ -407,10 +449,11 @@ thread_local! {
 #[cfg(test)]
 thread_local! {
     /// Tests run on parallel threads of one process, so each test thread gets
-    /// its own active palette and background flag: a test that switches skins
-    /// can't repaint a frame another test is asserting on.
+    /// its own active palette, background flag and cursor style: a test that
+    /// switches skins can't repaint a frame another test is asserting on.
     static TEST_PALETTE: Cell<Option<Palette>> = const { Cell::new(None) };
     static TEST_BACKGROUND: Cell<bool> = const { Cell::new(false) };
+    static TEST_CURSOR_STYLE: Cell<CursorStyle> = const { Cell::new(CursorStyle::Bar) };
 }
 
 /// Install the active palette. If called after startup, replaces the active
@@ -485,6 +528,11 @@ fn load_active() -> Palette {
 #[cfg(not(test))]
 static BACKGROUND: AtomicBool = AtomicBool::new(false);
 
+/// Whether resource tables render the cursor row as a status-preserving tint
+/// (`CursorStyle::Tint`) instead of the solid lavender bar (`CursorStyle::Bar`).
+#[cfg(not(test))]
+static CURSOR_TINT: AtomicBool = AtomicBool::new(false);
+
 /// Enable (or disable) painting the palette's `base` swatch as the app
 /// background. Off by default, so sofka inherits the terminal's — possibly
 /// transparent — background. On, every view is filled with the skin's own
@@ -505,6 +553,26 @@ pub fn background() -> Option<Color> {
     #[cfg(not(test))]
     let on = BACKGROUND.load(Ordering::Relaxed);
     on.then(base)
+}
+
+/// Set how the cursor row is highlighted in resource tables.
+pub fn set_cursor_style(style: CursorStyle) {
+    #[cfg(test)]
+    TEST_CURSOR_STYLE.with(|c| c.set(style));
+    #[cfg(not(test))]
+    CURSOR_TINT.store(style == CursorStyle::Tint, Ordering::Relaxed);
+}
+
+/// Active resource table cursor style.
+pub fn cursor_style() -> CursorStyle {
+    #[cfg(test)]
+    return TEST_CURSOR_STYLE.with(|c| c.get());
+    #[cfg(not(test))]
+    if CURSOR_TINT.load(Ordering::Relaxed) {
+        CursorStyle::Tint
+    } else {
+        CursorStyle::Bar
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -536,12 +604,53 @@ pub fn header_row() -> Style {
 
 /// Cursor / selected row: a bright lavender bar with dark text, bold. Using
 /// `lavender` (light in dark themes, mid-tone in light themes) as the bg and
-/// `base` as the fg keeps the cursor high-contrast under every skin.
+/// `base` as the fg keeps the cursor high-contrast under every skin. Pickers
+/// and lists always use this style; resource tables use [`cursor_row`], which
+/// switches to a lavender-tinted bar when `[skin] cursor = "tint"`.
 pub fn selected_row() -> Style {
     Style::default()
         .bg(lavender())
         .fg(base())
         .add_modifier(Modifier::BOLD)
+}
+
+/// Cursor row in resource tables: follows [`cursor_style`]. Under
+/// [`CursorStyle::Bar`] (the default) this is the solid [`selected_row`] bar.
+/// Under [`CursorStyle::Tint`] it paints `base` blended 20% toward `lavender`,
+/// bold, with no foreground of its own so row tint, `STATUS` badge, threshold
+/// colors and filter matches stay visible on the cursor row.
+pub fn cursor_row() -> Style {
+    match cursor_style() {
+        CursorStyle::Bar => selected_row(),
+        CursorStyle::Tint => Style::default()
+            .bg(blend_rgb(base(), lavender(), 1, 5))
+            .add_modifier(Modifier::BOLD),
+    }
+}
+
+/// The `▌ ` gutter marker on a resource table cursor row: matches
+/// [`selected_row`] under [`CursorStyle::Bar`], or draws in `lavender` on the
+/// tinted bar under [`CursorStyle::Tint`].
+pub fn cursor_marker() -> Style {
+    match cursor_style() {
+        CursorStyle::Bar => selected_row(),
+        CursorStyle::Tint => cursor_row().fg(lavender()),
+    }
+}
+
+/// Blend `a` toward `b` by `num / den` in RGB space; non-RGB colors return `a`.
+fn blend_rgb(a: Color, b: Color, num: u16, den: u16) -> Color {
+    match (a, b) {
+        (Color::Rgb(ar, ag, ab), Color::Rgb(br, bg, bb)) => {
+            let mix = |x: u8, y: u8| -> u8 {
+                let x = u16::from(x);
+                let y = u16::from(y);
+                ((x * (den - num) + y * num + den / 2) / den) as u8
+            };
+            Color::Rgb(mix(ar, br), mix(ag, bg), mix(ab, bb))
+        }
+        _ => a,
+    }
 }
 
 /// Cursor on a marked row: the mark color as the bar, like k9s, so marking
@@ -753,6 +862,60 @@ mod tests {
         // gruvbox-light's `base` is cream on its cream mark color.
         set(builtin("gruvbox-light").unwrap());
         assert_eq!(selected_marked_row().fg, Some(text()));
+    }
+
+    #[test]
+    fn cursor_tint_keeps_status_colors_readable_in_every_builtin_skin() {
+        set_cursor_style(CursorStyle::Tint);
+        for name in BUILTIN_NAMES {
+            set(builtin(name).unwrap());
+            let row = cursor_row();
+            assert_eq!(row.fg, None, "{name}: tinted cursor must keep cell fg");
+            let bar = row.bg.expect("tinted cursor background");
+            let bar_vs_base = contrast(bar, base());
+            assert!(
+                bar_vs_base >= 1.2,
+                "{name}: cursor tint bar contrast against base is only {bar_vs_base:.2}"
+            );
+            for (swatch, color) in [
+                ("blue", blue()),
+                ("red", red()),
+                ("peach", peach()),
+                ("overlay0", overlay0()),
+                ("overlay1", overlay1()),
+                ("mauve", mauve()),
+                ("green", green()),
+                ("yellow", yellow()),
+                ("text", text()),
+                ("lavender", cursor_marker().fg.unwrap()),
+            ] {
+                let on_bar = contrast(color, bar);
+                let on_base = contrast(color, base());
+                assert!(
+                    on_bar >= 0.6 * on_base,
+                    "{name} {swatch}: {on_bar:.2} on cursor tint, {on_base:.2} on base"
+                );
+            }
+        }
+        set_cursor_style(CursorStyle::Bar);
+        assert_eq!(cursor_row(), selected_row());
+        assert_eq!(cursor_marker(), selected_row());
+    }
+
+    #[test]
+    fn validate_cursor_style_accepts_bar_and_tint_and_warns_otherwise() {
+        assert_eq!(resolve_cursor_style(None), CursorStyle::Bar);
+        assert_eq!(resolve_cursor_style(Some("bar")), CursorStyle::Bar);
+        assert_eq!(resolve_cursor_style(Some(" TINT ")), CursorStyle::Tint);
+        assert_eq!(resolve_cursor_style(Some("glow")), CursorStyle::Bar);
+        assert_eq!(validate_cursor_style(None), None);
+        assert_eq!(validate_cursor_style(Some("bar")), None);
+        assert_eq!(validate_cursor_style(Some("tint")), None);
+        let warn = validate_cursor_style(Some("glow")).expect("warning");
+        assert!(
+            warn.contains("skin.cursor") && warn.contains("glow"),
+            "{warn}"
+        );
     }
 
     #[test]

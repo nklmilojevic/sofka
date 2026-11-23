@@ -1823,6 +1823,9 @@ impl App {
         self.configure_native_describe(resolved.config.experimental.native_describe);
         self.cluster.add_aliases(&self.user_aliases);
         crate::theme::set_background(resolved.config.skin.background);
+        crate::theme::set_cursor_style(crate::theme::resolve_cursor_style(
+            resolved.config.skin.cursor.as_deref(),
+        ));
         // The skin named by the base config (if any) becomes the session skin
         // again — a reload is an explicit "use what the files say now". With
         // none configured, the current session skin (auto-detected or the last
@@ -1836,6 +1839,9 @@ impl App {
                 .as_deref()
                 .or(self.session_skin.as_deref()),
             &self.skin_colors,
+        ));
+        warnings.extend(crate::theme::validate_cursor_style(
+            resolved.config.skin.cursor.as_deref(),
         ));
         self.apply_context_skin(resolved.skin_override);
         self.config_warnings = warnings;

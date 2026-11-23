@@ -1956,10 +1956,11 @@ impl ratatui::widgets::Widget for ScrollingTable<'_> {
             .unwrap_or(0);
         // Reuse one row of storage. Long values do not allocate a full table.
         let mut source = ratatui::buffer::Buffer::empty(Rect::new(0, 0, max_width, 1));
-        let selected_style = if self.selected_marked {
-            theme::selected_marked_row()
+        let (selected_style, marker_style) = if self.selected_marked {
+            let style = theme::selected_marked_row();
+            (style, style)
         } else {
-            theme::selected_row()
+            (theme::cursor_row(), theme::cursor_marker())
         };
         for (y, cells) in std::iter::once(self.header)
             .chain(self.rows)
@@ -1977,7 +1978,7 @@ impl ratatui::widgets::Widget for ScrollingTable<'_> {
             };
             buf.set_style(Rect::new(area.x, y_pos, area.width, 1), style);
             if selected {
-                buf.set_stringn(area.x, y_pos, "▌ ", usize::from(area.width), style);
+                buf.set_stringn(area.x, y_pos, "▌ ", usize::from(area.width), marker_style);
             }
             for &(start, end, position, source_start) in &ranges {
                 let index = self.order[position];

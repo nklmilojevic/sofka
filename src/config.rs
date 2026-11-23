@@ -1091,6 +1091,7 @@ pub struct ViewColumnConfig {
 /// [skin]
 /// name = "gruvbox"
 /// background = true       # paint the skin's background (default: false)
+/// cursor = "tint"         # "bar" (default) or "tint" (keep row status colors)
 ///
 /// [skin.colors]
 /// red   = "#fb4934"
@@ -1104,6 +1105,9 @@ pub struct Skin {
     /// Fill views with the skin's `base` background swatch (default: false,
     /// i.e. transparent — inherit the terminal background).
     pub background: bool,
+    /// Resource table cursor style: `"bar"` (default solid lavender bar) or
+    /// `"tint"` (lavender-tinted background that keeps row status colors).
+    pub cursor: Option<String>,
 }
 
 /// A badge shown next to the context name in the header and on the context's
@@ -2963,7 +2967,7 @@ bookmarks = []
         std::fs::create_dir_all(&ctx_dir).unwrap();
         std::fs::write(
             dir.join("config.toml"),
-            "default_namespace = \"default\"\n[aliases]\ndep = \"deployments\"\n[skin]\nname = \"gruvbox-dark\"\n",
+            "default_namespace = \"default\"\n[aliases]\ndep = \"deployments\"\n[skin]\nname = \"gruvbox-dark\"\ncursor = \"tint\"\n",
         )
         .unwrap();
         std::fs::write(
@@ -2986,6 +2990,7 @@ bookmarks = []
         assert!(plain.warnings.is_empty());
         assert_eq!(plain.config.default_namespace.as_deref(), Some("default"));
         assert_eq!(plain.config.skin.name.as_deref(), Some("gruvbox-dark"));
+        assert_eq!(plain.config.skin.cursor.as_deref(), Some("tint"));
         assert_eq!(plain.skin_override, None);
         assert!(!plain.config.readonly);
 
@@ -2994,6 +2999,7 @@ bookmarks = []
         assert!(prod.warnings.is_empty());
         assert_eq!(prod.config.default_namespace.as_deref(), Some("prod"));
         assert!(prod.config.skin.background);
+        assert_eq!(prod.config.skin.cursor.as_deref(), Some("tint"));
         assert_eq!(prod.config.aliases.len(), 2);
         assert_eq!(prod.skin_override.as_deref(), Some("catppuccin-latte"));
         assert!(prod.config.readonly);
