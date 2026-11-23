@@ -2,8 +2,9 @@ name: CI
 
 # PRs only. Pushes to main run only nix-cache.yaml. Home Manager tests run here.
 # The platforms job compiles all targets on Windows and runs the tests on macOS.
-# The release workflow builds Nix packages for all four platforms and updates
-# the Cachix cache. Package build failures can still first appear at release.
+# The release workflow builds Nix packages for Linux and Apple Silicon macOS
+# and updates the Cachix cache. Package build failures can still first appear
+# at release.
 on:
   pull_request:
 

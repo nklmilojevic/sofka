@@ -2,9 +2,6 @@
   description = "sofka - a Kubernetes TUI, reimagined in Rust";
 
   inputs = {
-    # Current stable release. Unlike unstable (which dropped x86_64-darwin
-    # after 26.05), this branch still covers all four platforms the release
-    # workflow builds for, so a single input suffices.
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-26.05";
     home-manager = {
       url = "github:nix-community/home-manager/release-26.05";
@@ -21,7 +18,6 @@
       systems = [
         "x86_64-linux"
         "aarch64-linux"
-        "x86_64-darwin"
         "aarch64-darwin"
       ];
 

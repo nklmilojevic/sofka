@@ -175,7 +175,6 @@ jobs:
           - os: ubuntu-latest
           - os: ubuntu-24.04-arm
           - os: macos-latest
-          - os: macos-15-intel
     runs-on: ${{ matrix.os }}
     env:
       CACHIX_AUTH_TOKEN: ${{ secrets.CACHIX_AUTH_TOKEN }}

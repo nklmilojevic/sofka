@@ -10,9 +10,9 @@ Add Sofka to your flake inputs:
 inputs.sofka.url = "github:nklmilojevic/sofka";
 ```
 
-CI builds every commit on `main` and every release for Linux and macOS and
-pushes the result to the `nkl-sofka` Cachix cache. Add it to your Nix settings
-to substitute Sofka instead of compiling it:
+CI builds every commit on `main` and every release for Linux and Apple Silicon
+macOS and pushes the result to the `nkl-sofka` Cachix cache. Add it to your Nix
+settings to substitute Sofka instead of compiling it:
 
 ```nix
 nix.settings = {

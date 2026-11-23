@@ -12,7 +12,7 @@ let
     strictDeps = true;
 
     # aws-lc-sys (the TLS client's crypto backend) builds AWS-LC's C sources
-    # with cmake. Bindings are pregenerated for all four platforms this package
+    # with cmake. Bindings are pregenerated for all platforms this package
     # targets, so no bindgen/libclang is needed here.
     nativeBuildInputs = [ cmake ];
 
