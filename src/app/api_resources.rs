@@ -180,6 +180,8 @@ impl App {
             return;
         }
         self.store.synced = false;
+        self.rediscovery_request += 1;
+        let request = self.rediscovery_request;
         let claim = self.claim_status("refreshing API resources…");
         let client = self.cluster.client.clone();
         let tx = self.tx.clone();
@@ -195,6 +197,7 @@ impl App {
                 .send(Msg::ApiResourcesRefreshed {
                     epoch,
                     generation,
+                    request,
                     claim,
                     result,
                 })

@@ -152,6 +152,7 @@ pub enum Msg {
     ApiResourcesRefreshed {
         epoch: u64,
         generation: u64,
+        request: u64,
         claim: StatusClaim,
         result: Result<Box<crate::k8s::Discovery>, String>,
     },

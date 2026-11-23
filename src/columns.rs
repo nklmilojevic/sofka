@@ -407,7 +407,7 @@ const NS_RESOURCE_COLUMNS: &[Column] = &[
 
 /// The `:api-resources` view: one row per discovered listable API resource.
 const API_RESOURCE_COLUMNS: &[Column] = &[
-    column("NAME", col_api_resource_name),
+    column("NAME", col_name),
     column("ALIASES", col_api_resource_aliases),
     column("APIVERSION", col_api_resource_api_version),
     column("SCOPE", col_api_resource_scope),
@@ -1645,10 +1645,6 @@ fn col_ns_resource_group<'a>(ctx: &CellContext<'a>) -> Cow<'a, str> {
 
 fn col_ns_resource_count<'a>(ctx: &CellContext<'a>) -> Cow<'a, str> {
     ns_resource_field(ctx, "count")
-}
-
-fn col_api_resource_name<'a>(ctx: &CellContext<'a>) -> Cow<'a, str> {
-    ns_resource_field(ctx, "plural")
 }
 
 fn col_api_resource_aliases<'a>(ctx: &CellContext<'a>) -> Cow<'a, str> {

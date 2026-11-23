@@ -309,8 +309,15 @@ impl App {
         if self.kind.is_none() {
             return;
         }
+        let kind_group = self
+            .kind
+            .as_ref()
+            .map(|k| k.ar.group.clone())
+            .unwrap_or_default();
         let entry = ViewEntry {
             kind_plural: self.kind_plural.clone(),
+            kind_group,
+            synthetic_api_resources: self.api_resources_active(),
             namespace: self.namespace.clone(),
             filter: self.filter.clone(),
             layout: self.active_layout().map(str::to_string),
@@ -380,9 +387,7 @@ impl App {
             self.start_watch();
             return;
         }
-        if entry.kind_plural == api_resources::VIEW
-            && self.cluster.resolve(api_resources::VIEW).is_none()
-        {
+        if entry.synthetic_api_resources {
             self.namespace = entry.namespace;
             self.set_api_resources_root();
             self.filter = entry.filter;
@@ -395,7 +400,15 @@ impl App {
             self.flash_err = false;
             return;
         }
-        let Some(kind) = self.cluster.resolve(&entry.kind_plural) else {
+        let resolved = if entry.kind_group.is_empty() {
+            self.cluster.resolve(&entry.kind_plural)
+        } else {
+            let qualified = format!("{}.{}", entry.kind_plural, entry.kind_group);
+            self.cluster
+                .resolve(&qualified)
+                .or_else(|| self.cluster.resolve(&entry.kind_plural))
+        };
+        let Some(kind) = resolved else {
             self.flash_warn(&format!("cannot resolve '{}' anymore", entry.kind_plural));
             return;
         };
@@ -1347,9 +1360,10 @@ impl App {
             Msg::ApiResourcesRefreshed {
                 epoch,
                 generation,
+                request,
                 claim,
                 result,
-            } if epoch == self.context_epoch => {
+            } if epoch == self.context_epoch && request == self.rediscovery_request => {
                 self.receive_api_resources_refresh(generation, claim, result);
             }
             Msg::Deleted { generation, key } if generation == self.generation => {

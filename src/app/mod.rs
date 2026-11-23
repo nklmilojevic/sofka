@@ -2017,6 +2017,8 @@ struct ViewKey {
 #[derive(Clone, PartialEq, Eq)]
 struct ViewEntry {
     kind_plural: String,
+    kind_group: String,
+    synthetic_api_resources: bool,
     namespace: String,
     filter: String,
     layout: Option<String>,

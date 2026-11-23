@@ -79,7 +79,9 @@ async fn ctrl_a_and_palette_commands_open_api_resources_browser() {
     assert_eq!(cell(&app, "nodes", "scope"), "Cluster");
     assert_eq!(app.flash, "3 API resources");
     assert!(!app.flash_err);
-    assert!(screen_text(&mut app, 120, 20).contains("○ snapshot"));
+    let rendered = screen_text(&mut app, 120, 20);
+    assert!(rendered.contains("○ snapshot"));
+    assert!(rendered.contains("deployments.apps"));
 
     // Wide mode adds SCALABLE.
     app.handle_key(press(KeyCode::Char('w'))).unwrap();
@@ -162,11 +164,13 @@ async fn refresh_updates_discovery_and_keeps_rows_on_error() {
     assert!(!app.store.synced);
     assert_eq!(app.rows().len(), initial_count);
     let claim = current_claim(&app);
+    let request = app.rediscovery_request;
 
     // A failure restores synced state and preserves existing rows.
     app.handle_msg(Msg::ApiResourcesRefreshed {
         epoch: app.context_epoch,
         generation: app.generation,
+        request,
         claim,
         result: Err("connection refused".into()),
     });
@@ -178,6 +182,7 @@ async fn refresh_updates_discovery_and_keeps_rows_on_error() {
     // Refresh again and receive a discovery with a new CRD.
     app.handle_key(press(KeyCode::Char('r'))).unwrap();
     let claim = current_claim(&app);
+    let request = app.rediscovery_request;
     let fresh = crate::k8s::Discovery::from_legacy(vec![json!({
         "groupVersion": "example.io/v1alpha1",
         "resources": [
@@ -187,6 +192,7 @@ async fn refresh_updates_discovery_and_keeps_rows_on_error() {
     app.handle_msg(Msg::ApiResourcesRefreshed {
         epoch: app.context_epoch,
         generation: app.generation,
+        request,
         claim,
         result: Ok(Box::new(fresh)),
     });
@@ -195,6 +201,59 @@ async fn refresh_updates_discovery_and_keeps_rows_on_error() {
     assert_eq!(cell(&app, "widgets.example.io", "aliases"), "wg");
     assert_eq!(app.flash, "1 API resource");
     assert!(!app.flash_err);
+}
+
+#[tokio::test]
+async fn overlapping_refreshes_drop_superseded_responses_before_applying_discovery() {
+    let (mut app, _rx) = test_app();
+    app.handle_key(ctrl(KeyCode::Char('a'))).unwrap();
+    assert!(app.api_resources_active());
+
+    // Trigger two overlapping refreshes.
+    app.handle_key(press(KeyCode::Char('r'))).unwrap();
+    let first_claim = current_claim(&app);
+    let first_request = app.rediscovery_request;
+
+    app.handle_key(press(KeyCode::Char('r'))).unwrap();
+    let second_claim = current_claim(&app);
+    let second_request = app.rediscovery_request;
+    assert!(second_request > first_request);
+
+    // The newer response arrives first and updates discovery and rows.
+    let newer = crate::k8s::Discovery::from_legacy(vec![json!({
+        "groupVersion": "newer.io/v1",
+        "resources": [
+            {"name": "gadgets", "kind": "Gadget", "namespaced": true, "verbs": ["get", "list"], "shortNames": ["gd"]}
+        ]
+    })]);
+    app.handle_msg(Msg::ApiResourcesRefreshed {
+        epoch: app.context_epoch,
+        generation: app.generation,
+        request: second_request,
+        claim: second_claim,
+        result: Ok(Box::new(newer)),
+    });
+    assert!(app.store.synced);
+    assert_eq!(row_names(&app), ["gadgets.newer.io"]);
+    assert!(app.cluster.resolve("gadgets").is_some());
+
+    // The slower first response arrives later and must be ignored.
+    let older = crate::k8s::Discovery::from_legacy(vec![json!({
+        "groupVersion": "older.io/v1",
+        "resources": [
+            {"name": "widgets", "kind": "Widget", "namespaced": true, "verbs": ["get", "list"]}
+        ]
+    })]);
+    app.handle_msg(Msg::ApiResourcesRefreshed {
+        epoch: app.context_epoch,
+        generation: app.generation,
+        request: first_request,
+        claim: first_claim,
+        result: Ok(Box::new(older)),
+    });
+    assert_eq!(row_names(&app), ["gadgets.newer.io"]);
+    assert!(app.cluster.resolve("gadgets").is_some());
+    assert!(app.cluster.resolve("widgets").is_none());
 }
 
 #[tokio::test]
@@ -297,4 +356,47 @@ async fn custom_resource_sharing_plural_keeps_its_own_view() {
     app.handle_key(press(KeyCode::Char('y'))).unwrap();
     assert!(!app.flash.contains("⏎ opens one"), "{}", app.flash);
     assert_ne!(app.mode, Mode::Table);
+}
+
+#[tokio::test]
+async fn history_distinguishes_browser_from_colliding_crd_in_both_directions() {
+    let (mut app, _rx) = test_app();
+    app.cluster
+        .register_kind("example.com", "ApiResource", "api-resources", true);
+
+    // Open the synthetic browser via Ctrl+A, then switch to the colliding CRD.
+    app.handle_key(ctrl(KeyCode::Char('a'))).unwrap();
+    assert!(app.api_resources_active());
+
+    type_resource_query(&mut app, "api-resources.example.com");
+    assert!(!app.api_resources_active());
+    assert_eq!(app.kind_plural, "api-resources");
+    assert_eq!(app.kind.as_ref().unwrap().ar.group, "example.com");
+
+    // `[` returns to the synthetic browser (not the colliding CRD).
+    app.handle_key(press(KeyCode::Char('['))).unwrap();
+    assert!(app.api_resources_active());
+
+    // `]` returns to the colliding CRD with its exact API group.
+    app.handle_key(press(KeyCode::Char(']'))).unwrap();
+    assert!(!app.api_resources_active());
+    assert_eq!(app.kind_plural, "api-resources");
+    assert_eq!(app.kind.as_ref().unwrap().ar.group, "example.com");
+}
+
+#[tokio::test]
+async fn colliding_plurals_render_distinct_qualified_names_in_name_column() {
+    let (mut app, _rx) = test_app();
+    app.handle_key(ctrl(KeyCode::Char('a'))).unwrap();
+    assert!(app.api_resources_active());
+
+    app.handle_key(press(KeyCode::Char('/'))).unwrap();
+    for c in "events".chars() {
+        app.handle_key(press(KeyCode::Char(c))).unwrap();
+    }
+    app.handle_key(press(KeyCode::Enter)).unwrap();
+    assert_eq!(row_names(&app), ["events", "events.events.k8s.io"]);
+
+    let rendered = screen_text(&mut app, 120, 20);
+    assert!(rendered.contains("events.events.k8s.io"));
 }
