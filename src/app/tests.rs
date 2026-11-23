@@ -5455,12 +5455,105 @@ async fn logs_pause_freezes_and_survives_new_lines() {
     app.handle_key(press(KeyCode::Char('G'))).unwrap();
     assert!(app.logs.follow);
 
-    // Down-scroll is clamped to the deepest offset (rows - height = 60), so
-    // it can't overshoot past the bottom-pinned last page.
+    // Down-scroll at the bottom stays clamped to the deepest offset
+    // (rows - height = 60) and keeps autoscroll active.
     app.logs.view.scroll = 60;
     app.handle_key(press(KeyCode::Char('j'))).unwrap();
-    assert!(!app.logs.follow);
+    assert!(app.logs.follow);
     assert_eq!(app.logs.view.scroll, 60);
+}
+
+#[tokio::test]
+async fn logs_scroll_down_to_bottom_resumes_autoscroll_and_trims() {
+    let (mut app, _rx) = test_app();
+    use_keys(&mut app, HALF_PAGE_KEYS);
+    app.logs_cfg.buffer = 50;
+    app.mode = Mode::Logs;
+    app.return_mode = Mode::Table;
+    app.logs.follow = true;
+    app.logs.view.scroll = 60;
+    app.logs.viewport_rows = 100;
+    app.logs.viewport_h = 40;
+
+    // Scrolling down while already following at the bottom keeps autoscroll on.
+    for key in [
+        press(KeyCode::Down),
+        press(KeyCode::Char('j')),
+        press(KeyCode::PageDown),
+        ctrl(KeyCode::Char('d')),
+    ] {
+        app.handle_key(key).unwrap();
+        assert!(app.logs.follow);
+        assert_eq!(app.logs.view.scroll, 60);
+    }
+
+    // Scroll up two rows → paused; stepping down one row stays paused.
+    app.handle_key(press(KeyCode::Up)).unwrap();
+    app.handle_key(press(KeyCode::Up)).unwrap();
+    assert!(!app.logs.follow);
+    assert_eq!(app.logs.view.scroll, 58);
+
+    // Fill past the follow buffer cap while paused so resuming must trim.
+    app.handle_msg(Msg::LogLines {
+        generation: app.log_gen,
+        lines: (0..80).map(|i| format!("line {i}")).collect(),
+    });
+    assert_eq!(app.logs.view.lines.len(), 80);
+
+    app.handle_key(press(KeyCode::Down)).unwrap();
+    assert!(!app.logs.follow);
+    assert_eq!(app.logs.view.scroll, 59);
+    assert_eq!(app.logs.view.lines.len(), 80);
+
+    // Reaching the bottom via Down resumes autoscroll and trims the buffer.
+    app.handle_key(press(KeyCode::Down)).unwrap();
+    assert!(app.logs.follow);
+    assert_eq!(app.logs.view.scroll, 60);
+    assert_eq!(app.logs.view.lines.len(), 50);
+
+    // Reaching the bottom via PageDown and HalfPageDown also resumes and trims.
+    for (up_key, down_key) in [
+        (press(KeyCode::PageUp), press(KeyCode::PageDown)),
+        (ctrl(KeyCode::Char('u')), ctrl(KeyCode::Char('d'))),
+    ] {
+        app.handle_key(up_key).unwrap();
+        assert!(!app.logs.follow);
+        app.handle_msg(Msg::LogLines {
+            generation: app.log_gen,
+            lines: (0..30).map(|i| format!("extra {i}")).collect(),
+        });
+        assert_eq!(app.logs.view.lines.len(), 80);
+
+        app.handle_key(down_key).unwrap();
+        assert!(app.logs.follow);
+        assert_eq!(app.logs.view.scroll, 60);
+        assert_eq!(app.logs.view.lines.len(), 50);
+    }
+
+    // Jumping back to the bottom with `G` or toggling follow back on with `s`
+    // anchors scroll so an immediate Down before the next draw keeps follow on.
+    for resume_key in [press(KeyCode::Char('G')), press(KeyCode::Char('s'))] {
+        app.handle_key(press(KeyCode::Char('g'))).unwrap();
+        assert!(!app.logs.follow);
+        assert_eq!(app.logs.view.scroll, 0);
+
+        app.handle_key(resume_key).unwrap();
+        assert!(app.logs.follow);
+        app.handle_key(press(KeyCode::Down)).unwrap();
+        assert!(app.logs.follow);
+        assert_eq!(app.logs.view.scroll, 60);
+    }
+
+    // Buffer shorter than the viewport (`max == 0`): Up pauses, Down resumes.
+    app.logs.viewport_rows = 10;
+    app.logs.viewport_h = 40;
+    app.logs.view.scroll = 0;
+    app.logs.follow = true;
+    app.handle_key(press(KeyCode::Up)).unwrap();
+    assert!(!app.logs.follow);
+    app.handle_key(press(KeyCode::Down)).unwrap();
+    assert!(app.logs.follow);
+    assert_eq!(app.logs.view.scroll, 0);
 }
 
 /// A fast wheel-down burst in the log view reaches us as alternate-scroll
@@ -5497,6 +5590,7 @@ async fn rapid_log_wheel_down_clamps_without_leaving_logs() {
         assert!(app.logs.view.scroll <= 60);
     }
     assert_eq!(app.logs.view.scroll, 60);
+    assert!(app.logs.follow);
     assert!(!repair.pending());
 }
 

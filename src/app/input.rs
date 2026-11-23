@@ -1647,6 +1647,8 @@ impl App {
             (Some(Action::Follow), _) => {
                 self.logs.follow = !self.logs.follow;
                 if self.logs.follow {
+                    self.logs.view.scroll =
+                        self.logs.viewport_rows.saturating_sub(self.logs.viewport_h);
                     self.trim_log_buffer();
                 }
                 self.flash = format!(
@@ -1746,10 +1748,11 @@ impl App {
             }
             _ => {}
         }
-        // Navigation. Any manual upward/relative move drops autoscroll and
-        // freezes the view; jumping to the bottom (G/End) re-arms it, like
-        // k9s. Scroll is clamped in display-row units (`viewport_rows`) so a
-        // wrapped buffer doesn't jump to a stale line index when paused.
+        // Navigation. Moving up or stopping above the bottom drops autoscroll
+        // and freezes the view; reaching the bottom (or jumping there with
+        // G/End) re-arms it, and scrolling down while already at the bottom
+        // keeps it on. Scroll is clamped in display-row units (`viewport_rows`)
+        // so a wrapped buffer doesn't jump to a stale line index when paused.
         let page = self.logs.viewport_h.max(1);
         // Deepest useful offset: last full page pinned to the viewport bottom.
         let max = self.logs.viewport_rows.saturating_sub(self.logs.viewport_h);
@@ -1762,17 +1765,26 @@ impl App {
                     self.restore_selection();
                 }
             }
-            (Some(Action::Down), _) => {
-                self.logs.follow = false;
-                self.logs.view.scroll = cur.saturating_add(1).min(max);
+            (Some(a @ (Action::Down | Action::PageDown | Action::HalfPageDown)), _) => {
+                let step = match a {
+                    Action::Down => 1,
+                    _ => a.page_size(page),
+                };
+                let next = cur.saturating_add(step).min(max);
+                self.logs.view.scroll = next;
+                if next >= max {
+                    let was_following = self.logs.follow;
+                    self.logs.follow = true;
+                    if !was_following {
+                        self.trim_log_buffer();
+                    }
+                } else {
+                    self.logs.follow = false;
+                }
             }
             (Some(Action::Up), _) => {
                 self.logs.follow = false;
                 self.logs.view.scroll = cur.saturating_sub(1);
-            }
-            (Some(a @ (Action::PageDown | Action::HalfPageDown)), _) => {
-                self.logs.follow = false;
-                self.logs.view.scroll = cur.saturating_add(a.page_size(page)).min(max);
             }
             (Some(a @ (Action::PageUp | Action::HalfPageUp)), _) => {
                 self.logs.follow = false;
@@ -1791,6 +1803,7 @@ impl App {
             (Some(Action::Last), _) => {
                 // Resume autoscroll; the next draw anchors to the bottom.
                 self.logs.follow = true;
+                self.logs.view.scroll = max;
                 self.trim_log_buffer();
             }
             _ => {}
