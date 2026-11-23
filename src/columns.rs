@@ -405,6 +405,16 @@ const NS_RESOURCE_COLUMNS: &[Column] = &[
     column("COUNT", col_ns_resource_count),
 ];
 
+/// The `:api-resources` view: one row per discovered listable API resource.
+const API_RESOURCE_COLUMNS: &[Column] = &[
+    column("NAME", col_api_resource_name),
+    column("ALIASES", col_api_resource_aliases),
+    column("APIVERSION", col_api_resource_api_version),
+    column("SCOPE", col_api_resource_scope),
+    column("KIND", col_api_resource_kind),
+    wide_column("SCALABLE", col_api_resource_scalable),
+];
+
 /// One row per release, at its latest revision — like `helm list`. Backed by
 /// the release storage `Secret`s (see `crate::helm`), not a real discovered
 /// resource kind.
@@ -494,6 +504,7 @@ fn columns_for(group: &str, plural: &str) -> &'static [Column] {
         ("", "helm") => HELM_COLUMNS,
         ("", "workloads") => WORKLOAD_COLUMNS,
         ("", "ns-resources") => NS_RESOURCE_COLUMNS,
+        ("", "api-resources") => API_RESOURCE_COLUMNS,
         ("", "helmhistory") => HELM_HISTORY_COLUMNS,
         ("apps", crate::rollout::VIEW) => ROLLOUT_HISTORY_COLUMNS,
         _ => DEFAULT_COLUMNS,
@@ -1634,6 +1645,34 @@ fn col_ns_resource_group<'a>(ctx: &CellContext<'a>) -> Cow<'a, str> {
 
 fn col_ns_resource_count<'a>(ctx: &CellContext<'a>) -> Cow<'a, str> {
     ns_resource_field(ctx, "count")
+}
+
+fn col_api_resource_name<'a>(ctx: &CellContext<'a>) -> Cow<'a, str> {
+    ns_resource_field(ctx, "plural")
+}
+
+fn col_api_resource_aliases<'a>(ctx: &CellContext<'a>) -> Cow<'a, str> {
+    ns_resource_field(ctx, "aliases")
+}
+
+fn col_api_resource_api_version<'a>(ctx: &CellContext<'a>) -> Cow<'a, str> {
+    ns_resource_field(ctx, "apiVersion")
+}
+
+fn col_api_resource_scope<'a>(ctx: &CellContext<'a>) -> Cow<'a, str> {
+    ns_resource_field(ctx, "scope")
+}
+
+fn col_api_resource_kind<'a>(ctx: &CellContext<'a>) -> Cow<'a, str> {
+    ns_resource_field(ctx, "kind")
+}
+
+fn col_api_resource_scalable<'a>(ctx: &CellContext<'a>) -> Cow<'a, str> {
+    Cow::Borrowed(if ctx.data["scalable"].as_bool().unwrap_or(false) {
+        "true"
+    } else {
+        "false"
+    })
 }
 
 fn col_workload_kind<'a>(ctx: &CellContext<'a>) -> Cow<'a, str> {

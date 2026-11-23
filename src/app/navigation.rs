@@ -56,6 +56,9 @@ impl App {
             }
             "pods" => self.open_containers(&obj),
             ns_resources::VIEW if self.ns_resources_active() => self.drill_into_ns_resource(&obj),
+            api_resources::VIEW if self.api_resources_active() => {
+                self.drill_into_api_resource(&obj)
+            }
             "cronjobs" => self.drill_into_cronjob_jobs(&obj),
             // enter on a CRD lists its custom resources, not its YAML.
             "customresourcedefinitions" => self.drill_into_crd(&obj),

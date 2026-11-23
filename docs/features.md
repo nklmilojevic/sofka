@@ -371,7 +371,7 @@ include those conditions. Row filters can search the route paths.
   view history.
 - **Command palette** (`:`) - fuzzy search over the full resource catalog, your
   saved bookmarks and workspaces, and the built-in commands (`ctx`, `helm`,
-  `workloads`, `ns-resources`, `pulse`, `xray`, `explain`, `timeline`, `gitops`, `argocd`, `adjacent`, `users`, `groups`, `policy`, `can-i`, `journal`,
+  `workloads`, `ns-resources`, `api-resources`, `pulse`, `xray`, `explain`, `timeline`, `gitops`, `argocd`, `adjacent`, `users`, `groups`, `policy`, `can-i`, `journal`,
   `debug`,
   `debug-clean`, `bundle`, `bundle-save`, `snapshot`, `snapshots`, `diff`,
   `events`, `pf`, `notify`, `find`, `vlogs`, `rightsize`, `fleet`, `skin`,
@@ -617,6 +617,19 @@ include those conditions. Row filters can search the route paths.
   are hidden, one `⏎` away from their owner. `O` shows them too. `Ctrl+Z`
   judges each row by its kind's faults rule. Kinds missing from API discovery
   are skipped.
+- **API resources browser** (`Ctrl+A`, `:api-resources`, `:aliases`) -
+  a searchable table of all discovered listable Kubernetes resource types
+  (core, aggregated APIs, and CRDs) with NAME, ALIASES (API short names,
+  built-in shorthands, and user `[aliases]`), APIVERSION, SCOPE
+  (`Namespaced` or `Cluster`), and KIND columns, plus SCALABLE in wide mode
+  (`w`). Populated immediately from cached API discovery with no extra API
+  requests on open; `r` or `ctrl-r` re-runs API discovery in the background so
+  newly installed CRDs appear without restarting. `⏎` opens the selected
+  resource's view using its exact API group and version, and `esc` returns.
+  Filter, sort, copy, and view history work as in any table; keys, commands,
+  and plugins that act on objects are disabled on these rows, while
+  `target = "context"` plugins still run. Configured bookmark, workspace, and
+  plugin bindings take precedence over `Ctrl+A`.
 - **Namespace resources** (`:ns-resources [ns]`, `R` on a namespace row) -
   every namespaced kind from a fresh API discovery that has objects in the
   namespace, custom resources included, with KIND, GROUP, and COUNT columns.

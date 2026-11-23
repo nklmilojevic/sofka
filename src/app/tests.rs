@@ -6,6 +6,7 @@ use serde_json::json;
 use std::time::Instant;
 use tokio::sync::mpsc::{self, Receiver};
 
+mod api_resources;
 #[cfg(unix)]
 mod clipboard;
 mod context_badge;

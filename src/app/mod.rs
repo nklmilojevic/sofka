@@ -833,6 +833,7 @@ enum PaletteAction {
     Helm,
     Workloads,
     NsResources,
+    ApiResources,
     Notify,
     Reload,
     Layout,
@@ -888,6 +889,10 @@ const PALETTE_COMMANDS: &[PaletteCommand] = &[
     PaletteCommand {
         action: PaletteAction::NsResources,
         names: ns_resources::NAMES,
+    },
+    PaletteCommand {
+        action: PaletteAction::ApiResources,
+        names: api_resources::NAMES,
     },
     PaletteCommand {
         action: PaletteAction::Pulse,
@@ -3296,6 +3301,7 @@ mod metrics_history;
 mod mouse;
 mod namespace_patterns;
 pub use namespace_patterns::NamespacePatternAction;
+pub mod api_resources;
 mod config_edit;
 mod navigation;
 mod notify;

@@ -26,6 +26,7 @@ actions! {
     Adjacent => ("adjacent", "adjacent"),
     AllContainers => ("all_containers", "toggle default and all containers"),
     AllNamespaces => ("all_namespaces", "all namespaces"),
+    ApiResources => ("api_resources", "browse discovered API resources"),
     Anchor0 => ("anchor_0", "tail logs"),
     Anchor1 => ("anchor_1", "logs from last minute"),
     Anchor2 => ("anchor_2", "logs from last 5 minutes"),
@@ -637,6 +638,7 @@ const DEFAULTS: &[(&str, Action, &[&str])] = &[
     ("table", Action::ActionMenu, &["t"]),
     ("table", Action::Adjacent, &["u"]),
     ("table", Action::AllNamespaces, &["0"]),
+    ("table", Action::ApiResources, &["ctrl-a"]),
     ("table", Action::FavoriteNamespace1, &["1"]),
     ("table", Action::FavoriteNamespace2, &["2"]),
     ("table", Action::FavoriteNamespace3, &["3"]),
@@ -1162,6 +1164,7 @@ pub fn hidden_bindings(
             for (scope, action, chords) in keymap.entries() {
                 if scope == "table"
                     && action != Action::Faults
+                    && action != Action::ApiResources
                     && action.kinds().is_none_or(|kinds| {
                         resources.is_empty()
                             || resources.iter().any(|s| kinds.contains(&s.as_str()))

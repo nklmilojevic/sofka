@@ -148,6 +148,13 @@ pub enum Msg {
         claim: StatusClaim,
         update: crate::app::ns_resources::Update,
     },
+    /// Fresh API discovery triggered from `:api-resources` (`r`).
+    ApiResourcesRefreshed {
+        epoch: u64,
+        generation: u64,
+        claim: StatusClaim,
+        result: Result<Box<crate::k8s::Discovery>, String>,
+    },
     XrayData {
         generation: u64,
         claim: StatusClaim,

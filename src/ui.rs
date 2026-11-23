@@ -892,7 +892,10 @@ fn draw_compact_header(frame: &mut Frame, app: &App, area: Rect) {
         ("● refresh", theme::sky())
     } else if app.resource_refresh_available() {
         ("○ stopped", theme::overlay1())
-    } else if app.ns_resources_active() && app.mode == Mode::Table && app.store.synced {
+    } else if (app.ns_resources_active() || app.api_resources_active())
+        && app.mode == Mode::Table
+        && app.store.synced
+    {
         ("○ snapshot", theme::overlay1())
     } else {
         sync_indicator(
@@ -1211,6 +1214,24 @@ fn header_hints(app: &App) -> Vec<Line<'static>> {
                     (Action::Edit, "edit"),
                     (Action::Delete, "delete"),
                     (Action::NsResources, "resources"),
+                ],
+            ),
+        ],
+        "api-resources" if app.api_resources_active() => vec![
+            hint_line(
+                app,
+                &[
+                    (Action::Open, "open"),
+                    (Action::RestartOrRefresh, "refresh"),
+                    (Action::Wide, "wide"),
+                ],
+            ),
+            hint_line(
+                app,
+                &[
+                    (Action::Filter, "filter"),
+                    (Action::Sort, "sort"),
+                    (Action::CopyName, "copy"),
                 ],
             ),
         ],
@@ -3546,6 +3567,10 @@ fn build_help(app: &App, width: usize) -> (Vec<Line<'static>>, String, HelpSecti
     lines.push(bind(
         ":ns-resources [ns]",
         "kinds with objects in the namespace and how many; ⏎ opens one · r counts again",
+    ));
+    lines.push(bind(
+        ":api-resources · :aliases",
+        "discovered API resources, CRDs, and aliases; ⏎ opens one · r refreshes discovery",
     ));
     lines.push(bind(
         ":xray · :diff",
@@ -6603,7 +6628,10 @@ fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
         ("● refresh", theme::sky())
     } else if app.resource_refresh_available() {
         ("○ stopped", theme::overlay1())
-    } else if app.ns_resources_active() && app.mode == Mode::Table && app.store.synced {
+    } else if (app.ns_resources_active() || app.api_resources_active())
+        && app.mode == Mode::Table
+        && app.store.synced
+    {
         ("○ snapshot", theme::overlay1())
     } else {
         sync_indicator(

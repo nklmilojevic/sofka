@@ -1822,6 +1822,9 @@ impl App {
         warnings.extend(badge_warnings);
         self.configure_native_describe(resolved.config.experimental.native_describe);
         self.cluster.add_aliases(&self.user_aliases);
+        if self.api_resources_active() {
+            self.populate_api_resources_store();
+        }
         crate::theme::set_background(resolved.config.skin.background);
         // The skin named by the base config (if any) becomes the session skin
         // again — a reload is an explicit "use what the files say now". With

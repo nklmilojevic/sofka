@@ -159,6 +159,9 @@ impl App {
             None if ns_resources::NAMES.contains(&input.trim().to_lowercase().as_str()) => {
                 self.open_ns_resources(ns);
             }
+            None if api_resources::NAMES.contains(&input.trim().to_lowercase().as_str()) => {
+                self.open_api_resources();
+            }
             None => {
                 let retry = rediscovery::Retry::Kind {
                     input: input.to_string(),
@@ -377,6 +380,21 @@ impl App {
             self.start_watch();
             return;
         }
+        if entry.kind_plural == api_resources::VIEW
+            && self.cluster.resolve(api_resources::VIEW).is_none()
+        {
+            self.namespace = entry.namespace;
+            self.set_api_resources_root();
+            self.filter = entry.filter;
+            self.start_watch();
+            self.flash = format!(
+                "history {}/{}: api-resources",
+                self.history_pos + 1,
+                self.history.len()
+            );
+            self.flash_err = false;
+            return;
+        }
         let Some(kind) = self.cluster.resolve(&entry.kind_plural) else {
             self.flash_warn(&format!("cannot resolve '{}' anymore", entry.kind_plural));
             return;
@@ -582,6 +600,8 @@ impl App {
             self.start_workload_watches(watch_labels, watch_fields);
         } else if self.ns_resources_active() {
             self.start_ns_resources();
+        } else if self.api_resources_active() {
+            self.start_api_resources();
         } else {
             self.start_namespace_watches(&kind, watch_labels, watch_fields);
         }
@@ -1324,6 +1344,14 @@ impl App {
                 claim,
                 update,
             } if generation == self.generation => self.receive_ns_resources(claim, update),
+            Msg::ApiResourcesRefreshed {
+                epoch,
+                generation,
+                claim,
+                result,
+            } if epoch == self.context_epoch => {
+                self.receive_api_resources_refresh(generation, claim, result);
+            }
             Msg::Deleted { generation, key } if generation == self.generation => {
                 self.delete_watched(None, &key);
             }

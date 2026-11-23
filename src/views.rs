@@ -206,6 +206,7 @@ pub const BUILTIN_DRILLS: &[&str] = &[
     "helmreleases",
     "rollouthistory",
     "ns-resources",
+    "api-resources",
 ];
 
 /// The plural a view key names: the last segment of `apiVersion/plural`,
@@ -650,9 +651,10 @@ pub fn compile(
                 let rbac_group = key_lc
                     .split_once('/')
                     .is_none_or(|(group, _)| group == "rbac.authorization.k8s.io");
-                // `ns-resources` is a synthetic core view (`v1`); a custom
-                // resource sharing its plural is configured by its group.
-                let synthetic = plural != "ns-resources"
+                // `ns-resources` and `api-resources` are synthetic core views
+                // (`v1`); a custom resource sharing either plural is configured
+                // by its group.
+                let synthetic = !matches!(plural, "ns-resources" | "api-resources")
                     || key_lc
                         .split_once('/')
                         .is_none_or(|(prefix, _)| prefix == "v1");
@@ -2333,6 +2335,19 @@ mod tests {
         assert!(ignored("ns-resources"));
         assert!(ignored("v1/ns-resources"));
         assert!(!ignored("example.com/ns-resources"));
+    }
+
+    #[test]
+    fn api_resources_drill_is_builtin_only_for_the_synthetic_view() {
+        let ignored = |key: &str| {
+            let (_, warnings) = compile_toml(&format!(
+                "[views.\"{key}\"]\ndrill = {{ kind = \"secrets\" }}\n"
+            ));
+            warnings.iter().any(|w| w.contains("drill is ignored"))
+        };
+        assert!(ignored("api-resources"));
+        assert!(ignored("v1/api-resources"));
+        assert!(!ignored("example.com/api-resources"));
     }
 
     #[test]
