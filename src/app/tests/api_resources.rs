@@ -456,4 +456,27 @@ async fn same_group_and_plural_across_api_versions_stay_separate_rows() {
     app.handle_key(press(KeyCode::Char('j'))).unwrap();
     app.handle_key(press(KeyCode::Enter)).unwrap();
     assert_eq!(app.kind.as_ref().unwrap().ar.api_version, second_version);
+
+    // Switching namespace records the drilled version/kind in history;
+    // navigating to the other kind and back restores the exact version/kind.
+    let drilled_version = app.kind.as_ref().unwrap().ar.api_version.clone();
+    let drilled_kind = app.kind.as_ref().unwrap().ar.kind.clone();
+    app.handle_key(press(KeyCode::Char('0'))).unwrap();
+    let other_kind = if drilled_kind == "Widget" {
+        "legacywidget"
+    } else {
+        "widget"
+    };
+    type_resource_query(&mut app, other_kind);
+    let other_version = app.kind.as_ref().unwrap().ar.api_version.clone();
+    let other_kind_name = app.kind.as_ref().unwrap().ar.kind.clone();
+    assert_ne!(other_version, drilled_version);
+
+    app.handle_key(press(KeyCode::Char('['))).unwrap();
+    assert_eq!(app.kind.as_ref().unwrap().ar.api_version, drilled_version);
+    assert_eq!(app.kind.as_ref().unwrap().ar.kind, drilled_kind);
+
+    app.handle_key(press(KeyCode::Char(']'))).unwrap();
+    assert_eq!(app.kind.as_ref().unwrap().ar.api_version, other_version);
+    assert_eq!(app.kind.as_ref().unwrap().ar.kind, other_kind_name);
 }

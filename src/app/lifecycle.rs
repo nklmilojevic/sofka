@@ -306,17 +306,14 @@ impl App {
     /// root switch; navigating with `[`/`]` bypasses this so hopping through
     /// history doesn't rewrite it. A new entry truncates the forward tail.
     pub(super) fn record_history(&mut self) {
-        if self.kind.is_none() {
+        let Some(kind) = self.kind.as_ref() else {
             return;
-        }
-        let kind_group = self
-            .kind
-            .as_ref()
-            .map(|k| k.ar.group.clone())
-            .unwrap_or_default();
+        };
         let entry = ViewEntry {
             kind_plural: self.kind_plural.clone(),
-            kind_group,
+            kind_group: kind.ar.group.clone(),
+            kind_version: kind.ar.version.clone(),
+            kind_name: kind.ar.kind.clone(),
             synthetic_api_resources: self.api_resources_active(),
             namespace: self.namespace.clone(),
             filter: self.filter.clone(),
@@ -400,14 +397,27 @@ impl App {
             self.flash_err = false;
             return;
         }
-        let resolved = if entry.kind_group.is_empty() {
-            self.cluster.resolve(&entry.kind_plural)
-        } else {
-            let qualified = format!("{}.{}", entry.kind_plural, entry.kind_group);
-            self.cluster
-                .resolve(&qualified)
-                .or_else(|| self.cluster.resolve(&entry.kind_plural))
-        };
+        let resolved = self
+            .cluster
+            .discovered_resources()
+            .iter()
+            .find(|r| {
+                r.kind.ar.group == entry.kind_group
+                    && r.kind.ar.version == entry.kind_version
+                    && r.kind.ar.plural.eq_ignore_ascii_case(&entry.kind_plural)
+                    && r.kind.ar.kind == entry.kind_name
+            })
+            .map(|r| r.kind.clone())
+            .or_else(|| {
+                if entry.kind_group.is_empty() {
+                    self.cluster.resolve(&entry.kind_plural)
+                } else {
+                    let qualified = format!("{}.{}", entry.kind_plural, entry.kind_group);
+                    self.cluster
+                        .resolve(&qualified)
+                        .or_else(|| self.cluster.resolve(&entry.kind_plural))
+                }
+            });
         let Some(kind) = resolved else {
             self.flash_warn(&format!("cannot resolve '{}' anymore", entry.kind_plural));
             return;

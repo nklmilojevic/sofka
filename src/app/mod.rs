@@ -2018,6 +2018,8 @@ struct ViewKey {
 struct ViewEntry {
     kind_plural: String,
     kind_group: String,
+    kind_version: String,
+    kind_name: String,
     synthetic_api_resources: bool,
     namespace: String,
     filter: String,
