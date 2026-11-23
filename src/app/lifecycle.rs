@@ -159,6 +159,9 @@ impl App {
             None if ns_resources::NAMES.contains(&input.trim().to_lowercase().as_str()) => {
                 self.open_ns_resources(ns);
             }
+            None if api_resources::NAMES.contains(&input.trim().to_lowercase().as_str()) => {
+                self.open_api_resources();
+            }
             None => {
                 let retry = rediscovery::Retry::Kind {
                     input: input.to_string(),
@@ -303,11 +306,15 @@ impl App {
     /// root switch; navigating with `[`/`]` bypasses this so hopping through
     /// history doesn't rewrite it. A new entry truncates the forward tail.
     pub(super) fn record_history(&mut self) {
-        if self.kind.is_none() {
+        let Some(kind) = self.kind.as_ref() else {
             return;
-        }
+        };
         let entry = ViewEntry {
             kind_plural: self.kind_plural.clone(),
+            kind_group: kind.ar.group.clone(),
+            kind_version: kind.ar.version.clone(),
+            kind_name: kind.ar.kind.clone(),
+            synthetic_api_resources: self.api_resources_active(),
             namespace: self.namespace.clone(),
             filter: self.filter.clone(),
             layout: self.active_layout().map(str::to_string),
@@ -377,7 +384,41 @@ impl App {
             self.start_watch();
             return;
         }
-        let Some(kind) = self.cluster.resolve(&entry.kind_plural) else {
+        if entry.synthetic_api_resources {
+            self.namespace = entry.namespace;
+            self.set_api_resources_root();
+            self.filter = entry.filter;
+            self.start_watch();
+            self.flash = format!(
+                "history {}/{}: api-resources",
+                self.history_pos + 1,
+                self.history.len()
+            );
+            self.flash_err = false;
+            return;
+        }
+        let resolved = self
+            .cluster
+            .discovered_resources()
+            .iter()
+            .find(|r| {
+                r.kind.ar.group == entry.kind_group
+                    && r.kind.ar.version == entry.kind_version
+                    && r.kind.ar.plural.eq_ignore_ascii_case(&entry.kind_plural)
+                    && r.kind.ar.kind == entry.kind_name
+            })
+            .map(|r| r.kind.clone())
+            .or_else(|| {
+                if entry.kind_group.is_empty() {
+                    self.cluster.resolve(&entry.kind_plural)
+                } else {
+                    let qualified = format!("{}.{}", entry.kind_plural, entry.kind_group);
+                    self.cluster
+                        .resolve(&qualified)
+                        .or_else(|| self.cluster.resolve(&entry.kind_plural))
+                }
+            });
+        let Some(kind) = resolved else {
             self.flash_warn(&format!("cannot resolve '{}' anymore", entry.kind_plural));
             return;
         };
@@ -582,6 +623,8 @@ impl App {
             self.start_workload_watches(watch_labels, watch_fields);
         } else if self.ns_resources_active() {
             self.start_ns_resources();
+        } else if self.api_resources_active() {
+            self.start_api_resources();
         } else {
             self.start_namespace_watches(&kind, watch_labels, watch_fields);
         }
@@ -1324,6 +1367,15 @@ impl App {
                 claim,
                 update,
             } if generation == self.generation => self.receive_ns_resources(claim, update),
+            Msg::ApiResourcesRefreshed {
+                epoch,
+                generation,
+                request,
+                claim,
+                result,
+            } if epoch == self.context_epoch && request == self.rediscovery_request => {
+                self.receive_api_resources_refresh(generation, claim, result);
+            }
             Msg::Deleted { generation, key } if generation == self.generation => {
                 self.delete_watched(None, &key);
             }

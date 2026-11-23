@@ -1822,6 +1822,9 @@ impl App {
         warnings.extend(badge_warnings);
         self.configure_native_describe(resolved.config.experimental.native_describe);
         self.cluster.add_aliases(&self.user_aliases);
+        if self.api_resources_active() {
+            self.populate_api_resources_store();
+        }
         crate::theme::set_background(resolved.config.skin.background);
         crate::theme::set_cursor_style(crate::theme::resolve_cursor_style(
             resolved.config.skin.cursor.as_deref(),

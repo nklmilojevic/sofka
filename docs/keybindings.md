@@ -706,6 +706,7 @@ for those operations.
 | `action_menu`        | `t`                  |
 | `adjacent`           | `u`                  |
 | `all_namespaces`     | `0`                  |
+| `api_resources`      | `ctrl-a`             |
 | `approve`            | `V`                  |
 | `attach`             | `a`                  |
 | `back`               | `esc`                |

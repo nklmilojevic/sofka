@@ -685,6 +685,14 @@ pub struct Kind {
     pub scalable: bool,
 }
 
+/// A discovered API resource with the metadata the `:api-resources` browser shows.
+#[derive(Clone)]
+pub struct DiscoveredResource {
+    pub kind: Kind,
+    pub short_names: Vec<String>,
+    pub listable: bool,
+}
+
 /// An `Api` for `ar` in `namespace`, where `""` means every namespace. A
 /// cluster-scoped resource ignores the namespace.
 pub fn dynamic_api(
@@ -757,6 +765,8 @@ pub struct Cluster {
     registry: HashMap<String, Kind>,
     /// stable, de-duplicated list of plural names for completion
     pub catalog: Vec<String>,
+    /// discovered resources with short names and list capability
+    discovered: Vec<DiscoveredResource>,
     /// False for the placeholder built by [`Cluster::disconnected`] when the
     /// current context is unreachable at launch — the app then starts in the
     /// context picker instead of a resource view.
@@ -980,6 +990,7 @@ impl Cluster {
             cli_context,
             registry: HashMap::new(),
             catalog: Vec::new(),
+            discovered: Vec::new(),
             connected: true,
             allow_v1_client_cert,
             no_tls_resumption,
@@ -1069,6 +1080,7 @@ impl Cluster {
             default_namespace: "default".into(),
             registry: HashMap::new(),
             catalog: Vec::new(),
+            discovered: Vec::new(),
             connected: false,
             allow_v1_client_cert: false,
             no_tls_resumption: false,
@@ -1201,6 +1213,14 @@ impl Cluster {
         });
         let mut entries = Vec::new();
         let mut catalog = Vec::new();
+        self.discovered = resources
+            .iter()
+            .map(|r| DiscoveredResource {
+                kind: r.kind.clone(),
+                short_names: r.short_names.clone(),
+                listable: r.listable,
+            })
+            .collect();
         for resource in &resources {
             let kind = &resource.kind;
             let ar = &kind.ar;
@@ -1248,6 +1268,37 @@ impl Cluster {
     pub fn resolve(&self, input: &str) -> Option<Kind> {
         let key = input.trim().trim_start_matches(':').to_lowercase();
         self.registry.get(&key).cloned()
+    }
+
+    /// Discovered API resources for the current cluster.
+    pub fn discovered_resources(&self) -> &[DiscoveredResource] {
+        &self.discovered
+    }
+
+    /// Working aliases (API short names, built-in shorthands, and user
+    /// `[aliases]`) that resolve to `kind`, sorted and deduplicated.
+    pub fn aliases_for(&self, kind: &Kind) -> Vec<String> {
+        let plural = kind.ar.plural.to_lowercase();
+        let singular = kind.ar.kind.to_lowercase();
+        let qualified = (!kind.ar.group.is_empty())
+            .then(|| format!("{plural}.{}", kind.ar.group.to_lowercase()));
+        let mut aliases: Vec<String> = self
+            .registry
+            .iter()
+            .filter(|(key, target)| {
+                target.ar.group == kind.ar.group
+                    && target.ar.version == kind.ar.version
+                    && target.ar.plural == kind.ar.plural
+                    && target.ar.kind == kind.ar.kind
+                    && *key != &plural
+                    && *key != &singular
+                    && qualified.as_ref() != Some(*key)
+            })
+            .map(|(key, _)| key.clone())
+            .collect();
+        aliases.sort();
+        aliases.dedup();
+        aliases
     }
 
     /// Resolve a kind within an API group, as an `ownerReference` names it
@@ -1997,6 +2048,7 @@ impl Cluster {
             no_tls_resumption: false,
             registry: HashMap::new(),
             catalog: Vec::new(),
+            discovered: Vec::new(),
             streaming_lists: Arc::new(AtomicU8::new(STREAMING_UNKNOWN)),
             child_kinds: Vec::new(),
             discovery_warnings: Vec::new(),
@@ -2071,7 +2123,12 @@ impl Cluster {
         };
         cluster
             .registry
-            .insert("events.events.k8s.io".to_string(), events_k8s_io);
+            .insert("events.events.k8s.io".to_string(), events_k8s_io.clone());
+        cluster.discovered.push(DiscoveredResource {
+            kind: events_k8s_io,
+            short_names: Vec::new(),
+            listable: true,
+        });
         cluster
     }
 
@@ -2119,6 +2176,13 @@ impl Cluster {
         if namespaced {
             self.child_kinds.push(k.clone());
         }
+        self.discovered
+            .retain(|r| !(r.kind.ar.group == group && r.kind.ar.kind == kind));
+        self.discovered.push(DiscoveredResource {
+            kind: k.clone(),
+            short_names: Vec::new(),
+            listable: true,
+        });
         self.registry.insert(kind.to_lowercase(), k.clone());
         self.registry.insert(plural.clone(), k.clone());
         self.catalog.push(plural.clone());
@@ -2151,7 +2215,15 @@ impl Cluster {
 
     /// The discovery a real cluster serving this fixture's kinds would return.
     pub fn fake_discovery(&self) -> Discovery {
-        let mut resources: Vec<discovery::Resource> = Vec::new();
+        let mut resources: Vec<discovery::Resource> = self
+            .discovered
+            .iter()
+            .map(|r| discovery::Resource {
+                kind: r.kind.clone(),
+                short_names: r.short_names.clone(),
+                listable: r.listable,
+            })
+            .collect();
         for kind in self.registry.values() {
             if !resources
                 .iter()
@@ -2177,6 +2249,8 @@ impl Cluster {
     pub fn unregister_kind(&mut self, group: &str, kind: &str) {
         self.registry
             .retain(|_, k| !(k.ar.group == group && k.ar.kind == kind));
+        self.discovered
+            .retain(|r| !(r.kind.ar.group == group && r.kind.ar.kind == kind));
     }
 }
 

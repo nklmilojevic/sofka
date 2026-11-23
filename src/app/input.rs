@@ -414,7 +414,7 @@ impl App {
             }
             return;
         }
-        if self.ns_resources_blocks(&key) {
+        if self.ns_resources_blocks(&key) || self.api_resources_blocks(&key) {
             return;
         }
         // A kind-specific built-in leaves its key to user bindings on other
@@ -431,7 +431,21 @@ impl App {
         match (key.action, key.code) {
             (Some(Action::Delete), _) => self.request_delete(false),
             (Some(Action::ForceDelete), _) => self.request_delete(true),
-            (Some(Action::Refresh), _) => self.refresh_namespace_selection(),
+            (Some(Action::Refresh), _) => {
+                if self.api_resources_active() {
+                    self.refresh_api_resources();
+                } else {
+                    self.refresh_namespace_selection();
+                }
+            }
+            (Some(Action::ApiResources), _) => {
+                if !self.try_bookmark_key(key.event())
+                    && !self.try_workspace_key(key.event())
+                    && !self.try_plugin_key(key.event())
+                {
+                    self.open_api_resources();
+                }
+            }
             (Some(Action::Faults), _) if self.faults_supported() => {
                 if !self.try_bookmark_key(key.event())
                     && !self.try_workspace_key(key.event())
@@ -584,6 +598,8 @@ impl App {
                     self.request_helm_rollback();
                 } else if self.kind_plural == crate::rollout::VIEW {
                     self.request_rollout_undo();
+                } else if self.api_resources_active() {
+                    self.refresh_api_resources();
                 } else {
                     self.refresh_namespace_selection();
                 }
@@ -900,6 +916,10 @@ impl App {
             self.flash_warn("ns-resources lists kinds: ⏎ opens one, r counts again");
             return false;
         }
+        if action.acts_on_row() && self.api_resources_active() {
+            self.flash_warn("api-resources lists kinds: ⏎ opens one, r refreshes discovery");
+            return false;
+        }
         if action.acts_on_row() {
             self.focus_workload_row();
         }
@@ -963,6 +983,7 @@ impl App {
             PaletteAction::Helm => self.open_helm_releases(),
             PaletteAction::Workloads => self.open_workloads(None),
             PaletteAction::NsResources => self.open_ns_resources(None),
+            PaletteAction::ApiResources => self.open_api_resources(),
             PaletteAction::Notify => self.toggle_notify(""),
             PaletteAction::Reload => self.reload_config(),
             PaletteAction::Layout => self.open_layout_picker(),

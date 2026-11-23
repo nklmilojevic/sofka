@@ -833,6 +833,7 @@ enum PaletteAction {
     Helm,
     Workloads,
     NsResources,
+    ApiResources,
     Notify,
     Reload,
     Layout,
@@ -888,6 +889,10 @@ const PALETTE_COMMANDS: &[PaletteCommand] = &[
     PaletteCommand {
         action: PaletteAction::NsResources,
         names: ns_resources::NAMES,
+    },
+    PaletteCommand {
+        action: PaletteAction::ApiResources,
+        names: api_resources::NAMES,
     },
     PaletteCommand {
         action: PaletteAction::Pulse,
@@ -2012,6 +2017,10 @@ struct ViewKey {
 #[derive(Clone, PartialEq, Eq)]
 struct ViewEntry {
     kind_plural: String,
+    kind_group: String,
+    kind_version: String,
+    kind_name: String,
+    synthetic_api_resources: bool,
     namespace: String,
     filter: String,
     layout: Option<String>,
@@ -3296,6 +3305,7 @@ mod metrics_history;
 mod mouse;
 mod namespace_patterns;
 pub use namespace_patterns::NamespacePatternAction;
+pub mod api_resources;
 mod config_edit;
 mod navigation;
 mod notify;
