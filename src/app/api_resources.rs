@@ -70,6 +70,18 @@ fn identity() -> Kind {
     }
 }
 
+/// The store key of an `:api-resources` row: includes API version and kind
+/// alongside the plural so resources sharing a group and plural across API
+/// versions never collide in the store or cell cache.
+pub(crate) fn key(obj: &DynamicObject) -> String {
+    format!(
+        "{}/{}/{}",
+        obj.data["apiVersion"].as_str().unwrap_or(""),
+        obj.data["plural"].as_str().unwrap_or(""),
+        obj.data["kind"].as_str().unwrap_or(""),
+    )
+}
+
 /// One synthetic table row for a discovered API resource.
 pub fn row(resource: &crate::k8s::DiscoveredResource, aliases: &[String]) -> DynamicObject {
     let kind = &resource.kind;
@@ -152,7 +164,7 @@ impl App {
             .collect();
         let count = rows.len();
         for obj in rows {
-            let key = row_key(&obj);
+            let key = key(&obj);
             self.apply_watched(None, key, obj);
         }
         if self.store.finish_sync() {
@@ -267,6 +279,7 @@ impl App {
                 r.kind.ar.group == group
                     && r.kind.ar.version == version
                     && r.kind.ar.plural == plural
+                    && r.kind.ar.kind == kind
             })
             .map(|r| r.kind.clone())
             .unwrap_or_else(|| Kind {

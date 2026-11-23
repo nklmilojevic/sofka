@@ -114,6 +114,8 @@ impl App {
     pub(crate) fn key_of(&self, obj: &DynamicObject) -> String {
         if self.workloads.is_some() {
             key(obj)
+        } else if self.api_resources_active() {
+            api_resources::key(obj)
         } else {
             row_key(obj)
         }

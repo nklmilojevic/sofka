@@ -400,3 +400,60 @@ async fn colliding_plurals_render_distinct_qualified_names_in_name_column() {
     let rendered = screen_text(&mut app, 120, 20);
     assert!(rendered.contains("events.events.k8s.io"));
 }
+
+#[tokio::test]
+async fn same_group_and_plural_across_api_versions_stay_separate_rows() {
+    let (mut app, _rx) = test_app();
+    app.cluster.apply_discovery(crate::k8s::Discovery::from_aggregated(json!({
+        "items": [
+            {
+                "metadata": {"name": "example.io"},
+                "versions": [
+                    {
+                        "version": "v1alpha1",
+                        "resources": [
+                            {"resource": "widgets", "responseKind": {"kind": "LegacyWidget"}, "scope": "Namespaced", "verbs": ["get", "list"]}
+                        ]
+                    },
+                    {
+                        "version": "v1",
+                        "resources": [
+                            {"resource": "widgets", "responseKind": {"kind": "Widget"}, "scope": "Namespaced", "verbs": ["get", "list"]}
+                        ]
+                    }
+                ]
+            }
+        ]
+    })));
+
+    app.handle_key(ctrl(KeyCode::Char('a'))).unwrap();
+    assert!(app.api_resources_active());
+    assert_eq!(app.rows().len(), 2);
+    assert_eq!(app.flash, "2 API resources");
+
+    let rendered = screen_text(&mut app, 120, 20);
+    assert!(rendered.contains("example.io/v1alpha1"));
+    assert!(rendered.contains("LegacyWidget"));
+    assert!(rendered.contains("example.io/v1"));
+    assert!(rendered.contains("Widget"));
+
+    // Enter opens each version's exact kind independently.
+    let first_version = app.rows()[0].data["apiVersion"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let second_version = app.rows()[1].data["apiVersion"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_ne!(first_version, second_version);
+
+    app.handle_key(press(KeyCode::Enter)).unwrap();
+    assert_eq!(app.kind.as_ref().unwrap().ar.api_version, first_version);
+
+    app.handle_key(press(KeyCode::Esc)).unwrap();
+    assert!(app.api_resources_active());
+    app.handle_key(press(KeyCode::Char('j'))).unwrap();
+    app.handle_key(press(KeyCode::Enter)).unwrap();
+    assert_eq!(app.kind.as_ref().unwrap().ar.api_version, second_version);
+}

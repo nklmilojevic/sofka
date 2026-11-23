@@ -1289,6 +1289,7 @@ impl Cluster {
                 target.ar.group == kind.ar.group
                     && target.ar.version == kind.ar.version
                     && target.ar.plural == kind.ar.plural
+                    && target.ar.kind == kind.ar.kind
                     && *key != &plural
                     && *key != &singular
                     && qualified.as_ref() != Some(*key)
