@@ -1,5 +1,24 @@
 # Changelog
 
+## v0.38.0 - 2026-11-23
+
+This release adds a searchable API resource browser and child app actions in `:argocd`. It also fixes table scrolling and removes Intel macOS release builds.
+
+### New features
+
+- Adds a searchable API resource browser. Open it with `:api-resources`, `:aliases`, or `Ctrl+A`. The browser lists the resource kinds that the cluster exposes.
+- Adds the `t` key in `:argocd`. It opens the action menu on child Applications and ApplicationSets. You do not leave the parent view to run the action.
+- Adds the opt-in `[skin] cursor = "tint"` setting. The cursor row keeps its status, badge, and filter colors. The default stays a solid bar.
+- Resumes logs autoscroll when you scroll down to the bottom of the logs view.
+
+### Fixes
+
+- Fixes table scrolling when a filter narrows or rows are deleted. Earlier rows return to the view, and no blank space appears below them.
+
+### Other changes
+
+- Removes the `x86_64-darwin` build from the flake and the release cache. Intel Mac users must build `sofka` from source.
+
 ## v0.37.0 - 2026-11-16
 
 This release shows your position along long log lines. It also fixes plugin cancellation on NixOS and in Nix build sandboxes.
