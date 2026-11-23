@@ -1073,6 +1073,12 @@ impl App {
         self.rbac_allowed = None;
         self.last_rbac_ns = None;
         crate::theme::set_background(resolved.config.skin.background);
+        crate::theme::set_cursor_style(crate::theme::resolve_cursor_style(
+            resolved.config.skin.cursor.as_deref(),
+        ));
+        plugin_warnings.extend(crate::theme::validate_cursor_style(
+            resolved.config.skin.cursor.as_deref(),
+        ));
         self.apply_context_skin(resolved.skin_override);
         self.flash = format!("context: {name}");
         self.flash_err = false;

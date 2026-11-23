@@ -509,6 +509,11 @@ async fn run_main(args: Args, proxy_warnings: Vec<String>) -> Result<()> {
         .unwrap_or_else(|| session_skin.clone());
     theme::init(theme::resolve_skin(Some(&initial_skin), &cfg.skin.colors));
     theme::set_background(cfg.skin.background);
+    theme::set_cursor_style(theme::resolve_cursor_style(cfg.skin.cursor.as_deref()));
+    if let Some(warning) = theme::validate_cursor_style(cfg.skin.cursor.as_deref()) {
+        eprintln!("warning: {warning}");
+        config_warnings.push(warning);
+    }
 
     // Decoded Secret values a crashed session left in the temp directory.
     std::thread::spawn(app::sweep_abandoned_secret_edits);
@@ -1154,7 +1159,8 @@ async fn run_info(
             .chain(config::guardrail_warnings(&cfg.guardrails))
             .chain(config::forward_warnings(&cfg.forwards))
             .chain(config::notify_warnings(&cfg.notify))
-            .chain(cfg.context_badge.compile().1),
+            .chain(cfg.context_badge.compile().1)
+            .chain(theme::validate_cursor_style(cfg.skin.cursor.as_deref())),
     );
     lines.push(String::new());
     lines.extend(diagnostics::warning_lines(warnings));

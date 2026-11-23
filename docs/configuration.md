@@ -242,23 +242,23 @@ namespace.
 ## Base options
 
 ```toml
-default_namespace = "kube-system"  # fallback only: the last namespace picked in a
-                                   # context is remembered across restarts
+default_namespace = "kube-system" # fallback only: the last namespace picked in a
+# context is remembered across restarts
 prefer_context_namespace = false # true gives the kubeconfig namespace priority over history
-default_resource  = "deployments"
-readonly          = false  # true disables every mutating action (delete, edit,
-                           # scale, shell, plugins, …); --readonly/--write win
+default_resource = "deployments"
+readonly = false # true disables every mutating action (delete, edit,
+# scale, shell, plugins, …); --readonly/--write win
 hide_header = false # true hides the header and logo
 compact_mode = false # true starts with a one-line header and no footer
 detail_wrap = false # true starts with document line wrapping enabled
 rbac_rule_list = false # true opens RBAC rules as the per-rule list, not the matrix
-mouse             = false  # default; :mouse switches it for this session
-                           # false keeps the terminal's native mouse behavior
-                           # (text selection) instead of scroll/click/sort
-mouse_scroll_lines = 3     # steps per wheel event in captured views; 1 for one step
+mouse = false # default; :mouse switches it for this session
+# false keeps the terminal's native mouse behavior
+# (text selection) instead of scroll/click/sort
+mouse_scroll_lines = 3 # steps per wheel event in captured views; 1 for one step
 terminal_title = true # false disables terminal title changes
-remember_sort     = true   # save and restore sort choices per resource kind
-                           # false makes sort changes temporary
+remember_sort = true # save and restore sort choices per resource kind
+# false makes sort changes temporary
 update_check = true # false turns off the daily check for a newer release
 save_dir = "~/k8s/saves" # ctrl-s target for logs and documents; default: temp dir
 
@@ -409,16 +409,26 @@ Use `[]` to disable an action. Custom keys use the normal conflict checks.
 # tokyo-night, one-dark, rose-pine, rose-pine-dawn, monokai, flexoki-dark,
 # flexoki-light.
 name = "gruvbox-dark"
-background = true        # fill views with the skin's own background swatch
-                         # (default: false = inherit the terminal background)
+background = true # fill views with the skin's own background swatch
+# (default: false = inherit the terminal background)
+cursor = "tint" # resource table cursor: "bar" (default solid bar)
+# or "tint" (tinted bar that keeps row status colors)
 
-[skin.colors]            # optional per-swatch overrides
+[skin.colors] # optional per-swatch overrides
 red = "#fb4934"
 ```
 
 Every semantic color - row status, severity badges, headers, borders - is derived
 from the active palette, so one skin change lands everywhere at once. `:skin`
 switches live, `:skin gruvbox-dark` applies directly.
+
+By default (`cursor = "bar"`), resource tables use the same solid `lavender`
+cursor bar as pickers and lists. Set `cursor = "tint"` to highlight the
+resource table cursor row with a subtle `base`-to-`lavender` background blend
+and a `lavender` `▌` gutter marker instead, keeping row tints, `STATUS` badges,
+threshold colors, and filter match highlights visible on the cursor row in
+every skin (with or without `background = true`). Marked rows under the cursor
+still use the mark bar, and pickers and lists keep the solid bar.
 
 ## Context badge
 
@@ -428,8 +438,8 @@ context is obvious at a glance. Set it in a
 
 ```toml
 [context_badge]
-label = "prod"   # required
-color = "red"    # optional skin color name
+label = "prod" # required
+color = "red" # optional skin color name
 ```
 
 The badge shows as `[prod]` after the context name in the header and in the

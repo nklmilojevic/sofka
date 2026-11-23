@@ -6971,6 +6971,136 @@ async fn cursor_row_is_a_lavender_bar_with_base_text() {
 }
 
 #[tokio::test]
+async fn cursor_row_tint_keeps_status_colors_and_filter_highlights() {
+    use crate::theme::{self, CursorStyle};
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+    use ratatui::style::Modifier;
+
+    let dir = std::env::temp_dir().join(format!(
+        "sofka-app-cursor-tint-{}-{:?}",
+        std::process::id(),
+        std::thread::current().id()
+    ));
+    write_config(&dir, "[skin]\ncursor = \"tint\"\n");
+
+    let (mut app, _rx) = test_app();
+    app.config = crate::config::ConfigLoader::from_dir(Some(dir.clone()));
+    app.switch_kind("pods");
+    for (name, ready, state) in [
+        ("a-healthy", true, json!({"running": {}})),
+        (
+            "b-broken",
+            false,
+            json!({"waiting": {"reason": "CrashLoopBackOff"}}),
+        ),
+    ] {
+        apply(
+            &mut app,
+            json!({
+                "apiVersion": "v1", "kind": "Pod",
+                "metadata": {"name": name, "namespace": "default"},
+                "status": {
+                    "phase": "Running",
+                    "containerStatuses": [{
+                        "ready": ready, "restartCount": 0, "state": state
+                    }]
+                }
+            }),
+        );
+    }
+
+    // Apply `[skin] cursor = "tint"` through `:reload` via the command palette.
+    app.handle_key(press(KeyCode::Char(':'))).unwrap();
+    for ch in "reload".chars() {
+        app.handle_key(press(KeyCode::Char(ch))).unwrap();
+    }
+    app.handle_key(press(KeyCode::Enter)).unwrap();
+    assert_eq!(theme::cursor_style(), CursorStyle::Tint);
+
+    app.handle_key(press(KeyCode::Down)).unwrap();
+    assert_eq!(
+        app.selected().and_then(|o| o.metadata.name).as_deref(),
+        Some("b-broken")
+    );
+
+    let tint_bg = theme::cursor_row().bg.expect("tinted cursor bg");
+    assert_ne!(tint_bg, theme::lavender());
+    assert_ne!(tint_bg, theme::base());
+
+    for background in [false, true] {
+        theme::set_background(background);
+        let mut term = Terminal::new(TestBackend::new(120, 24)).unwrap();
+        term.draw(|f| crate::ui::draw(f, &mut app)).unwrap();
+        let hit = app.table_hit.borrow().clone().unwrap();
+        let buf = term.backend().buffer();
+        let y = (hit.rows_y..hit.rows_y + hit.rows_h)
+            .find(|&y| buf[(hit.x_min, y)].symbol() == "▌")
+            .expect("cursor row marker");
+        assert_eq!(y, hit.rows_y + 1, "background={background}");
+
+        let marker = &buf[(hit.x_min, y)];
+        assert_eq!(marker.fg, theme::lavender(), "background={background}");
+        assert_eq!(marker.bg, tint_bg, "background={background}");
+        assert!(marker.modifier.contains(Modifier::BOLD));
+
+        for x in hit.x_min..hit.x_max {
+            let cell = &buf[(x, y)];
+            assert_eq!(cell.bg, tint_bg, "x={x} background={background}");
+            assert!(cell.modifier.contains(Modifier::BOLD), "x={x}");
+        }
+
+        let row_text: String = (hit.x_min..hit.x_max)
+            .map(|x| buf[(x, y)].symbol())
+            .collect();
+        let name_x = hit.x_min + row_text.find("b-broken").expect("pod name") as u16;
+        assert_eq!(
+            buf[(name_x, y)].fg,
+            theme::red(),
+            "NAME keeps row tint; background={background}"
+        );
+        let status_x = hit.x_min + row_text.find("CrashLoopBackOff").expect("pod status") as u16;
+        assert_eq!(
+            buf[(status_x, y)].fg,
+            theme::red(),
+            "STATUS keeps status badge color; background={background}"
+        );
+
+        let other = hit.rows_y;
+        assert_ne!(buf[(hit.x_min, other)].symbol(), "▌");
+        assert!((hit.x_min..hit.x_max).all(|x| buf[(x, other)].bg != tint_bg));
+    }
+
+    // Filter match highlights stay visible on the cursor row.
+    app.handle_key(press(KeyCode::Char('/'))).unwrap();
+    for ch in "broken".chars() {
+        app.handle_key(press(KeyCode::Char(ch))).unwrap();
+    }
+    app.handle_key(press(KeyCode::Enter)).unwrap();
+    let mut term = Terminal::new(TestBackend::new(120, 24)).unwrap();
+    term.draw(|f| crate::ui::draw(f, &mut app)).unwrap();
+    let hit = app.table_hit.borrow().clone().unwrap();
+    let buf = term.backend().buffer();
+    let y = hit.rows_y;
+    let row_text: String = (hit.x_min..hit.x_max)
+        .map(|x| buf[(x, y)].symbol())
+        .collect();
+    let match_x = hit.x_min + row_text.find("broken").expect("filtered pod name") as u16;
+    assert_eq!(buf[(match_x, y)].fg, theme::yellow());
+    assert_eq!(buf[(match_x, y)].bg, tint_bg);
+
+    // Marking the cursor row still uses the solid mark bar.
+    app.handle_key(press(KeyCode::Char(' '))).unwrap();
+    term.draw(|f| crate::ui::draw(f, &mut app)).unwrap();
+    let buf = term.backend().buffer();
+    assert_eq!(buf[(hit.x_min, y)].bg, theme::mark());
+
+    theme::set_background(false);
+    theme::set_cursor_style(CursorStyle::Bar);
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[tokio::test]
 async fn delete_confirm_force_can_toggle() {
     let (mut app, _rx) = test_app();
     app.switch_kind("pods");
@@ -22423,7 +22553,7 @@ async fn reload_reports_skin_validation_warnings() {
     let dir = std::env::temp_dir().join(format!("sofka-app-reload-skin-{}", std::process::id()));
     write_config(
         &dir,
-        "[skin]\nname = \"no-such-skin\"\n[skin.colors]\ngreen = \"zzz\"\n",
+        "[skin]\nname = \"no-such-skin\"\ncursor = \"glow\"\n[skin.colors]\ngreen = \"zzz\"\n",
     );
     let (mut app, _rx) = test_app();
     app.config = crate::config::ConfigLoader::from_dir(Some(dir.clone()));
@@ -22444,6 +22574,14 @@ async fn reload_reports_skin_validation_warnings() {
         "{:?}",
         app.config_warnings
     );
+    assert!(
+        app.config_warnings
+            .iter()
+            .any(|w| w.contains("skin.cursor") && w.contains("glow")),
+        "{:?}",
+        app.config_warnings
+    );
+    assert_eq!(crate::theme::cursor_style(), crate::theme::CursorStyle::Bar);
 
     std::fs::remove_dir_all(&dir).unwrap();
 }
