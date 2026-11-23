@@ -493,6 +493,7 @@ for those operations.
 | Action              | Default bindings |
 | ------------------- | ---------------- |
 | `accept`            | `enter`          |
+| `action_menu`       | `t`              |
 | `back`              | `esc`            |
 | `close`             | `q`              |
 | `discover_children` | `c`              |

@@ -118,6 +118,29 @@ impl Destination {
     }
 }
 
+/// Live state read directly from a managed child `Application`. Kept separate
+/// from [`ManagedResource::sync`] and [`ManagedResource::health`], which hold
+/// the parent's own view of the child manifest and feed the `Blocking` section.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChildAppState {
+    /// `Syncing` while an operation is in flight, else `status.sync.status`.
+    pub sync: String,
+    pub health: String,
+    pub syncing: bool,
+    pub suspended: bool,
+}
+
+impl ChildAppState {
+    pub fn from_app(app: &DynamicObject) -> Self {
+        Self {
+            sync: sync_cell(app).to_string(),
+            health: health_status(app).to_string(),
+            syncing: operation_in_flight(app),
+            suspended: auto_sync(app) == AutoSync::Suspended,
+        }
+    }
+}
+
 /// One entry of `status.resources[]`: an object the Application manages.
 #[derive(Debug, Clone)]
 pub struct ManagedResource {
@@ -137,6 +160,9 @@ pub struct ManagedResource {
     /// Resolved by the app layer; empty when the cluster does not know the
     /// kind, in which case there is nothing to jump to.
     pub plural: String,
+    /// Filled by the app layer for local child `Application`s so the row
+    /// reflects the child's own sync progress and suspension state.
+    pub child_state: Option<ChildAppState>,
 }
 
 /// A jump to an object the Application deploys. Only an object in this
@@ -154,11 +180,25 @@ impl ManagedResource {
         jump(dest, &self.plural, &self.namespace, &self.name)
     }
 
+    fn display_sync(&self) -> &str {
+        self.child_state
+            .as_ref()
+            .map_or(self.sync.as_str(), |c| c.sync.as_str())
+    }
+
+    fn display_health(&self) -> &str {
+        self.child_state
+            .as_ref()
+            .map_or(self.health.as_str(), |c| c.health.as_str())
+    }
+
     fn level(&self) -> Level {
-        match self.health.as_str() {
+        let sync = self.display_sync();
+        let health = self.display_health();
+        match health {
             "Degraded" | "Missing" => Level::Critical,
             "Progressing" => Level::Warn,
-            _ if self.sync == "OutOfSync" => Level::Warn,
+            _ if sync == "OutOfSync" || sync == "Syncing" => Level::Warn,
             "Healthy" => Level::Good,
             _ => Level::Info,
         }
@@ -172,7 +212,7 @@ impl ManagedResource {
         } else {
             format!("{}/{}", self.kind, self.name)
         };
-        let state = match (self.sync.as_str(), self.health.as_str()) {
+        let state = match (self.display_sync(), self.display_health()) {
             ("", "") => String::new(),
             (sync, "") => sync.to_string(),
             ("", health) => health.to_string(),
@@ -180,6 +220,9 @@ impl ManagedResource {
         };
         if !state.is_empty() {
             s.push_str(&format!(": {state}"));
+        }
+        if self.child_state.as_ref().is_some_and(|c| c.suspended) {
+            s.push_str(" (suspended)");
         }
         s
     }
@@ -475,6 +518,7 @@ pub fn managed_resources(app: &DynamicObject) -> Vec<ManagedResource> {
                         .and_then(Value::as_bool)
                         .unwrap_or(false),
                     plural: String::new(),
+                    child_state: None,
                 })
                 .collect()
         })
@@ -2735,5 +2779,105 @@ mod tests {
             1,
             "listed twice: {section:?}"
         );
+    }
+
+    #[test]
+    fn child_app_state_renders_syncing_and_suspended_without_affecting_parent_blocking() {
+        let mut parent = healthy();
+        parent.data["status"]["resources"] = json!([{
+            "group": "argoproj.io",
+            "version": "v1alpha1",
+            "kind": "Application",
+            "namespace": "argocd",
+            "name": "child-a",
+            "status": "Synced",
+            "health": {"status": "Healthy"}
+        }]);
+        let child = app(json!({
+            "apiVersion": "argoproj.io/v1alpha1",
+            "kind": "Application",
+            "metadata": {
+                "name": "child-a",
+                "namespace": "argocd",
+                "annotations": { AUTOMATED_STASH: "e30=" }
+            },
+            "operation": {"sync": {"prune": false}},
+            "status": {
+                "sync": {"status": "OutOfSync"},
+                "health": {"status": "Healthy"}
+            }
+        }));
+        let mut ev = evidence(parent, Destination::Current);
+        ev.resources[0].child_state = Some(ChildAppState::from_app(&child));
+        assert!(ev.resources[0].child_state.as_ref().unwrap().syncing);
+        assert!(ev.resources[0].child_state.as_ref().unwrap().suspended);
+
+        let out = describe(&ev, 1_700_000_000);
+        let row = out
+            .iter()
+            .find(|f| f.text.starts_with("Application/child-a:"))
+            .expect("child application row");
+        assert_eq!(
+            row.text,
+            "Application/child-a: Syncing / Healthy (suspended)"
+        );
+        assert_eq!(row.level, Level::Warn);
+        // Parent's Blocking section stays driven by the parent's own status.
+        assert!(
+            out.iter().any(|f| f.text.starts_with("synced and healthy")),
+            "{:?}",
+            texts(&out)
+        );
+    }
+
+    #[test]
+    fn readable_child_with_empty_status_does_not_fall_back_to_parent_status() {
+        let mut parent = healthy();
+        parent.data["status"]["resources"] = json!([
+            {
+                "group": "argoproj.io",
+                "version": "v1alpha1",
+                "kind": "Application",
+                "namespace": "argocd",
+                "name": "child-empty",
+                "status": "Synced",
+                "health": {"status": "Healthy"}
+            },
+            {
+                "group": "argoproj.io",
+                "version": "v1alpha1",
+                "kind": "Application",
+                "namespace": "argocd",
+                "name": "child-unreadable",
+                "status": "Synced",
+                "health": {"status": "Healthy"}
+            }
+        ]);
+        let empty_child = app(json!({
+            "apiVersion": "argoproj.io/v1alpha1",
+            "kind": "Application",
+            "metadata": {"name": "child-empty", "namespace": "argocd"}
+        }));
+        let mut ev = evidence(parent, Destination::Current);
+        ev.resources[0].child_state = Some(ChildAppState::from_app(&empty_child));
+        // Second child remains None (unreadable), so it falls back to parent values.
+
+        let out = describe(&ev, 1_700_000_000);
+        let empty_row = out
+            .iter()
+            .find(|f| f.text.starts_with("Application/child-empty"))
+            .expect("readable empty child row");
+        assert_eq!(empty_row.text, "Application/child-empty");
+        assert_eq!(empty_row.level, Level::Info);
+
+        let fallback_row = out
+            .iter()
+            .find(|f| f.text.starts_with("Application/child-unreadable"))
+            .expect("unreadable child row");
+        assert_eq!(
+            fallback_row.text,
+            "Application/child-unreadable: Synced / Healthy"
+        );
+        assert_eq!(fallback_row.level, Level::Good);
     }
 }

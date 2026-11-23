@@ -30696,6 +30696,570 @@ async fn argocd_view_does_not_follow_while_expanded_or_closed() {
     assert_eq!(app.argocd_request, request);
 }
 
+fn app_of_apps_root(destination: serde_json::Value) -> serde_json::Value {
+    json!({
+        "apiVersion": "argoproj.io/v1alpha1",
+        "kind": "Application",
+        "metadata": {"name": "root", "namespace": "argocd"},
+        "spec": {
+            "project": "default",
+            "source": {
+                "repoURL": "https://github.com/example/fleet",
+                "path": "apps",
+                "targetRevision": "HEAD"
+            },
+            "destination": destination
+        },
+        "status": {
+            "sync": {"status": "Synced", "revision": "53e28ff20cc530b9ada2173fbbd64d48338583ba"},
+            "health": {"status": "Healthy"},
+            "resources": [
+                {"group": "argoproj.io", "version": "v1alpha1", "kind": "Application",
+                 "namespace": "argocd", "name": "child-a",
+                 "status": "Synced", "health": {"status": "Healthy"}},
+                {"version": "v1", "kind": "ConfigMap",
+                 "namespace": "argocd", "name": "cfg",
+                 "status": "Synced"}
+            ]
+        }
+    })
+}
+
+fn child_application(name: &str, sync: &str, health: &str, syncing: bool) -> serde_json::Value {
+    let mut obj = json!({
+        "apiVersion": "argoproj.io/v1alpha1",
+        "kind": "Application",
+        "metadata": {"name": name, "namespace": "argocd"},
+        "spec": {
+            "project": "default",
+            "destination": {"server": "https://kubernetes.default.svc", "namespace": "default"},
+            "syncPolicy": {"automated": {"prune": true, "selfHeal": true}}
+        },
+        "status": {
+            "sync": {"status": sync},
+            "health": {"status": health}
+        }
+    });
+    if syncing {
+        obj["operation"] = json!({"sync": {"prune": false}});
+    }
+    obj
+}
+
+type MockObjectStore = Arc<std::sync::Mutex<HashMap<String, serde_json::Value>>>;
+
+/// Build an App whose mock API server serves GET from `objects` and records
+/// PATCHes while applying simple JSON merge patches onto `objects`.
+fn argocd_child_action_app(
+    plural: &str,
+    root: serde_json::Value,
+    initial_objects: Vec<(&str, &str, &str, serde_json::Value)>,
+) -> (App, Receiver<Msg>, MockObjectStore, PatchLog, String) {
+    use http_body_util::BodyExt;
+    let (mut app, rx) = test_app();
+    app.switch_kind(plural);
+    apply(&mut app, root);
+    app.table_state.select(Some(0));
+    let api_version = app
+        .cluster
+        .resolve_in_group("Application", ARGOCD_GROUP)
+        .unwrap()
+        .ar
+        .api_version;
+
+    let map: HashMap<String, serde_json::Value> = initial_objects
+        .into_iter()
+        .map(|(res_plural, ns, name, obj)| {
+            (
+                format!("/apis/{api_version}/namespaces/{ns}/{res_plural}/{name}"),
+                obj,
+            )
+        })
+        .collect();
+    let objects: Arc<std::sync::Mutex<HashMap<String, serde_json::Value>>> =
+        Arc::new(std::sync::Mutex::new(map));
+    let patches = PatchLog::default();
+    let store = objects.clone();
+    let log = patches.clone();
+    app.cluster.client = kube::Client::new(
+        tower::service_fn(move |request: http::Request<kube::client::Body>| {
+            let store = store.clone();
+            let log = log.clone();
+            async move {
+                let method = request.method().clone();
+                let path = request.uri().path().to_string();
+                let body_bytes = request.into_body().collect().await.unwrap().to_bytes();
+                let (code, body) = match method {
+                    http::Method::GET => store
+                        .lock()
+                        .unwrap()
+                        .get(&path)
+                        .cloned()
+                        .map(|v| (200, v))
+                        .unwrap_or_else(|| {
+                            (
+                                404,
+                                json!({"apiVersion":"v1","kind":"Status","status":"Failure",
+                                       "message":"not found","reason":"NotFound","code":404}),
+                            )
+                        }),
+                    http::Method::PATCH => {
+                        let patch: serde_json::Value =
+                            serde_json::from_slice(&body_bytes).unwrap_or(serde_json::Value::Null);
+                        log.lock()
+                            .unwrap()
+                            .push(json!({"path": path.clone(), "body": patch.clone()}));
+                        let mut map = store.lock().unwrap();
+                        if let Some(obj) = map.get_mut(&path) {
+                            json_merge_patch(obj, &patch);
+                            (200, obj.clone())
+                        } else {
+                            (
+                                404,
+                                json!({"apiVersion":"v1","kind":"Status","status":"Failure",
+                                       "message":"not found","reason":"NotFound","code":404}),
+                            )
+                        }
+                    }
+                    other => panic!("unexpected {other} {path}"),
+                };
+                Ok::<_, std::convert::Infallible>(
+                    http::Response::builder()
+                        .status(code)
+                        .header("content-type", "application/json")
+                        .body(kube::client::Body::from(body.to_string().into_bytes()))
+                        .unwrap(),
+                )
+            }
+        }),
+        "default",
+    );
+    (app, rx, objects, patches, api_version)
+}
+
+fn json_merge_patch(target: &mut serde_json::Value, patch: &serde_json::Value) {
+    if let (Some(t), Some(p)) = (target.as_object_mut(), patch.as_object()) {
+        for (k, v) in p {
+            if v.is_null() {
+                t.remove(k);
+            } else if let Some(existing) = t.get_mut(k) {
+                json_merge_patch(existing, v);
+            } else {
+                t.insert(k.clone(), v.clone());
+            }
+        }
+    } else {
+        *target = patch.clone();
+    }
+}
+
+fn select_argocd_row(app: &mut App, prefix: &str) {
+    let idx = app
+        .argocd_items
+        .iter()
+        .position(|f| f.text.starts_with(prefix))
+        .unwrap_or_else(|| {
+            panic!(
+                "row starting with {prefix:?} not found in {:?}",
+                argocd_texts(app)
+            )
+        });
+    app.argocd_state.select(Some(idx));
+}
+
+fn choose_argocd_menu_item(app: &mut App, item: &str) {
+    app.handle_key(press(KeyCode::Char('t'))).unwrap();
+    assert_eq!(app.mode, Mode::FluxMenu);
+    let idx = app
+        .action_menu_items()
+        .iter()
+        .position(|s| *s == item)
+        .unwrap_or_else(|| panic!("menu item {item:?} not found"));
+    app.flux_menu_state.select(Some(idx));
+    app.handle_key(press(KeyCode::Enter)).unwrap();
+}
+
+/// Pressing `t` on a child Application row in `:argocd` opens the Application
+/// action menu in place, patches the child (not the parent), stays in
+/// `:argocd`, refreshes quietly to show `Syncing`, and follows until it finishes.
+#[tokio::test]
+async fn argocd_view_syncs_child_application_in_place_and_follows_until_done() {
+    let root = app_of_apps_root(
+        json!({"server": "https://kubernetes.default.svc", "namespace": "argocd"}),
+    );
+    let (mut app, mut rx, objects, patches, api_version) = argocd_child_action_app(
+        "applications",
+        root.clone(),
+        vec![
+            ("applications", "argocd", "root", root),
+            (
+                "applications",
+                "argocd",
+                "child-a",
+                child_application("child-a", "OutOfSync", "Healthy", false),
+            ),
+        ],
+    );
+    let child_path = format!("/apis/{api_version}/namespaces/argocd/applications/child-a");
+    app.marked.insert("argocd/root".into());
+
+    app.handle_key(press(KeyCode::Enter)).unwrap();
+    assert_eq!(app.mode, Mode::Argocd);
+    receive_argocd_report(&mut app, &mut rx).await;
+    assert!(app.argocd_has_child_actions());
+    assert!(
+        argocd_texts(&app).contains(&"Application/child-a: OutOfSync / Healthy".to_string()),
+        "{:?}",
+        argocd_texts(&app)
+    );
+
+    select_argocd_row(&mut app, "Application/child-a:");
+    app.handle_key(press(KeyCode::Char('t'))).unwrap();
+    assert_eq!(app.mode, Mode::FluxMenu);
+    assert!(app.action_menu_over_argocd());
+    assert_eq!(app.action_menu_subject(), "ArgoCD");
+    assert_eq!(app.action_menu_items(), ARGOCD_MENU_ITEMS);
+    // Cancelling the menu returns to `:argocd` without patching.
+    app.handle_key(press(KeyCode::Esc)).unwrap();
+    assert_eq!(app.mode, Mode::Argocd);
+    assert!(patches.lock().unwrap().is_empty());
+
+    choose_argocd_menu_item(&mut app, "Sync now");
+    assert_eq!(app.mode, Mode::Argocd, "stays in the Argo CD view");
+    assert_eq!(app.marked.len(), 1, "table marks are not cleared");
+
+    // Wait for the patch flash, which triggers a quiet refresh of `:argocd`.
+    drain_until(&mut app, &mut rx, |app| {
+        app.flash.contains("sync requested: child-a")
+    })
+    .await;
+    receive_argocd_report(&mut app, &mut rx).await;
+
+    {
+        let log = patches.lock().unwrap();
+        assert_eq!(log.len(), 1);
+        assert_eq!(log[0]["path"], child_path);
+        assert_eq!(
+            log[0]["body"],
+            json!({"operation": {"sync": {"prune": false}}})
+        );
+    }
+
+    assert!(
+        argocd_texts(&app).contains(&"Application/child-a: Syncing / Healthy".to_string()),
+        "{:?}",
+        argocd_texts(&app)
+    );
+    assert!(
+        app.argocd_following,
+        "follows while child sync is in flight"
+    );
+    let selected = app.argocd_state.selected().unwrap();
+    assert_eq!(
+        app.argocd_items[selected].text, "Application/child-a: Syncing / Healthy",
+        "cursor stays on child-a across quiet refresh"
+    );
+
+    // Child finishes syncing; follow-up read updates row and stops following.
+    objects.lock().unwrap().insert(
+        child_path,
+        child_application("child-a", "Synced", "Healthy", false),
+    );
+    app.follow_argocd_operation_at(std::time::Instant::now() + Duration::from_secs(3));
+    receive_argocd_report(&mut app, &mut rx).await;
+    assert!(
+        argocd_texts(&app).contains(&"Application/child-a: Synced / Healthy".to_string()),
+        "{:?}",
+        argocd_texts(&app)
+    );
+    assert!(!app.argocd_following);
+}
+
+/// `Sync with prune` on a child Application in `:argocd` confirms over `:argocd`,
+/// respects `prune` guardrails, and returns to `:argocd` on cancel or accept.
+#[tokio::test]
+async fn argocd_view_child_sync_with_prune_confirms_and_respects_guardrails() {
+    let root = app_of_apps_root(
+        json!({"server": "https://kubernetes.default.svc", "namespace": "argocd"}),
+    );
+    let (mut app, mut rx, _, patches, api_version) = argocd_child_action_app(
+        "applications",
+        root.clone(),
+        vec![
+            ("applications", "argocd", "root", root),
+            (
+                "applications",
+                "argocd",
+                "child-a",
+                child_application("child-a", "OutOfSync", "Healthy", false),
+            ),
+        ],
+    );
+    let child_path = format!("/apis/{api_version}/namespaces/argocd/applications/child-a");
+
+    app.handle_key(press(KeyCode::Enter)).unwrap();
+    receive_argocd_report(&mut app, &mut rx).await;
+    select_argocd_row(&mut app, "Application/child-a:");
+
+    // Plain confirm: decline returns to Mode::Argocd without patching.
+    choose_argocd_menu_item(&mut app, "Sync with prune");
+    assert_eq!(app.mode, Mode::Confirm);
+    assert!(app.over_argocd_view());
+    assert!(
+        app.confirm_label
+            .contains("Sync child-a in argocd with prune")
+    );
+    app.handle_key(press(KeyCode::Char('n'))).unwrap();
+    assert_eq!(app.mode, Mode::Argocd);
+    assert!(patches.lock().unwrap().is_empty());
+
+    // Deny guardrail blocks the prune and stays in Mode::Argocd.
+    app.guardrails = vec![crate::config::Guardrail {
+        actions: vec!["prune".into()],
+        resources: vec!["applications".into()],
+        deny: true,
+        reason: Some("no prune here".into()),
+        ..Default::default()
+    }];
+    choose_argocd_menu_item(&mut app, "Sync with prune");
+    assert_eq!(app.mode, Mode::Argocd);
+    assert!(app.flash.contains("no prune here"), "{}", app.flash);
+    assert!(patches.lock().unwrap().is_empty());
+
+    // Typed confirmation guardrail prompts over Mode::Argocd and returns there.
+    app.guardrails = vec![crate::config::Guardrail {
+        actions: vec!["prune".into()],
+        resources: vec!["applications".into()],
+        confirmation: Some("type-resource-name".into()),
+        ..Default::default()
+    }];
+    choose_argocd_menu_item(&mut app, "Sync with prune");
+    assert_eq!(app.mode, Mode::Prompt);
+    assert!(app.over_argocd_view());
+    app.handle_key(press(KeyCode::Esc)).unwrap();
+    assert_eq!(app.mode, Mode::Argocd);
+
+    choose_argocd_menu_item(&mut app, "Sync with prune");
+    assert_eq!(app.mode, Mode::Prompt);
+    for ch in "child-a".chars() {
+        app.handle_key(press(KeyCode::Char(ch))).unwrap();
+    }
+    app.handle_key(press(KeyCode::Enter)).unwrap();
+    assert_eq!(app.mode, Mode::Argocd);
+    drain_until(&mut app, &mut rx, |app| {
+        app.flash.contains("sync with prune requested: child-a")
+    })
+    .await;
+    let log = patches.lock().unwrap();
+    assert_eq!(log.len(), 1);
+    assert_eq!(log[0]["path"], child_path);
+    assert_eq!(
+        log[0]["body"],
+        json!({"operation": {"sync": {"prune": true}}})
+    );
+}
+
+/// Non-Application rows, remote destinations, and read-only mode do not open
+/// the child action menu.
+#[tokio::test]
+async fn argocd_view_gates_t_on_local_child_applications_and_readonly() {
+    let root = app_of_apps_root(
+        json!({"server": "https://kubernetes.default.svc", "namespace": "argocd"}),
+    );
+    let (mut app, mut rx, _, _, _) = argocd_child_action_app(
+        "applications",
+        root.clone(),
+        vec![
+            ("applications", "argocd", "root", root),
+            (
+                "applications",
+                "argocd",
+                "child-a",
+                child_application("child-a", "OutOfSync", "Healthy", false),
+            ),
+        ],
+    );
+    app.handle_key(press(KeyCode::Enter)).unwrap();
+    receive_argocd_report(&mut app, &mut rx).await;
+
+    // Non-Application managed row.
+    select_argocd_row(&mut app, "ConfigMap/cfg:");
+    app.handle_key(press(KeyCode::Char('t'))).unwrap();
+    assert_eq!(app.mode, Mode::Argocd);
+    assert!(app.flash.contains("Application"), "{}", app.flash);
+
+    // Read-only mode blocks `t` even on a child Application.
+    select_argocd_row(&mut app, "Application/child-a:");
+    app.readonly = true;
+    app.handle_key(press(KeyCode::Char('t'))).unwrap();
+    assert_eq!(app.mode, Mode::Argocd);
+    assert!(app.flash.contains("read-only"), "{}", app.flash);
+
+    // Remote destination blocks `t` so it cannot patch the wrong cluster.
+    let remote =
+        app_of_apps_root(json!({"server": "https://other.example:6443", "namespace": "argocd"}));
+    let (mut remote_app, mut remote_rx, _, _, _) = argocd_child_action_app(
+        "applications",
+        remote.clone(),
+        vec![("applications", "argocd", "root", remote)],
+    );
+    remote_app.handle_key(press(KeyCode::Enter)).unwrap();
+    receive_argocd_report(&mut remote_app, &mut remote_rx).await;
+    assert!(!remote_app.argocd_has_child_actions());
+    select_argocd_row(&mut remote_app, "Application/child-a:");
+    remote_app.handle_key(press(KeyCode::Char('t'))).unwrap();
+    assert_eq!(remote_app.mode, Mode::Argocd);
+    assert!(
+        remote_app.flash.contains("other.example:6443"),
+        "{}",
+        remote_app.flash
+    );
+}
+
+/// Opening `:argocd` on an ApplicationSet exposes the full Application `t`
+/// menu on each produced Application and targets `applications` (not
+/// `applicationsets`), showing `(suspended)` after a suspend patch lands.
+#[tokio::test]
+async fn argocd_view_on_applicationset_acts_on_produced_application() {
+    let appset = argocd_applicationset();
+    let (mut app, mut rx, _, patches, api_version) = argocd_child_action_app(
+        "applicationsets",
+        appset.clone(),
+        vec![
+            ("applicationsets", "argocd", "team-a", appset),
+            (
+                "applications",
+                "argocd",
+                "team-a-dev",
+                child_application("team-a-dev", "Synced", "Healthy", false),
+            ),
+        ],
+    );
+    let child_path = format!("/apis/{api_version}/namespaces/argocd/applications/team-a-dev");
+
+    app.handle_key(press(KeyCode::Enter)).unwrap();
+    receive_argocd_report(&mut app, &mut rx).await;
+    assert!(app.argocd_has_child_actions());
+
+    select_argocd_row(&mut app, "Application/team-a-dev:");
+    app.handle_key(press(KeyCode::Char('t'))).unwrap();
+    assert_eq!(app.mode, Mode::FluxMenu);
+    assert_eq!(
+        app.action_menu_items(),
+        ARGOCD_MENU_ITEMS,
+        "produced row gets the full Application menu, not the ApplicationSet menu"
+    );
+    let suspend_idx = ARGOCD_MENU_ITEMS
+        .iter()
+        .position(|s| *s == "Suspend")
+        .unwrap();
+    app.flux_menu_state.select(Some(suspend_idx));
+    app.handle_key(press(KeyCode::Enter)).unwrap();
+    assert_eq!(app.mode, Mode::Argocd);
+
+    drain_until(&mut app, &mut rx, |app| {
+        app.flash.contains("suspended team-a-dev")
+    })
+    .await;
+    receive_argocd_report(&mut app, &mut rx).await;
+
+    let log = patches.lock().unwrap();
+    assert_eq!(log.len(), 1);
+    assert_eq!(log[0]["path"], child_path);
+    assert!(
+        argocd_texts(&app)
+            .contains(&"Application/team-a-dev: Synced / Healthy (suspended)".to_string()),
+        "{:?}",
+        argocd_texts(&app)
+    );
+}
+
+/// A managed child ApplicationSet gets the ApplicationSet suspend/resume menu.
+#[tokio::test]
+async fn argocd_view_supports_child_applicationset_menu() {
+    let mut root = app_of_apps_root(
+        json!({"server": "https://kubernetes.default.svc", "namespace": "argocd"}),
+    );
+    root["status"]["resources"] = json!([
+        {"group": "argoproj.io", "version": "v1alpha1", "kind": "ApplicationSet",
+         "namespace": "argocd", "name": "team-a", "status": "Synced"}
+    ]);
+    let (mut app, mut rx, _, _, _) = argocd_child_action_app(
+        "applications",
+        root.clone(),
+        vec![("applications", "argocd", "root", root)],
+    );
+
+    app.handle_key(press(KeyCode::Enter)).unwrap();
+    receive_argocd_report(&mut app, &mut rx).await;
+    select_argocd_row(&mut app, "ApplicationSet/team-a:");
+    app.handle_key(press(KeyCode::Char('t'))).unwrap();
+    assert_eq!(app.mode, Mode::FluxMenu);
+    assert_eq!(app.action_menu_items(), ARGOCD_APPSET_MENU_ITEMS);
+}
+
+/// Opening another `t` menu (or help) before a child sync's patch finishes
+/// must not drop the quiet refresh: closing the overlay still shows `Syncing`
+/// and starts the follow loop.
+#[tokio::test]
+async fn argocd_view_refreshes_child_sync_while_another_overlay_is_open() {
+    let mut root = app_of_apps_root(
+        json!({"server": "https://kubernetes.default.svc", "namespace": "argocd"}),
+    );
+    root["status"]["resources"] = json!([
+        {"group": "argoproj.io", "version": "v1alpha1", "kind": "Application",
+         "namespace": "argocd", "name": "child-a", "status": "Synced"},
+        {"group": "argoproj.io", "version": "v1alpha1", "kind": "Application",
+         "namespace": "argocd", "name": "child-b", "status": "Synced"}
+    ]);
+    let (mut app, mut rx, _, _, _) = argocd_child_action_app(
+        "applications",
+        root.clone(),
+        vec![
+            ("applications", "argocd", "root", root),
+            (
+                "applications",
+                "argocd",
+                "child-a",
+                child_application("child-a", "OutOfSync", "Healthy", false),
+            ),
+            (
+                "applications",
+                "argocd",
+                "child-b",
+                child_application("child-b", "OutOfSync", "Healthy", false),
+            ),
+        ],
+    );
+
+    app.handle_key(press(KeyCode::Enter)).unwrap();
+    receive_argocd_report(&mut app, &mut rx).await;
+
+    // Trigger sync on child-a, then immediately open the `t` menu on child-b
+    // before child-a's Msg::Flash has been processed.
+    select_argocd_row(&mut app, "Application/child-a:");
+    choose_argocd_menu_item(&mut app, "Sync now");
+    select_argocd_row(&mut app, "Application/child-b:");
+    app.handle_key(press(KeyCode::Char('t'))).unwrap();
+    assert_eq!(app.mode, Mode::FluxMenu);
+
+    drain_until(&mut app, &mut rx, |app| {
+        app.flash.contains("sync requested: child-a")
+    })
+    .await;
+    receive_argocd_report(&mut app, &mut rx).await;
+
+    // Dismiss child-b's menu and verify child-a's sync is reflected and followed.
+    app.handle_key(press(KeyCode::Esc)).unwrap();
+    assert_eq!(app.mode, Mode::Argocd);
+    assert!(
+        argocd_texts(&app).contains(&"Application/child-a: Syncing / Healthy".to_string()),
+        "{:?}",
+        argocd_texts(&app)
+    );
+    assert!(app.argocd_following);
+}
+
 /// Leaving the view must drop a report still in flight, not let it land on a
 /// list the user has already walked away from.
 #[tokio::test]

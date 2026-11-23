@@ -1385,6 +1385,9 @@ impl App {
                 err,
             } if generation == self.generation => {
                 self.set_claimed_status(claim, message, err);
+                if self.argocd_refresh_claims.remove(&claim) && !err && self.argocd_view_active() {
+                    self.refresh_argocd_quiet();
+                }
             }
             Msg::Flash {
                 message, err: true, ..

@@ -2256,6 +2256,8 @@ impl App {
         }
         self.action_menu_targets = targets;
         self.action_menu_objects = self.action_target_objects();
+        self.action_menu_kind = self.kind.clone();
+        self.action_menu_return = Mode::Table;
         self.flux_menu_state.select(Some(0));
         self.mode = Mode::FluxMenu;
     }
@@ -2267,7 +2269,8 @@ impl App {
             (Some(Action::Back), _) | (Some(Action::Close), _) => {
                 self.action_menu_targets.clear();
                 self.action_menu_objects.clear();
-                self.mode = Mode::Table;
+                self.action_menu_kind = None;
+                self.mode = std::mem::replace(&mut self.action_menu_return, Mode::Table);
             }
             (Some(Action::Down), _) => list_step(&mut self.flux_menu_state, len, true),
             (Some(Action::Up), _) => list_step(&mut self.flux_menu_state, len, false),
@@ -2291,18 +2294,22 @@ impl App {
                     .copied();
                 let targets = std::mem::take(&mut self.action_menu_targets);
                 let objects = std::mem::take(&mut self.action_menu_objects);
-                self.mode = Mode::Table;
+                let kind = self.action_menu_kind.take().or_else(|| self.kind.clone());
+                let back = std::mem::replace(&mut self.action_menu_return, Mode::Table);
+                let from_argocd = back == Mode::Argocd;
+                self.mode = back;
+                let is_argocd = kind.as_ref().is_some_and(Self::is_argocd_kind);
                 match choice {
                     Some("Suspend") => {
-                        if self.argocd_kind() {
-                            self.do_argocd_suspend(targets, true);
+                        if is_argocd && let Some(kind) = kind {
+                            self.do_argocd_suspend(kind, targets, true, from_argocd);
                         } else {
                             self.do_flux_suspend(targets, true);
                         }
                     }
                     Some("Resume") => {
-                        if self.argocd_kind() {
-                            self.do_argocd_suspend(targets, false);
+                        if is_argocd && let Some(kind) = kind {
+                            self.do_argocd_suspend(kind, targets, false, from_argocd);
                         } else {
                             self.do_flux_suspend(targets, false);
                         }
@@ -2311,12 +2318,25 @@ impl App {
                         self.do_flux_reconcile(targets, choice == Some("Force reconcile"));
                     }
                     Some("Refresh" | "Hard refresh") => {
-                        self.do_argocd_refresh(targets, choice == Some("Hard refresh"));
+                        if let Some(kind) = kind {
+                            self.do_argocd_refresh(
+                                kind,
+                                targets,
+                                choice == Some("Hard refresh"),
+                                from_argocd,
+                            );
+                        }
                     }
                     Some("Sync now") => {
-                        self.do_argocd_sync(targets, false);
+                        if let Some(kind) = kind {
+                            self.do_argocd_sync(kind, targets, false, from_argocd);
+                        }
                     }
-                    Some("Sync with prune") => self.request_argocd_sync_prune(targets),
+                    Some("Sync with prune") => {
+                        if let Some(kind) = kind {
+                            self.request_argocd_sync_prune(kind, targets, from_argocd);
+                        }
+                    }
                     Some("Trigger now") => self.do_trigger_cronjobs(objects),
                     _ => {} // "Cancel" or nothing selected — do nothing.
                 }
@@ -2418,13 +2438,17 @@ impl App {
     /// survive the round-trip. ApplicationSets stash `applicationsSync` and set
     /// it to `create-only` on suspend (no `none` mode exists). Each target is
     /// GET-then-patched so the stash is built from the live object.
-    pub(super) fn do_argocd_suspend(&mut self, targets: Vec<(String, String)>, suspend: bool) {
-        let Some(kind) = self.kind.clone() else {
-            return;
-        };
+    pub(super) fn do_argocd_suspend(
+        &mut self,
+        kind: Kind,
+        targets: Vec<(String, String)>,
+        suspend: bool,
+        from_argocd: bool,
+    ) {
         if targets.is_empty() {
             return; // see `do_flux_suspend`
         }
+        let plural = kind.ar.plural.clone();
         let label = self.action_label(&targets);
         self.note_action(if suspend { "suspend" } else { "resume" }, label);
         let verb = if suspend { "suspending" } else { "resuming" };
@@ -2432,16 +2456,20 @@ impl App {
         let progress = if targets.len() == 1 {
             format!("{verb} {}…", targets[0].0)
         } else {
-            format!("{verb} {} {}…", targets.len(), self.kind_plural)
+            format!("{verb} {} {plural}…", targets.len())
         };
         let claim = self.claim_status(progress);
-        self.clear_marks();
+        if from_argocd {
+            self.argocd_refresh_claims.insert(claim);
+        } else {
+            self.clear_marks();
+        }
         let ok_message = if targets.len() == 1 {
             format!("{verb_done} {}", targets[0].0)
         } else {
-            format!("{verb_done} {} {}", targets.len(), self.kind_plural)
+            format!("{verb_done} {} {plural}", targets.len())
         };
-        let is_app = self.argocd_app_kind();
+        let is_app = Self::is_argocd_app_kind(&kind);
         let client = self.cluster.client.clone();
         let tx = self.tx.clone();
         let genr = self.generation;
@@ -2498,13 +2526,17 @@ impl App {
     /// patch only requests a comparison, so it does not confirm; with
     /// automated sync enabled, an OutOfSync result then syncs (and prunes, if
     /// configured) as the next periodic reconcile would.
-    pub(super) fn do_argocd_refresh(&mut self, targets: Vec<(String, String)>, hard: bool) {
-        let Some(kind) = self.kind.clone() else {
-            return;
-        };
+    pub(super) fn do_argocd_refresh(
+        &mut self,
+        kind: Kind,
+        targets: Vec<(String, String)>,
+        hard: bool,
+        from_argocd: bool,
+    ) {
         if targets.is_empty() {
             return; // see `do_flux_suspend`
         }
+        let plural = kind.ar.plural.clone();
         let now = k8s_openapi::jiff::Timestamp::now().to_string();
         let (action, verb) = if hard {
             ("hard refresh", "hard refreshing")
@@ -2516,14 +2548,18 @@ impl App {
         let progress = if targets.len() == 1 {
             format!("{verb} {}…", targets[0].0)
         } else {
-            format!("{verb} {} {}…", targets.len(), self.kind_plural)
+            format!("{verb} {} {plural}…", targets.len())
         };
         let claim = self.claim_status(progress);
-        self.clear_marks();
+        if from_argocd {
+            self.argocd_refresh_claims.insert(claim);
+        } else {
+            self.clear_marks();
+        }
         let ok_message = if targets.len() == 1 {
             format!("{action} requested: {}", targets[0].0)
         } else {
-            format!("{action} requested: {} {}", targets.len(), self.kind_plural)
+            format!("{action} requested: {} {plural}", targets.len())
         };
         self.spawn_patch_action(
             kind,
@@ -2538,13 +2574,17 @@ impl App {
     /// Trigger an ArgoCD Application sync by patching the top-level `operation`
     /// field — the same mechanism the ArgoCD API server's `SyncApplication`
     /// endpoint uses. The controller fills in the revision from `spec.source`.
-    pub(super) fn do_argocd_sync(&mut self, targets: Vec<(String, String)>, prune: bool) {
-        let Some(kind) = self.kind.clone() else {
-            return;
-        };
+    pub(super) fn do_argocd_sync(
+        &mut self,
+        kind: Kind,
+        targets: Vec<(String, String)>,
+        prune: bool,
+        from_argocd: bool,
+    ) {
         if targets.is_empty() {
             return; // see `do_flux_suspend`
         }
+        let plural = kind.ar.plural.clone();
         let label = self.action_label(&targets);
         let (verb, suffix) = if prune {
             ("sync with prune", " with prune")
@@ -2555,14 +2595,18 @@ impl App {
         let progress = if targets.len() == 1 {
             format!("syncing {}{suffix}…", targets[0].0)
         } else {
-            format!("syncing {} {}{suffix}…", targets.len(), self.kind_plural)
+            format!("syncing {} {plural}{suffix}…", targets.len())
         };
         let claim = self.claim_status(progress);
-        self.clear_marks();
+        if from_argocd {
+            self.argocd_refresh_claims.insert(claim);
+        } else {
+            self.clear_marks();
+        }
         let ok_message = if targets.len() == 1 {
             format!("{verb} requested: {}", targets[0].0)
         } else {
-            format!("{verb} requested: {} {}", targets.len(), self.kind_plural)
+            format!("{verb} requested: {} {plural}", targets.len())
         };
         self.spawn_patch_action(
             kind,
@@ -2576,11 +2620,16 @@ impl App {
 
     /// Ask before a pruning sync: it deletes every resource the Application
     /// manages that is no longer in Git. Gated by `prune` guardrails.
-    pub(super) fn request_argocd_sync_prune(&mut self, targets: Vec<(String, String)>) {
+    pub(super) fn request_argocd_sync_prune(
+        &mut self,
+        kind: Kind,
+        targets: Vec<(String, String)>,
+        from_argocd: bool,
+    ) {
         if targets.is_empty() {
             return; // see `do_flux_suspend`
         }
-        let plural = self.kind_plural.clone();
+        let plural = kind.ar.plural.clone();
         let Some(level) = self.guard("prune", &plural, &targets, ConfirmLevel::Plain) else {
             return;
         };
@@ -2598,7 +2647,11 @@ impl App {
             ),
         };
         self.begin_guarded(
-            ConfirmAction::ArgocdSyncPrune { targets },
+            ConfirmAction::ArgocdSyncPrune {
+                kind,
+                targets,
+                from_argocd,
+            },
             label,
             level,
             name_hint,

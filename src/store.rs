@@ -7,7 +7,7 @@ use std::sync::Arc;
 use kube::core::{DynamicObject, GroupVersionResource};
 
 /// Identity of an asynchronous operation's claim on the shared status bar.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct StatusClaim(pub(crate) u64);
 
 /// One remote directory read, or why there isn't one. Named because the

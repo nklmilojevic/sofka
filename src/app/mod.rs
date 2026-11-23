@@ -448,7 +448,11 @@ enum ConfirmAction {
     },
     /// Sync one or more ArgoCD Applications with pruning, which deletes
     /// resources no longer in Git.
-    ArgocdSyncPrune { targets: Vec<(String, String)> },
+    ArgocdSyncPrune {
+        kind: Kind,
+        targets: Vec<(String, String)>,
+        from_argocd: bool,
+    },
     /// Uninstall one or more Helm releases (`helm uninstall`), `(name, ns)`
     /// per release — bulk when marked, like [`ConfirmAction::Delete`].
     HelmUninstall { targets: Vec<(String, String)> },
@@ -2485,6 +2489,12 @@ pub struct App {
     pub(super) pf_picker_target: Option<(String, String)>,
     pub(super) action_menu_targets: Vec<(String, String)>,
     pub(super) action_menu_objects: Vec<DynamicObject>,
+    /// Explicit kind for the open `t` action menu (`None` falls back to
+    /// `self.kind`), so `:argocd` can target a child Application even when the
+    /// underlying table holds an ApplicationSet or workload.
+    pub(super) action_menu_kind: Option<Kind>,
+    /// Mode to return to when the `t` action menu closes or runs an action.
+    pub(super) action_menu_return: Mode,
     /// Saved `[[forwards]]` from config: shown in `:pf` even while stopped,
     /// startable with one keystroke, autostarted on connect when configured.
     pub forwards_cfg: Vec<crate::config::Forward>,
@@ -2634,6 +2644,9 @@ pub struct App {
     /// of a running sync instead of searching on every one.
     /// `None` until a search has run for the state on screen.
     argocd_causes: Option<Vec<crate::explain::Finding>>,
+    /// Claims for Argo CD actions started from the `:argocd` view, so a quiet
+    /// refresh runs once the patch succeeds.
+    argocd_refresh_claims: HashSet<StatusClaim>,
     /// Session-local per-object state-change history, fed by the table watch.
     pub timeline: crate::timeline::Timeline,
     /// Table geometry from the last frame, for mouse hit-testing. A RefCell
@@ -2975,6 +2988,8 @@ impl App {
             pf_picker_target: None,
             action_menu_targets: Vec::new(),
             action_menu_objects: Vec::new(),
+            action_menu_kind: None,
+            action_menu_return: Mode::Table,
             notify_cfg: crate::config::NotifyConfig::default(),
             keymap: Keymap::default(),
             pf_state: ListState::default(),
@@ -3053,6 +3068,7 @@ impl App {
             argocd_following: false,
             argocd_gathered_at: None,
             argocd_causes: None,
+            argocd_refresh_claims: HashSet::new(),
             timeline: crate::timeline::Timeline::default(),
             table_hit: RefCell::new(None),
             notify_tasks: HashMap::new(),
@@ -3156,11 +3172,53 @@ impl App {
             Mode::PvcExplore
         } else if self.over_dir_browser() {
             Mode::Dir
+        } else if self.over_argocd_view() {
+            Mode::Argocd
         } else if self.confirm_over_document() {
             Mode::Detail
         } else {
             Mode::Table
         }
+    }
+
+    /// Whether the open dialog belongs to the Argo CD view, so the renderer
+    /// keeps the findings underneath it and closing returns there.
+    pub fn over_argocd_view(&self) -> bool {
+        let argocd_prune =
+            |action: &ConfirmAction| matches!(action, ConfirmAction::ArgocdSyncPrune { .. });
+        self.confirm_return == Mode::Argocd
+            && self.argocd_source.is_some()
+            && (self.confirm_action.as_ref().is_some_and(argocd_prune)
+                || matches!(
+                    &self.prompt_kind,
+                    Some(PromptKind::GuardConfirm { action, .. }) if argocd_prune(action)
+                ))
+    }
+
+    /// Whether the `t` action menu was opened from the Argo CD view.
+    pub fn action_menu_over_argocd(&self) -> bool {
+        self.action_menu_return == Mode::Argocd && self.argocd_source.is_some()
+    }
+
+    /// Whether `:argocd` is currently on screen, or sits underneath overlays
+    /// (action menu, confirmation, help, palette) that return to it.
+    pub(super) fn argocd_view_active(&self) -> bool {
+        if self.argocd_source.is_none() {
+            return false;
+        }
+        let mut mode = self.mode;
+        for _ in 0..5 {
+            mode = match mode {
+                Mode::Argocd => return true,
+                Mode::FluxMenu if self.action_menu_over_argocd() => Mode::Argocd,
+                Mode::Confirm | Mode::Prompt if self.over_argocd_view() => Mode::Argocd,
+                Mode::Command => self.palette_return,
+                Mode::Help => self.help_return,
+                Mode::DocFilter => self.doc_filter_return,
+                _ => break,
+            };
+        }
+        false
     }
 
     /// Whether the open dialog belongs to the manifest browser, so the
