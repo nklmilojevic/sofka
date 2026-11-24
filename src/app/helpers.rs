@@ -155,15 +155,49 @@ pub(super) fn argocd_appset_suspend_patch(obj: &DynamicObject, suspend: bool) ->
     }
 }
 
-/// ArgoCD sync patch. Setting the top-level `operation.sync` field triggers a
-/// manual sync — the same mechanism the ArgoCD API server's `SyncApplication`
-/// endpoint uses. The controller fills in the revision from `spec.source`.
-/// A manual sync never prunes unless the operation asks for it;
-/// `syncPolicy.automated.prune` only applies to automated syncs. `prune` is
-/// always written: a merge patch keeps fields it omits, so a plain sync sent
-/// while a pruning operation is still pending would otherwise prune too.
-pub(super) fn argocd_sync_patch(prune: bool) -> Value {
-    json!({ "operation": { "sync": { "prune": prune } } })
+/// Why [`argocd_sync_patch`] refuses an Application. The same text as Argo
+/// CD's `ErrAnotherOperationInProgress`.
+pub(super) const ARGOCD_OPERATION_IN_PROGRESS: &str = "another operation is already in progress";
+
+/// ArgoCD sync patch, built from the live Application. Setting the top-level
+/// `operation` field triggers a manual sync. Like the ArgoCD API server's
+/// `SyncApplication` endpoint, the operation carries the Application's
+/// `spec.syncPolicy.syncOptions` and `spec.syncPolicy.retry` and names its
+/// initiator: the controller reads sync options and retries only from the
+/// operation, never from the spec. The controller fills in the source and
+/// revision from the spec. A manual sync never prunes unless the operation
+/// asks for it; `syncPolicy.automated.prune` only applies to automated syncs.
+///
+/// Like the endpoint, it refuses while an operation is pending or running,
+/// and it sends the `resourceVersion` it read, so the API server rejects the
+/// patch with a conflict if another sync was requested in between.
+pub(super) fn argocd_sync_patch(app: &DynamicObject, prune: bool) -> Result<Value, &'static str> {
+    if crate::argocd::operation_requested(app) {
+        return Err(ARGOCD_OPERATION_IN_PROGRESS);
+    }
+    let mut operation = json!({
+        "initiatedBy": { "username": "sofka" },
+        "sync": { "prune": prune },
+    });
+    if let Some(options) = app
+        .data
+        .pointer("/spec/syncPolicy/syncOptions")
+        .filter(|o| o.as_array().is_some_and(|a| !a.is_empty()))
+    {
+        operation["sync"]["syncOptions"] = options.clone();
+    }
+    if let Some(retry) = app
+        .data
+        .pointer("/spec/syncPolicy/retry")
+        .filter(|r| r.is_object())
+    {
+        operation["retry"] = retry.clone();
+    }
+    let mut patch = json!({ "operation": operation });
+    if let Some(version) = &app.metadata.resource_version {
+        patch["metadata"]["resourceVersion"] = json!(version);
+    }
+    Ok(patch)
 }
 
 /// ArgoCD refresh patch, the same annotations Argo CD's own `RefreshApp`

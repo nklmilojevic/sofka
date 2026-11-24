@@ -141,7 +141,9 @@ pub const CRONJOB_MENU_ITEMS: &[&str] = &["Trigger now", "Suspend", "Resume", "C
 /// refresh" set the `argocd.argoproj.io/refresh` annotation, which the
 /// controller clears after re-comparing against Git. "Sync now" patches
 /// the top-level `operation` field, which the ArgoCD application controller
-/// picks up — the same mechanism the `argocd app sync` API endpoint uses.
+/// picks up. Like the `argocd app sync` API endpoint, the operation carries
+/// the Application's `syncOptions` and `retry`, and an Application with an
+/// operation in progress is refused.
 /// "Sync with prune" sets `prune: true` on that operation, so resources no
 /// longer in Git are deleted, and asks for confirmation first. No `argocd`
 /// binary.

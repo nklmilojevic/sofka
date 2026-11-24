@@ -8595,29 +8595,49 @@ type PatchLog = Arc<std::sync::Mutex<Vec<Value>>>;
 /// An ArgoCD Applications view whose client records every PATCH (path and
 /// body) and answers it with the patched Application.
 fn argocd_patch_app(names: &[&str]) -> (App, Receiver<Msg>, PatchLog) {
+    argocd_patch_apps(names.iter().map(|name| argocd_app(name)).collect())
+}
+
+/// [`argocd_patch_app`] for the given Application objects. GET answers with
+/// the object as given, so tests can set its spec or a pending `operation`.
+fn argocd_patch_apps(apps: Vec<Value>) -> (App, Receiver<Msg>, PatchLog) {
     use http_body_util::BodyExt;
     let (mut app, rx) = test_app();
     app.switch_kind("applications");
-    for name in names {
-        apply(&mut app, argocd_app(name));
+    let mut objects = HashMap::new();
+    for obj in apps {
+        let name = obj["metadata"]["name"].as_str().unwrap().to_string();
+        apply(&mut app, obj.clone());
+        objects.insert(name, obj);
     }
+    let objects = Arc::new(objects);
     let log = PatchLog::default();
     let shared = log.clone();
     app.cluster.client = kube::Client::new(
         tower::service_fn(move |request: http::Request<kube::client::Body>| {
             let shared = shared.clone();
+            let objects = objects.clone();
             async move {
                 let method = request.method().to_string();
                 let path = request.uri().path().to_string();
                 let body = request.into_body().collect().await.unwrap().to_bytes();
                 let body: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
-                assert_eq!(method, "PATCH", "unexpected request: {method} {path}");
-                shared
-                    .lock()
-                    .unwrap()
-                    .push(json!({"path": path, "body": body}));
+                assert!(
+                    method == "GET" || method == "PATCH",
+                    "unexpected request: {method} {path}"
+                );
+                if method == "PATCH" {
+                    shared
+                        .lock()
+                        .unwrap()
+                        .push(json!({"path": path, "body": body}));
+                }
                 let name = path.rsplit('/').next().unwrap();
-                let response = argocd_app(name).to_string();
+                let response = objects
+                    .get(name)
+                    .cloned()
+                    .unwrap_or_else(|| argocd_app(name))
+                    .to_string();
                 Ok::<_, std::convert::Infallible>(
                     http::Response::builder()
                         .status(200)
@@ -8679,7 +8699,7 @@ async fn argocd_menu_sync_with_prune_patches_after_confirmation() {
     );
     assert_eq!(
         log[0]["body"],
-        json!({"operation": {"sync": {"prune": true}}})
+        json!({"operation": {"initiatedBy": {"username": "sofka"}, "sync": {"prune": true}}})
     );
     assert!(
         app.journal
@@ -8703,7 +8723,7 @@ async fn argocd_menu_sync_now_patches_without_prune() {
     assert_eq!(log.len(), 1);
     assert_eq!(
         log[0]["body"],
-        json!({"operation": {"sync": {"prune": false}}})
+        json!({"operation": {"initiatedBy": {"username": "sofka"}, "sync": {"prune": false}}})
     );
 }
 
@@ -8850,10 +8870,8 @@ async fn argocd_sync_with_prune_patches_every_marked_application() {
         .collect();
     paths.sort();
     assert_eq!(paths, ["frontend", "guestbook"]);
-    assert!(
-        log.iter()
-            .all(|r| r["body"] == json!({"operation": {"sync": {"prune": true}}}))
-    );
+    assert!(log.iter().all(|r| r["body"]
+        == json!({"operation": {"initiatedBy": {"username": "sofka"}, "sync": {"prune": true}}})));
 }
 
 #[tokio::test]
@@ -8939,7 +8957,7 @@ async fn argocd_sync_with_prune_typed_confirmation() {
     assert_eq!(log.len(), 1);
     assert_eq!(
         log[0]["body"],
-        json!({"operation": {"sync": {"prune": true}}})
+        json!({"operation": {"initiatedBy": {"username": "sofka"}, "sync": {"prune": true}}})
     );
 }
 
@@ -9143,39 +9161,183 @@ fn argocd_appset_resume_without_annotation_defaults_to_sync() {
 
 #[test]
 fn argocd_sync_patch_sets_operation() {
-    let p = argocd_sync_patch(false);
-    assert_eq!(p, json!({"operation": {"sync": {"prune": false}}}));
-    let p = argocd_sync_patch(true);
-    assert_eq!(p, json!({"operation": {"sync": {"prune": true}}}));
-}
-
-/// RFC 7386 JSON merge patch, the semantics the API server applies to
-/// `Patch::Merge`.
-fn merge_patch(target: &mut Value, patch: &Value) {
-    let Some(fields) = patch.as_object() else {
-        *target = patch.clone();
-        return;
-    };
-    if !target.is_object() {
-        *target = json!({});
-    }
-    let map = target.as_object_mut().unwrap();
-    for (key, value) in fields {
-        if value.is_null() {
-            map.remove(key);
-        } else {
-            merge_patch(map.entry(key.clone()).or_insert(Value::Null), value);
-        }
-    }
+    let mut app = argocd_app("guestbook");
+    app["metadata"]["resourceVersion"] = json!("42");
+    let app = obj(app);
+    let p = argocd_sync_patch(&app, false).unwrap();
+    assert_eq!(
+        p,
+        json!({
+            "metadata": {"resourceVersion": "42"},
+            "operation": {"initiatedBy": {"username": "sofka"}, "sync": {"prune": false}}
+        })
+    );
+    let p = argocd_sync_patch(&app, true).unwrap();
+    assert_eq!(p["operation"]["sync"], json!({"prune": true}));
 }
 
 #[test]
-fn argocd_plain_sync_clears_a_pending_prune() {
+fn argocd_sync_patch_copies_sync_options_and_retry_from_the_spec() {
     let mut app = argocd_app("guestbook");
-    merge_patch(&mut app, &argocd_sync_patch(true));
-    assert_eq!(app["operation"]["sync"]["prune"], json!(true));
-    merge_patch(&mut app, &argocd_sync_patch(false));
-    assert_eq!(app["operation"]["sync"]["prune"], json!(false));
+    app["spec"]["syncPolicy"]["syncOptions"] =
+        json!(["CreateNamespace=true", "ServerSideApply=true"]);
+    app["spec"]["syncPolicy"]["retry"] =
+        json!({"limit": 3, "backoff": {"duration": "5s", "factor": 2}});
+    let p = argocd_sync_patch(&obj(app), true).unwrap();
+    assert_eq!(
+        p,
+        json!({"operation": {
+            "initiatedBy": {"username": "sofka"},
+            "sync": {"prune": true, "syncOptions": ["CreateNamespace=true", "ServerSideApply=true"]},
+            "retry": {"limit": 3, "backoff": {"duration": "5s", "factor": 2}}
+        }})
+    );
+}
+
+#[test]
+fn argocd_sync_patch_leaves_out_empty_sync_options() {
+    let mut app = argocd_app("guestbook");
+    app["spec"]["syncPolicy"]["syncOptions"] = json!([]);
+    let p = argocd_sync_patch(&obj(app), false).unwrap();
+    assert_eq!(p["operation"]["sync"], json!({"prune": false}));
+    assert!(p["operation"].get("retry").is_none(), "{p}");
+}
+
+#[test]
+fn argocd_sync_patch_refuses_while_an_operation_is_pending() {
+    let mut app = argocd_app("guestbook");
+    app["operation"] = json!({"sync": {"prune": true}});
+    assert_eq!(
+        argocd_sync_patch(&obj(app), false),
+        Err("another operation is already in progress")
+    );
+}
+
+/// A plain sync used to be merged into a pending pruning sync and turned its
+/// `prune` off. It is refused now, as Argo CD's own sync is, and the pending
+/// operation stays as it was.
+#[tokio::test]
+async fn argocd_sync_leaves_a_pending_operation_untouched() {
+    let mut pending = argocd_app("guestbook");
+    pending["operation"] = json!({"sync": {"prune": true}});
+    let (mut app, mut rx, log) = argocd_patch_apps(vec![pending]);
+
+    open_argocd_menu_item(&mut app, "Sync now");
+    drain_until(&mut app, &mut rx, |app| {
+        app.flash.contains("sync guestbook failed")
+    })
+    .await;
+    assert!(app.flash_err, "{}", app.flash);
+    assert!(
+        app.flash
+            .contains("another operation is already in progress"),
+        "{}",
+        app.flash
+    );
+    assert!(log.lock().unwrap().is_empty(), "no PATCH is sent");
+}
+
+/// The Application's `syncOptions` and `retry` reach the operation. Without
+/// them the controller syncs without `CreateNamespace`, `ServerSideApply`
+/// and the like, and never retries a failed sync.
+#[tokio::test]
+async fn argocd_sync_now_applies_the_applications_sync_options_and_retry() {
+    let mut guestbook = argocd_app("guestbook");
+    guestbook["metadata"]["resourceVersion"] = json!("7");
+    guestbook["spec"]["syncPolicy"]["syncOptions"] =
+        json!(["CreateNamespace=true", "ServerSideApply=true"]);
+    guestbook["spec"]["syncPolicy"]["retry"] = json!({"limit": 3});
+    let (mut app, mut rx, log) = argocd_patch_apps(vec![guestbook]);
+
+    open_argocd_menu_item(&mut app, "Sync now");
+    drain_until(&mut app, &mut rx, |app| {
+        app.flash.contains("sync requested: guestbook")
+    })
+    .await;
+    assert!(!app.flash_err, "{}", app.flash);
+    let log = log.lock().unwrap();
+    assert_eq!(log.len(), 1);
+    assert_eq!(
+        log[0]["body"],
+        json!({
+            "metadata": {"resourceVersion": "7"},
+            "operation": {
+                "initiatedBy": {"username": "sofka"},
+                "sync": {"prune": false, "syncOptions": ["CreateNamespace=true", "ServerSideApply=true"]},
+                "retry": {"limit": 3}
+            }
+        })
+    );
+}
+
+#[tokio::test]
+async fn argocd_sync_with_prune_applies_the_applications_sync_options() {
+    let mut guestbook = argocd_app("guestbook");
+    guestbook["spec"]["syncPolicy"]["syncOptions"] = json!(["CreateNamespace=true"]);
+    let (mut app, mut rx, log) = argocd_patch_apps(vec![guestbook]);
+
+    open_argocd_menu_item(&mut app, "Sync with prune");
+    assert_eq!(app.mode, Mode::Confirm);
+    app.handle_key(press(KeyCode::Char('y'))).unwrap();
+    drain_until(&mut app, &mut rx, |app| {
+        app.flash.contains("sync with prune requested: guestbook")
+    })
+    .await;
+    let log = log.lock().unwrap();
+    assert_eq!(log.len(), 1);
+    assert_eq!(
+        log[0]["body"]["operation"]["sync"],
+        json!({"prune": true, "syncOptions": ["CreateNamespace=true"]})
+    );
+}
+
+/// A bulk sync builds each Application's operation from that Application, and
+/// one Application with an operation in progress does not stop the others.
+#[tokio::test]
+async fn argocd_bulk_sync_uses_each_applications_own_options() {
+    let mut guestbook = argocd_app("guestbook");
+    guestbook["spec"]["syncPolicy"]["syncOptions"] = json!(["CreateNamespace=true"]);
+    let mut frontend = argocd_app("frontend");
+    frontend["spec"]["syncPolicy"]["syncOptions"] = json!(["ServerSideApply=true"]);
+    frontend["spec"]["syncPolicy"]["retry"] = json!({"limit": 5});
+    let mut backend = argocd_app("backend");
+    backend["operation"] = json!({"sync": {"prune": false}});
+    let (mut app, mut rx, log) = argocd_patch_apps(vec![guestbook, frontend, backend]);
+    app.marked.insert("argocd/guestbook".into());
+    app.marked.insert("argocd/frontend".into());
+    app.marked.insert("argocd/backend".into());
+
+    open_argocd_menu_item(&mut app, "Sync now");
+    drain_until(&mut app, &mut rx, |app| {
+        app.flash.contains("sync backend failed")
+    })
+    .await;
+    assert!(app.flash_err, "{}", app.flash);
+    assert!(
+        app.flash
+            .contains("another operation is already in progress"),
+        "{}",
+        app.flash
+    );
+    let log = log.lock().unwrap();
+    let body = |name: &str| {
+        log.iter()
+            .find(|r| r["path"].as_str().unwrap().ends_with(&format!("/{name}")))
+            .map(|r| r["body"]["operation"].clone())
+    };
+    assert_eq!(log.len(), 2);
+    assert_eq!(
+        body("guestbook").unwrap(),
+        json!({"initiatedBy": {"username": "sofka"},
+               "sync": {"prune": false, "syncOptions": ["CreateNamespace=true"]}})
+    );
+    assert_eq!(
+        body("frontend").unwrap(),
+        json!({"initiatedBy": {"username": "sofka"},
+               "sync": {"prune": false, "syncOptions": ["ServerSideApply=true"]},
+               "retry": {"limit": 5}})
+    );
+    assert!(body("backend").is_none());
 }
 
 fn argocd_appset(name: &str) -> serde_json::Value {
@@ -31026,17 +31188,14 @@ async fn argocd_view_syncs_child_application_in_place_and_follows_until_done() {
     let root = app_of_apps_root(
         json!({"server": "https://kubernetes.default.svc", "namespace": "argocd"}),
     );
+    let mut child = child_application("child-a", "OutOfSync", "Healthy", false);
+    child["spec"]["syncPolicy"]["syncOptions"] = json!(["CreateNamespace=true"]);
     let (mut app, mut rx, objects, patches, api_version) = argocd_child_action_app(
         "applications",
         root.clone(),
         vec![
             ("applications", "argocd", "root", root),
-            (
-                "applications",
-                "argocd",
-                "child-a",
-                child_application("child-a", "OutOfSync", "Healthy", false),
-            ),
+            ("applications", "argocd", "child-a", child),
         ],
     );
     let child_path = format!("/apis/{api_version}/namespaces/argocd/applications/child-a");
@@ -31080,7 +31239,10 @@ async fn argocd_view_syncs_child_application_in_place_and_follows_until_done() {
         assert_eq!(log[0]["path"], child_path);
         assert_eq!(
             log[0]["body"],
-            json!({"operation": {"sync": {"prune": false}}})
+            json!({"operation": {
+                "initiatedBy": {"username": "sofka"},
+                "sync": {"prune": false, "syncOptions": ["CreateNamespace=true"]}
+            }})
         );
     }
 
@@ -31194,7 +31356,7 @@ async fn argocd_view_child_sync_with_prune_confirms_and_respects_guardrails() {
     assert_eq!(log[0]["path"], child_path);
     assert_eq!(
         log[0]["body"],
-        json!({"operation": {"sync": {"prune": true}}})
+        json!({"operation": {"initiatedBy": {"username": "sofka"}, "sync": {"prune": true}}})
     );
 }
 

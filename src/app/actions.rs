@@ -4,9 +4,15 @@ use super::*;
 /// ships it, otherwise fall back to sh, in a single `sh -c` invocation.
 pub(super) const SHELL_FALLBACK: &str = "command -v bash >/dev/null 2>&1 && exec bash || exec sh";
 
+/// A per-target merge patch built from the live object, or the reason the
+/// target is refused.
+pub(super) type BuildPatch = Box<dyn Fn(&DynamicObject) -> Result<Value, String> + Send + Sync>;
+
 pub(super) enum ActionPatch {
     Resource(Patch<Value>),
     Scale(Value),
+    /// GET each target, then send the merge patch built from what was read.
+    FromLive(BuildPatch),
 }
 
 impl From<Patch<Value>> for ActionPatch {
@@ -101,7 +107,7 @@ impl App {
         ok_message: String,
         error_message: F,
     ) where
-        F: Fn(&str, &str, kube::Error) -> String + Send + 'static,
+        F: Fn(&str, &str, &str) -> String + Send + 'static,
     {
         let patch = patch.into();
         let client = self.cluster.client.clone();
@@ -115,14 +121,27 @@ impl App {
                     ActionPatch::Resource(patch) => api
                         .patch(&name, &PatchParams::default(), patch)
                         .await
-                        .map(|_| ()),
+                        .map(|_| ())
+                        .map_err(|e| e.to_string()),
                     ActionPatch::Scale(value) => api
                         .patch_scale(&name, &PatchParams::default(), &Patch::Merge(value))
                         .await
-                        .map(|_| ()),
+                        .map(|_| ())
+                        .map_err(|e| e.to_string()),
+                    ActionPatch::FromLive(build) => match api.get(&name).await {
+                        Ok(obj) => match build(&obj) {
+                            Ok(value) => api
+                                .patch(&name, &PatchParams::default(), &Patch::Merge(value))
+                                .await
+                                .map(|_| ())
+                                .map_err(|e| e.to_string()),
+                            Err(reason) => Err(reason),
+                        },
+                        Err(e) => Err(e.to_string()),
+                    },
                 };
                 if let Err(e) = result {
-                    errors.push(error_message(&name, &ns, e));
+                    errors.push(error_message(&name, &ns, &e));
                 }
             }
             let err = !errors.is_empty();
@@ -2581,8 +2600,10 @@ impl App {
     }
 
     /// Trigger an ArgoCD Application sync by patching the top-level `operation`
-    /// field — the same mechanism the ArgoCD API server's `SyncApplication`
-    /// endpoint uses. The controller fills in the revision from `spec.source`.
+    /// field. Each target is GET-then-patched: like the ArgoCD API server's
+    /// `SyncApplication` endpoint, the operation copies `syncOptions` and
+    /// `retry` from the Application's spec, and an Application with an
+    /// operation in progress is refused. See [`argocd_sync_patch`].
     pub(super) fn do_argocd_sync(
         &mut self,
         kind: Kind,
@@ -2620,7 +2641,9 @@ impl App {
         self.spawn_patch_action(
             kind,
             targets,
-            Patch::Merge(argocd_sync_patch(prune)),
+            ActionPatch::FromLive(Box::new(move |obj| {
+                argocd_sync_patch(obj, prune).map_err(str::to_string)
+            })),
             claim,
             ok_message,
             move |name, _, e| format!("{verb} {name} failed: {e}"),

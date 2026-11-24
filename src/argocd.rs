@@ -288,7 +288,7 @@ fn operation_phase(app: &DynamicObject) -> &str {
 
 /// A sync was requested (top-level `operation`, which the controller clears
 /// when it finishes) and the controller has not finished it.
-fn operation_requested(app: &DynamicObject) -> bool {
+pub fn operation_requested(app: &DynamicObject) -> bool {
     app.data.get("operation").is_some_and(|o| !o.is_null())
 }
 

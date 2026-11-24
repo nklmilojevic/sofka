@@ -756,7 +756,9 @@ include those conditions. Row filters can search the route paths.
   only requests a comparison. On an Application with automated sync, though,
   an OutOfSync result starts that sync right away, including its `prune` if
   configured, just as the next periodic reconcile would. Sync-now patches the top-level `operation`
-  field. Sync-with-prune does the same with `prune: true`, so resources no
+  field. Like `argocd app sync`, the operation carries the Application's
+  `syncOptions` and `retry`, and an Application whose operation is still
+  pending or running is refused. Sync-with-prune does the same with `prune: true`, so resources no
   longer in Git are deleted; it asks first and is gated by `prune`
   guardrails. A plain sync never prunes, even when `syncPolicy.automated.prune`
   is set, because that only applies to automated syncs. No `argocd` binary
