@@ -155,15 +155,83 @@ pub(super) fn argocd_appset_suspend_patch(obj: &DynamicObject, suspend: bool) ->
     }
 }
 
-/// ArgoCD sync patch. Setting the top-level `operation.sync` field triggers a
-/// manual sync — the same mechanism the ArgoCD API server's `SyncApplication`
-/// endpoint uses. The controller fills in the revision from `spec.source`.
+/// Build a JSON merge-patch value that replaces `current` with `desired`,
+/// nulling keys present in `current` that `desired` omits so stale nested
+/// fields (such as a pending operation's `retry.backoff`) do not survive.
+fn replace_for_merge_patch(current: Option<&Value>, desired: &Value) -> Value {
+    match (current.and_then(Value::as_object), desired.as_object()) {
+        (Some(cur), Some(des)) => {
+            let mut out = serde_json::Map::new();
+            for (k, v) in des {
+                out.insert(k.clone(), replace_for_merge_patch(cur.get(k), v));
+            }
+            for k in cur.keys() {
+                if !des.contains_key(k) {
+                    out.insert(k.clone(), Value::Null);
+                }
+            }
+            Value::Object(out)
+        }
+        _ => desired.clone(),
+    }
+}
+
+/// ArgoCD sync patch, built from the live Application. Setting the top-level
+/// `operation.sync` field triggers a manual sync — the same mechanism the
+/// ArgoCD API server's `SyncApplication` endpoint uses. The controller fills
+/// in the revision from `spec.source`, but it reads `syncOptions` and `retry`
+/// only from `operation` (not `spec.syncPolicy`), so both are copied from
+/// `spec.syncPolicy` just as `SyncApplication` does.
+///
+/// When the fetched object carries a `metadata.resourceVersion`, it is pinned
+/// in the patch so Kubernetes rejects the write with `409 Conflict` if
+/// `spec.syncPolicy` changed between GET and PATCH.
+///
 /// A manual sync never prunes unless the operation asks for it;
 /// `syncPolicy.automated.prune` only applies to automated syncs. `prune` is
-/// always written: a merge patch keeps fields it omits, so a plain sync sent
-/// while a pruning operation is still pending would otherwise prune too.
-pub(super) fn argocd_sync_patch(prune: bool) -> Value {
-    json!({ "operation": { "sync": { "prune": prune } } })
+/// always written, and stale `syncOptions`/`retry` keys on a pending
+/// `operation` are nulled, because a merge patch keeps fields it omits.
+pub(super) fn argocd_sync_patch(obj: &DynamicObject, prune: bool) -> Value {
+    let mut sync = json!({ "prune": prune });
+    if let Some(options) = obj
+        .data
+        .pointer("/spec/syncPolicy/syncOptions")
+        .filter(|v| v.as_array().is_some_and(|a| !a.is_empty()))
+    {
+        sync["syncOptions"] = options.clone();
+    } else if obj
+        .data
+        .pointer("/operation/sync/syncOptions")
+        .is_some_and(|v| !v.is_null())
+    {
+        sync["syncOptions"] = Value::Null;
+    }
+
+    let mut operation = json!({ "sync": sync });
+    if let Some(retry) = obj
+        .data
+        .pointer("/spec/syncPolicy/retry")
+        .filter(|v| v.as_object().is_some_and(|m| !m.is_empty()))
+    {
+        operation["retry"] = replace_for_merge_patch(obj.data.pointer("/operation/retry"), retry);
+    } else if obj
+        .data
+        .pointer("/operation/retry")
+        .is_some_and(|v| !v.is_null())
+    {
+        operation["retry"] = Value::Null;
+    }
+
+    let mut patch = json!({ "operation": operation });
+    if let Some(rv) = obj
+        .metadata
+        .resource_version
+        .as_deref()
+        .filter(|s| !s.is_empty())
+    {
+        patch["metadata"] = json!({ "resourceVersion": rv });
+    }
+    patch
 }
 
 /// ArgoCD refresh patch, the same annotations Argo CD's own `RefreshApp`
