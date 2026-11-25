@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.39.0 - 2026-11-25
+
+This release fixes Argo CD syncs that sofka starts. Syncs now use the sync options and retry settings of each Application.
+
+### Fixes
+
+- sofka now sends each Application's sync options and retry settings to Argo CD, so options such as `CreateNamespace=true` take effect. Sync now and Sync with prune now also need `get` permission on Applications.
+
 ## v0.38.0 - 2026-11-23
 
 This release adds a searchable API resource browser and child app actions in `:argocd`. It also fixes table scrolling and removes Intel macOS release builds.
