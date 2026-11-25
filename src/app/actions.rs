@@ -2624,19 +2624,31 @@ impl App {
         let tx = self.tx.clone();
         let genr = self.generation;
         tokio::spawn(async move {
+            const MAX_ATTEMPTS: usize = 5;
             let mut errors = Vec::new();
             for (name, ns) in targets {
                 let api = kind.api(client.clone(), &ns);
-                let obj = match api.get(&name).await {
-                    Ok(o) => o,
-                    Err(e) => {
-                        errors.push(format!("{verb} {name} failed: {e}"));
-                        continue;
+                for attempt in 1..=MAX_ATTEMPTS {
+                    let obj = match api.get(&name).await {
+                        Ok(o) => o,
+                        Err(e) => {
+                            errors.push(format!("{verb} {name} failed: {e}"));
+                            break;
+                        }
+                    };
+                    let patch = Patch::Merge(argocd_sync_patch(&obj, prune));
+                    match api.patch(&name, &PatchParams::default(), &patch).await {
+                        Ok(_) => break,
+                        Err(kube::Error::Api(status))
+                            if status.code == 409 && attempt < MAX_ATTEMPTS =>
+                        {
+                            continue;
+                        }
+                        Err(e) => {
+                            errors.push(format!("{verb} {name} failed: {e}"));
+                            break;
+                        }
                     }
-                };
-                let patch = Patch::Merge(argocd_sync_patch(&obj, prune));
-                if let Err(e) = api.patch(&name, &PatchParams::default(), &patch).await {
-                    errors.push(format!("{verb} {name} failed: {e}"));
                 }
             }
             let err = !errors.is_empty();

@@ -758,10 +758,13 @@ include those conditions. Row filters can search the route paths.
   configured, just as the next periodic reconcile would. Sync-now reads the
   live Application and patches its top-level `operation` field, copying
   `spec.syncPolicy.syncOptions` and `spec.syncPolicy.retry` into the operation
-  as Argo CD's own sync endpoint does. Sync-with-prune does the same with
-  `prune: true`, so resources no longer in Git are deleted; it asks first and
-  is gated by `prune` guardrails. A plain sync never prunes, even when
-  `syncPolicy.automated.prune`
+  as Argo CD's own sync endpoint does, pinned to the fetched `resourceVersion`
+  and retried on conflict so concurrent policy edits are not overwritten.
+  Sync-with-prune does the same with `prune: true`, so resources no longer in
+  Git are deleted; it asks first and is gated by `prune` guardrails. Both sync
+  actions require `get` and `patch` RBAC permissions on Applications (including
+  child Applications and every bulk target). A plain sync never prunes, even
+  when `syncPolicy.automated.prune`
   is set, because that only applies to automated syncs. No `argocd` binary
   needed. Works with bulk multiselect. While a sync is requested or running,
   the Application's SYNC cell reads `Syncing`, then goes back to `Synced` or

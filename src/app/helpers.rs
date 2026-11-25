@@ -183,6 +183,10 @@ fn replace_for_merge_patch(current: Option<&Value>, desired: &Value) -> Value {
 /// only from `operation` (not `spec.syncPolicy`), so both are copied from
 /// `spec.syncPolicy` just as `SyncApplication` does.
 ///
+/// When the fetched object carries a `metadata.resourceVersion`, it is pinned
+/// in the patch so Kubernetes rejects the write with `409 Conflict` if
+/// `spec.syncPolicy` changed between GET and PATCH.
+///
 /// A manual sync never prunes unless the operation asks for it;
 /// `syncPolicy.automated.prune` only applies to automated syncs. `prune` is
 /// always written, and stale `syncOptions`/`retry` keys on a pending
@@ -218,7 +222,16 @@ pub(super) fn argocd_sync_patch(obj: &DynamicObject, prune: bool) -> Value {
         operation["retry"] = Value::Null;
     }
 
-    json!({ "operation": operation })
+    let mut patch = json!({ "operation": operation });
+    if let Some(rv) = obj
+        .metadata
+        .resource_version
+        .as_deref()
+        .filter(|s| !s.is_empty())
+    {
+        patch["metadata"] = json!({ "resourceVersion": rv });
+    }
+    patch
 }
 
 /// ArgoCD refresh patch, the same annotations Argo CD's own `RefreshApp`
