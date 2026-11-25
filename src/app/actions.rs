@@ -2582,7 +2582,10 @@ impl App {
 
     /// Trigger an ArgoCD Application sync by patching the top-level `operation`
     /// field — the same mechanism the ArgoCD API server's `SyncApplication`
-    /// endpoint uses. The controller fills in the revision from `spec.source`.
+    /// endpoint uses. Each target is GET-then-patched so `syncOptions` and
+    /// `retry` are copied from the live `spec.syncPolicy` (the controller reads
+    /// them only from `operation`, while filling in the revision from
+    /// `spec.source`).
     pub(super) fn do_argocd_sync(
         &mut self,
         kind: Kind,
@@ -2617,14 +2620,36 @@ impl App {
         } else {
             format!("{verb} requested: {} {plural}", targets.len())
         };
-        self.spawn_patch_action(
-            kind,
-            targets,
-            Patch::Merge(argocd_sync_patch(prune)),
-            claim,
-            ok_message,
-            move |name, _, e| format!("{verb} {name} failed: {e}"),
-        );
+        let client = self.cluster.client.clone();
+        let tx = self.tx.clone();
+        let genr = self.generation;
+        tokio::spawn(async move {
+            let mut errors = Vec::new();
+            for (name, ns) in targets {
+                let api = kind.api(client.clone(), &ns);
+                let obj = match api.get(&name).await {
+                    Ok(o) => o,
+                    Err(e) => {
+                        errors.push(format!("{verb} {name} failed: {e}"));
+                        continue;
+                    }
+                };
+                let patch = Patch::Merge(argocd_sync_patch(&obj, prune));
+                if let Err(e) = api.patch(&name, &PatchParams::default(), &patch).await {
+                    errors.push(format!("{verb} {name} failed: {e}"));
+                }
+            }
+            let err = !errors.is_empty();
+            let message = if err { errors.join("; ") } else { ok_message };
+            let _ = tx
+                .send(Msg::Flash {
+                    generation: genr,
+                    claim,
+                    message,
+                    err,
+                })
+                .await;
+        });
     }
 
     /// Ask before a pruning sync: it deletes every resource the Application
