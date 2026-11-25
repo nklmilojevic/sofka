@@ -51,6 +51,9 @@ pub struct ArgocdReport {
     pub title: String,
     /// `None` when the read failed, and `findings` then holds the error.
     pub source: Option<Box<DynamicObject>>,
+    /// The resolved Application or ApplicationSet this report describes,
+    /// whether opened directly or via a managed resource's tracking metadata.
+    pub subject: Option<crate::argocd::ArgocdSubject>,
     pub destination: crate::argocd::Destination,
     pub findings: Vec<crate::explain::Finding>,
     /// Kept so an expansion can resolve a managed resource in its own API

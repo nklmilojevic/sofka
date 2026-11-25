@@ -189,10 +189,28 @@ fn replace_for_merge_patch(current: Option<&Value>, desired: &Value) -> Value {
 ///
 /// A manual sync never prunes unless the operation asks for it;
 /// `syncPolicy.automated.prune` only applies to automated syncs. `prune` is
-/// always written, and stale `syncOptions`/`retry` keys on a pending
-/// `operation` are nulled, because a merge patch keeps fields it omits.
-pub(super) fn argocd_sync_patch(obj: &DynamicObject, prune: bool) -> Value {
+/// always written, and stale `resources`/`syncOptions`/`retry` keys on a
+/// pending `operation` are nulled, because a merge patch keeps fields it omits.
+pub(super) fn argocd_sync_patch(
+    obj: &DynamicObject,
+    prune: bool,
+    resources: &[crate::argocd::ResourceRef],
+) -> Value {
     let mut sync = json!({ "prune": prune });
+    if !resources.is_empty() {
+        sync["resources"] = Value::Array(
+            resources
+                .iter()
+                .map(crate::argocd::ResourceRef::to_sync_json)
+                .collect(),
+        );
+    } else if obj
+        .data
+        .pointer("/operation/sync/resources")
+        .is_some_and(|v| !v.is_null())
+    {
+        sync["resources"] = Value::Null;
+    }
     if let Some(options) = obj
         .data
         .pointer("/spec/syncPolicy/syncOptions")
@@ -749,8 +767,12 @@ impl App {
         self.kind_plural == "cronjobs"
     }
 
-    /// The items shown in the `t` action menu for the target kind.
+    /// The items shown in the `t` action menu for the target kind, or the
+    /// selective-sync menu opened with `s` in `:argocd`.
     pub fn action_menu_items(&self) -> &'static [&'static str] {
+        if !self.action_menu_selective.is_empty() {
+            return ARGOCD_SELECTIVE_MENU_ITEMS;
+        }
         let kind = self.action_menu_target_kind();
         if kind.is_some_and(|k| k.ar.plural == "cronjobs") {
             CRONJOB_MENU_ITEMS

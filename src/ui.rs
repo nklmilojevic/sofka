@@ -3477,7 +3477,13 @@ fn build_help(app: &App, width: usize) -> (Vec<Line<'static>>, String, HelpSecti
         } else if scope == "table" && action == Action::ActionMenu {
             "action menu: Flux suspend/resume/reconcile (includes HelmChart, flux-operator kinds, and tofu-controller Terraform; HelmRelease, ResourceSetInputProvider, FluxInstance: + force reconcile); Argo CD suspend/resume (Application: + refresh, hard refresh, sync, sync with prune); CronJobs trigger/suspend/resume; pods file transfer"
         } else if scope == "argocd" && action == Action::ActionMenu {
-            "action menu for the selected child Application (suspend/resume/refresh/hard refresh/sync/sync with prune) or ApplicationSet (suspend/resume)"
+            "action menu for row 0 (current Application/ApplicationSet) or selected/marked local child Applications/ApplicationSets"
+        } else if scope == "argocd" && action == Action::Mark {
+            "mark/unmark managed resource row for bulk t actions or s selective sync"
+        } else if scope == "argocd" && action == Action::SyncSelected {
+            "sync selected or marked managed resources in the current Application (with optional prune)"
+        } else if scope == "argocd" && action == Action::Back {
+            "clear marks, or return to the previous view"
         } else if scope == "port_forward_picker" && action == Action::Edit {
             "edit local port of the selected mapping"
         } else if scope == "logs" && action == Action::Lookback {
@@ -4218,35 +4224,49 @@ fn draw_copy_picker(frame: &mut Frame, app: &mut App, area: Rect) {
 /// takes an explicit, visible choice.
 fn draw_flux_menu(frame: &mut Frame, app: &mut App, area: Rect) {
     let show_scrollbars = app.scrollbars_visible();
-    let target = if let [(name, _)] = app.action_menu_targets.as_slice() {
-        name.clone()
+    let title = if !app.action_menu_selective.is_empty() {
+        let parent = app
+            .action_menu_targets
+            .first()
+            .map(|(name, _)| name.as_str())
+            .unwrap_or_default();
+        let scope = match app.action_menu_selective.as_slice() {
+            [one] => one.label(),
+            many => format!("{} resources", many.len()),
+        };
+        format!(" Sync in {parent}: {scope} ")
     } else {
-        format!(
-            "{} marked {}",
-            app.action_menu_targets.len(),
-            app.kind_plural
-        )
+        let target = if let [(name, _)] = app.action_menu_targets.as_slice() {
+            name.clone()
+        } else {
+            let plural = app
+                .action_menu_kind
+                .as_ref()
+                .map(|k| k.ar.plural.as_str())
+                .unwrap_or(&app.kind_plural);
+            format!("{} marked {plural}", app.action_menu_targets.len())
+        };
+        format!(" {}: {target} ", app.action_menu_subject())
     };
     let items: Vec<Text> = app
         .action_menu_items()
         .iter()
         .map(|label| {
             let color = match *label {
-                "Suspend" | "Sync with prune" => theme::peach(),
-                "Resume" | "Trigger now" | "Sync now" => theme::green(),
+                "Suspend" | "Sync with prune" | "Sync selected with prune" => theme::peach(),
+                "Resume" | "Trigger now" | "Sync now" | "Sync selected" => theme::green(),
                 _ => theme::overlay1(),
             };
             Text::from(Span::styled(*label, Style::default().fg(color)))
         })
         .collect();
-    let subject = app.action_menu_subject();
     app.picker_page_items = render_popup_list(
         frame,
         show_scrollbars,
         area,
         (36, 24),
         items,
-        Span::styled(format!(" {subject}: {target} "), theme::title()),
+        Span::styled(title, theme::title()),
         &mut app.flux_menu_state,
     );
 }
@@ -5781,9 +5801,10 @@ fn draw_findings(
     wrap: bool,
     scroll: &mut crate::app::FindingsScroll,
     area: Rect,
-    title: String,
+    title: Line<'static>,
     findings: &[crate::explain::Finding],
     jumps: &dyn Fn(usize, &crate::explain::Finding) -> bool,
+    marked: &dyn Fn(usize) -> bool,
     empty_msg: &str,
     state: &mut ListState,
 ) {
@@ -5810,19 +5831,45 @@ fn draw_findings(
             .iter()
             .enumerate()
             .map(|(i, f)| {
+                let is_marked = marked(i);
                 let indent = "  ".repeat(f.indent as usize);
-                let style = match f.level {
-                    Level::Heading => Style::default()
-                        .fg(color(f.level))
-                        .add_modifier(Modifier::BOLD),
-                    _ => Style::default().fg(color(f.level)),
+                let style = if is_marked {
+                    Style::default()
+                        .fg(theme::mark())
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    match f.level {
+                        Level::Heading => Style::default()
+                            .fg(color(f.level))
+                            .add_modifier(Modifier::BOLD),
+                        _ => Style::default().fg(color(f.level)),
+                    }
+                };
+                let prefix_span = || {
+                    if is_marked && f.indent >= 1 {
+                        Span::styled(
+                            format!("{}✓ ", "  ".repeat((f.indent - 1) as usize)),
+                            Style::default()
+                                .fg(theme::mark())
+                                .add_modifier(Modifier::BOLD),
+                        )
+                    } else if is_marked {
+                        Span::styled(
+                            "✓ ",
+                            Style::default()
+                                .fg(theme::mark())
+                                .add_modifier(Modifier::BOLD),
+                        )
+                    } else {
+                        Span::raw(indent.clone())
+                    }
                 };
                 let mut spans = vec![Span::styled(f.text.clone(), style)];
                 if jumps(i, f) {
                     spans.push(Span::styled("  →", theme::dim()));
                 }
                 if !wrap {
-                    spans.insert(0, Span::raw(indent));
+                    spans.insert(0, prefix_span());
                     return vec![Line::from(spans)];
                 }
                 let hanging = format!("{indent}  ");
@@ -5830,8 +5877,12 @@ fn draw_findings(
                 rows.into_iter()
                     .enumerate()
                     .map(|(row, mut line)| {
-                        let prefix = if row == 0 { &indent } else { &hanging };
-                        line.spans.insert(0, Span::raw(prefix.clone()));
+                        let prefix = if row == 0 {
+                            prefix_span()
+                        } else {
+                            Span::raw(hanging.clone())
+                        };
+                        line.spans.insert(0, prefix);
                         line
                     })
                     .collect()
@@ -5867,7 +5918,7 @@ fn draw_findings(
         show_scrollbars,
         area,
         items,
-        Span::styled(title, theme::title()),
+        title,
         state,
         &scroll.heights,
         skip,
@@ -5891,9 +5942,10 @@ fn draw_explain(frame: &mut Frame, app: &mut App, area: Rect) {
         app.findings_wrap,
         &mut app.findings_scroll,
         area,
-        title,
+        Line::from(Span::styled(title, theme::title())),
         &app.explain_items,
         &|_, f| f.target.is_some(),
+        &|_| false,
         "gathering evidence…",
         &mut app.explain_state,
     );
@@ -5901,16 +5953,38 @@ fn draw_explain(frame: &mut Frame, app: &mut App, area: Rect) {
 
 fn draw_argocd(frame: &mut Frame, app: &mut App, area: Rect) {
     let show_scrollbars = app.scrollbars_visible();
-    // The expansion and child-app actions are only discoverable from the
-    // title, the way the adjacent view advertises `c`.
-    let hints = if app.argocd_has_child_actions() {
-        "c discover children · t actions"
-    } else {
-        "c discover children"
-    };
-    let title = format!(" {} ({hints}) ", app.argocd_title);
+    let mut hint_parts = vec!["c children"];
+    if app.argocd_has_managed_resources() {
+        hint_parts.push("space mark");
+    }
+    if app.argocd_can_act() {
+        hint_parts.push("t actions");
+    }
+    if app.argocd_can_selective_sync() {
+        hint_parts.push("s sync selected");
+    }
+    let mut title_spans = vec![Span::styled(
+        format!(" {} ", app.argocd_title),
+        theme::title(),
+    )];
+    if !app.argocd_marked.is_empty() {
+        title_spans.push(Span::styled(
+            format!("✓{} ", app.argocd_marked.len()),
+            Style::default()
+                .fg(theme::mark())
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
+    title_spans.push(Span::styled(
+        format!("({}) ", hint_parts.join(" · ")),
+        theme::title(),
+    ));
+    let title = Line::from(title_spans);
     let jumps: Vec<bool> = (0..app.argocd_items.len())
         .map(|i| app.argocd_row_jumps(i))
+        .collect();
+    let marked: Vec<bool> = (0..app.argocd_items.len())
+        .map(|i| app.argocd_row_marked(i))
         .collect();
     draw_findings(
         frame,
@@ -5921,6 +5995,7 @@ fn draw_argocd(frame: &mut Frame, app: &mut App, area: Rect) {
         title,
         &app.argocd_items,
         &|i, _| jumps[i],
+        &|i| marked[i],
         "reading the Application…",
         &mut app.argocd_state,
     );
@@ -5935,9 +6010,10 @@ fn draw_gitops(frame: &mut Frame, app: &mut App, area: Rect) {
         app.findings_wrap,
         &mut app.findings_scroll,
         area,
-        title,
+        Line::from(Span::styled(title, theme::title())),
         &app.gitops_items,
         &|_, f| f.target.is_some(),
+        &|_| false,
         "following the reconciliation chain…",
         &mut app.gitops_state,
     );
@@ -6474,6 +6550,16 @@ fn navigation_hint(app: &App, width: u16) -> Line<'static> {
             Action::Accept,
             Action::Rename,
             Action::FleetMark,
+        ][..],
+        "argocd" => &[
+            Action::Back,
+            Action::Accept,
+            Action::Mark,
+            Action::ActionMenu,
+            Action::SyncSelected,
+            Action::DiscoverChildren,
+            Action::Refresh,
+            Action::Wrap,
         ][..],
         _ => &[
             Action::Back,
@@ -8159,5 +8245,112 @@ mod tests {
         for name in ["alpha-08", "alpha-09", "api-1", "api-2", "api-3", "api-4"] {
             assert!(screen.contains(name), "missing {name}:\n{screen}");
         }
+    }
+
+    #[tokio::test]
+    async fn argocd_view_renders_marks_and_action_menu_titles() {
+        use crate::argocd::{ArgocdSubject, ManagedResource, ResourceRef};
+        use crate::explain::{Finding, Level};
+        use crate::k8s::Cluster;
+        use ratatui::{Terminal, backend::TestBackend};
+
+        let (tx, _rx) = tokio::sync::mpsc::channel(16);
+        let mut app = App::new(Cluster::fake(), tx);
+        app.switch_kind("deployments");
+        app.mode = Mode::Argocd;
+        app.argocd_title = "root — Argo CD".into();
+        app.argocd_subject = Some(ArgocdSubject {
+            is_app: true,
+            name: "root".into(),
+            namespace: "argocd".into(),
+        });
+        app.argocd_resources = vec![ManagedResource {
+            group: String::new(),
+            kind: "ConfigMap".into(),
+            plural: "configmaps".into(),
+            namespace: "default".into(),
+            name: "cfg".into(),
+            sync: "OutOfSync".into(),
+            health: String::new(),
+            requires_pruning: false,
+            syncing_in_parent: false,
+            child_state: None,
+        }];
+        app.argocd_items = vec![
+            Finding {
+                indent: 0,
+                level: Level::Warn,
+                text: "Application/root: OutOfSync / Healthy".into(),
+                target: None,
+            },
+            Finding {
+                indent: 0,
+                level: Level::Heading,
+                text: "Managed resources (1)".into(),
+                target: None,
+            },
+            Finding {
+                indent: 1,
+                level: Level::Warn,
+                text: "ConfigMap/cfg: OutOfSync".into(),
+                target: None,
+            },
+        ];
+        app.argocd_state.select(Some(2));
+        app.argocd_marked.insert(ResourceRef {
+            group: String::new(),
+            kind: "ConfigMap".into(),
+            namespace: "default".into(),
+            name: "cfg".into(),
+        });
+
+        let render = |app: &mut App| {
+            let mut term = Terminal::new(TestBackend::new(100, 20)).unwrap();
+            term.draw(|f| draw(f, app)).unwrap();
+            let buffer = term.backend().buffer();
+            (0..buffer.area.height)
+                .map(|y| {
+                    (0..buffer.area.width)
+                        .map(|x| buffer[(x, y)].symbol())
+                        .collect::<String>()
+                })
+                .collect::<Vec<String>>()
+                .join("\n")
+        };
+
+        let screen = render(&mut app);
+        assert!(screen.contains("✓1"), "{screen}");
+        assert!(screen.contains("✓ ConfigMap/cfg: OutOfSync"), "{screen}");
+
+        // Selective sync menu names the parent Application and the selected resource.
+        app.mode = Mode::FluxMenu;
+        app.action_menu_return = Mode::Argocd;
+        app.action_menu_kind = app.cluster.resolve_in_group("Application", "argoproj.io");
+        app.action_menu_targets = vec![("root".into(), "argocd".into())];
+        app.action_menu_selective = vec![ResourceRef {
+            group: String::new(),
+            kind: "ConfigMap".into(),
+            namespace: "default".into(),
+            name: "cfg".into(),
+        }];
+        app.flux_menu_state.select(Some(0));
+        let selective_screen = render(&mut app);
+        assert!(
+            selective_screen.contains("Sync in root: ConfigMap/cfg"),
+            "{selective_screen}"
+        );
+
+        // Bulk child `t` menu uses the target kind's plural ("applications"),
+        // not the underlying table's plural ("deployments").
+        app.action_menu_selective.clear();
+        app.action_menu_targets = vec![
+            ("child-a".into(), "argocd".into()),
+            ("child-b".into(), "argocd".into()),
+        ];
+        let bulk_screen = render(&mut app);
+        assert!(
+            bulk_screen.contains("ArgoCD: 2 marked applications"),
+            "{bulk_screen}"
+        );
     }
 }

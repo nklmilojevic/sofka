@@ -163,8 +163,9 @@ impl App {
                 kind,
                 targets,
                 from_argocd,
+                resources,
             } => {
-                self.do_argocd_sync(kind, targets, true, from_argocd);
+                self.do_argocd_sync(kind, targets, true, from_argocd, resources);
             }
             ConfirmAction::HelmUninstall { targets } => {
                 self.do_helm_uninstall(targets);

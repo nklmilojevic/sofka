@@ -141,6 +141,51 @@ impl ChildAppState {
     }
 }
 
+/// Identity of one managed resource in `status.resources[]` and in Argo CD's
+/// selective-sync `operation.sync.resources[]`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ResourceRef {
+    pub group: String,
+    pub kind: String,
+    pub namespace: String,
+    pub name: String,
+}
+
+impl ResourceRef {
+    /// Short display label for menus, confirmations, and the action journal.
+    pub fn label(&self) -> String {
+        format!("{}/{}", self.kind, self.name)
+    }
+
+    /// Serialized form Argo CD's `operation.sync.resources[]` expects.
+    /// Empty `group` (core API) and empty `namespace` (cluster-scoped) are
+    /// omitted, matching Argo CD's `SyncOperationResource` JSON.
+    pub fn to_sync_json(&self) -> Value {
+        let mut obj = serde_json::json!({
+            "kind": self.kind,
+            "name": self.name,
+        });
+        if !self.group.is_empty() {
+            obj["group"] = serde_json::json!(self.group);
+        }
+        if !self.namespace.is_empty() {
+            obj["namespace"] = serde_json::json!(self.namespace);
+        }
+        obj
+    }
+}
+
+/// The Argo CD object an open `:argocd` view inspects — either an
+/// `Application` (opened directly or resolved from a managed object's
+/// tracking metadata) or an `ApplicationSet`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArgocdSubject {
+    /// `true` for `Application`, `false` for `ApplicationSet`.
+    pub is_app: bool,
+    pub name: String,
+    pub namespace: String,
+}
+
 /// One entry of `status.resources[]`: an object the Application manages.
 #[derive(Debug, Clone)]
 pub struct ManagedResource {
@@ -163,6 +208,9 @@ pub struct ManagedResource {
     /// Filled by the app layer for local child `Application`s so the row
     /// reflects the child's own sync progress and suspension state.
     pub child_state: Option<ChildAppState>,
+    /// True while the parent Application has an in-flight selective sync
+    /// (`operation.sync.resources[]`) targeting this resource.
+    pub syncing_in_parent: bool,
 }
 
 /// A jump to an object the Application deploys. Only an object in this
@@ -176,14 +224,27 @@ fn jump(dest: &Destination, plural: &str, namespace: &str, name: &str) -> Option
 }
 
 impl ManagedResource {
+    pub fn resource_ref(&self) -> ResourceRef {
+        ResourceRef {
+            group: self.group.clone(),
+            kind: self.kind.clone(),
+            namespace: self.namespace.clone(),
+            name: self.name.clone(),
+        }
+    }
+
     fn target(&self, dest: &Destination) -> Option<Target> {
         jump(dest, &self.plural, &self.namespace, &self.name)
     }
 
     fn display_sync(&self) -> &str {
-        self.child_state
-            .as_ref()
-            .map_or(self.sync.as_str(), |c| c.sync.as_str())
+        if let Some(child) = &self.child_state {
+            child.sync.as_str()
+        } else if self.syncing_in_parent {
+            "Syncing"
+        } else {
+            self.sync.as_str()
+        }
     }
 
     fn display_health(&self) -> &str {
@@ -195,10 +256,12 @@ impl ManagedResource {
     fn level(&self) -> Level {
         let sync = self.display_sync();
         let health = self.display_health();
+        let parent_attention = self.child_state.is_some()
+            && (self.syncing_in_parent || self.sync == "OutOfSync" || self.requires_pruning);
         match health {
             "Degraded" | "Missing" => Level::Critical,
             "Progressing" => Level::Warn,
-            _ if sync == "OutOfSync" || sync == "Syncing" => Level::Warn,
+            _ if sync == "OutOfSync" || sync == "Syncing" || parent_attention => Level::Warn,
             "Healthy" => Level::Good,
             _ => Level::Info,
         }
@@ -221,8 +284,21 @@ impl ManagedResource {
         if !state.is_empty() {
             s.push_str(&format!(": {state}"));
         }
-        if self.child_state.as_ref().is_some_and(|c| c.suspended) {
-            s.push_str(" (suspended)");
+        let mut tags: Vec<&str> = Vec::new();
+        if let Some(child) = &self.child_state {
+            if self.syncing_in_parent {
+                tags.push("syncing in parent");
+            } else if self.requires_pruning {
+                tags.push("manifest requires pruning");
+            } else if self.sync == "OutOfSync" {
+                tags.push("manifest OutOfSync");
+            }
+            if child.suspended {
+                tags.push("suspended");
+            }
+        }
+        if !tags.is_empty() {
+            s.push_str(&format!(" ({})", tags.join(", ")));
         }
         s
     }
@@ -487,10 +563,51 @@ pub fn auto_sync(app: &DynamicObject) -> AutoSync {
     }
 }
 
+/// Resources targeted by an in-flight selective sync (`operation.sync.resources[]`
+/// or `status.operationState.operation.sync.resources[]`). Empty when no
+/// operation is in flight or when the sync targets the whole Application.
+pub fn operation_sync_resources(app: &DynamicObject) -> Vec<ResourceRef> {
+    if !operation_in_flight(app) {
+        return Vec::new();
+    }
+    // When `operation` is set, it is authoritative for the active/pending sync;
+    // do not fall back to a finished selective sync still sitting in
+    // `status.operationState`.
+    let list = if app.data.pointer("/operation").is_some_and(|v| !v.is_null()) {
+        app.data.pointer("/operation/sync/resources")
+    } else {
+        app.data
+            .pointer("/status/operationState/operation/sync/resources")
+    }
+    .and_then(Value::as_array);
+    let Some(rs) = list else {
+        return Vec::new();
+    };
+    let s = |v: &Value, k: &str| {
+        v.get(k)
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string()
+    };
+    rs.iter()
+        .filter_map(|r| {
+            let kind = s(r, "kind");
+            let name = s(r, "name");
+            (!kind.is_empty() && !name.is_empty()).then(|| ResourceRef {
+                group: s(r, "group"),
+                kind,
+                namespace: s(r, "namespace"),
+                name,
+            })
+        })
+        .collect()
+}
+
 /// The objects the Application manages, straight out of `status.resources[]`.
 /// `plural` is left empty here; the app layer fills it in once it has resolved
 /// each kind against the cluster.
 pub fn managed_resources(app: &DynamicObject) -> Vec<ManagedResource> {
+    let syncing = operation_sync_resources(app);
     let s = |v: &Value, k: &str| {
         v.get(k)
             .and_then(Value::as_str)
@@ -502,23 +619,36 @@ pub fn managed_resources(app: &DynamicObject) -> Vec<ManagedResource> {
         .and_then(Value::as_array)
         .map(|rs| {
             rs.iter()
-                .map(|r| ManagedResource {
-                    kind: s(r, "kind"),
-                    group: s(r, "group"),
-                    namespace: s(r, "namespace"),
-                    name: s(r, "name"),
-                    sync: s(r, "status"),
-                    health: r
-                        .pointer("/health/status")
-                        .and_then(Value::as_str)
-                        .unwrap_or_default()
-                        .to_string(),
-                    requires_pruning: r
-                        .get("requiresPruning")
-                        .and_then(Value::as_bool)
-                        .unwrap_or(false),
-                    plural: String::new(),
-                    child_state: None,
+                .map(|r| {
+                    let kind = s(r, "kind");
+                    let group = s(r, "group");
+                    let namespace = s(r, "namespace");
+                    let name = s(r, "name");
+                    let syncing_in_parent = syncing.iter().any(|t| {
+                        t.kind == kind
+                            && t.group == group
+                            && t.namespace == namespace
+                            && t.name == name
+                    });
+                    ManagedResource {
+                        kind,
+                        group,
+                        namespace,
+                        name,
+                        sync: s(r, "status"),
+                        health: r
+                            .pointer("/health/status")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default()
+                            .to_string(),
+                        requires_pruning: r
+                            .get("requiresPruning")
+                            .and_then(Value::as_bool)
+                            .unwrap_or(false),
+                        plural: String::new(),
+                        child_state: None,
+                        syncing_in_parent,
+                    }
                 })
                 .collect()
         })
@@ -973,12 +1103,13 @@ pub fn describe(ev: &Evidence, now: i64) -> Vec<Finding> {
     };
 
     let sync = sync_status(app);
+    let display_sync = sync_cell(app);
     let health = health_status(app);
 
     out.push(finding(
         0,
-        headline_level(sync, health),
-        headline(ev, app, sync, health, now),
+        headline_level(display_sync, health),
+        headline(ev, app, display_sync, health, now),
     ));
 
     // Application block.
@@ -2879,5 +3010,179 @@ mod tests {
             "Application/child-unreadable: Synced / Healthy"
         );
         assert_eq!(fallback_row.level, Level::Good);
+    }
+
+    #[test]
+    fn resource_ref_to_sync_json_omits_empty_group_and_namespace() {
+        let namespaced = ResourceRef {
+            group: "apps".into(),
+            kind: "Deployment".into(),
+            namespace: "prod".into(),
+            name: "web".into(),
+        };
+        assert_eq!(namespaced.label(), "Deployment/web");
+        assert_eq!(
+            namespaced.to_sync_json(),
+            json!({"group": "apps", "kind": "Deployment", "name": "web", "namespace": "prod"})
+        );
+
+        let core = ResourceRef {
+            group: String::new(),
+            kind: "ConfigMap".into(),
+            namespace: "default".into(),
+            name: "cfg".into(),
+        };
+        assert_eq!(
+            core.to_sync_json(),
+            json!({"kind": "ConfigMap", "name": "cfg", "namespace": "default"})
+        );
+
+        let cluster = ResourceRef {
+            group: "rbac.authorization.k8s.io".into(),
+            kind: "ClusterRole".into(),
+            namespace: String::new(),
+            name: "admin".into(),
+        };
+        assert_eq!(
+            cluster.to_sync_json(),
+            json!({"group": "rbac.authorization.k8s.io", "kind": "ClusterRole", "name": "admin"})
+        );
+    }
+
+    #[test]
+    fn headline_shows_syncing_while_operation_in_flight() {
+        let mut obj = healthy();
+        obj.data["status"]["sync"]["status"] = json!("OutOfSync");
+        obj.data["operation"] = json!({"sync": {"prune": false}});
+        let out = describe(&evidence(obj, Destination::Current), now_secs());
+        assert_eq!(out[0].text, "Application/guestbook: Syncing / Healthy");
+        assert_eq!(out[0].level, Level::Warn);
+        // Blocking stays driven by the real sync status, not the headline's Syncing label.
+        assert!(
+            texts(&out)
+                .iter()
+                .any(|t| t == "OutOfSync / Healthy at 53e28ff"),
+            "{:?}",
+            texts(&out)
+        );
+    }
+
+    #[test]
+    fn child_app_row_surfaces_parent_manifest_drift_pruning_and_parent_sync() {
+        let mut parent = healthy();
+        parent.data["operation"] = json!({
+            "sync": {
+                "prune": false,
+                "resources": [
+                    {"group": "argoproj.io", "kind": "Application", "namespace": "argocd", "name": "child-syncing"},
+                    {"kind": "ConfigMap", "namespace": "guestbook", "name": "cfg"}
+                ]
+            }
+        });
+        parent.data["status"]["resources"] = json!([
+            {
+                "group": "argoproj.io", "version": "v1alpha1", "kind": "Application",
+                "namespace": "argocd", "name": "child-drift",
+                "status": "OutOfSync", "health": {"status": "Healthy"}
+            },
+            {
+                "group": "argoproj.io", "version": "v1alpha1", "kind": "Application",
+                "namespace": "argocd", "name": "child-prune",
+                "status": "OutOfSync", "requiresPruning": true, "health": {"status": "Healthy"}
+            },
+            {
+                "group": "argoproj.io", "version": "v1alpha1", "kind": "Application",
+                "namespace": "argocd", "name": "child-syncing",
+                "status": "OutOfSync", "health": {"status": "Healthy"}
+            },
+            {
+                "version": "v1", "kind": "ConfigMap", "namespace": "guestbook", "name": "cfg",
+                "status": "OutOfSync"
+            },
+            {
+                "version": "v1", "kind": "Service", "namespace": "guestbook", "name": "guestbook-ui",
+                "status": "Synced", "health": {"status": "Healthy"}
+            }
+        ]);
+
+        let synced_child = app(json!({
+            "apiVersion": "argoproj.io/v1alpha1", "kind": "Application",
+            "metadata": {"name": "child", "namespace": "argocd"},
+            "status": {"sync": {"status": "Synced"}, "health": {"status": "Healthy"}}
+        }));
+        let suspended_child = app(json!({
+            "apiVersion": "argoproj.io/v1alpha1", "kind": "Application",
+            "metadata": {
+                "name": "child-prune", "namespace": "argocd",
+                "annotations": { AUTOMATED_STASH: "e30=" }
+            },
+            "status": {"sync": {"status": "Synced"}, "health": {"status": "Healthy"}}
+        }));
+
+        let mut ev = evidence(parent, Destination::Current);
+        ev.resources[0].child_state = Some(ChildAppState::from_app(&synced_child));
+        ev.resources[1].child_state = Some(ChildAppState::from_app(&suspended_child));
+        ev.resources[2].child_state = Some(ChildAppState::from_app(&synced_child));
+
+        let out = describe(&ev, 1_700_000_000);
+        let row = |prefix: &str| {
+            out.iter()
+                .find(|f| f.text.starts_with(prefix))
+                .unwrap_or_else(|| panic!("missing {prefix:?} in {:?}", texts(&out)))
+        };
+
+        let drift = row("Application/child-drift:");
+        assert_eq!(
+            drift.text,
+            "Application/child-drift: Synced / Healthy (manifest OutOfSync)"
+        );
+        assert_eq!(drift.level, Level::Warn);
+
+        let prune = row("Application/child-prune:");
+        assert_eq!(
+            prune.text,
+            "Application/child-prune: Synced / Healthy (manifest requires pruning, suspended)"
+        );
+        assert_eq!(prune.level, Level::Warn);
+
+        let syncing_child = row("Application/child-syncing:");
+        assert_eq!(
+            syncing_child.text,
+            "Application/child-syncing: Synced / Healthy (syncing in parent)"
+        );
+        assert_eq!(syncing_child.level, Level::Warn);
+
+        let cfg = row("ConfigMap/cfg:");
+        assert_eq!(cfg.text, "ConfigMap/cfg: Syncing");
+        assert_eq!(cfg.level, Level::Warn);
+
+        let svc = row("Service/guestbook-ui:");
+        assert_eq!(svc.text, "Service/guestbook-ui: Synced / Healthy");
+        assert_eq!(svc.level, Level::Good);
+    }
+
+    #[test]
+    fn pending_full_sync_does_not_inherit_previous_selective_sync_resources() {
+        let mut obj = healthy();
+        obj.data["operation"] = json!({"sync": {"prune": false}});
+        obj.data["status"]["operationState"] = json!({
+            "phase": "Succeeded",
+            "operation": {
+                "sync": {
+                    "resources": [
+                        {"kind": "Service", "namespace": "guestbook", "name": "guestbook-ui"}
+                    ]
+                }
+            }
+        });
+        assert!(operation_sync_resources(&obj).is_empty());
+
+        // When `operation` is cleared while `operationState` is still Running,
+        // the running operation's selective targets apply.
+        obj.data["operation"] = Value::Null;
+        obj.data["status"]["operationState"]["phase"] = json!("Running");
+        let running = operation_sync_resources(&obj);
+        assert_eq!(running.len(), 1);
+        assert_eq!(running[0].name, "guestbook-ui");
     }
 }

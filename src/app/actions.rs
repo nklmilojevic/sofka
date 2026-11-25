@@ -2267,6 +2267,7 @@ impl App {
         self.action_menu_objects = self.action_target_objects();
         self.action_menu_kind = self.kind.clone();
         self.action_menu_return = Mode::Table;
+        self.action_menu_selective.clear();
         self.flux_menu_state.select(Some(0));
         self.mode = Mode::FluxMenu;
     }
@@ -2279,6 +2280,7 @@ impl App {
                 self.action_menu_targets.clear();
                 self.action_menu_objects.clear();
                 self.action_menu_kind = None;
+                self.action_menu_selective.clear();
                 self.mode = std::mem::replace(&mut self.action_menu_return, Mode::Table);
             }
             (Some(Action::Down), _) => list_step(&mut self.flux_menu_state, len, true),
@@ -2304,6 +2306,7 @@ impl App {
                 let targets = std::mem::take(&mut self.action_menu_targets);
                 let objects = std::mem::take(&mut self.action_menu_objects);
                 let kind = self.action_menu_kind.take().or_else(|| self.kind.clone());
+                let selective = std::mem::take(&mut self.action_menu_selective);
                 let back = std::mem::replace(&mut self.action_menu_return, Mode::Table);
                 let from_argocd = back == Mode::Argocd;
                 self.mode = back;
@@ -2338,12 +2341,22 @@ impl App {
                     }
                     Some("Sync now") => {
                         if let Some(kind) = kind {
-                            self.do_argocd_sync(kind, targets, false, from_argocd);
+                            self.do_argocd_sync(kind, targets, false, from_argocd, Vec::new());
                         }
                     }
                     Some("Sync with prune") => {
                         if let Some(kind) = kind {
-                            self.request_argocd_sync_prune(kind, targets, from_argocd);
+                            self.request_argocd_sync_prune(kind, targets, from_argocd, Vec::new());
+                        }
+                    }
+                    Some("Sync selected") => {
+                        if let Some(kind) = kind {
+                            self.do_argocd_sync(kind, targets, false, from_argocd, selective);
+                        }
+                    }
+                    Some("Sync selected with prune") => {
+                        if let Some(kind) = kind {
+                            self.request_argocd_sync_prune(kind, targets, from_argocd, selective);
                         }
                     }
                     Some("Trigger now") => self.do_trigger_cronjobs(objects),
@@ -2470,6 +2483,7 @@ impl App {
         let claim = self.claim_status(progress);
         if from_argocd {
             self.argocd_refresh_claims.insert(claim);
+            self.argocd_marked.clear();
         } else {
             self.clear_marks();
         }
@@ -2562,6 +2576,7 @@ impl App {
         let claim = self.claim_status(progress);
         if from_argocd {
             self.argocd_refresh_claims.insert(claim);
+            self.argocd_marked.clear();
         } else {
             self.clear_marks();
         }
@@ -2592,33 +2607,43 @@ impl App {
         targets: Vec<(String, String)>,
         prune: bool,
         from_argocd: bool,
+        resources: Vec<crate::argocd::ResourceRef>,
     ) {
         if targets.is_empty() {
             return; // see `do_flux_suspend`
         }
         let plural = kind.ar.plural.clone();
-        let label = self.action_label(&targets);
         let (verb, suffix) = if prune {
             ("sync with prune", " with prune")
         } else {
             ("sync", "")
         };
+        let selective_scope = match resources.as_slice() {
+            [] => None,
+            [one] => Some(one.label()),
+            many => Some(format!("{} resources", many.len())),
+        };
+        let label = match &selective_scope {
+            Some(scope) => format!("{scope} in {}", self.action_label(&targets)),
+            None => self.action_label(&targets),
+        };
         self.note_action(verb, label);
-        let progress = if targets.len() == 1 {
-            format!("syncing {}{suffix}…", targets[0].0)
-        } else {
-            format!("syncing {} {plural}{suffix}…", targets.len())
+        let progress = match (&selective_scope, targets.as_slice()) {
+            (Some(scope), [(name, _)]) => format!("syncing {scope} in {name}{suffix}…"),
+            (_, [(name, _)]) => format!("syncing {name}{suffix}…"),
+            _ => format!("syncing {} {plural}{suffix}…", targets.len()),
         };
         let claim = self.claim_status(progress);
         if from_argocd {
             self.argocd_refresh_claims.insert(claim);
+            self.argocd_marked.clear();
         } else {
             self.clear_marks();
         }
-        let ok_message = if targets.len() == 1 {
-            format!("{verb} requested: {}", targets[0].0)
-        } else {
-            format!("{verb} requested: {} {plural}", targets.len())
+        let ok_message = match (&selective_scope, targets.as_slice()) {
+            (Some(scope), [(name, _)]) => format!("{verb} requested: {scope} in {name}"),
+            (_, [(name, _)]) => format!("{verb} requested: {name}"),
+            _ => format!("{verb} requested: {} {plural}", targets.len()),
         };
         let client = self.cluster.client.clone();
         let tx = self.tx.clone();
@@ -2636,7 +2661,7 @@ impl App {
                             break;
                         }
                     };
-                    let patch = Patch::Merge(argocd_sync_patch(&obj, prune));
+                    let patch = Patch::Merge(argocd_sync_patch(&obj, prune, &resources));
                     match api.patch(&name, &PatchParams::default(), &patch).await {
                         Ok(_) => break,
                         Err(kube::Error::Api(status))
@@ -2665,12 +2690,14 @@ impl App {
     }
 
     /// Ask before a pruning sync: it deletes every resource the Application
-    /// manages that is no longer in Git. Gated by `prune` guardrails.
+    /// manages that is no longer in Git (or only the targeted resources in a
+    /// selective sync). Gated by `prune` guardrails.
     pub(super) fn request_argocd_sync_prune(
         &mut self,
         kind: Kind,
         targets: Vec<(String, String)>,
         from_argocd: bool,
+        resources: Vec<crate::argocd::ResourceRef>,
     ) {
         if targets.is_empty() {
             return; // see `do_flux_suspend`
@@ -2679,24 +2706,42 @@ impl App {
         let Some(level) = self.guard("prune", &plural, &targets, ConfirmLevel::Plain) else {
             return;
         };
-        let (label, name_hint) = match targets.as_slice() {
-            [(name, ns)] => (
-                format!("Sync {name} in {ns} with prune? Resources no longer in Git are deleted."),
-                name.clone(),
-            ),
-            many => (
+        let (label, name_hint) = if !resources.is_empty()
+            && let [(name, ns)] = targets.as_slice()
+        {
+            let scope = match resources.as_slice() {
+                [one] => one.label(),
+                many => format!("{} resources", many.len()),
+            };
+            (
                 format!(
-                    "Sync {} {plural} with prune? Resources no longer in Git are deleted.",
-                    many.len()
+                    "Sync {scope} in {name} ({ns}) with prune? Targeted resources no longer in Git are deleted."
                 ),
-                many.len().to_string(),
-            ),
+                name.clone(),
+            )
+        } else {
+            match targets.as_slice() {
+                [(name, ns)] => (
+                    format!(
+                        "Sync {name} in {ns} with prune? Resources no longer in Git are deleted."
+                    ),
+                    name.clone(),
+                ),
+                many => (
+                    format!(
+                        "Sync {} {plural} with prune? Resources no longer in Git are deleted.",
+                        many.len()
+                    ),
+                    many.len().to_string(),
+                ),
+            }
         };
         self.begin_guarded(
             ConfirmAction::ArgocdSyncPrune {
                 kind,
                 targets,
                 from_argocd,
+                resources,
             },
             label,
             level,
