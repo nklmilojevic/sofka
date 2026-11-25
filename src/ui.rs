@@ -4260,11 +4260,16 @@ fn draw_flux_menu(frame: &mut Frame, app: &mut App, area: Rect) {
             Text::from(Span::styled(*label, Style::default().fg(color)))
         })
         .collect();
+    let percent = if app.action_menu_selective.is_empty() {
+        (36, 24)
+    } else {
+        (56, 24)
+    };
     app.picker_page_items = render_popup_list(
         frame,
         show_scrollbars,
         area,
-        (36, 24),
+        percent,
         items,
         Span::styled(title, theme::title()),
         &mut app.flux_menu_state,
@@ -8336,7 +8341,7 @@ mod tests {
         app.flux_menu_state.select(Some(0));
         let selective_screen = render(&mut app);
         assert!(
-            selective_screen.contains("Sync in root: ConfigMap/cfg"),
+            selective_screen.contains("Sync in root: ConfigMap/default/cfg"),
             "{selective_screen}"
         );
 

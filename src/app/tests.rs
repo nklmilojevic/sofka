@@ -32218,7 +32218,8 @@ async fn argocd_view_row_zero_t_and_s_work_when_opened_from_managed_deployment()
     select_argocd_row(&mut app, "ConfigMap/cfg:");
     choose_argocd_selective_item(&mut app, "Sync selected");
     drain_until(&mut app, &mut rx, |app| {
-        app.flash.contains("sync requested: ConfigMap/cfg in root")
+        app.flash
+            .contains("sync requested: ConfigMap/default/cfg in root")
     })
     .await;
     receive_argocd_report(&mut app, &mut rx).await;
@@ -32438,8 +32439,20 @@ async fn argocd_view_selective_sync_single_marked_prune_and_remote() {
     assert_eq!(app.mode, Mode::Argocd);
     assert!(app.flash.contains("t on row 0"), "{}", app.flash);
 
-    // Single managed row selective sync without marks.
+    // Single managed row selective sync without marks: prune confirmation names
+    // the resource's own namespace ("default") distinctly from the app's ("argocd").
     select_argocd_row(&mut app, "ConfigMap/cfg:");
+    choose_argocd_selective_item(&mut app, "Sync selected with prune");
+    assert_eq!(app.mode, Mode::Confirm);
+    assert!(
+        app.confirm_label
+            .contains("Sync ConfigMap/default/cfg in root (argocd) with prune"),
+        "{}",
+        app.confirm_label
+    );
+    app.handle_key(press(KeyCode::Char('n'))).unwrap();
+    assert_eq!(app.mode, Mode::Argocd);
+
     app.handle_key(press(KeyCode::Char('s'))).unwrap();
     assert_eq!(app.mode, Mode::FluxMenu);
     assert!(app.action_menu_over_argocd());
@@ -32448,7 +32461,8 @@ async fn argocd_view_selective_sync_single_marked_prune_and_remote() {
     assert_eq!(app.mode, Mode::Argocd);
 
     drain_until(&mut app, &mut rx, |app| {
-        app.flash.contains("sync requested: ConfigMap/cfg in root")
+        app.flash
+            .contains("sync requested: ConfigMap/default/cfg in root")
     })
     .await;
     receive_argocd_report(&mut app, &mut rx).await;
@@ -32561,7 +32575,8 @@ async fn argocd_view_selective_sync_single_marked_prune_and_remote() {
     select_argocd_row(&mut remote_app, "ConfigMap/cfg:");
     choose_argocd_selective_item(&mut remote_app, "Sync selected");
     drain_until(&mut remote_app, &mut remote_rx, |app| {
-        app.flash.contains("sync requested: ConfigMap/cfg in root")
+        app.flash
+            .contains("sync requested: ConfigMap/argocd/cfg in root")
     })
     .await;
     receive_argocd_report(&mut remote_app, &mut remote_rx).await;

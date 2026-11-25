@@ -12,7 +12,7 @@
 //! is unit-tested without a cluster. The app layer gathers and renders.
 
 use std::borrow::Cow;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use k8s_openapi::jiff::Timestamp;
 use kube::core::DynamicObject;
@@ -152,9 +152,19 @@ pub struct ResourceRef {
 }
 
 impl ResourceRef {
-    /// Short display label for menus, confirmations, and the action journal.
+    /// Display label for menus, confirmations, and the action journal,
+    /// including group and namespace when present so same-named resources
+    /// across namespaces or API groups cannot be confused.
     pub fn label(&self) -> String {
-        format!("{}/{}", self.kind, self.name)
+        match (self.group.is_empty(), self.namespace.is_empty()) {
+            (true, true) => format!("{}/{}", self.kind, self.name),
+            (true, false) => format!("{}/{}/{}", self.kind, self.namespace, self.name),
+            (false, true) => format!("{}.{}/{}", self.kind, self.group, self.name),
+            (false, false) => format!(
+                "{}.{}/{}/{}",
+                self.kind, self.group, self.namespace, self.name
+            ),
+        }
     }
 
     /// Serialized form Argo CD's `operation.sync.resources[]` expects.
@@ -607,7 +617,18 @@ pub fn operation_sync_resources(app: &DynamicObject) -> Vec<ResourceRef> {
 /// `plural` is left empty here; the app layer fills it in once it has resolved
 /// each kind against the cluster.
 pub fn managed_resources(app: &DynamicObject) -> Vec<ManagedResource> {
-    let syncing = operation_sync_resources(app);
+    let syncing_refs = operation_sync_resources(app);
+    let syncing: HashSet<(&str, &str, &str, &str)> = syncing_refs
+        .iter()
+        .map(|r| {
+            (
+                r.group.as_str(),
+                r.kind.as_str(),
+                r.namespace.as_str(),
+                r.name.as_str(),
+            )
+        })
+        .collect();
     let s = |v: &Value, k: &str| {
         v.get(k)
             .and_then(Value::as_str)
@@ -624,12 +645,13 @@ pub fn managed_resources(app: &DynamicObject) -> Vec<ManagedResource> {
                     let group = s(r, "group");
                     let namespace = s(r, "namespace");
                     let name = s(r, "name");
-                    let syncing_in_parent = syncing.iter().any(|t| {
-                        t.kind == kind
-                            && t.group == group
-                            && t.namespace == namespace
-                            && t.name == name
-                    });
+                    let syncing_in_parent = !syncing.is_empty()
+                        && syncing.contains(&(
+                            group.as_str(),
+                            kind.as_str(),
+                            namespace.as_str(),
+                            name.as_str(),
+                        ));
                     ManagedResource {
                         kind,
                         group,
@@ -3020,7 +3042,7 @@ mod tests {
             namespace: "prod".into(),
             name: "web".into(),
         };
-        assert_eq!(namespaced.label(), "Deployment/web");
+        assert_eq!(namespaced.label(), "Deployment.apps/prod/web");
         assert_eq!(
             namespaced.to_sync_json(),
             json!({"group": "apps", "kind": "Deployment", "name": "web", "namespace": "prod"})
@@ -3032,6 +3054,7 @@ mod tests {
             namespace: "default".into(),
             name: "cfg".into(),
         };
+        assert_eq!(core.label(), "ConfigMap/default/cfg");
         assert_eq!(
             core.to_sync_json(),
             json!({"kind": "ConfigMap", "name": "cfg", "namespace": "default"})
@@ -3044,9 +3067,21 @@ mod tests {
             name: "admin".into(),
         };
         assert_eq!(
+            cluster.label(),
+            "ClusterRole.rbac.authorization.k8s.io/admin"
+        );
+        assert_eq!(
             cluster.to_sync_json(),
             json!({"group": "rbac.authorization.k8s.io", "kind": "ClusterRole", "name": "admin"})
         );
+
+        let core_cluster = ResourceRef {
+            group: String::new(),
+            kind: "Namespace".into(),
+            namespace: String::new(),
+            name: "prod".into(),
+        };
+        assert_eq!(core_cluster.label(), "Namespace/prod");
     }
 
     #[test]
