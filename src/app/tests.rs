@@ -9587,9 +9587,9 @@ fn argocd_appset_resume_without_annotation_defaults_to_sync() {
 #[test]
 fn argocd_sync_patch_sets_operation() {
     let o = obj(argocd_app("guestbook"));
-    let p = argocd_sync_patch(&o, false);
+    let p = argocd_sync_patch(&o, false, &[]);
     assert_eq!(p, json!({"operation": {"sync": {"prune": false}}}));
-    let p = argocd_sync_patch(&o, true);
+    let p = argocd_sync_patch(&o, true, &[]);
     assert_eq!(p, json!({"operation": {"sync": {"prune": true}}}));
 }
 
@@ -9599,7 +9599,7 @@ fn argocd_sync_patch_ignores_empty_sync_options_and_retry() {
     raw["spec"]["syncPolicy"] = json!({"syncOptions": [], "retry": {}});
     let o = obj(raw);
     assert_eq!(
-        argocd_sync_patch(&o, false),
+        argocd_sync_patch(&o, false, &[]),
         json!({"operation": {"sync": {"prune": false}}})
     );
 }
@@ -9609,7 +9609,7 @@ fn argocd_sync_patch_pins_resource_version_when_present() {
     let mut raw = argocd_app("guestbook");
     raw["metadata"]["resourceVersion"] = json!("42");
     assert_eq!(
-        argocd_sync_patch(&obj(raw), false),
+        argocd_sync_patch(&obj(raw), false, &[]),
         json!({
             "metadata": {"resourceVersion": "42"},
             "operation": {"sync": {"prune": false}}
@@ -9619,7 +9619,7 @@ fn argocd_sync_patch_pins_resource_version_when_present() {
     let mut empty_rv = argocd_app("guestbook");
     empty_rv["metadata"]["resourceVersion"] = json!("");
     assert_eq!(
-        argocd_sync_patch(&obj(empty_rv), false),
+        argocd_sync_patch(&obj(empty_rv), false, &[]),
         json!({"operation": {"sync": {"prune": false}}})
     );
 }
@@ -9647,10 +9647,10 @@ fn merge_patch(target: &mut Value, patch: &Value) {
 #[test]
 fn argocd_plain_sync_clears_a_pending_prune() {
     let mut app = argocd_app("guestbook");
-    let first = argocd_sync_patch(&obj(app.clone()), true);
+    let first = argocd_sync_patch(&obj(app.clone()), true, &[]);
     merge_patch(&mut app, &first);
     assert_eq!(app["operation"]["sync"]["prune"], json!(true));
-    let second = argocd_sync_patch(&obj(app.clone()), false);
+    let second = argocd_sync_patch(&obj(app.clone()), false, &[]);
     merge_patch(&mut app, &second);
     assert_eq!(app["operation"]["sync"]["prune"], json!(false));
 }
@@ -9665,7 +9665,7 @@ fn argocd_sync_patch_clears_stale_pending_sync_options_and_retry() {
             "backoff": {"duration": "5s", "factor": 2, "maxDuration": "3m"}
         }
     });
-    let first = argocd_sync_patch(&obj(app.clone()), false);
+    let first = argocd_sync_patch(&obj(app.clone()), false, &[]);
     merge_patch(&mut app, &first);
 
     // Narrow retry (dropping backoff.factor and backoff.maxDuration) and replace syncOptions.
@@ -9673,7 +9673,7 @@ fn argocd_sync_patch_clears_stale_pending_sync_options_and_retry() {
         "syncOptions": ["CreateNamespace=true"],
         "retry": {"limit": 3, "backoff": {"duration": "10s"}}
     });
-    let second = argocd_sync_patch(&obj(app.clone()), false);
+    let second = argocd_sync_patch(&obj(app.clone()), false, &[]);
     merge_patch(&mut app, &second);
     assert_eq!(
         app["operation"],
@@ -9685,9 +9685,67 @@ fn argocd_sync_patch_clears_stale_pending_sync_options_and_retry() {
 
     // Remove syncOptions and retry altogether while the previous operation is still pending.
     app["spec"]["syncPolicy"] = json!({});
-    let third = argocd_sync_patch(&obj(app.clone()), false);
+    let third = argocd_sync_patch(&obj(app.clone()), false, &[]);
     merge_patch(&mut app, &third);
     assert_eq!(app["operation"], json!({"sync": {"prune": false}}));
+}
+
+#[test]
+fn argocd_sync_patch_writes_selective_resources_and_clears_them_on_full_sync() {
+    let mut app = argocd_app("guestbook");
+    app["metadata"]["resourceVersion"] = json!("77");
+    app["spec"]["syncPolicy"] = json!({
+        "syncOptions": ["CreateNamespace=true"],
+        "retry": {"limit": 2}
+    });
+    let resources = vec![
+        crate::argocd::ResourceRef {
+            group: "apps".into(),
+            kind: "Deployment".into(),
+            namespace: "prod".into(),
+            name: "web".into(),
+        },
+        crate::argocd::ResourceRef {
+            group: String::new(),
+            kind: "ConfigMap".into(),
+            namespace: "prod".into(),
+            name: "cfg".into(),
+        },
+        crate::argocd::ResourceRef {
+            group: "rbac.authorization.k8s.io".into(),
+            kind: "ClusterRole".into(),
+            namespace: String::new(),
+            name: "reader".into(),
+        },
+    ];
+
+    let selective = argocd_sync_patch(&obj(app.clone()), true, &resources);
+    assert_eq!(
+        selective,
+        json!({
+            "metadata": {"resourceVersion": "77"},
+            "operation": {
+                "sync": {
+                    "prune": true,
+                    "syncOptions": ["CreateNamespace=true"],
+                    "resources": [
+                        {"group": "apps", "kind": "Deployment", "name": "web", "namespace": "prod"},
+                        {"kind": "ConfigMap", "name": "cfg", "namespace": "prod"},
+                        {"group": "rbac.authorization.k8s.io", "kind": "ClusterRole", "name": "reader"}
+                    ]
+                },
+                "retry": {"limit": 2}
+            }
+        })
+    );
+    merge_patch(&mut app, &selective);
+
+    // A subsequent full sync while the selective operation is still pending
+    // must null out `operation.sync.resources` so RFC 7386 merge patch drops it.
+    let full = argocd_sync_patch(&obj(app.clone()), false, &[]);
+    assert_eq!(full["operation"]["sync"]["resources"], Value::Null);
+    merge_patch(&mut app, &full);
+    assert!(app["operation"]["sync"].get("resources").is_none());
 }
 
 fn argocd_appset(name: &str) -> serde_json::Value {
@@ -31956,6 +32014,596 @@ async fn argocd_view_refreshes_child_sync_while_another_overlay_is_open() {
         argocd_texts(&app)
     );
     assert!(app.argocd_following);
+}
+
+fn choose_argocd_selective_item(app: &mut App, item: &str) {
+    app.handle_key(press(KeyCode::Char('s'))).unwrap();
+    assert_eq!(app.mode, Mode::FluxMenu);
+    let idx = app
+        .action_menu_items()
+        .iter()
+        .position(|s| *s == item)
+        .unwrap_or_else(|| panic!("menu item {item:?} not found"));
+    app.flux_menu_state.select(Some(idx));
+    app.handle_key(press(KeyCode::Enter)).unwrap();
+}
+
+/// Pressing `t` on row 0 in `:argocd` acts on the current Application (even
+/// when its destination is a remote cluster) or ApplicationSet itself.
+#[tokio::test]
+async fn argocd_view_row_zero_t_acts_on_current_application_and_applicationset() {
+    let remote =
+        app_of_apps_root(json!({"server": "https://other.example:6443", "namespace": "argocd"}));
+    let (mut app, mut rx, _, patches, api_version) = argocd_child_action_app(
+        "applications",
+        remote.clone(),
+        vec![("applications", "argocd", "root", remote)],
+    );
+    let root_path = format!("/apis/{api_version}/namespaces/argocd/applications/root");
+
+    app.handle_key(press(KeyCode::Enter)).unwrap();
+    receive_argocd_report(&mut app, &mut rx).await;
+    assert!(app.argocd_can_act());
+
+    // Jump to row 0 (`g`) and trigger Sync now on the current Application.
+    app.handle_key(press(KeyCode::Char('g'))).unwrap();
+    assert_eq!(app.argocd_state.selected(), Some(0));
+    choose_argocd_menu_item(&mut app, "Sync now");
+    assert_eq!(app.mode, Mode::Argocd);
+
+    drain_until(&mut app, &mut rx, |app| {
+        app.flash.contains("sync requested: root")
+    })
+    .await;
+    receive_argocd_report(&mut app, &mut rx).await;
+
+    {
+        let log = patches.lock().unwrap();
+        assert_eq!(log.len(), 1);
+        assert_eq!(log[0]["path"], root_path);
+        assert_eq!(
+            log[0]["body"],
+            json!({"operation": {"sync": {"prune": false}}})
+        );
+    }
+    assert_eq!(
+        app.argocd_items[0].text,
+        "Application/root: Syncing / Healthy"
+    );
+    assert!(app.argocd_following);
+    assert_eq!(app.argocd_state.selected(), Some(0));
+
+    // Row 0 on an ApplicationSet opens the ApplicationSet menu and patches it.
+    let appset = argocd_applicationset();
+    let (mut set_app, mut set_rx, _, set_patches, set_api_version) = argocd_child_action_app(
+        "applicationsets",
+        appset.clone(),
+        vec![("applicationsets", "argocd", "team-a", appset)],
+    );
+    let set_path = format!("/apis/{set_api_version}/namespaces/argocd/applicationsets/team-a");
+    set_app.handle_key(press(KeyCode::Enter)).unwrap();
+    receive_argocd_report(&mut set_app, &mut set_rx).await;
+    set_app.handle_key(press(KeyCode::Char('g'))).unwrap();
+    set_app.handle_key(press(KeyCode::Char('t'))).unwrap();
+    assert_eq!(set_app.mode, Mode::FluxMenu);
+    assert_eq!(set_app.action_menu_items(), ARGOCD_APPSET_MENU_ITEMS);
+    set_app.handle_key(press(KeyCode::Enter)).unwrap();
+    drain_until(&mut set_app, &mut set_rx, |app| {
+        app.flash.contains("suspended team-a")
+    })
+    .await;
+    let set_log = set_patches.lock().unwrap();
+    assert_eq!(set_log.len(), 1);
+    assert_eq!(set_log[0]["path"], set_path);
+}
+
+/// Opening `:argocd` from a managed Deployment still resolves the owning
+/// Application as `argocd_subject`, so row-0 `t` and `s` selective sync both
+/// patch that Application.
+#[tokio::test]
+async fn argocd_view_row_zero_t_and_s_work_when_opened_from_managed_deployment() {
+    use http_body_util::BodyExt;
+
+    let deploy = json!({
+        "apiVersion": "apps/v1",
+        "kind": "Deployment",
+        "metadata": {
+            "name": "web",
+            "namespace": "default",
+            "annotations": {
+                "argocd.argoproj.io/tracking-id": "root:apps/Deployment:default/web"
+            }
+        }
+    });
+    let mut root = app_of_apps_root(
+        json!({"server": "https://kubernetes.default.svc", "namespace": "default"}),
+    );
+    root["status"]["resources"] = json!([
+        {"group": "apps", "version": "v1", "kind": "Deployment",
+         "namespace": "default", "name": "web", "status": "OutOfSync"},
+        {"version": "v1", "kind": "ConfigMap",
+         "namespace": "default", "name": "cfg", "status": "OutOfSync"}
+    ]);
+
+    let (mut app, mut rx) = test_app();
+    app.switch_kind("deployments");
+    apply(&mut app, deploy.clone());
+    app.table_state.select(Some(0));
+    let app_api_version = app
+        .cluster
+        .resolve_in_group("Application", ARGOCD_GROUP)
+        .unwrap()
+        .ar
+        .api_version;
+    let root_path = format!("/apis/{app_api_version}/namespaces/argocd/applications/root");
+    let list_path = format!("/apis/{app_api_version}/applications");
+
+    let objects: MockObjectStore = Arc::new(std::sync::Mutex::new(HashMap::from([
+        (
+            "/apis/apps/v1/namespaces/default/deployments/web".to_string(),
+            deploy,
+        ),
+        (root_path.clone(), root.clone()),
+    ])));
+    let patches = PatchLog::default();
+    let store = objects.clone();
+    let log = patches.clone();
+    let root_key = root_path.clone();
+    app.cluster.client = kube::Client::new(
+        tower::service_fn(move |request: http::Request<kube::client::Body>| {
+            let store = store.clone();
+            let log = log.clone();
+            let list_path = list_path.clone();
+            let root_key = root_key.clone();
+            async move {
+                let method = request.method().clone();
+                let path = request.uri().path().to_string();
+                let body_bytes = request.into_body().collect().await.unwrap().to_bytes();
+                let (code, body) = match method {
+                    http::Method::GET if path == list_path => {
+                        let item = store.lock().unwrap().get(&root_key).cloned().unwrap();
+                        (
+                            200,
+                            json!({"apiVersion": "argoproj.io/v1alpha1", "kind": "ApplicationList",
+                                   "metadata": {}, "items": [item]}),
+                        )
+                    }
+                    http::Method::GET => store
+                        .lock()
+                        .unwrap()
+                        .get(&path)
+                        .cloned()
+                        .map(|v| (200, v))
+                        .unwrap_or_else(|| (404, json!({"code": 404}))),
+                    http::Method::PATCH => {
+                        let patch: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+                        log.lock()
+                            .unwrap()
+                            .push(json!({"path": path.clone(), "body": patch.clone()}));
+                        let mut map = store.lock().unwrap();
+                        if let Some(obj) = map.get_mut(&path) {
+                            json_merge_patch(obj, &patch);
+                            (200, obj.clone())
+                        } else {
+                            (404, json!({"code": 404}))
+                        }
+                    }
+                    other => panic!("unexpected {other} {path}"),
+                };
+                Ok::<_, std::convert::Infallible>(
+                    http::Response::builder()
+                        .status(code)
+                        .header("content-type", "application/json")
+                        .body(kube::client::Body::from(body.to_string().into_bytes()))
+                        .unwrap(),
+                )
+            }
+        }),
+        "default",
+    );
+
+    open_argocd_view(&mut app);
+    receive_argocd_report(&mut app, &mut rx).await;
+
+    // Row 0 `t` targets Application/root, not Deployment/web.
+    app.handle_key(press(KeyCode::Char('g'))).unwrap();
+    choose_argocd_menu_item(&mut app, "Sync now");
+    drain_until(&mut app, &mut rx, |app| {
+        app.flash.contains("sync requested: root")
+    })
+    .await;
+    receive_argocd_report(&mut app, &mut rx).await;
+
+    // `s` on ConfigMap/cfg patches Application/root with `operation.sync.resources`.
+    select_argocd_row(&mut app, "ConfigMap/cfg:");
+    choose_argocd_selective_item(&mut app, "Sync selected");
+    drain_until(&mut app, &mut rx, |app| {
+        app.flash
+            .contains("sync requested: ConfigMap/default/cfg in root")
+    })
+    .await;
+    receive_argocd_report(&mut app, &mut rx).await;
+
+    let log = patches.lock().unwrap();
+    assert_eq!(log.len(), 2);
+    assert_eq!(log[0]["path"], root_path);
+    assert_eq!(log[1]["path"], root_path);
+    assert_eq!(
+        log[1]["body"],
+        json!({
+            "operation": {
+                "sync": {
+                    "prune": false,
+                    "resources": [
+                        {"kind": "ConfigMap", "name": "cfg", "namespace": "default"}
+                    ]
+                }
+            }
+        })
+    );
+}
+
+/// `space` marks managed rows in `:argocd` (separate from table marks), `esc`
+/// clears marks before closing, `t` acts on marked local child Applications in
+/// bulk while rejecting mixed kinds, and refreshes prune vanished marks.
+#[tokio::test]
+async fn argocd_view_space_marking_and_bulk_child_actions() {
+    let mut root = app_of_apps_root(
+        json!({"server": "https://kubernetes.default.svc", "namespace": "argocd"}),
+    );
+    root["status"]["resources"] = json!([
+        {"group": "argoproj.io", "version": "v1alpha1", "kind": "Application",
+         "namespace": "argocd", "name": "child-a", "status": "Synced"},
+        {"group": "argoproj.io", "version": "v1alpha1", "kind": "Application",
+         "namespace": "argocd", "name": "child-b", "status": "Synced"},
+        {"group": "argoproj.io", "version": "v1alpha1", "kind": "ApplicationSet",
+         "namespace": "argocd", "name": "team-a", "status": "Synced"},
+        {"version": "v1", "kind": "ConfigMap",
+         "namespace": "argocd", "name": "cfg", "status": "Synced"}
+    ]);
+    let (mut app, mut rx, objects, patches, api_version) = argocd_child_action_app(
+        "applications",
+        root.clone(),
+        vec![
+            ("applications", "argocd", "root", root),
+            (
+                "applications",
+                "argocd",
+                "child-a",
+                child_application("child-a", "OutOfSync", "Healthy", false),
+            ),
+            (
+                "applications",
+                "argocd",
+                "child-b",
+                child_application("child-b", "OutOfSync", "Healthy", false),
+            ),
+        ],
+    );
+    let root_path = format!("/apis/{api_version}/namespaces/argocd/applications/root");
+    let child_a_path = format!("/apis/{api_version}/namespaces/argocd/applications/child-a");
+    let child_b_path = format!("/apis/{api_version}/namespaces/argocd/applications/child-b");
+    app.marked.insert("argocd/root".into());
+
+    app.handle_key(press(KeyCode::Enter)).unwrap();
+    receive_argocd_report(&mut app, &mut rx).await;
+
+    // Row 0 cannot be marked.
+    app.handle_key(press(KeyCode::Char('g'))).unwrap();
+    app.handle_key(press(KeyCode::Char(' '))).unwrap();
+    assert!(app.argocd_marked.is_empty());
+    assert!(app.flash.contains("managed resource"), "{}", app.flash);
+
+    // Mark child-a and child-b; cursor stays on each row on `space`.
+    select_argocd_row(&mut app, "Application/child-a:");
+    let idx_a = app.argocd_state.selected().unwrap();
+    app.handle_key(press(KeyCode::Char(' '))).unwrap();
+    assert_eq!(app.argocd_state.selected(), Some(idx_a));
+    assert!(app.argocd_row_marked(idx_a));
+    // Toggle off and back on.
+    app.handle_key(press(KeyCode::Char(' '))).unwrap();
+    assert!(!app.argocd_row_marked(idx_a));
+    app.handle_key(press(KeyCode::Char(' '))).unwrap();
+    assert!(app.argocd_row_marked(idx_a));
+
+    select_argocd_row(&mut app, "Application/child-b:");
+    app.handle_key(press(KeyCode::Char(' '))).unwrap();
+    assert_eq!(app.argocd_marked.len(), 2);
+
+    // First `esc` clears marks and stays in `:argocd`; second `esc` leaves.
+    app.handle_key(press(KeyCode::Esc)).unwrap();
+    assert_eq!(app.mode, Mode::Argocd);
+    assert!(app.argocd_marked.is_empty());
+    app.handle_key(press(KeyCode::Esc)).unwrap();
+    assert_eq!(app.mode, Mode::Table);
+
+    // Re-open `:argocd`; `q` closes immediately and clears `:argocd` marks.
+    app.handle_key(press(KeyCode::Enter)).unwrap();
+    receive_argocd_report(&mut app, &mut rx).await;
+    select_argocd_row(&mut app, "Application/child-a:");
+    app.handle_key(press(KeyCode::Char(' '))).unwrap();
+    app.handle_key(press(KeyCode::Char('q'))).unwrap();
+    assert_eq!(app.mode, Mode::Table);
+    assert!(app.argocd_marked.is_empty());
+
+    // Re-open `:argocd` and test mixed-kind refusals for `t`.
+    app.handle_key(press(KeyCode::Enter)).unwrap();
+    receive_argocd_report(&mut app, &mut rx).await;
+    select_argocd_row(&mut app, "Application/child-a:");
+    app.handle_key(press(KeyCode::Char(' '))).unwrap();
+    select_argocd_row(&mut app, "ConfigMap/cfg:");
+    app.handle_key(press(KeyCode::Char(' '))).unwrap();
+    app.handle_key(press(KeyCode::Char('t'))).unwrap();
+    assert_eq!(app.mode, Mode::Argocd);
+    assert!(app.flash.contains("use s"), "{}", app.flash);
+    // Unmark ConfigMap, mark ApplicationSet -> mixed Application/ApplicationSet refused.
+    app.handle_key(press(KeyCode::Char(' '))).unwrap();
+    select_argocd_row(&mut app, "ApplicationSet/team-a:");
+    app.handle_key(press(KeyCode::Char(' '))).unwrap();
+    app.handle_key(press(KeyCode::Char('t'))).unwrap();
+    assert_eq!(app.mode, Mode::Argocd);
+    assert!(app.flash.contains("cannot mix"), "{}", app.flash);
+    // Unmark ApplicationSet, mark child-b -> bulk `t` patches both children.
+    app.handle_key(press(KeyCode::Char(' '))).unwrap();
+    select_argocd_row(&mut app, "Application/child-b:");
+    app.handle_key(press(KeyCode::Char(' '))).unwrap();
+    assert_eq!(app.argocd_marked.len(), 2);
+
+    choose_argocd_menu_item(&mut app, "Sync now");
+    assert_eq!(app.mode, Mode::Argocd);
+    assert!(app.argocd_marked.is_empty(), "argocd marks cleared on run");
+    assert_eq!(app.marked.len(), 1, "table marks stay untouched");
+
+    drain_until(&mut app, &mut rx, |app| {
+        app.flash.contains("sync requested: 2 applications")
+    })
+    .await;
+    receive_argocd_report(&mut app, &mut rx).await;
+
+    {
+        let log = patches.lock().unwrap();
+        assert_eq!(log.len(), 2);
+        assert_eq!(log[0]["path"], child_a_path);
+        assert_eq!(log[1]["path"], child_b_path);
+    }
+    let lines = argocd_texts(&app);
+    assert!(
+        lines.contains(&"Application/child-a: Syncing / Healthy".to_string()),
+        "{lines:?}"
+    );
+    assert!(
+        lines.contains(&"Application/child-b: Syncing / Healthy".to_string()),
+        "{lines:?}"
+    );
+
+    // Refresh prunes marks whose resource disappeared while keeping remaining marks.
+    select_argocd_row(&mut app, "Application/child-a:");
+    app.handle_key(press(KeyCode::Char(' '))).unwrap();
+    select_argocd_row(&mut app, "Application/child-b:");
+    app.handle_key(press(KeyCode::Char(' '))).unwrap();
+    objects.lock().unwrap().get_mut(&root_path).unwrap()["status"]["resources"] = json!([
+        {"group": "argoproj.io", "version": "v1alpha1", "kind": "Application",
+         "namespace": "argocd", "name": "child-a", "status": "Synced"}
+    ]);
+    app.handle_key(press(KeyCode::Char('r'))).unwrap();
+    receive_argocd_report(&mut app, &mut rx).await;
+    assert_eq!(app.argocd_marked.len(), 1);
+    let only = app.argocd_marked.iter().next().unwrap();
+    assert_eq!(only.name, "child-a");
+}
+
+/// `s` in `:argocd` selectively syncs a single managed row or marked managed
+/// rows in the current Application (including remote destinations), enforces
+/// prune confirmation & guardrails, and refuses ApplicationSets / row 0.
+#[tokio::test]
+async fn argocd_view_selective_sync_single_marked_prune_and_remote() {
+    let mut root = app_of_apps_root(
+        json!({"server": "https://kubernetes.default.svc", "namespace": "argocd"}),
+    );
+    root["status"]["resources"] = json!([
+        {"group": "argoproj.io", "version": "v1alpha1", "kind": "Application",
+         "namespace": "argocd", "name": "child-a", "status": "OutOfSync"},
+        {"group": "apps", "version": "v1", "kind": "Deployment",
+         "namespace": "default", "name": "web", "status": "OutOfSync"},
+        {"version": "v1", "kind": "ConfigMap",
+         "namespace": "default", "name": "cfg", "status": "OutOfSync"}
+    ]);
+    let (mut app, mut rx, _, patches, api_version) = argocd_child_action_app(
+        "applications",
+        root.clone(),
+        vec![
+            ("applications", "argocd", "root", root),
+            (
+                "applications",
+                "argocd",
+                "child-a",
+                child_application("child-a", "Synced", "Healthy", false),
+            ),
+        ],
+    );
+    let root_path = format!("/apis/{api_version}/namespaces/argocd/applications/root");
+
+    app.handle_key(press(KeyCode::Enter)).unwrap();
+    receive_argocd_report(&mut app, &mut rx).await;
+    assert!(app.argocd_can_selective_sync());
+    assert!(
+        argocd_texts(&app)
+            .contains(&"Application/child-a: Synced / Healthy (manifest OutOfSync)".to_string()),
+        "{:?}",
+        argocd_texts(&app)
+    );
+
+    // Row 0 with no marks points the user to `t`.
+    app.handle_key(press(KeyCode::Char('g'))).unwrap();
+    app.handle_key(press(KeyCode::Char('s'))).unwrap();
+    assert_eq!(app.mode, Mode::Argocd);
+    assert!(app.flash.contains("t on row 0"), "{}", app.flash);
+
+    // Single managed row selective sync without marks: prune confirmation names
+    // the resource's own namespace ("default") distinctly from the app's ("argocd").
+    select_argocd_row(&mut app, "ConfigMap/cfg:");
+    choose_argocd_selective_item(&mut app, "Sync selected with prune");
+    assert_eq!(app.mode, Mode::Confirm);
+    assert!(
+        app.confirm_label
+            .contains("Sync ConfigMap/default/cfg in root (argocd) with prune"),
+        "{}",
+        app.confirm_label
+    );
+    app.handle_key(press(KeyCode::Char('n'))).unwrap();
+    assert_eq!(app.mode, Mode::Argocd);
+
+    app.handle_key(press(KeyCode::Char('s'))).unwrap();
+    assert_eq!(app.mode, Mode::FluxMenu);
+    assert!(app.action_menu_over_argocd());
+    assert_eq!(app.action_menu_items(), ARGOCD_SELECTIVE_MENU_ITEMS);
+    app.handle_key(press(KeyCode::Enter)).unwrap();
+    assert_eq!(app.mode, Mode::Argocd);
+
+    drain_until(&mut app, &mut rx, |app| {
+        app.flash
+            .contains("sync requested: ConfigMap/default/cfg in root")
+    })
+    .await;
+    receive_argocd_report(&mut app, &mut rx).await;
+    assert!(
+        argocd_texts(&app).contains(&"ConfigMap/cfg: Syncing".to_string()),
+        "{:?}",
+        argocd_texts(&app)
+    );
+    assert!(app.argocd_following);
+
+    // Multi-row selective sync with prune: confirm, guardrail deny, typed confirm.
+    select_argocd_row(&mut app, "Application/child-a:");
+    app.handle_key(press(KeyCode::Char(' '))).unwrap();
+    select_argocd_row(&mut app, "Deployment/web:");
+    app.handle_key(press(KeyCode::Char(' '))).unwrap();
+
+    choose_argocd_selective_item(&mut app, "Sync selected with prune");
+    assert_eq!(app.mode, Mode::Confirm);
+    assert!(app.over_argocd_view());
+    assert!(
+        app.confirm_label
+            .contains("Sync 2 resources in root (argocd) with prune"),
+        "{}",
+        app.confirm_label
+    );
+    // Declining keeps marks intact.
+    app.handle_key(press(KeyCode::Char('n'))).unwrap();
+    assert_eq!(app.mode, Mode::Argocd);
+    assert_eq!(app.argocd_marked.len(), 2);
+
+    // Deny guardrail blocks selective sync with prune.
+    app.guardrails = vec![crate::config::Guardrail {
+        actions: vec!["prune".into()],
+        resources: vec!["applications".into()],
+        deny: true,
+        reason: Some("no selective prune".into()),
+        ..Default::default()
+    }];
+    choose_argocd_selective_item(&mut app, "Sync selected with prune");
+    assert_eq!(app.mode, Mode::Argocd);
+    assert!(app.flash.contains("no selective prune"), "{}", app.flash);
+
+    // Typed-confirmation guardrail expects the Application name ("root").
+    app.guardrails = vec![crate::config::Guardrail {
+        actions: vec!["prune".into()],
+        resources: vec!["applications".into()],
+        confirmation: Some("type-resource-name".into()),
+        ..Default::default()
+    }];
+    choose_argocd_selective_item(&mut app, "Sync selected with prune");
+    assert_eq!(app.mode, Mode::Prompt);
+    assert!(app.over_argocd_view());
+    for ch in "root".chars() {
+        app.handle_key(press(KeyCode::Char(ch))).unwrap();
+    }
+    app.handle_key(press(KeyCode::Enter)).unwrap();
+    assert_eq!(app.mode, Mode::Argocd);
+    assert!(app.argocd_marked.is_empty());
+
+    drain_until(&mut app, &mut rx, |app| {
+        app.flash
+            .contains("sync with prune requested: 2 resources in root")
+    })
+    .await;
+    receive_argocd_report(&mut app, &mut rx).await;
+
+    {
+        let log = patches.lock().unwrap();
+        assert_eq!(log.len(), 2);
+        assert_eq!(log[1]["path"], root_path);
+        assert_eq!(
+            log[1]["body"],
+            json!({
+                "operation": {
+                    "sync": {
+                        "prune": true,
+                        "resources": [
+                            {"group": "argoproj.io", "kind": "Application", "name": "child-a", "namespace": "argocd"},
+                            {"group": "apps", "kind": "Deployment", "name": "web", "namespace": "default"}
+                        ]
+                    }
+                }
+            })
+        );
+    }
+    let lines = argocd_texts(&app);
+    assert!(
+        lines.contains(&"Application/child-a: Synced / Healthy (syncing in parent)".to_string()),
+        "{lines:?}"
+    );
+    assert!(
+        lines.contains(&"Deployment/web: Syncing".to_string()),
+        "{lines:?}"
+    );
+
+    // Remote-destination Application still permits `s` selective sync because the
+    // Application CRD itself lives in the current cluster.
+    let remote =
+        app_of_apps_root(json!({"server": "https://other.example:6443", "namespace": "argocd"}));
+    let (mut remote_app, mut remote_rx, _, remote_patches, remote_api_version) =
+        argocd_child_action_app(
+            "applications",
+            remote.clone(),
+            vec![("applications", "argocd", "root", remote)],
+        );
+    let remote_root_path =
+        format!("/apis/{remote_api_version}/namespaces/argocd/applications/root");
+    remote_app.handle_key(press(KeyCode::Enter)).unwrap();
+    receive_argocd_report(&mut remote_app, &mut remote_rx).await;
+    select_argocd_row(&mut remote_app, "ConfigMap/cfg:");
+    choose_argocd_selective_item(&mut remote_app, "Sync selected");
+    drain_until(&mut remote_app, &mut remote_rx, |app| {
+        app.flash
+            .contains("sync requested: ConfigMap/argocd/cfg in root")
+    })
+    .await;
+    receive_argocd_report(&mut remote_app, &mut remote_rx).await;
+    assert_eq!(remote_patches.lock().unwrap()[0]["path"], remote_root_path);
+    let sel = remote_app.argocd_state.selected().unwrap();
+    assert_eq!(
+        remote_app.argocd_items[sel].text, "ConfigMap/cfg: Syncing",
+        "remote managed row stays selected when Sync operation section appears"
+    );
+
+    // ApplicationSet refuses `s`.
+    let appset = argocd_applicationset();
+    let (mut set_app, mut set_rx, _, _, _) = argocd_child_action_app(
+        "applicationsets",
+        appset.clone(),
+        vec![("applicationsets", "argocd", "team-a", appset)],
+    );
+    set_app.handle_key(press(KeyCode::Enter)).unwrap();
+    receive_argocd_report(&mut set_app, &mut set_rx).await;
+    assert!(!set_app.argocd_can_selective_sync());
+    set_app.handle_key(press(KeyCode::Char('s'))).unwrap();
+    assert_eq!(set_app.mode, Mode::Argocd);
+    assert!(
+        set_app.flash.contains("ApplicationSets"),
+        "{}",
+        set_app.flash
+    );
 }
 
 /// Leaving the view must drop a report still in flight, not let it land on a

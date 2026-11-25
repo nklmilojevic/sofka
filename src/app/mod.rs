@@ -165,6 +165,12 @@ pub const ARGOCD_MENU_ITEMS: &[&str] = &[
 /// Application-level action.
 pub const ARGOCD_APPSET_MENU_ITEMS: &[&str] = &["Suspend", "Resume", "Cancel"];
 
+/// Items in the ArgoCD selective-sync menu (`s` in `:argocd`), targeting
+/// specific managed resources in the current Application via
+/// `operation.sync.resources`.
+pub const ARGOCD_SELECTIVE_MENU_ITEMS: &[&str] =
+    &["Sync selected", "Sync selected with prune", "Cancel"];
+
 /// Items in the pod file-transfer menu (`t` on a pod), in display order. Both
 /// directions shell out to `kubectl cp` (which needs `tar` in the container),
 /// prompting for the source and destination paths.
@@ -452,6 +458,7 @@ enum ConfirmAction {
         kind: Kind,
         targets: Vec<(String, String)>,
         from_argocd: bool,
+        resources: Vec<crate::argocd::ResourceRef>,
     },
     /// Uninstall one or more Helm releases (`helm uninstall`), `(name, ns)`
     /// per release — bulk when marked, like [`ConfirmAction::Delete`].
@@ -2504,6 +2511,9 @@ pub struct App {
     pub(super) action_menu_kind: Option<Kind>,
     /// Mode to return to when the `t` action menu closes or runs an action.
     pub(super) action_menu_return: Mode,
+    /// Managed resources targeted when the open action menu is an Argo CD
+    /// selective sync (`s` in `:argocd`). Empty for regular `t` menus.
+    pub(super) action_menu_selective: Vec<crate::argocd::ResourceRef>,
     /// Saved `[[forwards]]` from config: shown in `:pf` even while stopped,
     /// startable with one keystroke, autostarted on connect when configured.
     pub forwards_cfg: Vec<crate::config::Forward>,
@@ -2625,6 +2635,10 @@ pub struct App {
     pub argocd_state: ListState,
     pub argocd_title: String,
     pub argocd_source: Option<DynamicObject>,
+    /// The resolved Application or ApplicationSet displayed by `:argocd`, so
+    /// row-0 `t` and `s` selective sync work even when `:argocd` was opened
+    /// from a managed object.
+    pub argocd_subject: Option<crate::argocd::ArgocdSubject>,
     /// Where the inspected Application deploys, so the view can say where a
     /// managed resource lives when it is not in this cluster.
     pub argocd_destination: crate::argocd::Destination,
@@ -2634,6 +2648,9 @@ pub struct App {
     /// The inspected Application's managed resources, kept for their API
     /// groups.
     pub argocd_resources: Vec<crate::argocd::ManagedResource>,
+    /// Managed resources marked with `space` inside `:argocd`, separate from
+    /// table marks so actions in `:argocd` never clear table selection.
+    pub argocd_marked: HashSet<crate::argocd::ResourceRef>,
     /// Managed-resource rows whose `ownerReferences` descendants are shown
     /// inline, keyed by position in `status.resources[]` and carrying the
     /// request that may fill them, so a superseded expansion is dropped.
@@ -2999,6 +3016,7 @@ impl App {
             action_menu_objects: Vec::new(),
             action_menu_kind: None,
             action_menu_return: Mode::Table,
+            action_menu_selective: Vec::new(),
             notify_cfg: crate::config::NotifyConfig::default(),
             keymap: Keymap::default(),
             pf_state: ListState::default(),
@@ -3065,10 +3083,12 @@ impl App {
             argocd_state: ListState::default(),
             argocd_title: String::new(),
             argocd_source: None,
+            argocd_subject: None,
             argocd_destination: crate::argocd::Destination::Current,
             argocd_request: 0,
             argocd_claim: None,
             argocd_resources: Vec::new(),
+            argocd_marked: HashSet::new(),
             argocd_expanded: HashMap::new(),
             argocd_children_request: 0,
             argocd_children_claims: Vec::new(),

@@ -84,6 +84,8 @@ impl App {
         // `⏎` during the load must not report the previous Application's
         // cluster.
         self.argocd_destination = Destination::Current;
+        self.argocd_subject = None;
+        self.argocd_marked.clear();
         self.argocd_reselect = None;
         self.cancel_explain_request();
         self.argocd_source = Some(obj);
@@ -207,8 +209,14 @@ impl App {
                     };
                     let findings =
                         argocd::describe_applicationset(&selection, &subject, &resources);
+                    let argocd_subject = Some(argocd::ArgocdSubject {
+                        is_app: false,
+                        name: selection.metadata.name.clone().unwrap_or_default(),
+                        namespace: selection.metadata.namespace.clone().unwrap_or_default(),
+                    });
                     return Ok((
                         selection,
+                        argocd_subject,
                         findings,
                         Destination::Current,
                         resources,
@@ -240,6 +248,11 @@ impl App {
                     (Some(subject.clone()), owner, app)
                 };
 
+                let argocd_subject = app.as_ref().map(|a| argocd::ArgocdSubject {
+                    is_app: true,
+                    name: a.metadata.name.clone().unwrap_or_default(),
+                    namespace: a.metadata.namespace.clone().unwrap_or_default(),
+                });
                 let subject = match &app {
                     Some(a) => format!(
                         "{}/{}",
@@ -294,14 +307,22 @@ impl App {
                     app,
                 };
                 let findings = argocd::describe(&ev, crate::columns::now_secs());
-                Ok((selection, findings, destination, ev.resources, following))
+                Ok((
+                    selection,
+                    argocd_subject,
+                    findings,
+                    destination,
+                    ev.resources,
+                    following,
+                ))
             }
             .await;
             // Not `report_result`: the destination travels with the findings so
             // the view can explain an absent jump target.
-            let (source, findings, destination, resources, following) = match gathered {
-                Ok((source, findings, destination, resources, following)) => (
+            let (source, subject, findings, destination, resources, following) = match gathered {
+                Ok((source, subject, findings, destination, resources, following)) => (
                     Some(Box::new(source)),
+                    subject,
                     findings,
                     destination,
                     resources,
@@ -310,7 +331,14 @@ impl App {
                 Err(error) => {
                     let mut findings = Vec::new();
                     prepend_warn_finding(&mut findings, Some(error));
-                    (None, findings, Destination::Current, Vec::new(), false)
+                    (
+                        None,
+                        None,
+                        findings,
+                        Destination::Current,
+                        Vec::new(),
+                        false,
+                    )
                 }
             };
             let _ = tx
@@ -321,6 +349,7 @@ impl App {
                         claim,
                         title,
                         source,
+                        subject,
                         destination,
                         findings,
                         resources,
@@ -358,7 +387,18 @@ impl App {
     pub(super) fn key_argocd(&mut self, key: KeyInput) {
         let len = self.argocd_items.len();
         match (key.action, key.code) {
-            (Some(Action::Back), _) | (Some(Action::Close), _) => {
+            (Some(Action::Back), _) => {
+                if !self.argocd_marked.is_empty() {
+                    self.argocd_marked.clear();
+                } else {
+                    self.mode = self.return_mode;
+                    if self.return_mode == Mode::Table {
+                        self.restore_selection();
+                    }
+                }
+            }
+            (Some(Action::Close), _) => {
+                self.argocd_marked.clear();
                 self.mode = self.return_mode;
                 if self.return_mode == Mode::Table {
                     self.restore_selection();
@@ -381,7 +421,9 @@ impl App {
             (Some(Action::Refresh), _) => self.refresh_argocd(),
             (Some(Action::Wrap), _) => self.toggle_findings_wrap(),
             (Some(Action::DiscoverChildren), _) => self.toggle_argocd_children(),
-            (Some(Action::ActionMenu), _) => self.request_argocd_child_action_menu(),
+            (Some(Action::Mark), _) => self.toggle_argocd_mark(),
+            (Some(Action::ActionMenu), _) => self.request_argocd_action_menu(),
+            (Some(Action::SyncSelected), _) => self.request_argocd_selective_sync_menu(),
             (Some(Action::Accept), _) => {
                 let selected = self
                     .argocd_state
@@ -406,47 +448,187 @@ impl App {
         }
     }
 
-    /// `t` in the Argo CD view: open the Argo CD action menu for the selected
-    /// child Application (app-of-apps or ApplicationSet) or child
-    /// ApplicationSet without leaving the parent's view.
-    fn request_argocd_child_action_menu(&mut self) {
-        if self.deny_readonly() {
-            return;
-        }
-        let Some(resource) = self
+    /// `space` in the Argo CD view: mark or unmark a direct managed resource
+    /// row (leaving the cursor in place, like the table view).
+    fn toggle_argocd_mark(&mut self) {
+        let Some(reference) = self
             .argocd_state
             .selected()
             .and_then(|index| self.managed_row_ordinal(index))
             .and_then(|ordinal| self.argocd_resources.get(ordinal))
-            .filter(|r| {
-                r.group == ARGOCD_GROUP
-                    && matches!(r.kind.as_str(), "Application" | "ApplicationSet")
-            })
-            .cloned()
+            .map(argocd::ManagedResource::resource_ref)
         else {
-            self.flash_warn("select an Argo CD Application or ApplicationSet row for actions");
+            self.flash_warn("only managed resource rows can be marked");
             return;
         };
+        if !self.argocd_marked.remove(&reference) {
+            self.argocd_marked.insert(reference);
+        }
+    }
+
+    /// Whether row `index` in `:argocd` is currently marked with `space`.
+    pub fn argocd_row_marked(&self, index: usize) -> bool {
+        if self.argocd_marked.is_empty() {
+            return false;
+        }
+        self.managed_row_ordinal(index)
+            .and_then(|ordinal| self.argocd_resources.get(ordinal))
+            .is_some_and(|r| self.argocd_marked.contains(&r.resource_ref()))
+    }
+
+    /// Marked managed resources in display order, capped at the listed rows.
+    fn argocd_marked_resources(&self) -> Vec<argocd::ManagedResource> {
+        self.argocd_resources
+            .iter()
+            .take(argocd::MAX_LISTED)
+            .filter(|r| self.argocd_marked.contains(&r.resource_ref()))
+            .cloned()
+            .collect()
+    }
+
+    fn deny_remote_argocd_children(&mut self, subject: &str, plural: bool) -> bool {
+        let (verb, do_not) = if plural {
+            ("live", "do")
+        } else {
+            ("lives", "does")
+        };
         match &self.argocd_destination {
-            Destination::Current => {}
+            Destination::Current => false,
             Destination::Context(ctx) => {
                 self.flash_warn(&format!(
-                    "{} lives in {ctx}; press ⏎ to open it there first",
-                    resource.name
+                    "{subject} {verb} in {ctx}; press ⏎ to open it there first"
                 ));
-                return;
+                true
             }
             Destination::Unresolved(server) if !server.is_empty() => {
                 self.flash_warn(&format!(
-                    "{} lives in {server}, which no kubeconfig context serves",
-                    resource.name
+                    "{subject} {verb} in {server}, which no kubeconfig context serves"
                 ));
-                return;
+                true
             }
             Destination::Unresolved(_) => {
-                self.flash_warn(&format!("{} does not live in this cluster", resource.name));
+                self.flash_warn(&format!("{subject} {do_not} not live in this cluster"));
+                true
+            }
+        }
+    }
+
+    /// `t` in the Argo CD view: act on marked local child Applications or
+    /// ApplicationSets, on the current Application/ApplicationSet when row 0
+    /// is selected, or on the selected local child Application/ApplicationSet.
+    fn request_argocd_action_menu(&mut self) {
+        if self.deny_readonly() {
+            return;
+        }
+        if !self.argocd_marked.is_empty() {
+            let marked = self.argocd_marked_resources();
+            if marked.is_empty() {
+                self.argocd_marked.clear();
+            } else {
+                let all_apps = marked
+                    .iter()
+                    .all(|r| r.group == ARGOCD_GROUP && r.kind == "Application");
+                let all_appsets = marked
+                    .iter()
+                    .all(|r| r.group == ARGOCD_GROUP && r.kind == "ApplicationSet");
+                if !all_apps && !all_appsets {
+                    let all_argo = marked.iter().all(|r| {
+                        r.group == ARGOCD_GROUP
+                            && matches!(r.kind.as_str(), "Application" | "ApplicationSet")
+                    });
+                    if all_argo {
+                        self.flash_warn("cannot mix marked Applications and ApplicationSets for t");
+                    } else if self.argocd_subject.as_ref().is_some_and(|s| s.is_app) {
+                        self.flash_warn(
+                            "t only applies to Application or ApplicationSet rows (use s to sync marked resources in the current Application)",
+                        );
+                    } else {
+                        self.flash_warn("t only applies to Application or ApplicationSet rows");
+                    }
+                    return;
+                }
+                let subject = if marked.len() == 1 {
+                    marked[0].name.as_str()
+                } else {
+                    "marked resources"
+                };
+                if self.deny_remote_argocd_children(subject, marked.len() != 1) {
+                    return;
+                }
+                if let Some(missing) = marked.iter().find(|r| r.namespace.is_empty()) {
+                    self.flash_warn(&format!("{} has no namespace", missing.name));
+                    return;
+                }
+                let kind_name = marked[0].kind.as_str();
+                let Some(kind) = self.cluster.resolve_in_group(kind_name, ARGOCD_GROUP) else {
+                    self.flash_warn(&format!("this cluster has no Argo CD {kind_name} CRD"));
+                    return;
+                };
+                self.action_menu_targets =
+                    marked.into_iter().map(|r| (r.name, r.namespace)).collect();
+                self.action_menu_objects.clear();
+                self.action_menu_kind = Some(kind);
+                self.action_menu_selective.clear();
+                self.action_menu_return = Mode::Argocd;
+                self.flux_menu_state.select(Some(0));
+                self.mode = Mode::FluxMenu;
                 return;
             }
+        }
+
+        if self.argocd_state.selected() == Some(0) {
+            let Some(subj) = self.argocd_subject.clone() else {
+                self.flash_warn(
+                    "select the root Application or a child Application/ApplicationSet row for actions",
+                );
+                return;
+            };
+            if subj.namespace.is_empty() {
+                self.flash_warn(&format!("{} has no namespace", subj.name));
+                return;
+            }
+            let kind_name = if subj.is_app {
+                "Application"
+            } else {
+                "ApplicationSet"
+            };
+            let Some(kind) = self.cluster.resolve_in_group(kind_name, ARGOCD_GROUP) else {
+                self.flash_warn(&format!("this cluster has no Argo CD {kind_name} CRD"));
+                return;
+            };
+            self.action_menu_targets = vec![(subj.name, subj.namespace)];
+            self.action_menu_objects.clear();
+            self.action_menu_kind = Some(kind);
+            self.action_menu_selective.clear();
+            self.action_menu_return = Mode::Argocd;
+            self.flux_menu_state.select(Some(0));
+            self.mode = Mode::FluxMenu;
+            return;
+        }
+
+        let selected_managed = self
+            .argocd_state
+            .selected()
+            .and_then(|index| self.managed_row_ordinal(index))
+            .and_then(|ordinal| self.argocd_resources.get(ordinal))
+            .cloned();
+        let Some(resource) = selected_managed.as_ref().filter(|r| {
+            r.group == ARGOCD_GROUP && matches!(r.kind.as_str(), "Application" | "ApplicationSet")
+        }) else {
+            if selected_managed.is_some() && self.argocd_subject.as_ref().is_some_and(|s| s.is_app)
+            {
+                self.flash_warn(
+                    "select the root Application or a child Application/ApplicationSet row for t (use s to sync this resource)",
+                );
+            } else {
+                self.flash_warn(
+                    "select the root Application or a child Application/ApplicationSet row for actions",
+                );
+            }
+            return;
+        };
+        if self.deny_remote_argocd_children(&resource.name, false) {
+            return;
         }
         if resource.namespace.is_empty() {
             self.flash_warn(&format!("{} has no namespace", resource.name));
@@ -459,9 +641,69 @@ impl App {
             ));
             return;
         };
-        self.action_menu_targets = vec![(resource.name, resource.namespace)];
+        self.action_menu_targets = vec![(resource.name.clone(), resource.namespace.clone())];
         self.action_menu_objects.clear();
         self.action_menu_kind = Some(kind);
+        self.action_menu_selective.clear();
+        self.action_menu_return = Mode::Argocd;
+        self.flux_menu_state.select(Some(0));
+        self.mode = Mode::FluxMenu;
+    }
+
+    /// `s` in the Argo CD view: selectively sync the marked managed resources
+    /// (or the selected managed resource) in the current Application via
+    /// `operation.sync.resources`.
+    fn request_argocd_selective_sync_menu(&mut self) {
+        if self.deny_readonly() {
+            return;
+        }
+        let Some(subj) = self.argocd_subject.clone() else {
+            self.flash_warn("no Argo CD Application to sync");
+            return;
+        };
+        if !subj.is_app {
+            self.flash_warn("selective sync applies to Applications, not ApplicationSets");
+            return;
+        }
+        if subj.namespace.is_empty() {
+            self.flash_warn(&format!("{} has no namespace", subj.name));
+            return;
+        }
+        let Some(kind) = self.cluster.resolve_in_group("Application", ARGOCD_GROUP) else {
+            self.flash_warn("this cluster has no Argo CD Application CRD");
+            return;
+        };
+        let selected: Vec<argocd::ResourceRef> = if !self.argocd_marked.is_empty() {
+            self.argocd_marked_resources()
+                .into_iter()
+                .map(|r| r.resource_ref())
+                .collect()
+        } else if let Some(resource) = self
+            .argocd_state
+            .selected()
+            .and_then(|index| self.managed_row_ordinal(index))
+            .and_then(|ordinal| self.argocd_resources.get(ordinal))
+        {
+            vec![resource.resource_ref()]
+        } else {
+            if self.argocd_state.selected() == Some(0) {
+                self.flash_warn(
+                    "select or mark managed resources to sync (use t on row 0 to sync the whole Application)",
+                );
+            } else {
+                self.flash_warn("select or mark managed resources to sync");
+            }
+            return;
+        };
+        if selected.is_empty() {
+            self.argocd_marked.clear();
+            self.flash_warn("select or mark managed resources to sync");
+            return;
+        }
+        self.action_menu_targets = vec![(subj.name, subj.namespace)];
+        self.action_menu_objects.clear();
+        self.action_menu_kind = Some(kind);
+        self.action_menu_selective = selected;
         self.action_menu_return = Mode::Argocd;
         self.flux_menu_state.select(Some(0));
         self.mode = Mode::FluxMenu;
@@ -480,6 +722,30 @@ impl App {
                         && matches!(r.kind.as_str(), "Application" | "ApplicationSet")
                         && !r.namespace.is_empty()
                 })
+    }
+
+    /// Whether the open Argo CD view has an Application or ApplicationSet
+    /// target that `t` can act on (row 0 or a local child).
+    pub fn argocd_can_act(&self) -> bool {
+        self.argocd_subject
+            .as_ref()
+            .is_some_and(|s| !s.namespace.is_empty())
+            || self.argocd_has_child_actions()
+    }
+
+    /// Whether the open Argo CD view has managed resources that `s` can
+    /// selectively sync in the current Application.
+    pub fn argocd_can_selective_sync(&self) -> bool {
+        self.argocd_subject
+            .as_ref()
+            .is_some_and(|s| s.is_app && !s.namespace.is_empty())
+            && !self.argocd_resources.is_empty()
+    }
+
+    /// Whether the open Argo CD view lists any managed resources that `space`
+    /// can mark.
+    pub fn argocd_has_managed_resources(&self) -> bool {
+        !self.argocd_resources.is_empty()
     }
 
     /// Switch to the destination context and open the selected managed
@@ -1340,6 +1606,7 @@ impl App {
             claim,
             title,
             source,
+            subject,
             destination,
             findings,
             resources,
@@ -1359,15 +1626,28 @@ impl App {
         if quiet && !self.argocd_expanded.is_empty() {
             return;
         }
-        self.argocd_following = following;
-        self.argocd_resources = resources;
-        if let Some(source) = source {
-            self.argocd_source = Some(*source);
-        }
+        let previous_managed = self
+            .argocd_state
+            .selected()
+            .and_then(|i| self.managed_row_ordinal(i))
+            .and_then(|ordinal| self.argocd_resources.get(ordinal))
+            .map(argocd::ManagedResource::resource_ref);
         let previous = self
             .argocd_state
             .selected()
             .and_then(|i| Some((i, row_identity(&self.argocd_items, i)?)));
+        self.argocd_following = following;
+        self.argocd_resources = resources;
+        self.argocd_marked.retain(|marked| {
+            self.argocd_resources
+                .iter()
+                .take(argocd::MAX_LISTED)
+                .any(|r| r.resource_ref() == *marked)
+        });
+        if let Some(source) = source {
+            self.argocd_source = Some(*source);
+        }
+        self.argocd_subject = subject;
         self.argocd_items = findings;
         self.argocd_title = title;
         self.argocd_destination = destination;
@@ -1396,6 +1676,16 @@ impl App {
             .unwrap_or(0);
         let selected = match previous.filter(|_| quiet) {
             Some((index, identity)) => {
+                // Keep managed rows pinned by ResourceRef even when status text
+                // changes or a Sync operation section appears above them (e.g.
+                // on a remote destination where findings carry no Target).
+                let managed_match = previous_managed.and_then(|ref_id| {
+                    self.argocd_resources
+                        .iter()
+                        .take(argocd::MAX_LISTED)
+                        .position(|r| r.resource_ref() == ref_id)
+                        .and_then(|ordinal| self.managed_row_at(ordinal))
+                });
                 // The same object can be listed twice, failed in the sync and
                 // again as a managed resource, so its section is matched too.
                 let found = |section: bool| {
@@ -1406,7 +1696,8 @@ impl App {
                         })
                     })
                 };
-                found(true)
+                managed_match
+                    .or_else(|| found(true))
                     .or_else(|| found(false))
                     .unwrap_or(index.min(self.argocd_items.len().saturating_sub(1)))
             }

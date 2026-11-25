@@ -888,14 +888,29 @@ include those conditions. Row filters can search the route paths.
   For app-of-apps root Applications and ApplicationSets in the current cluster,
   each listed child `Application` row reads that child Application's own live
   sync and health state (showing `Syncing` while an operation is in flight and
-  `(suspended)` when auto-sync is suspended), while `Blocking` continues to
-  reflect the parent's own status. Press `t` on a local child `Application` row
-  to open its action menu in place (suspend, resume, refresh, hard refresh,
-  sync now, or sync with prune with the usual confirmations and guardrails), or
-  on a local child `ApplicationSet` row for suspend and resume, without leaving
-  the parent view; once the patch lands, the view refreshes quietly in place and
-  follows any syncing child every 2 seconds until it finishes (pausing while an
-  owned-child expansion opened with `c` is open and resuming when it closes).
+  `(suspended)` when auto-sync is suspended), and appends `(manifest OutOfSync)`,
+  `(manifest requires pruning)`, or `(syncing in parent)` when the parent
+  Application's own status reports drift or an in-flight selective sync on that
+  child manifest, while `Blocking` continues to reflect the parent's own status.
+  Row 0 (`Application/<name>` or `ApplicationSet/<name>`) shows `Syncing` while
+  an operation is in flight and accepts `t` to open the action menu for the
+  current Application or ApplicationSet itself (even when opened from a managed
+  object or when the Application targets a remote cluster). Press `space` on
+  managed resource rows to mark or unmark them (`esc` clears marks before
+  closing the view; marks stay separate from resource table marks). Press `t` on
+  a local child `Application` or `ApplicationSet` row — or on marked local child
+  `Application`s or `ApplicationSet`s — to open their action menu in place
+  (suspend, resume, refresh, hard refresh, sync now, or sync with prune for
+  Applications; suspend and resume for ApplicationSets) without leaving the
+  parent view. Press `s` on a managed resource row or marked managed resources
+  inside an Application to open the selective sync menu (`Sync selected` or
+  `Sync selected with prune`, with the usual confirmation and `prune`
+  guardrails), which patches `operation.sync.resources` on the current
+  Application (including remote-destination Applications) and marks targeted
+  rows as `Syncing` / `(syncing in parent)` while the sync runs. Once any patch
+  lands, the view refreshes quietly in place and follows syncing operations
+  every 2 seconds until they finish (pausing while an owned-child expansion
+  opened with `c` is open and resuming when it closes).
 - **Native Helm inspector** (`:helm` / `:hm`) - sofka decodes Helm's release
   storage Secrets directly (double base64 → gunzip → JSON, same as Helm) and
   lists one row per release at its latest revision, like `helm list`. `⏎` opens

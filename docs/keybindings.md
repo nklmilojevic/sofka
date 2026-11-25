@@ -500,8 +500,11 @@ for those operations.
 | `down`              | `j`, `down`      |
 | `first`             | `g`, `home`      |
 | `last`              | `G`, `end`       |
+| `mark`              | `space`          |
 | `refresh`           | `r`              |
+| `sync_selected`     | `s`              |
 | `up`                | `k`, `up`        |
+| `wrap`              | `w`              |
 
 ### `[keys.gitops]`
 
