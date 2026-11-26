@@ -102,7 +102,7 @@ jobs:
           workspaces: . -> target/llvm-cov-target
 
       - name: Install coverage tool
-        uses: taiki-e/install-action@fe3acb53a98b62c772db35de75ce0e4595e7ca8c # v2.90.8
+        uses: taiki-e/install-action@073e1fd0bc889c9aee68dbaaa927cde1b5653a83 # v2.90.11
         with:
           tool: cargo-llvm-cov@0.9.1
 
