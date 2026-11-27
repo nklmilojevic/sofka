@@ -3951,6 +3951,93 @@ async fn horizontal_scroll_clips_wide_characters_at_both_edges() {
 }
 
 #[tokio::test]
+async fn huge_service_ports_renders_and_scrolls_without_panicking() {
+    use ratatui::{Terminal, backend::TestBackend};
+
+    let (mut app, _rx) = test_app();
+    app.handle_key(press(KeyCode::Char(':'))).unwrap();
+    for ch in "services".chars() {
+        app.handle_key(press(KeyCode::Char(ch))).unwrap();
+    }
+    app.handle_key(press(KeyCode::Enter)).unwrap();
+
+    // 7,000 ports produces >70,000 display columns in PORTS (exceeding u16::MAX).
+    let ports: Vec<_> = (10000..17000)
+        .map(|port| json!({"port": port, "protocol": "TCP"}))
+        .collect();
+    apply(
+        &mut app,
+        json!({
+            "apiVersion": "v1", "kind": "Service",
+            "metadata": {"name": "huge-svc", "namespace": "default"},
+            "spec": {"type": "ClusterIP", "clusterIP": "10.0.0.1", "ports": ports}
+        }),
+    );
+
+    let mut term = Terminal::new(TestBackend::new(100, 24)).unwrap();
+    term.draw(|f| crate::ui::draw(f, &mut app)).unwrap();
+
+    // Flex scroll cap keeps trailing columns (AGE) reachable rather than 65k cells away.
+    assert!(
+        app.col_scroll_max > 0 && app.col_scroll_max < 500,
+        "unexpected col_scroll_max: {}",
+        app.col_scroll_max
+    );
+    let steps = app.col_scroll_max / 5 + 2;
+    for _ in 0..steps {
+        app.handle_key(press(KeyCode::Right)).unwrap();
+    }
+    term.draw(|f| crate::ui::draw(f, &mut app)).unwrap();
+    assert_eq!(app.col_offset, app.col_scroll_max);
+    let headers = app.display_headers().to_vec();
+    let age_idx = headers.iter().position(|h| h == "AGE").unwrap();
+    let hit = app.table_hit.borrow().clone().unwrap();
+    assert!(
+        hit.cols.iter().any(|&(_, _, idx)| idx == age_idx),
+        "AGE column should be visible at max horizontal scroll"
+    );
+
+    // Filtering still matches ports deep in the full cell text.
+    app.handle_key(press(KeyCode::Char('/'))).unwrap();
+    for ch in "16500/TCP".chars() {
+        app.handle_key(press(KeyCode::Char(ch))).unwrap();
+    }
+    app.handle_key(press(KeyCode::Enter)).unwrap();
+    assert_eq!(app.row_count(), 1);
+    term.draw(|f| crate::ui::draw(f, &mut app)).unwrap();
+}
+
+#[tokio::test]
+async fn explicit_u16_max_column_width_renders_without_panicking() {
+    use ratatui::{Terminal, backend::TestBackend};
+
+    let (mut app, _rx) = test_app();
+    install_views(
+        &mut app,
+        r#"
+        [[views."cert-manager.io/v1/certificates".columns]]
+        name = "HUGE"
+        path = "/spec/value"
+        width = 65535
+    "#,
+    );
+    app.switch_kind("certificates");
+    apply(
+        &mut app,
+        json!({
+            "apiVersion": "cert-manager.io/v1", "kind": "Certificate",
+            "metadata": {"name": "web", "namespace": "default"},
+            "spec": {"value": "x".repeat(usize::from(u16::MAX) + 100)}
+        }),
+    );
+
+    let mut term = Terminal::new(TestBackend::new(80, 24)).unwrap();
+    term.draw(|f| crate::ui::draw(f, &mut app)).unwrap();
+    app.handle_key(press(KeyCode::Right)).unwrap();
+    term.draw(|f| crate::ui::draw(f, &mut app)).unwrap();
+}
+
+#[tokio::test]
 async fn mouse_capture_defaults_off_and_can_be_enabled_from_the_palette() {
     let (mut app, _rx) = test_app();
     assert!(!app.mouse_enabled);
