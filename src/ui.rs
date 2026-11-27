@@ -37,6 +37,7 @@ impl RenderCell<'_> {
         self
     }
 
+    #[cfg(test)]
     fn render(
         &self,
         area: Rect,
@@ -44,14 +45,195 @@ impl RenderCell<'_> {
         row: Style,
         selected: Option<Style>,
     ) {
-        use ratatui::widgets::Widget;
-        buf.set_style(area, row);
-        buf.set_style(area, self.style);
-        (&self.content).render(area, buf);
+        self.render_slice(usize::from(area.width), 0, area, buf, row, selected);
+    }
+
+    /// Render the visible slice `[source_start .. source_start + dst.width]`
+    /// of a `col_width`-wide cell directly into `dst` without allocating a
+    /// full-column scratch buffer.
+    fn render_slice(
+        &self,
+        col_width: usize,
+        source_start: usize,
+        dst: Rect,
+        buf: &mut ratatui::buffer::Buffer,
+        row: Style,
+        selected: Option<Style>,
+    ) {
+        let dst = dst.intersection(buf.area);
+        if dst.is_empty() {
+            return;
+        }
+        let dst = Rect { height: 1, ..dst };
+        buf.set_style(dst, row);
+        buf.set_style(dst, self.style);
+        buf.set_style(dst, self.content.style);
+
+        if let Some(line) = self.content.lines.first() {
+            let alignment = line.alignment.or(self.content.alignment);
+            let positioning = match alignment {
+                Some(Alignment::Center | Alignment::Right) => {
+                    let line_width = line.width();
+                    if line_width == 0 {
+                        None
+                    } else if line_width <= col_width {
+                        let indent = match alignment {
+                            Some(Alignment::Center) => (col_width - line_width) / 2,
+                            Some(Alignment::Right) => col_width - line_width,
+                            _ => 0,
+                        };
+                        Some((indent, 0))
+                    } else {
+                        let skip = match alignment {
+                            Some(Alignment::Center) => (line_width - col_width) / 2,
+                            Some(Alignment::Right) => line_width - col_width,
+                            _ => 0,
+                        };
+                        Some((0, skip))
+                    }
+                }
+                Some(Alignment::Left) | None => line
+                    .spans
+                    .iter()
+                    .any(|s| s.content.graphemes(true).any(|g| g.width() > 0))
+                    .then_some((0, 0)),
+            };
+            if let Some((virtual_indent, line_skip)) = positioning {
+                buf.set_style(dst, line.style);
+                let source_end = source_start
+                    .saturating_add(usize::from(dst.width))
+                    .min(col_width);
+                if source_start < source_end {
+                    render_line_slice(
+                        line,
+                        virtual_indent,
+                        line_skip,
+                        source_start,
+                        source_end,
+                        dst,
+                        buf,
+                    );
+                }
+            }
+        }
+
         if let Some(selected) = selected {
-            buf.set_style(area, selected);
+            buf.set_style(dst, selected);
         }
     }
+}
+
+/// Display width of a non-control grapheme in terminal cells, matching
+/// ratatui-core's adjustment for halfwidth katakana sound marks.
+fn grapheme_cell_width(grapheme: &str) -> usize {
+    if grapheme.len() == 1 {
+        1
+    } else {
+        grapheme.width()
+            + grapheme
+                .chars()
+                .filter(|c| matches!(*c, '\u{FF9E}' | '\u{FF9F}'))
+                .count()
+    }
+}
+
+fn render_line_slice(
+    line: &Line<'_>,
+    virtual_indent: usize,
+    line_skip: usize,
+    source_start: usize,
+    source_end: usize,
+    dst: Rect,
+    buf: &mut ratatui::buffer::Buffer,
+) {
+    let mut line_col = 0usize;
+    for (span_idx, span) in line.spans.iter().enumerate() {
+        let has_next_span = span_idx + 1 < line.spans.len();
+        let span_start_col = line_col;
+        let mut render_col = span_start_col;
+        let mut span_started = false;
+        let mut span_start_vx = 0usize;
+        let mut finished_span = true;
+
+        for grapheme in span.content.graphemes(true) {
+            if render_col < line_skip {
+                render_col += grapheme.width();
+                continue;
+            }
+            if grapheme.contains(char::is_control) {
+                continue;
+            }
+            let width = grapheme_cell_width(grapheme);
+            let vx = virtual_indent + (render_col - line_skip);
+            let is_first = !span_started;
+            if is_first {
+                span_started = true;
+                span_start_vx = vx;
+            }
+            if width == 0 {
+                if vx > source_end {
+                    finished_span = false;
+                    break;
+                }
+                if is_first {
+                    if vx >= source_start && vx < source_end {
+                        buf[(dst.x + (vx - source_start) as u16, dst.y)]
+                            .set_symbol(grapheme)
+                            .set_style(span.style);
+                    }
+                } else if vx == span_start_vx {
+                    if vx >= source_start && vx < source_end {
+                        append_cell_symbol(
+                            &mut buf[(dst.x + (vx - source_start) as u16, dst.y)],
+                            grapheme,
+                        )
+                        .set_style(span.style);
+                    }
+                } else if vx > source_start && vx <= source_end {
+                    append_cell_symbol(
+                        &mut buf[(dst.x + (vx - 1 - source_start) as u16, dst.y)],
+                        grapheme,
+                    )
+                    .set_style(span.style);
+                }
+                continue;
+            }
+            if vx >= source_end || vx.saturating_add(width) > source_end {
+                finished_span = false;
+                break;
+            }
+            if vx >= source_start {
+                let x = dst.x + (vx - source_start) as u16;
+                if !is_first && vx == span_start_vx {
+                    append_cell_symbol(&mut buf[(x, dst.y)], grapheme).set_style(span.style);
+                } else {
+                    buf[(x, dst.y)].set_symbol(grapheme).set_style(span.style);
+                }
+                for dx in 1..width {
+                    buf[(x + dx as u16, dst.y)].reset();
+                }
+            }
+            render_col += width;
+        }
+
+        if !finished_span {
+            return;
+        }
+        if has_next_span {
+            // Match ratatui's Line::render advancing past each span by `span.width()`.
+            line_col = span_start_col + span.width();
+        }
+    }
+}
+
+fn append_cell_symbol<'a>(
+    cell: &'a mut ratatui::buffer::Cell,
+    symbol: &str,
+) -> &'a mut ratatui::buffer::Cell {
+    let mut combined = String::with_capacity(cell.symbol().len() + symbol.len());
+    combined.push_str(cell.symbol());
+    combined.push_str(symbol);
+    cell.set_symbol(&combined)
 }
 
 enum TableCellText<'a> {
@@ -1616,7 +1798,7 @@ fn draw_table(frame: &mut Frame, app: &mut App, area: Rect) {
                 let share = u16::try_from(2 * fixed).unwrap_or(u16::MAX);
                 (*needed).min(area.width.saturating_sub(4) / share)
             } else {
-                *needed
+                (*needed).min(MAX_FLEX_SCROLL_WIDTH)
             };
             widths[i] = widths[i].max(minimum);
         }
@@ -1982,13 +2164,6 @@ struct ScrollingTable<'a> {
 impl ratatui::widgets::Widget for ScrollingTable<'_> {
     fn render(self, area: Rect, buf: &mut ratatui::buffer::Buffer) {
         let ranges = self.viewport.ranges(self.offset);
-        let max_width = ranges
-            .iter()
-            .map(|&(_, _, i, _)| self.widths[self.order[i]])
-            .max()
-            .unwrap_or(0);
-        // Reuse one row of storage. Long values do not allocate a full table.
-        let mut source = ratatui::buffer::Buffer::empty(Rect::new(0, 0, max_width, 1));
         let (selected_style, marker_style) = if self.selected_marked {
             let style = theme::selected_marked_row();
             (style, style)
@@ -2015,33 +2190,24 @@ impl ratatui::widgets::Widget for ScrollingTable<'_> {
             }
             for &(start, end, position, source_start) in &ranges {
                 let index = self.order[position];
-                source.reset();
-                if let Some(bg) = theme::background() {
-                    source.set_style(source.area, Style::default().bg(bg));
-                }
-                let cell_area = Rect::new(0, 0, self.widths[index], 1);
-                cells[index].render(
+                let cell_area = Rect::new(area.x + start, y_pos, end - start, 1);
+                cells[index].render_slice(
+                    usize::from(self.widths[index]),
+                    usize::from(source_start),
                     cell_area,
-                    &mut source,
+                    buf,
                     style,
                     selected.then_some(selected_style),
                 );
-                let source_end = source_start + (end - start);
-                let mut x = 0;
-                while x < source_end {
-                    let cell = &source[(x, 0)];
-                    let symbol_width = cell.symbol().width().max(1) as u16;
-                    if x >= source_start && x.saturating_add(symbol_width) <= source_end {
-                        let target = &mut buf[(area.x + start + (x - source_start), y_pos)];
-                        target.set_symbol(cell.symbol());
-                        target.set_style(cell.style());
-                    }
-                    x = x.saturating_add(symbol_width);
-                }
             }
         }
     }
 }
+
+/// Ceiling for non-pinned `Flex` column expansion during horizontal scrolling,
+/// so one huge cell (e.g. a Service with thousands of ports) cannot push
+/// trailing columns like `AGE` tens of thousands of cells off-screen.
+const MAX_FLEX_SCROLL_WIDTH: u16 = 256;
 
 /// How a table column's width is decided when splitting the frame (#166).
 enum ColWidth {
@@ -7313,6 +7479,102 @@ mod tests {
                             actual, expected,
                             "{width} {alignment:?} {selected} {value:?}"
                         );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn render_slice_matches_full_render_across_scroll_offsets() {
+        use ratatui::buffer::Buffer;
+        for col_width in [0usize, 1, 4, 8, 15] {
+            for alignment in [Alignment::Left, Alignment::Center, Alignment::Right] {
+                for selected in [false, true] {
+                    for value in ["", "plain", "界e\u{301}界", "a long clipped value"] {
+                        let text = Text::from(Line::from(vec![
+                            Span::styled(value, Style::default().fg(Color::Red)),
+                            Span::styled("!", Style::default().add_modifier(Modifier::BOLD)),
+                        ]))
+                        .alignment(alignment);
+                        let row = theme::header_row();
+                        let cell_style = Style::default().bg(Color::Blue);
+                        let sel = selected.then(theme::selected_row);
+                        let cell = RenderCell::from(text).style(cell_style);
+                        let full_area = Rect::new(0, 0, col_width as u16, 1);
+                        let mut full = Buffer::empty(full_area);
+                        cell.render(full_area, &mut full, row, sel);
+
+                        for start in 0..=col_width {
+                            for vis_width in [0usize, 1, 2, 5, col_width.saturating_sub(start)] {
+                                let vis_width = vis_width.min(col_width.saturating_sub(start));
+                                let dst = Rect::new(0, 0, vis_width as u16, 1);
+                                let mut actual = Buffer::empty(dst);
+                                cell.render_slice(col_width, start, dst, &mut actual, row, sel);
+
+                                // Build expected slice by copying whole symbols from the full render,
+                                // leaving split wide glyphs at either edge as spaces.
+                                let mut expected = Buffer::empty(dst);
+                                expected.set_style(dst, row);
+                                expected.set_style(dst, cell_style);
+                                if let Some(s) = sel {
+                                    expected.set_style(dst, s);
+                                }
+                                let end = start + vis_width;
+                                let mut x = 0usize;
+                                while x < end {
+                                    let src = &full[(x as u16, 0)];
+                                    let w = src.symbol().width().max(1);
+                                    if x >= start && x + w <= end {
+                                        let target = &mut expected[((x - start) as u16, 0)];
+                                        target.set_symbol(src.symbol());
+                                        target.set_style(src.style());
+                                        for dx in 1..w {
+                                            expected[((x - start + dx) as u16, 0)] =
+                                                full[((x + dx) as u16, 0)].clone();
+                                        }
+                                    }
+                                    x += w;
+                                }
+                                assert_eq!(
+                                    actual, expected,
+                                    "col={col_width} start={start} vis={vis_width} {alignment:?} {selected} {value:?}"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn render_slice_handles_u16_max_column_and_oversized_content() {
+        use ratatui::buffer::Buffer;
+        let col_width = usize::from(u16::MAX);
+        // Exceeds u16::MAX so ratatui's Span::render into a Rect(0, 0, u16::MAX, 1)
+        // would have panicked at index (65535, 0) (#1123).
+        let huge = format!("{}TAIL", "a".repeat(col_width + 500));
+        for alignment in [Alignment::Left, Alignment::Center, Alignment::Right] {
+            let cell = RenderCell::from(Text::from(huge.as_str()).alignment(alignment));
+            for source_start in [0usize, 100, col_width - 10] {
+                let dst = Rect::new(0, 0, 10, 1);
+                let mut buf = Buffer::empty(dst);
+                cell.render_slice(
+                    col_width,
+                    source_start,
+                    dst,
+                    &mut buf,
+                    Style::default(),
+                    None,
+                );
+                let rendered: String = (0..10).map(|x| buf[(x, 0)].symbol()).collect();
+                match (alignment, source_start) {
+                    (Alignment::Right, s) if s == col_width - 10 => {
+                        assert_eq!(rendered, "aaaaaaTAIL");
+                    }
+                    _ => {
+                        assert_eq!(rendered, "aaaaaaaaaa");
                     }
                 }
             }
