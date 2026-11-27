@@ -1,5 +1,17 @@
 # Changelog
 
+## v0.40.0 - 2026-11-27
+
+This release adds actions and selective sync to the Argo CD view. It also fixes a crash in tables with very wide cells.
+
+### New features
+
+- You can now act on the current Application in `:argocd` and sync only some of its resources. Press `space` to mark rows, `t` on row 0 to act on the Application itself, and `s` to start a selective sync.
+
+### Fixes
+
+- Tables with a very wide cell, such as a Service with more than 6,000 ports, no longer crash. Trailing columns such as `AGE` now stay visible, and tables render faster.
+
 ## v0.39.0 - 2026-11-25
 
 This release fixes Argo CD syncs that sofka starts. Syncs now use the sync options and retry settings of each Application.
